@@ -325,6 +325,9 @@ export function ImageStudio() {
     // App supplies false until GET /capabilities/mac has returned real platform facts.
     // Legacy/test providers omit the field and already pass authoritative fixtures.
     macCapabilitiesAuthoritative = true,
+    macCapabilitiesError = "",
+    macCapabilitiesLoading = false,
+    refreshMacCapabilities,
     visibleWorkers = [],
     preferencesHydrated,
   } = useAppContext();
@@ -3486,6 +3489,29 @@ export function ImageStudio() {
           <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
+
+          {decoderCapabilitiesPending && macCapabilitiesError ? (
+            <div className="inline-warning decoder-capability-recovery" role="alert">
+              <span>{macCapabilitiesError} The restored decoder has not been changed.</span>
+              <div className="decoder-capability-recovery-actions">
+                <button
+                  className="secondary-action"
+                  disabled={macCapabilitiesLoading || typeof refreshMacCapabilities !== "function"}
+                  onClick={() => refreshMacCapabilities?.()}
+                  type="button"
+                >
+                  {macCapabilitiesLoading ? "Retrying…" : "Retry"}
+                </button>
+                <button
+                  className="secondary-action"
+                  onClick={() => setDecoder("native")}
+                  type="button"
+                >
+                  Use Native VAE
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-15299), the
               same way VideoStudio does it: the submit path blanks the composed negative for a

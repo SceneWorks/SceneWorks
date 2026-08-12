@@ -2024,6 +2024,57 @@ describe("ImageStudio alternate decoder capability hydration (sc-18315)", () => 
     expect(createImageJob).toHaveBeenCalledTimes(1);
     expect(createImageJob.mock.calls[0][0].advanced.decoder).toBe(DECODER_ID);
   });
+
+  it("keeps a failed capability load recoverable without silently dropping the saved decoder", async () => {
+    const storageKey = "sceneworks-studio-image-project_1";
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify({ model: DECODER_MODEL.id, decoder: DECODER_ID }),
+    );
+    const createImageJob = vi.fn(async () => ({ id: "job-native" }));
+    const refreshMacCapabilities = vi.fn(async () => false);
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [DECODER_MODEL],
+        models: [DECODER_MODEL],
+        macCapabilities: { macGatingActive: false, platform: "" },
+        macCapabilitiesAuthoritative: false,
+        macCapabilitiesError: "Could not load engine capabilities: API offline",
+        macCapabilitiesLoading: false,
+        refreshMacCapabilities,
+        preferencesHydrated: true,
+      }),
+    );
+
+    const recovery = document.body.querySelector(".decoder-capability-recovery");
+    expect(recovery).toBeTruthy();
+    expect(recovery.textContent).toContain("API offline");
+    expect(recovery.textContent).toContain("restored decoder has not been changed");
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+
+    await click(
+      [...recovery.querySelectorAll("button")].find((button) => button.textContent === "Retry"),
+    );
+    expect(refreshMacCapabilities).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+
+    await click(
+      [...recovery.querySelectorAll("button")].find(
+        (button) => button.textContent === "Use Native VAE",
+      ),
+    );
+    expect(document.body.querySelector(".decoder-capability-recovery")).toBeFalsy();
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe("native");
+
+    const generate = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate",
+    );
+    expect(generate.disabled).toBe(false);
+    await click(generate);
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("decoder");
+  });
 });
 
 describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-10195)", () => {
