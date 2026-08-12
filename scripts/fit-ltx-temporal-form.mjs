@@ -181,28 +181,49 @@ export function fitSlice(fitPoints, heldOutPoints) {
  * The measured noise floor: the spread between records that share a logical geometry (tier, width,
  * height, frames, fps) but were captured in separate provider invocations. Without replicates this
  * returns `null` and every "within the noise floor" claim downstream has to say so.
+ *
+ * 🔴 Each spread carries the SceneWorks revisions it spans, and `crossRevision` says whether any
+ * group spans more than one. In the committed dataset every one of the four replicate groups does,
+ * because the capture ran across two driver sessions and four revisions — so this floor bounds
+ * repeat-plus-revision variation, not repeat variation alone, and every "×noise" statement judged
+ * against it inherits that. It is reported rather than corrected because the alternative is
+ * re-rendering, and a floor that is too WIDE is the conservative direction for a residual to be
+ * compared against.
  */
 export function noiseFloor(points) {
   const groups = new Map();
   for (const point of points) {
     if (!groups.has(point.replicateKey)) groups.set(point.replicateKey, []);
-    groups.get(point.replicateKey).push(point.value);
+    groups.get(point.replicateKey).push(point);
   }
   const spreads = [...groups.entries()]
-    .filter(([, values]) => values.length > 1)
-    .map(([key, values]) => ({
-      key,
-      replicates: values.length,
-      meanGib: values.reduce((sum, value) => sum + value, 0) / values.length,
-      spreadGib: Math.max(...values) - Math.min(...values),
-    }));
+    .filter(([, members]) => members.length > 1)
+    .map(([key, members]) => {
+      const values = members.map((member) => member.value);
+      return {
+        key,
+        replicates: members.length,
+        meanGib: values.reduce((sum, value) => sum + value, 0) / values.length,
+        spreadGib: Math.max(...values) - Math.min(...values),
+        sceneWorksRevisions: [
+          ...new Set(members.map((member) => member.sceneWorksRevision).filter(Boolean)),
+        ].sort(),
+      };
+    });
   if (spreads.length === 0) {
-    return { replicatedGeometries: 0, maxSpreadGib: null, maxSpreadFraction: null, spreads: [] };
+    return {
+      replicatedGeometries: 0,
+      maxSpreadGib: null,
+      maxSpreadFraction: null,
+      crossRevision: false,
+      spreads: [],
+    };
   }
   return {
     replicatedGeometries: spreads.length,
     maxSpreadGib: Math.max(...spreads.map((entry) => entry.spreadGib)),
     maxSpreadFraction: Math.max(...spreads.map((entry) => entry.spreadGib / entry.meanGib)),
+    crossRevision: spreads.some((entry) => entry.sceneWorksRevisions.length > 1),
     spreads,
   };
 }
@@ -252,6 +273,7 @@ export function pointsFrom(records, roleByFixture) {
     if (!role) throw new Error(`record fixture ${record.fixture} has no role in the sweep plan`);
     return {
       fixture: record.fixture,
+      capturedAt: record.capturedAt,
       tier: record.target.tier,
       role,
       rung: record.strategy.rung,
@@ -280,8 +302,8 @@ export function pointsFrom(records, roleByFixture) {
 }
 
 /**
- * The driver's own terminal state per plan entry, parsed from the committed sweep log
- * (`docs/calibration/sc-18810/sweep-run.log`, written verbatim by the sweep driver — see its
+ * The driver's own terminal state per plan entry, parsed from the committed sweep logs
+ * (`docs/calibration/sc-18810/*.log`, written verbatim by the sweep driver — see its
  * `BEGIN`/`OK`/`FAIL`/`STOP` writes).
  *
  * This exists because the previous version of this script carried a HARDCODED two-element list of
@@ -289,7 +311,13 @@ export function pointsFrom(records, roleByFixture) {
  * `not_attempted_host_limit` while the log shows `BEGIN ... free=16GiB 11:40:16` and no terminal
  * line at all. A coverage state that is typed by hand is a claim about the run that nothing checks.
  *
- * Terminal states, all four of which the log distinguishes:
+ * The capture spans TWO driver sessions and therefore two logs — the first one crashed the host
+ * mid-run — so this takes an ARRAY of log texts and sums the per-name counters across them. A
+ * single string is accepted as a one-element array. Counts, not just booleans, are summed because
+ * the coverage guard compares a fixture's `OK` count against how many records it produced; a
+ * session whose log is missing shows up there as records with no terminal line.
+ *
+ * Terminal states, all four of which the logs distinguish:
  *   `completed`           — the driver wrote `OK`.
  *   `failed`              — the driver wrote `FAIL`; the child exited non-zero or was killed.
  *   `no_terminal_record`  — a `BEGIN` with no `OK`/`FAIL`. The driver ITSELF did not survive to
@@ -298,8 +326,16 @@ export function pointsFrom(records, roleByFixture) {
  *                           it halted on the free-disk floor.
  * An entry re-run after a failure (`704x1280 f177` was refused by the staged-residency guard, then
  * re-run and captured) counts as `completed`: one `OK` is enough.
+ *
+ * A terminal line is believed only while an unmatched `BEGIN` for that name is open. The driver
+ * pipes each child's stderr into the same stream it writes these lines to, so an own-line
+ * `OK <planname> 1s` inside captured child output would otherwise be indistinguishable from the
+ * driver's own verdict and could flip an entry to `completed` — the one bucket that silences the
+ * record-versus-terminal guard below. The committed logs are unaffected either way; this closes the
+ * channel rather than trusting the transcripts to stay clean.
  */
-export function driverStatesFrom(logText) {
+export function driverStatesFrom(logs) {
+  const texts = Array.isArray(logs) ? logs : [logs];
   const states = new Map();
   const of = (name) => {
     if (!states.has(name)) {
@@ -307,12 +343,21 @@ export function driverStatesFrom(logText) {
     }
     return states.get(name);
   };
-  for (const line of logText.split("\n")) {
-    let match;
-    if ((match = /^BEGIN (\S+) /.exec(line))) of(match[1]).begins += 1;
-    else if ((match = /^OK (\S+) /.exec(line))) of(match[1]).oks += 1;
-    else if ((match = /^FAIL (\S+) /.exec(line))) of(match[1]).fails += 1;
-    else if ((match = /^STOP .* before (\S+)\s*$/.exec(line))) of(match[1]).stoppedBefore = true;
+  for (const text of texts) {
+    for (const line of text.split("\n")) {
+      let match;
+      if ((match = /^BEGIN (\S+) /.exec(line))) {
+        of(match[1]).begins += 1;
+      } else if ((match = /^(OK|FAIL) (\S+) /.exec(line))) {
+        const state = of(match[2]);
+        // No open BEGIN ⇒ this line cannot be the driver's verdict on this entry.
+        if (state.begins <= state.oks + state.fails) continue;
+        if (match[1] === "OK") state.oks += 1;
+        else state.fails += 1;
+      } else if ((match = /^STOP .* before (\S+)\s*$/.exec(line))) {
+        of(match[1]).stoppedBefore = true;
+      }
+    }
   }
   for (const state of states.values()) {
     state.terminal =
@@ -325,6 +370,83 @@ export function driverStatesFrom(logText) {
             : "no_terminal_record";
   }
   return states;
+}
+
+/**
+ * Per-session provenance, derived from the same logs. It exists because the replicates that produce
+ * this dataset's noise floor are NOT within-session: every one of the four replicated geometries has
+ * one record from the crashed first session and one from the second, and the two sessions ran
+ * different SceneWorks revisions. A "measured noise floor" that silently spans revisions is a
+ * different — weaker — claim than one measured back to back, so the report has to carry which
+ * session and which revision each record came from.
+ *
+ * Records are attributed WITHOUT clock arithmetic: within a fixture, the nth record in `capturedAt`
+ * order is the nth `OK` for that name in session order. The driver runs one child at a time and
+ * appends, so both sequences are chronological by construction, and the counts are already forced
+ * to agree by `coverageOf`'s record-versus-terminal guard. Two of the thirteen `capturedAt` values
+ * differ by one second from `BEGIN + duration` (the driver rounds the duration), which is exactly
+ * why timestamps are not used to pair them.
+ */
+export function sessionsFrom(logs, points, fixtureByName) {
+  // `okOrders[name]` is the session index of each successive OK for that driver name.
+  const okOrders = new Map();
+  const sessions = logs.map(({ path: logPath, text }, order) => {
+    let begins = 0;
+    let completed = 0;
+    let failed = 0;
+    let firstBeginAt = null;
+    const open = new Map();
+    for (const line of text.split("\n")) {
+      let match;
+      if ((match = /^BEGIN (\S+) .* (\d\d:\d\d:\d\d)\s*$/.exec(line))) {
+        begins += 1;
+        firstBeginAt ??= match[2];
+        open.set(match[1], (open.get(match[1]) ?? 0) + 1);
+      } else if ((match = /^(OK|FAIL) (\S+) /.exec(line))) {
+        if ((open.get(match[2]) ?? 0) === 0) continue;
+        open.set(match[2], open.get(match[2]) - 1);
+        if (match[1] === "FAIL") {
+          failed += 1;
+          continue;
+        }
+        completed += 1;
+        if (!okOrders.has(match[2])) okOrders.set(match[2], []);
+        okOrders.get(match[2]).push(order);
+      }
+    }
+    return {
+      log: logPath,
+      firstBeginAt,
+      begins,
+      completed,
+      failed,
+      begunWithoutTerminalLine: begins - completed - failed,
+      records: 0,
+      sceneWorksRevisions: [],
+    };
+  });
+  const revisions = sessions.map(() => new Set());
+  const byFixture = new Map();
+  for (const point of points) {
+    if (!byFixture.has(point.fixture)) byFixture.set(point.fixture, []);
+    byFixture.get(point.fixture).push(point);
+  }
+  for (const [name, orders] of okOrders) {
+    const records = byFixture.get(fixtureByName.get(name)) ?? [];
+    records
+      .slice()
+      .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt))
+      .forEach((record, index) => {
+        const order = orders[index];
+        if (order === undefined) return;
+        sessions[order].records += 1;
+        revisions[order].add(record.sceneWorksRevision);
+      });
+  }
+  sessions.forEach((session, order) => {
+    session.sceneWorksRevisions = [...revisions[order]].sort();
+  });
+  return sessions;
 }
 
 /**
@@ -341,15 +463,37 @@ export function driverStatesFrom(logText) {
  * against each other rather than one being derived from the other. A `fit` row can perfectly well
  * have been attempted and killed — `q8 768x512 f361` is — and that does not make it any less a `fit`
  * row. What is NOT allowed is a `*_host_limit` role that contradicts the log; that is the exact
- * defect this function now throws on.
+ * defect this function first threw on.
+ *
+ * Two further disagreements throw, both found in re-review:
+ *
+ * 1. **A record with no `OK` terminal in any committed log.** The link from a plan entry to the log
+ *    runs through `provider.name`, while records key on `provider.fixture`, so before this check
+ *    nothing tied the two together for any role but `*_host_limit`: renaming all eight captured
+ *    providers threw nothing and left `byState` byte-identical, and four of the thirteen records
+ *    came from a session whose log was not committed at all. Requiring `captures <= oks` per entry
+ *    forces every record to be accounted for by a terminal line in a log that ships with it.
+ * 2. **A driver name that matches no plan entry.** The mirror of the same break: a log naming an
+ *    entry the plan does not declare is a plan/log divergence, and silently ignoring it is how a
+ *    renamed provider stops being checked.
  */
 export function coverageOf(plan, points, driverStates = new Map()) {
   const captured = new Map();
   for (const point of points) {
     captured.set(point.fixture, (captured.get(point.fixture) ?? 0) + 1);
   }
+  const declaredNames = new Set(plan.providers.map((provider) => provider.name));
+  for (const name of driverStates.keys()) {
+    if (!declaredNames.has(name)) {
+      throw new Error(
+        `the driver log names ${name}, which is not a provider in the sweep plan — the plan and ` +
+          `the log disagree about which entries exist`,
+      );
+    }
+  }
   const entries = plan.providers.map((provider) => {
-    const terminal = driverStates.get(provider.name)?.terminal ?? "not_begun";
+    const state = driverStates.get(provider.name);
+    const terminal = state?.terminal ?? "not_begun";
     const attempted = terminal !== "not_begun";
     if (provider._role === "not_attempted_host_limit" && attempted) {
       throw new Error(
@@ -363,6 +507,14 @@ export function coverageOf(plan, points, driverStates = new Map()) {
           `BEGIN line for it`,
       );
     }
+    const captures = captured.get(provider.fixture) ?? 0;
+    if (captures > (state?.oks ?? 0)) {
+      throw new Error(
+        `${provider.fixture} has ${captures} record(s) but the committed driver logs record ` +
+          `${state?.oks ?? 0} OK terminal(s) for ${provider.name} — a captured record with no ` +
+          `terminal line means its session's log is missing, so its provenance is unstated`,
+      );
+    }
     return {
       fixture: provider.fixture,
       role: provider._role,
@@ -370,30 +522,52 @@ export function coverageOf(plan, points, driverStates = new Map()) {
       outputVoxels: provider._outputVoxels,
       latentTokens: provider._latentTokens,
       driverTerminalState: terminal,
-      state: captured.has(provider.fixture)
-        ? "captured"
-        : terminal === "failed" || terminal === "no_terminal_record"
-          ? "attempted_failed_host_limit"
-          : // The driver wrote OK and the dataset has no record for it — a retention hole, not a
-            // host limit. Given its own bucket rather than folded into either neighbour, because
-            // silently calling it "failed" is the same class of mislabel this function exists to
-            // stop. Zero of these in the committed run.
-            terminal === "completed"
-            ? "completed_without_record"
-            : provider._role === "not_attempted_host_limit"
-              ? "not_attempted_host_limit"
-              : "not_reached",
-      captures: captured.get(provider.fixture) ?? 0,
+      state:
+        captures > 0
+          ? "captured"
+          : terminal === "failed" || terminal === "no_terminal_record"
+            ? "attempted_failed_host_limit"
+            : // The driver wrote OK and the dataset has no record for it — a retention hole, not a
+              // host limit. Given its own bucket rather than folded into either neighbour, because
+              // silently calling it "failed" is the same class of mislabel this function exists to
+              // stop. Zero of these in the committed run.
+              terminal === "completed"
+              ? "completed_without_record"
+              : provider._role === "not_attempted_host_limit"
+                ? "not_attempted_host_limit"
+                : // The entry the driver NAMED on its STOP line: the run halted on the free-disk
+                  // floor immediately before it. Its own bucket rather than folded into
+                  // `not_reached`, because it is the one never-run entry the driver made a
+                  // statement about — and in the committed run it is a `fit` row, so burying it
+                  // among 25 unreached rows hid that the realized fit design is smaller than the
+                  // declared one.
+                  state?.stoppedBefore
+                  ? "stopped_before"
+                  : "not_reached",
+      captures,
     };
   });
+  // Derived, including the per-tier split: the runbook used to state that split in prose and got it
+  // wrong (it called 26 unreached rows "all bf16 and q4" while three were q8, one of them a `fit`
+  // row). A count that is typed rather than computed is the defect class this whole function exists
+  // to remove, so the split is computed here and quoted from here.
   const byState = {};
-  for (const entry of entries) byState[entry.state] = (byState[entry.state] ?? 0) + 1;
+  for (const entry of entries) {
+    byState[entry.state] ??= { total: 0, byTier: {} };
+    byState[entry.state].total += 1;
+    byState[entry.state].byTier[entry.tier] = (byState[entry.state].byTier[entry.tier] ?? 0) + 1;
+  }
   return {
     plannedEntries: entries.length,
+    // Fixtures and GEOMETRIES are different counts and the runbook conflated them: the fps probe
+    // repeats {768x512, f241} at 24 fps, so eight captured fixtures cover seven distinct
+    // {w,h,frames} geometries. §3 of the runbook argues those two are the same geometry, so the
+    // report may not simultaneously count them as two.
+    capturedFixtures: new Set(points.map((point) => point.fixture)).size,
     capturedGeometries: new Set(
       points.map((point) => {
-        const { width, height, frames, fps } = point.geometry;
-        return `${width}x${height}:f${frames}:fps${fps}`;
+        const { width, height, frames } = point.geometry;
+        return `${width}x${height}:f${frames}`;
       }),
     ).size,
     byState,
@@ -401,7 +575,7 @@ export function coverageOf(plan, points, driverStates = new Map()) {
   };
 }
 
-export function buildReport(points, plan = null, driverStates = new Map()) {
+export function buildReport(points, plan = null, driverStates = new Map(), sourceSessions = []) {
   const tiers = [...new Set(points.map((point) => point.tier))].sort();
   const bySeries = {};
   for (const series of Object.keys(SERIES)) {
@@ -452,6 +626,11 @@ export function buildReport(points, plan = null, driverStates = new Map()) {
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
     capturedRecords: points.length,
     tiers,
+    // Which driver session produced which record, and under which SceneWorks revision. The evidence
+    // BUNDLE's own `sourceSessions` is `[]` for this lane (as it is for sc-18808): the harness only
+    // populates it on its capture path, and these records were ingested without it. This block is
+    // the provenance that does exist, derived from the committed logs rather than typed.
+    sourceSessions,
     ...(plan ? { coverage: coverageOf(plan, points, driverStates) } : {}),
     noiseFloors,
     observations: points
@@ -490,6 +669,10 @@ async function main() {
     const index = args.indexOf(flag);
     return index < 0 ? fallback : args[index + 1];
   };
+  const repeated = (flag, fallback) => {
+    const found = args.flatMap((arg, index) => (arg === flag ? [args[index + 1]] : []));
+    return found.length > 0 ? found : fallback;
+  };
   const datasetPath = path.resolve(
     ROOT,
     value("--dataset", "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
@@ -502,15 +685,33 @@ async function main() {
     ROOT,
     value("--write", "docs/generated/ltx-temporal-form-fit-sc-18810.json"),
   );
-  const driverLogPath = path.resolve(
-    ROOT,
-    value("--driver-log", "docs/calibration/sc-18810/sweep-run.log"),
-  );
+  // BOTH driver sessions, in chronological order. The first crashed the host after four captures
+  // and its log went uncommitted in the original PR, which is what let four of the thirteen records
+  // ship with no terminal line anywhere. `--driver-log` may be repeated.
+  const driverLogPaths = repeated("--driver-log", [
+    "docs/calibration/sc-18810/precrash-q8-run.log",
+    "docs/calibration/sc-18810/sweep-run.log",
+  ]).map((relative) => path.resolve(ROOT, relative));
   const dataset = await readJson(datasetPath);
   const plan = await readJson(planPath);
-  // Which geometries were ATTEMPTED comes from the driver's own log, not from a hand-typed list.
-  const driverStates = driverStatesFrom(await readFile(driverLogPath, "utf8"));
-  const report = buildReport(pointsFrom(dataset.records, rolesFromPlan(plan)), plan, driverStates);
+  const logs = await Promise.all(
+    driverLogPaths.map(async (file) => ({
+      path: path.relative(ROOT, file),
+      text: await readFile(file, "utf8"),
+    })),
+  );
+  // Which geometries were ATTEMPTED comes from the drivers' own logs, not from a hand-typed list.
+  const driverStates = driverStatesFrom(logs.map((log) => log.text));
+  const points = pointsFrom(dataset.records, rolesFromPlan(plan));
+  const fixtureByName = new Map(
+    plan.providers.map((provider) => [provider.name, provider.fixture]),
+  );
+  const report = buildReport(
+    points,
+    plan,
+    driverStates,
+    sessionsFrom(logs, points, fixtureByName),
+  );
   const serialised = `${JSON.stringify(report, null, 2)}\n`;
   if (args.includes("--check")) {
     const existing = await readFile(reportPath, "utf8");

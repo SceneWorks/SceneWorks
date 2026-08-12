@@ -6,14 +6,73 @@
   "tiers": [
     "q8"
   ],
+  "sourceSessions": [
+    {
+      "log": "docs/calibration/sc-18810/precrash-q8-run.log",
+      "firstBeginAt": "08:26:28",
+      "begins": 5,
+      "completed": 4,
+      "failed": 0,
+      "begunWithoutTerminalLine": 1,
+      "records": 4,
+      "sceneWorksRevisions": [
+        "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+      ]
+    },
+    {
+      "log": "docs/calibration/sc-18810/sweep-run.log",
+      "firstBeginAt": "10:32:40",
+      "begins": 14,
+      "completed": 9,
+      "failed": 3,
+      "begunWithoutTerminalLine": 2,
+      "records": 9,
+      "sceneWorksRevisions": [
+        "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+        "817cf55097a69163632684cfbf3be667747ff256",
+        "c30c497489d0a7b0404e9baa42e3aabc6e852192"
+      ]
+    }
+  ],
   "coverage": {
     "plannedEntries": 44,
-    "capturedGeometries": 8,
+    "capturedFixtures": 8,
+    "capturedGeometries": 7,
     "byState": {
-      "captured": 8,
-      "attempted_failed_host_limit": 3,
-      "not_reached": 26,
-      "not_attempted_host_limit": 7
+      "captured": {
+        "total": 8,
+        "byTier": {
+          "q8": 8
+        }
+      },
+      "attempted_failed_host_limit": {
+        "total": 3,
+        "byTier": {
+          "q8": 3
+        }
+      },
+      "stopped_before": {
+        "total": 1,
+        "byTier": {
+          "q8": 1
+        }
+      },
+      "not_attempted_host_limit": {
+        "total": 7,
+        "byTier": {
+          "q8": 1,
+          "bf16": 3,
+          "q4": 3
+        }
+      },
+      "not_reached": {
+        "total": 25,
+        "byTier": {
+          "q8": 2,
+          "bf16": 12,
+          "q4": 11
+        }
+      }
     },
     "entries": [
       {
@@ -103,7 +162,7 @@
         "outputVoxels": 159498240,
         "latentTokens": 20240,
         "driverTerminalState": "not_begun",
-        "state": "not_reached",
+        "state": "stopped_before",
         "captures": 0
       },
       {
@@ -463,30 +522,48 @@
       "replicatedGeometries": 4,
       "maxSpreadGib": 0.10953521728515625,
       "maxSpreadFraction": 0.0033033086466509954,
+      "crossRevision": true,
       "spreads": [
         {
           "key": "q8:768x512:f241:fps24",
           "replicates": 2,
           "meanGib": 33.2283246293664,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f121:fps30",
           "replicates": 3,
           "meanGib": 33.159243958691754,
-          "spreadGib": 0.10953521728515625
+          "spreadGib": 0.10953521728515625,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:640x640:f177:fps30",
           "replicates": 2,
           "meanGib": 33.2283246293664,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f241:fps30",
           "replicates": 2,
           "meanGib": 33.2283246293664,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         }
       ]
     },
@@ -494,30 +571,48 @@
       "replicatedGeometries": 4,
       "maxSpreadGib": 0.00027042627334594727,
       "maxSpreadFraction": 0.000010185324997970276,
+      "crossRevision": true,
       "spreads": [
         {
           "key": "q8:768x512:f241:fps24",
           "replicates": 2,
           "meanGib": 32.38183308765292,
-          "spreadGib": 0.000045180320739746094
+          "spreadGib": 0.000045180320739746094,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f121:fps30",
           "replicates": 3,
           "meanGib": 26.550578739494085,
-          "spreadGib": 0.00027042627334594727
+          "spreadGib": 0.00027042627334594727,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:640x640:f177:fps30",
           "replicates": 2,
           "meanGib": 29.584157425910234,
-          "spreadGib": 0.000016450881958007812
+          "spreadGib": 0.000016450881958007812,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f241:fps30",
           "replicates": 2,
           "meanGib": 32.35757365450263,
-          "spreadGib": 0.000004351139068603516
+          "spreadGib": 0.000004351139068603516,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         }
       ]
     },
@@ -525,30 +620,48 @@
       "replicatedGeometries": 4,
       "maxSpreadGib": 0,
       "maxSpreadFraction": 0,
+      "crossRevision": true,
       "spreads": [
         {
           "key": "q8:768x512:f241:fps24",
           "replicates": 2,
           "meanGib": 30.98037526383996,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f121:fps30",
           "replicates": 3,
           "meanGib": 16.829830512404442,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:640x640:f177:fps30",
           "replicates": 2,
           "meanGib": 24.302487295120955,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f241:fps30",
           "replicates": 2,
           "meanGib": 30.98037489131093,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         }
       ]
     },
@@ -556,30 +669,48 @@
       "replicatedGeometries": 4,
       "maxSpreadGib": 0.10953521728515625,
       "maxSpreadFraction": 0.0033033086466509954,
+      "crossRevision": true,
       "spreads": [
         {
           "key": "q8:768x512:f241:fps24",
           "replicates": 2,
           "meanGib": 33.2283246293664,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f121:fps30",
           "replicates": 3,
           "meanGib": 33.159243958691754,
-          "spreadGib": 0.10953521728515625
+          "spreadGib": 0.10953521728515625,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:640x640:f177:fps30",
           "replicates": 2,
           "meanGib": 33.2283246293664,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f241:fps30",
           "replicates": 2,
           "meanGib": 33.2283246293664,
-          "spreadGib": 0
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         }
       ]
     },
@@ -587,30 +718,48 @@
       "replicatedGeometries": 4,
       "maxSpreadGib": 0.48833170905709267,
       "maxSpreadFraction": 0.004434882133151637,
+      "crossRevision": true,
       "spreads": [
         {
           "key": "q8:768x512:f241:fps24",
           "replicates": 2,
           "meanGib": 129.6140967886895,
-          "spreadGib": 0.4094945229589939
+          "spreadGib": 0.4094945229589939,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f121:fps30",
           "replicates": 3,
           "meanGib": 84.7649530035754,
-          "spreadGib": 0.3759225755929947
+          "spreadGib": 0.3759225755929947,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:640x640:f177:fps30",
           "replicates": 2,
           "meanGib": 115.22630941309035,
-          "spreadGib": 0.48833170905709267
+          "spreadGib": 0.48833170905709267,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         },
         {
           "key": "q8:768x512:f241:fps30",
           "replicates": 2,
           "meanGib": 129.88112881034613,
-          "spreadGib": 0.01202799379825592
+          "spreadGib": 0.01202799379825592,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
         }
       ]
     }

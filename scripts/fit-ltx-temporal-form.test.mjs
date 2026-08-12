@@ -15,15 +15,32 @@ import {
   noiseFloor,
   pointsFrom,
   rolesFromPlan,
+  sessionsFrom,
 } from "./fit-ltx-temporal-form.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLAN = JSON.parse(
   readFileSync(path.join(ROOT, "docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json"), "utf8"),
 );
-const DRIVER_LOG = readFileSync(
-  path.join(ROOT, "docs/calibration/sc-18810/sweep-run.log"),
-  "utf8",
+/** BOTH committed driver sessions, chronological — the capture crashed the host and resumed. */
+const LOG_PATHS = [
+  "docs/calibration/sc-18810/precrash-q8-run.log",
+  "docs/calibration/sc-18810/sweep-run.log",
+];
+const LOGS = LOG_PATHS.map((relative) => ({
+  path: relative,
+  text: readFileSync(path.join(ROOT, relative), "utf8"),
+}));
+const DRIVER_LOGS = LOGS.map((log) => log.text);
+const [PRECRASH_LOG, DRIVER_LOG] = DRIVER_LOGS;
+const FIXTURE_BY_NAME = new Map(
+  PLAN.providers.map((provider) => [provider.name, provider.fixture]),
+);
+const DATASET = JSON.parse(
+  readFileSync(
+    path.join(ROOT, "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
+    "utf8",
+  ),
 );
 
 const geometry = (width, height, frames, fps = 30) => ({
@@ -251,7 +268,7 @@ test("the scored roles are exactly the declared vocabulary, and host-outcome lab
 });
 
 test("the driver log, not a hardcoded list, says what was attempted", () => {
-  const states = driverStatesFrom(DRIVER_LOG);
+  const states = driverStatesFrom(DRIVER_LOGS);
   // Every terminal state the log actually distinguishes, on a real row of the committed log.
   assert.equal(states.get("mlx-ltx-2-3-q8-768x512-f121-fps30").terminal, "completed");
   assert.equal(states.get("mlx-ltx-2-3-q8-768x512-f361-fps30").terminal, "failed");
@@ -271,7 +288,7 @@ test("the driver log, not a hardcoded list, says what was attempted", () => {
 
 test("coverage buckets are derived from the log and the dataset, not from the role", () => {
   const points = [{ fixture: "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808", geometry: {} }];
-  const coverage = coverageOf(PLAN, points, driverStatesFrom(DRIVER_LOG));
+  const coverage = coverageOf(PLAN, points, driverStatesFrom(DRIVER_LOGS));
   const state = (fixture) =>
     coverage.entries.find((entry) => entry.fixture === fixture).state;
   assert.equal(state("ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808"), "captured");
@@ -291,16 +308,177 @@ test("coverage buckets are derived from the log and the dataset, not from the ro
   assert.equal(state("ltx-2-3-mlx-bf16-768x512-f121-fps30-seed18808"), "not_reached");
   // One captured (the single point supplied) and three the log shows were begun and never OK'd —
   // f361, f449 and f241. The old hardcoded list named two, and one of those two was wrong.
-  assert.equal(coverage.byState.captured, 1);
-  assert.equal(coverage.byState.attempted_failed_host_limit, 3);
+  assert.equal(coverage.byState.captured.total, 1);
+  assert.equal(coverage.byState.attempted_failed_host_limit.total, 3);
   // Withholding the other seven captured records puts them in the retention-hole bucket rather than
   // silently in "failed" — the seven the log says completed and this call was not given.
-  assert.equal(coverage.byState.completed_without_record, 7);
+  assert.equal(coverage.byState.completed_without_record.total, 7);
   assert.equal(coverage.plannedEntries, PLAN.providers.length);
 });
 
+test("the tier split of every coverage bucket is derived, not typed", () => {
+  // The runbook stated this split in prose and got it wrong: it called the unreached rows "all bf16
+  // and q4" while three were q8 — one of them a `fit` row. The split now comes from here.
+  const coverage = coverageOf(PLAN, [], driverStatesFrom(DRIVER_LOGS));
+  for (const [name, bucket] of Object.entries(coverage.byState)) {
+    const summed = Object.values(bucket.byTier).reduce((sum, count) => sum + count, 0);
+    assert.equal(summed, bucket.total, `${name} tier split must sum to its total`);
+  }
+  // The unreached rows are NOT all bf16 and q4 — the two q8 rung-2 boundary rows are there too.
+  assert.deepEqual(coverage.byState.not_reached.byTier, { q8: 2, bf16: 12, q4: 11 });
+  assert.equal(coverage.byState.not_reached.total, 25);
+  // And the row the driver stopped before is its own bucket, in q8, and it is a `fit` row.
+  assert.deepEqual(coverage.byState.stopped_before.byTier, { q8: 1 });
+  const stopped = coverage.entries.filter((entry) => entry.state === "stopped_before");
+  assert.equal(stopped.length, 1);
+  assert.equal(stopped[0].fixture, "ltx-2-3-mlx-q8-1280x704-f177-fps30-seed18808");
+  assert.equal(stopped[0].role, "fit");
+});
+
+test("the REALIZED fit design is smaller than the declared one, against the real dataset", () => {
+  // Six q8 `fit` rows were declared; the committed dataset has records for four. One was attempted
+  // and killed (768x512 f361) and one was never begun at all — 1280x704 f177, the geometry the
+  // driver named on its STOP line. Pinned against the shipped bundle so no later reading of "the
+  // fit" can quietly assume all six, and so re-capturing either row reds here until the prose that
+  // describes the design is updated with it.
+  const coverage = coverageOf(
+    PLAN,
+    pointsFrom(DATASET.records, rolesFromPlan(PLAN)),
+    driverStatesFrom(DRIVER_LOGS),
+  );
+  const q8Fit = coverage.entries.filter(
+    (entry) => entry.tier === "q8" && entry.role === "fit",
+  );
+  assert.equal(q8Fit.length, 6, "six q8 fit rows are DECLARED");
+  const byState = (state) =>
+    q8Fit.filter((entry) => entry.state === state).map((entry) => entry.fixture);
+  assert.equal(byState("captured").length, 4, "four q8 fit rows were REALIZED");
+  assert.deepEqual(byState("attempted_failed_host_limit"), [
+    "ltx-2-3-mlx-q8-768x512-f361-fps30-seed18808",
+  ]);
+  assert.deepEqual(byState("stopped_before"), [
+    "ltx-2-3-mlx-q8-1280x704-f177-fps30-seed18808",
+  ]);
+  // Eight captured FIXTURES over seven distinct {w,h,frames} geometries — the fps probe repeats
+  // {768x512, f241}, which §3 of the runbook argues is the same geometry.
+  assert.equal(coverage.capturedFixtures, 8);
+  assert.equal(coverage.capturedGeometries, 7);
+  assert.equal(coverage.byState.captured.total, 8);
+});
+
+test("the STOP line is consumed — deleting it moves the row the driver halted at", () => {
+  // Before this, `stoppedBefore` was parsed and asserted but never read by `coverageOf`, so
+  // deleting the STOP line changed no bucket and the assertion on it proved nothing downstream.
+  const withoutStop = DRIVER_LOG.split("\n")
+    .filter((line) => !line.startsWith("STOP "))
+    .join("\n");
+  const bucketOf = (logs) =>
+    coverageOf(PLAN, [], driverStatesFrom(logs)).entries.find(
+      (entry) => entry.fixture === "ltx-2-3-mlx-q8-1280x704-f177-fps30-seed18808",
+    ).state;
+  assert.equal(bucketOf(DRIVER_LOGS), "stopped_before");
+  assert.equal(bucketOf([PRECRASH_LOG, withoutStop]), "not_reached");
+});
+
+test("a captured record with no OK terminal in a committed log is refused", () => {
+  // The defect this closes: four of the thirteen records came from a driver session whose log was
+  // not committed, so nothing tied them to any run. `provider.name` links to the log while records
+  // key on `provider.fixture`, and for non-`*_host_limit` roles nothing checked the two agreed.
+  const record = (fixture) => ({ fixture, geometry: {} });
+  const threeF121 = [
+    record("ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808"),
+    record("ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808"),
+    record("ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808"),
+  ];
+  // Both sessions committed: three records, three OK terminals. Accounted for.
+  assert.equal(
+    coverageOf(PLAN, threeF121, driverStatesFrom(DRIVER_LOGS)).byState.captured.total,
+    1,
+  );
+  // Drop the crashed session's log — exactly the shipped state this re-review found — and the
+  // third record has no terminal line anywhere.
+  assert.throws(
+    () => coverageOf(PLAN, threeF121, driverStatesFrom([DRIVER_LOG])),
+    /has 3 record\(s\) but the committed driver logs record 2 OK terminal\(s\)/,
+  );
+});
+
+test("renaming a captured provider is refused rather than silently unlinking it", () => {
+  // Renaming all eight captured providers used to throw nothing and leave `byState` byte-identical,
+  // because only `*_host_limit` roles were cross-checked against the log at all.
+  const renamed = {
+    providers: PLAN.providers.map((provider) =>
+      provider.name === "mlx-ltx-2-3-q8-768x512-f121-fps30"
+        ? { ...provider, name: "mlx-ltx-2-3-q8-768x512-f121-fps30-renamed" }
+        : provider,
+    ),
+  };
+  assert.throws(
+    () => coverageOf(renamed, [], driverStatesFrom(DRIVER_LOGS)),
+    /the driver log names mlx-ltx-2-3-q8-768x512-f121-fps30, which is not a provider/,
+  );
+});
+
+test("a terminal line with no open BEGIN is not the driver's verdict", () => {
+  // The driver pipes each child's stderr into the stream it writes its own lines to, so an own-line
+  // `OK <planname> 1s` inside captured child output is byte-indistinguishable from a real terminal.
+  // Believing it would flip an entry to `completed` — the one bucket that silences the guard above.
+  const forged = [
+    "OK mlx-ltx-2-3-bf16-768x512-f121-fps30 1s",
+    "FAIL mlx-ltx-2-3-bf16-768x512-f145-fps30 1s :: boom",
+    "",
+  ].join("\n");
+  const states = driverStatesFrom([forged]);
+  assert.equal(states.get("mlx-ltx-2-3-bf16-768x512-f121-fps30").oks, 0);
+  assert.equal(states.get("mlx-ltx-2-3-bf16-768x512-f121-fps30").terminal, "not_begun");
+  assert.equal(states.get("mlx-ltx-2-3-bf16-768x512-f145-fps30").terminal, "not_begun");
+  // With a real BEGIN in front of it the same line IS believed — the guard is about provenance,
+  // not about the spelling of the line.
+  const genuine = driverStatesFrom([
+    ["BEGIN mlx-ltx-2-3-bf16-768x512-f121-fps30 tier=bf16 free=95GiB 10:00:00", forged].join("\n"),
+  ]);
+  assert.equal(genuine.get("mlx-ltx-2-3-bf16-768x512-f121-fps30").terminal, "completed");
+});
+
+test("source sessions attribute every record to the session and revision that produced it", () => {
+  const points = [
+    { fixture: "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808", capturedAt: "2026-08-12T08:28:21Z", sceneWorksRevision: "aaa" },
+    { fixture: "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808", capturedAt: "2026-08-12T10:34:17Z", sceneWorksRevision: "bbb" },
+    { fixture: "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808", capturedAt: "2026-08-12T11:09:33Z", sceneWorksRevision: "ccc" },
+  ];
+  const sessions = sessionsFrom(LOGS, points, FIXTURE_BY_NAME);
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[0].log, LOG_PATHS[0]);
+  assert.equal(sessions[0].firstBeginAt, "08:26:28");
+  // The crashed session: five begun, four OK'd, one left without a terminal line.
+  assert.equal(sessions[0].begins, 5);
+  assert.equal(sessions[0].completed, 4);
+  assert.equal(sessions[0].begunWithoutTerminalLine, 1);
+  // The earliest f121 record belongs to the crashed session; the later two to the second.
+  assert.equal(sessions[0].records, 1);
+  assert.deepEqual(sessions[0].sceneWorksRevisions, ["aaa"]);
+  assert.equal(sessions[1].records, 2);
+  assert.deepEqual(sessions[1].sceneWorksRevisions, ["bbb", "ccc"]);
+});
+
+test("the noise floor reports whether its replicates span revisions", () => {
+  const spanning = noiseFloor([
+    { replicateKey: "a", value: 10, sceneWorksRevision: "aaa" },
+    { replicateKey: "a", value: 10.25, sceneWorksRevision: "bbb" },
+  ]);
+  assert.equal(spanning.crossRevision, true);
+  assert.deepEqual(spanning.spreads[0].sceneWorksRevisions, ["aaa", "bbb"]);
+  const withinOne = noiseFloor([
+    { replicateKey: "a", value: 10, sceneWorksRevision: "aaa" },
+    { replicateKey: "a", value: 10.25, sceneWorksRevision: "aaa" },
+  ]);
+  assert.equal(withinOne.crossRevision, false);
+  // The committed dataset is the first kind: no replicate group was captured under one revision.
+  assert.equal(noiseFloor([]).crossRevision, false);
+});
+
 test("a plan that contradicts the driver log is refused, in both directions", () => {
-  const states = driverStatesFrom(DRIVER_LOG);
+  const states = driverStatesFrom(DRIVER_LOGS);
   const withRole = (name, role) => ({
     providers: PLAN.providers.map((provider) =>
       provider.name === name ? { ...provider, _role: role } : provider,

@@ -5010,10 +5010,110 @@ struct LtxDecodePlan {
     writable_frame_cap: i64,
 }
 
-/// Serialises the MLX-global memory-limit swap that `resolve_with_budget` uses, so two tests running
-/// on the harness's thread pool cannot observe each other's injected budget.
+/// The engine's own committed decode cost model (`mlx-gen-ltx/src/pipeline.rs:218-256`), restated
+/// for TEST preconditions only — never to make a production decision. Production always asks
+/// `auto_tiling_budgeted_ltx`, which is the point of `LtxDecodePlan`. Three call sites derived
+/// these numbers inline before; one definition means a mutation of the model moves all of them.
+#[cfg(test)]
+mod ltx_decode_cost {
+    pub(super) const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    /// `auto_tiling_budgeted_ltx`'s own headroom factor, applied on top of the MLX limit it reads.
+    pub(super) const SAFETY_FACTOR: f64 = 0.85;
+    const FIXED_BYTES: f64 = 3.3e9;
+    const ACCUMULATOR_BYTES_PER_VOXEL: f64 = 40.0;
+    const SINGLE_PASS_BYTES_PER_VOXEL: f64 = 340.0;
+
+    fn voxels(width: u32, height: u32, frames: u32) -> f64 {
+        f64::from(width) * f64::from(height) * f64::from(frames)
+    }
+
+    /// The full-output accumulators, which hold the assembled video and therefore cost the same at
+    /// EVERY tiling. Below this the engine refuses outright; no tile size buys it back.
+    pub(super) fn accumulator_floor_gib(width: u32, height: u32, frames: u32) -> f64 {
+        (FIXED_BYTES + ACCUMULATOR_BYTES_PER_VOXEL * voxels(width, height, frames)) / GIB
+    }
+
+    /// One untiled decode pass.
+    pub(super) fn single_pass_gib(width: u32, height: u32, frames: u32) -> f64 {
+        (FIXED_BYTES + SINGLE_PASS_BYTES_PER_VOXEL * voxels(width, height, frames)) / GIB
+    }
+}
+
+/// The geometry every `run_ltx` test drives (`ltx_request_json(768, 512, 97)`). It is named here
+/// because an injected budget's blast radius reaches it — see `LTX_BUDGET_INJECTION_LOCK`.
+#[cfg(test)]
+const LTX_UNLOCKED_SMOKE_GEOMETRY: (u32, u32, u32) = (768, 512, 97);
+
+/// Serialises the MLX-global memory-limit swap that `LtxInjectedBudget` performs.
+///
+/// **What it guarantees:** two *lock takers* never overlap. No injected-budget resolve observes
+/// another's budget, and each restore pairs with its own swap.
+///
+/// 🔴 **What it does NOT guarantee, though an earlier revision of this comment claimed it did:**
+/// that no test can observe an injected budget. The MLX memory limit is process-GLOBAL, and
+/// `run_ltx` resolves its decode plan through `LtxDecodePlan::resolve`, which reads that limit
+/// **without taking this lock**. The `run_ltx` refusal tests
+/// (`the_ltx_arm_fails_closed_on_a_non_t2v_target_before_weight_work`,
+/// `the_ltx_arm_refuses_a_malformed_plan_before_it_consults_the_host_budget`) reach exactly that
+/// call, and a budget small enough to make the engine refuse their geometry would replace the
+/// message they assert with the engine's refusal.
+///
+/// Those tests are safe only because every injected budget leaves `LTX_UNLOCKED_SMOKE_GEOMETRY`'s
+/// full-output accumulators affordable — 4.49 GiB against a lowest safe budget of 6.8 GiB, a 1.51x
+/// margin that nothing used to assert. `LtxInjectedBudget::install` asserts it on **every**
+/// injection, so a new row below the floor fails loudly at its own injection site instead of
+/// turning an unrelated test into an intermittent failure carrying the wrong message. That covers
+/// future `run_ltx` call sites too, which taking the lock at today's four would not: this lock is
+/// `#[cfg(test)]` and `resolve` is production code, so the read genuinely cannot be routed through
+/// it from the production side.
 #[cfg(test)]
 static LTX_BUDGET_INJECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// An injected MLX memory limit, installed for as long as this value lives.
+///
+/// RAII rather than a restore statement because `auto_tiling_budgeted_ltx` can panic: on that path
+/// a trailing `set_memory_limit(previous)` never runs, and the injected limit leaks to every later
+/// test in the process. `unwrap_or_else(PoisonError::into_inner)` then deliberately ignores the
+/// poisoning, so the leak would have had no signal at all.
+#[cfg(test)]
+struct LtxInjectedBudget {
+    previous: usize,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl LtxInjectedBudget {
+    fn install(budget_gib: f64) -> Self {
+        let (width, height, frames) = LTX_UNLOCKED_SMOKE_GEOMETRY;
+        let floor = ltx_decode_cost::accumulator_floor_gib(width, height, frames);
+        let safe = budget_gib * ltx_decode_cost::SAFETY_FACTOR;
+        assert!(
+            safe > floor,
+            "an injected budget of {budget_gib} GiB leaves {safe:.2} GiB safe, at or below the \
+             {floor:.2} GiB accumulator floor of the {width}x{height} x {frames} smoke geometry. \
+             `run_ltx` reads the process-global MLX limit WITHOUT LTX_BUDGET_INJECTION_LOCK, so a \
+             concurrently running `run_ltx` refusal test would be refused by the engine and fail \
+             carrying the wrong message. Raise the budget, or take this lock around every \
+             `run_ltx` call site."
+        );
+        let guard = LTX_BUDGET_INJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous =
+            mlx_rs::memory::set_memory_limit((budget_gib * ltx_decode_cost::GIB) as usize);
+        Self {
+            previous,
+            _guard: guard,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LtxInjectedBudget {
+    fn drop(&mut self) {
+        mlx_rs::memory::set_memory_limit(self.previous);
+    }
+}
 
 impl LtxDecodePlan {
     fn resolve(geometry: LtxGeometry) -> Result<Self, String> {
@@ -5048,15 +5148,13 @@ impl LtxDecodePlan {
     /// on the machine (CI) where it most needs to run.
     #[cfg(test)]
     fn resolve_with_budget(geometry: LtxGeometry, budget_gib: f64) -> Result<Self, String> {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
         let (height, width, frames) = Self::i32_geometry(geometry)?;
-        let guard = LTX_BUDGET_INJECTION_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = mlx_rs::memory::set_memory_limit((budget_gib * GIB) as usize);
-        let planned = mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames);
-        mlx_rs::memory::set_memory_limit(previous);
-        drop(guard);
+        let planned = {
+            // Installed for this call only, and restored on the unwind path as well as the normal
+            // one — `auto_tiling_budgeted_ltx` panicking must not leak the budget to later tests.
+            let _budget = LtxInjectedBudget::install(budget_gib);
+            mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
+        };
         Ok(Self {
             tiling: planned.map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?,
             writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
@@ -7180,17 +7278,15 @@ mod ltx_tests {
         // its 682 cap and is exactly what a hosted CI runner does to this arm's own smoke geometry.
         // `slack` is how far each row sits below the write bound: 0 at the cap, 585 at the smoke
         // geometry. Both tile anyway, which is the point — the write bound is not what forces it.
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
         for (width, height, frames, budget_gib, slack) in [
             (1280u32, 704u32, 297u32, 32.0f64, 0i64),
             (768, 512, 97, 16.0, 585),
         ] {
             // The precondition is DERIVED, not asserted in prose: this budget must actually be below
             // the engine's own single-pass cost, or the row proves nothing.
-            let single_pass_gib =
-                (3.3e9 + 340.0 * f64::from(frames) * f64::from(height) * f64::from(width)) / GIB;
+            let single_pass_gib = ltx_decode_cost::single_pass_gib(width, height, frames);
             assert!(
-                single_pass_gib > budget_gib * 0.85,
+                single_pass_gib > budget_gib * ltx_decode_cost::SAFETY_FACTOR,
                 "{width}x{height} f{frames}: {budget_gib} GiB does not constrain a \
                  {single_pass_gib:.2} GiB single-pass decode, so this row would be vacuous"
             );
@@ -7220,9 +7316,9 @@ mod ltx_tests {
         // before any render. A hosted macOS runner lands here at ~6 GiB of safe budget. Pinned at a
         // fixed budget so the refusal is asserted on every host, not only on a small one.
         const BELOW_THE_ACCUMULATOR_FLOOR_GIB: f64 = 8.0;
-        let accumulators_gib = (3.3e9 + 40.0 * 297.0 * 704.0 * 1280.0) / GIB;
+        let accumulators_gib = ltx_decode_cost::accumulator_floor_gib(1280, 704, 297);
         assert!(
-            accumulators_gib > BELOW_THE_ACCUMULATOR_FLOOR_GIB * 0.85,
+            accumulators_gib > BELOW_THE_ACCUMULATOR_FLOOR_GIB * ltx_decode_cost::SAFETY_FACTOR,
             "this budget must sit below the {accumulators_gib:.2} GiB accumulator floor or the \
              refusal below would be proving something else"
         );
@@ -7235,6 +7331,61 @@ mod ltx_tests {
         assert!(
             refused.contains("refuses 1280x704 x 297 frames before any render"),
             "{refused}"
+        );
+    }
+
+    /// The margin the fixed-budget injections above ride on, asserted instead of assumed.
+    ///
+    /// `run_ltx` reads the process-global MLX limit without `LTX_BUDGET_INJECTION_LOCK`, so an
+    /// injected budget below the `run_ltx` smoke geometry's accumulator floor would make the engine
+    /// refuse that geometry and replace the message those refusal tests assert. The lowest budget
+    /// injected today (8 GiB, 6.8 GiB safe) clears the 4.49 GiB floor by 1.51x — a margin that used
+    /// to be load-bearing and unstated.
+    #[test]
+    #[should_panic(expected = "accumulator floor of the 768x512 x 97 smoke geometry")]
+    fn an_injected_budget_below_the_smoke_geometrys_accumulator_floor_is_refused() {
+        // 5.2 GiB leaves 4.42 GiB safe, just under the 4.49 GiB floor. This is exactly the row a
+        // future author would add to probe a smaller host, and it must fail HERE — loudly, at the
+        // injection site — rather than intermittently in an unrelated `run_ltx` refusal test.
+        let _ =
+            LtxDecodePlan::resolve_with_budget(validate_ltx_geometry(768, 512, 97).unwrap(), 5.2);
+    }
+
+    /// The other side of that boundary: the assertion is a FLOOR, not a blanket refusal. 5.3 GiB
+    /// leaves 4.505 GiB safe against the same 4.494 GiB floor the 5.2 GiB row falls through, so the
+    /// two rows bracket it to within 0.1 GiB and neither can pass by being trivially true.
+    #[test]
+    fn an_injected_budget_just_above_the_smoke_geometrys_accumulator_floor_is_accepted() {
+        let before = get_memory_limit();
+        drop(LtxInjectedBudget::install(5.3));
+        assert_eq!(get_memory_limit(), before);
+    }
+
+    /// The injected limit is process-global, so failing to restore it leaks into every later test.
+    #[test]
+    fn an_injected_budget_is_restored_on_the_normal_and_the_unwind_path() {
+        let before = get_memory_limit();
+        {
+            let _budget = LtxInjectedBudget::install(32.0);
+            assert_eq!(
+                get_memory_limit(),
+                (32.0 * ltx_decode_cost::GIB) as usize,
+                "the budget must actually be installed while the guard lives"
+            );
+        }
+        assert_eq!(get_memory_limit(), before, "restored on the normal path");
+        // The path a trailing `set_memory_limit(previous)` statement misses entirely — and which
+        // `unwrap_or_else(PoisonError::into_inner)` would then hide, because the poisoned lock is
+        // the only signal the leak leaves behind.
+        let outcome = std::panic::catch_unwind(|| {
+            let _budget = LtxInjectedBudget::install(32.0);
+            panic!("the selector blew up mid-plan");
+        });
+        assert!(outcome.is_err(), "the closure must actually have panicked");
+        assert_eq!(
+            get_memory_limit(),
+            before,
+            "the injected limit leaked past a panic"
         );
     }
 
@@ -7252,19 +7403,18 @@ mod ltx_tests {
     /// * in between → **tiled**, or refused if not even the smallest tile fits.
     #[test]
     fn the_ltx_arm_resolves_the_cap_geometry_against_this_hosts_live_budget() {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-        // Read the limit and resolve under the SAME lock `resolve_with_budget` swaps under.
+        // Read the limit and resolve under the SAME lock `LtxInjectedBudget` swaps under.
         // MLX's memory limit is process-global: without this, the boundary test's injected budget
         // can land between the read and the resolve and this comparison reads two different hosts.
         let guard = LTX_BUDGET_INJECTION_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let budget_gib = get_memory_limit() as f64 / GIB * 0.85;
+        let budget_gib =
+            get_memory_limit() as f64 / ltx_decode_cost::GIB * ltx_decode_cost::SAFETY_FACTOR;
         let live = LtxDecodePlan::resolve(validate_ltx_geometry(1280, 704, 297).unwrap());
         drop(guard);
-        let voxels = 297.0 * 704.0 * 1280.0;
-        let accumulators_gib = (3.3e9 + 40.0 * voxels) / GIB;
-        let single_pass_gib = (3.3e9 + 340.0 * voxels) / GIB;
+        let accumulators_gib = ltx_decode_cost::accumulator_floor_gib(1280, 704, 297);
+        let single_pass_gib = ltx_decode_cost::single_pass_gib(1280, 704, 297);
         let where_we_are = format!(
             "accumulators {accumulators_gib:.2} GiB, single-pass {single_pass_gib:.2} GiB, this \
              host's safe budget {budget_gib:.2} GiB"

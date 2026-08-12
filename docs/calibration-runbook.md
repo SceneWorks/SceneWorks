@@ -897,9 +897,31 @@ captured through the sc-18808 MLX arm and `scripts/memory-calibration-harness.mj
 **production full-A/V path** (`video_mode` unset, audio track decoded — the row above used
 `no_audio`), q8, inference pin `b965641e` — **except where a paragraph says PREDICTED**, which means
 it is computed from the engine's committed `LTX_VAE_*` cost model and has no record behind it. §5 is
-the only such paragraph. 13 records over **8 distinct geometries**; replicates on four of them give a
-measured noise floor rather than an assumed one: decode is byte-identical across repeats, denoise
-varies by 0.001% (2.7e-4 GiB), and the text phase by 0.33% (0.110 GiB).
+the only such paragraph. 13 records over **8 captured fixtures spanning 7 distinct {w,h,frames}
+geometries plus one fps probe** — the probe repeats `{768x512, f241}` at 24 fps, and §3 below argues
+that is the same geometry, so it may not also be counted as an eighth one. Replicates on four of them
+give a measured noise floor rather than an assumed one: decode is byte-identical across repeats,
+denoise varies by 0.001% (2.7e-4 GiB), and the text phase by 0.33% (0.110 GiB).
+
+🔴 **That noise floor is CROSS-SESSION and CROSS-REVISION, and every "× noise" statement below
+inherits it.** The capture crashed the host after four records and resumed later, so it spans two
+driver sessions and **four SceneWorks revisions** — `f301d712` (session 1, 4 records), then
+`817cf550`, `41e8151f` and `c30c4974` (session 2, 9 records). Both sessions' logs ship
+(`docs/calibration/sc-18810/precrash-q8-run.log` and `sweep-run.log`) and
+`ltx-temporal-form-fit-sc-18810.json`'s `sourceSessions` says which records came from which; the
+original PR committed only the second log, so four records had no terminal line anywhere. **Every
+one of the four replicate groups contains one record from each session**, so not one of them is a
+back-to-back repeat: the floor bounds repeat-plus-revision variation, not repeat variation alone. The
+text floor's own maximum spread happens to fall between two session-2 records (`41e8151f` 33.2283
+vs `817cf550` 33.1188 GiB), so it is cross-revision even setting the crashed session aside. This is
+reported rather than corrected because correcting it means re-rendering, and a floor that is too
+WIDE is the conservative direction for a residual to be compared against.
+
+⚠️ The evidence **bundle**'s own `sourceSessions` is `[]` for this lane, as it is for sc-18808: the
+harness only populates it on its capture path and these records were ingested without it. The
+per-session provenance above is derived from the committed logs by
+`scripts/fit-ltx-temporal-form.mjs`, and a captured record with no `OK` terminal in a committed log
+now **throws** rather than shipping — which is the guard that would have caught the original gap.
 
 **1. The peak is not one curve — it is the max of three, and only the phases are fittable.** The
 shipped structure already does this (`KreaTurboPhasePeaks::peak_gb`), and it is load-bearing rather
@@ -909,7 +931,10 @@ pieces is not linear. Fitting each phase separately lands at **0.019–0.30 GiB*
 at 0.019–0.13, text at 0.30. Add the temporal term *per phase*; never to the aggregate.
 
 **2. The phase coefficients are the right order of magnitude for the staged components, and the
-per-voxel one matches the engine's own fit to 0.3%.**
+per-voxel one matches the engine's own fit to 0.3%.** 🔴 Every coefficient below is fitted on **four
+q8 geometries (seven records) of the six declared `fit` rows** — one was attempted and killed, one
+was never begun; see *Coverage is derived* below — and scored on six held-out records. The
+"× noise" figures are against the cross-session, cross-revision floor described above.
 
 | phase | best form | coefficients (q8) | held-out max residual |
 | --- | --- | --- | --- |
@@ -957,6 +982,13 @@ memory — but sc-18812 should record it as *small*, not as *unmeasured*.
 (0.95 × `hw.memsize`). q8 at 640x640 x 177 reached **24.30 GiB peak active + 90.68 GiB end-of-phase
 allocator cache = 114.98 GiB**, i.e. 7.46 GiB *above* the 107.52 GiB ceiling, on a render that
 completed and was bit-identical on warm repeat.
+
+> **Provenance of the 114.98 GiB.** It is the **session-1** record (`f301d712`, 08:31:49Z). Its
+> session-2 replicate (`817cf550`) reads **115.47 GiB** — 0.49 GiB higher, the largest replicate
+> spread in this series and, like every replicate here, cross-revision. Either record clears the
+> 107.52 GiB ceiling by more than 7 GiB, so the finding does not turn on which one is quoted; the
+> lower one is quoted deliberately, because the claim is that even the *smaller* reading exceeds the
+> ceiling.
 
 ⚠️ That 114.98 GiB is an **upper bound on co-existence, not a simultaneous maximum**.
 `PhaseMemory::capture()` pairs a phase-**window** peak (`get_peak_memory`) with an **instantaneous**
@@ -1010,18 +1042,35 @@ past physical memory, large single-pass decodes push the box into swap. From the
 768x512 x 449 (176,553,984 voxels) was **killed by a signal** after 1238 s with free disk falling
 81 → 16 GiB; 1280x704 x 241 (217,169,920 voxels) was begun at 16 GiB free and left **no terminal line
 at all** — the driver itself did not survive it; and 768x512 x 361 (141,950,976 voxels) was killed
-later in the same session at lower free space. The safe ceiling therefore *moves with free disk* and
-degraded across one session as APFS local snapshots pinned the churn. Check
-`df -h /System/Volumes/Data` before AND during, and treat any single-pass decode above ~150M output
-voxels as needing tens of GiB of headroom. This is a HOST verdict, not a model verdict.
+later in the same session at lower free space. Across that one session free space went
+**95 → 15 GiB against the driver's 25 GiB floor**, and the driver halted itself on that floor rather
+than continuing. The safe ceiling therefore *moves with free disk*, and degraded as APFS local
+snapshots pinned the churn. Check `df -h /System/Volumes/Data` before AND during, and treat any
+single-pass decode above ~150M output voxels as needing tens of GiB of headroom. This is a HOST
+verdict, not a model verdict.
 
 **Coverage is derived, not asserted.** `scripts/fit-ltx-temporal-form.mjs` buckets every planned entry
-from two artifacts — the dataset (was a record captured?) and the driver log (was it ever begun?) —
-and **throws** when the plan's `_role` contradicts the log. It used to take "attempted and killed"
-from a hardcoded two-element array, and that array was wrong: `1280x704 f241` was published as
-`not_attempted_host_limit` while the log shows it was begun. Final counts: **8 captured geometries /
-13 records**, 3 attempted-and-not-survived, 7 `not_attempted_host_limit`, 26 never reached (all bf16
-and q4).
+from two artifacts — the dataset (was a record captured?) and the driver logs (was it ever begun, and
+did it terminate?) — and **throws** when the plan and the logs disagree. It used to take "attempted
+and killed" from a hardcoded two-element array, and that array was wrong: `1280x704 f241` was
+published as `not_attempted_host_limit` while the log shows it was begun. Final counts, all read from
+`coverage.byState` rather than typed here: **8 captured fixtures over 7 distinct geometries /
+13 records**, 3 attempted-and-not-survived, 7 `not_attempted_host_limit`, **1 `stopped_before`**, and
+25 never reached (**12 bf16, 11 q4, 2 q8** — the two q8 rows are the rung-2 boundary pair).
+
+🔴 **One declared `fit` row was never captured, so the realized fit design is smaller than the plan
+declares.** Of the six q8 rows pre-registered as `fit`, **four produced records**. `768x512 f361` was
+attempted and killed. `1280x704 f177` was **never begun at all** — it is the geometry the driver
+named on its `STOP` line when free disk fell through the floor, and it now has its own
+`stopped_before` bucket rather than being buried among the unreached rows. An earlier revision of
+this paragraph said the unreached rows were "all bf16 and q4"; three were q8, and one of those three
+was this `fit` row, so the false parenthetical was also what concealed it. The row keeps its `fit`
+role — re-labelling a pre-registered role after seeing which points survived is exactly the
+after-the-fact redraw the role vocabulary exists to prevent — and the fit script's test
+*"the REALIZED fit design is smaller than the declared one"* pins the 6-declared / 4-realized split
+against the shipped bundle. **Every q8 coefficient in §2 is therefore fitted on four geometries
+(seven records), not six**, and re-capturing either missing row is a change to the fit, not a
+confirmation of it.
 
 ## 7. Ingest, stamping, and a new lane
 
