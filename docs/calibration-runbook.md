@@ -298,7 +298,78 @@ Two things follow, and both are now enforced rather than remembered:
   glob against the repo's *default branch*, so it passed this entry for weeks. As of sc-18809 it
   fetches `/api/models/<repo>/revision/<rev>` per entry and prints the revision it checked
   (`ltx_2_3/bf16  SceneWorks/ltx-2.3-mlx@254989c3ca7e  bf16/*`). Run it before quoting a tier as
-  fetchable. It is still a manual pre-flight, not CI — it talks to the HF API (see its header).
+  fetchable.
+
+  As of sc-18854 this is **enforced on every PR**, without putting the HF API on a required lane.
+  The check is split in two: `--write` is a networked RECORDER that transcribes one file listing per
+  `repo@revision` key into `config/download-pattern-evidence.json`, and `--check` is a hermetic GATE
+  that re-derives the claims from the manifests and grades them against those committed listings
+  with no network at all. `npm run check` runs the gate, so it reaches check.yml's `parity-scaffold`
+  and the required `parity` aggregator.
+
+  **So the workflow when you touch a `downloads[]` entry or a LoRA `source` is: re-record, then
+  commit the evidence with your manifest change.**
+
+  ```
+  npm run record:download-patterns   # networked; rewrites config/download-pattern-evidence.json
+  npm run check:download-patterns:offline   # what CI runs; no network
+  ```
+
+  🔴 **`config/download-pattern-evidence.json` is GENERATED. Regenerate it — never hand-edit it.**
+  The gate's entire trust chain terminates in that one multi-thousand-line file, and it is trusted
+  unconditionally: a one-line edit to any `files` array turns a real zero-match green, and a `gated`
+  flipped to `false` un-tracks an unfetchable repo. Neither is plausible to catch by eye in a review
+  of a machine-generated diff. The only honest edit is a re-record. If you find yourself wanting to
+  change the artifact by hand, the thing that is actually wrong is the manifest entry or the
+  waiver list in `scripts/check-download-patterns.mjs`.
+
+  **Reviewing someone else's evidence diff** — there is a no-write verify mode for exactly this:
+
+  ```
+  node scripts/check-download-patterns.mjs --write --dry-run
+  ```
+
+  It performs the same networked re-record, writes nothing, and ends with an
+  `=== ARTIFACT VERDICT: … ===` banner. **The banner, not the absence of noise above it, is the
+  signal:**
+
+  - `=== ARTIFACT VERDICT: UP TO DATE (N key(s)) — exit 0 ===` — the committed artifact is
+    byte-identical to what a re-record produces. That is what distinguishes an honest re-record
+    from a hand edit.
+  - `=== ARTIFACT VERDICT: WOULD CHANGE — exit 1 ===` — it is not. Re-record and **read the diff
+    before concluding anything**: an unrevisioned key whose upstream default branch has moved since
+    the last record reds this way harmlessly, and so does a hand edit.
+
+  🔴 **In this mode the exit code carries that verdict and nothing else** (sc-18854 review). The
+  live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner,
+  and today's tree prints a tracked `ZERO-MATCH PATTERNS (1)` for LipDub on every clean run — but
+  they deliberately do not move the exit status, because an anti-tamper mode that reds
+  unconditionally signals nothing. Grade those lists with
+  `npm run check:download-patterns:offline`; that is the gate CI runs.
+
+  `--dry-run` is rejected outright when it is not paired with `--write`, including in combination
+  with `--check` or `--self-test` (both of which ignore it — they never touch the network or the
+  artifact). Same reason: a flag that is silently swallowed lets a reviewer believe they verified
+  the artifact when they did not.
+
+  It is a **human tool and is deliberately wired into nothing**: it needs huggingface.co, and the
+  entire point of the record/grade split is that no required lane depends on that.
+
+  Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
+  `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to
+  run. The recorder never evaluates a pattern — it only transcribes — so you cannot record your way
+  out of a real zero-match. 83 of the 96 keys are pinned to immutable 40-hex revisions, whose
+  listings cannot go stale. **The other 13 are unrevisioned and that immutability argument does not
+  cover them** — they read a moving default branch, and while each records the `resolvedSha` it
+  actually read so drift is visible in a re-record diff, nothing forces a re-record. **sc-18924
+  tracks pinning all 13**, which is what closes that window; sc-18917 and sc-18923 each pin one as a
+  side effect of their own fixes.
+
+  Each recorded key also carries `gated` and `servedRepo`, and the gate hard-fails on both
+  (`evidence-gated`, `evidence-repo-id-mismatch`) with tracked waivers in `KNOWN_REPO_CONDITIONS`.
+  A green metadata listing does **not** mean a repo is fetchable: `gated: "auto"` answers 200 and
+  then 401s the actual download unless the token's account has accepted that repo's licence. Two
+  catalog entries are in that state today (sc-18923, sc-18917).
 - **A tier that lands at a different revision is a resolution problem too.** The cache then holds two
   `snapshots/<rev>/` dirs with the tiers split across them, and `huggingface_snapshot_dir` selects
   exactly one. `ltx_bundle_subdir_across_revisions` (sc-18809) scans siblings with tier preference
