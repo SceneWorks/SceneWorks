@@ -2483,7 +2483,7 @@
         }
       }
     },
-    "18813": {
+    "ltx-video": {
       "name": "LTX-Video",
       "backends": {
         "mlx": {
