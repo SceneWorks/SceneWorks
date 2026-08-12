@@ -1177,6 +1177,26 @@ fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
     Ok(json!({ "modelLoads": 1, "fragments": fragments }))
 }
 
+/// The fixture prefix that marks a plan row as a five-rung reference capture.
+const FIVE_RUNG_FIXTURE_PREFIX: &str = "fresh-five-rung-";
+
+/// Which of [`run`]'s two branches a plan row takes: the five-rung reference path, or the inline
+/// Krea arm.
+///
+/// Named rather than inlined so the decision is testable on its own (sc-18808 re-review). It is what
+/// determines which arm [`run`]'s geometry guard is standing in front of, and every case in the
+/// original regression table happened to answer `true` — so the inline arm, and with it `run`'s own
+/// guard, went unexercised while the redundant copy at the head of [`run_five_rung_reference`]
+/// produced the byte-identical message. Five shipped Candle plan rows answer `false`
+/// (`krea-q4-1024-seed42` and its q8/bf16/768/v2 siblings).
+fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
+    let is_five_rung_fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .is_some_and(|fixture| fixture.starts_with(FIVE_RUNG_FIXTURE_PREFIX));
+    Ok(is_five_rung_fixture || planned_provider(request)? == QWEN_ID)
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     if protocol::planned(request)?
         .get("backend")
@@ -1194,14 +1214,10 @@ fn run(request: &Value) -> Result<Value, String> {
     // Both dispatch targets below are image arms; refuse a non-still geometry here, before either of
     // them resolves an environment variable or touches a weight snapshot (sc-18808).
     protocol::validate_still_geometry(request, still_calibration_label(request)?)?;
-    let is_five_rung_reference = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .is_some_and(|fixture| fixture.starts_with("fresh-five-rung-"));
-    if is_five_rung_reference || provider == "qwen_image" {
+    if routes_to_five_rung_reference(request)? {
         return run_five_rung_reference(request);
     }
-    if provider != "krea_2_turbo" {
+    if provider != KREA_ID {
         return Err(format!(
             "unsupported Candle calibration provider {provider:?}"
         ));
@@ -1730,8 +1746,19 @@ mod tests {
     }
 
     /// A single planned case at `frames`, minimal enough that the geometry guard is the FIRST thing
-    /// that can reject it — no weight root, no environment, no fixture.
-    fn still_planned_case(provider: &str, rung: &str, frames: u64) -> Value {
+    /// that can reject it — no weight root, no environment.
+    ///
+    /// `fixture` is LOAD-BEARING here, not decoration. [`run`] picks its dispatch branch from it: a
+    /// `fresh-five-rung-` prefix routes into [`run_five_rung_reference`], and ANY OTHER fixture on
+    /// `krea_2_turbo` falls through to the inline Krea arm instead. A table that only ever passes
+    /// one prefix therefore exercises only one of the two branches, which is precisely how this
+    /// test shipped blind to [`run`]'s own guard once (sc-18808 re-review).
+    fn still_planned_case_with_fixture(
+        provider: &str,
+        rung: &str,
+        frames: u64,
+        fixture: &str,
+    ) -> Value {
         json!({
             "backend": "candle",
             "target": {
@@ -1745,8 +1772,13 @@ mod tests {
             "loadShape": "deferred_materialization",
             "strategy": { "rung": rung, "parameters": {} },
             "calibrationFingerprint": "unused",
-            "fixture": "fresh-five-rung-unused"
+            "fixture": fixture
         })
+    }
+
+    /// The five-rung shape — the only one [`run_five_rung_batch`] accepts.
+    fn still_planned_case(provider: &str, rung: &str, frames: u64) -> Value {
+        still_planned_case_with_fixture(provider, rung, frames, "fresh-five-rung-unused")
     }
 
     /// The canonical five-rung batch shape `run_five_rung_batch` requires, at `frames`.
@@ -1769,27 +1801,62 @@ mod tests {
     ///
     /// BOTH Candle arms hardcoded `frames: 1` into `MemoryGeometry` while reading only
     /// `width`/`height` from the plan, so a plan row declaring any other frame count would have
-    /// rendered ONE frame and emitted a record claiming a geometry it was never asked for. Both
-    /// reachable entry points — `run` (the dispatcher in front of the five-rung path AND the inline
-    /// Krea arm) and `run_five_rung_batch` (reached straight from `main`, so `run`'s guard never sees
-    /// it) — must refuse with the exact pinned wording, before any environment or weight work.
+    /// rendered ONE frame and emitted a record claiming a geometry it was never asked for.
+    ///
+    /// Two entry points are reachable from `main`, and both must refuse with the exact pinned
+    /// wording before any environment or weight work:
+    ///
+    /// * `run` — the dispatcher. Its guard stands in front of BOTH of its branches, and the branch
+    ///   is chosen by `planned.fixture`, which is why the table below carries the fixture instead of
+    ///   hardcoding one. A `fresh-five-rung-` prefix (or the `qwen_image` provider) routes into
+    ///   `run_five_rung_reference`; ANY OTHER fixture on `krea_2_turbo` falls through to the INLINE
+    ///   Krea arm — the arm that resolves `SCENEWORKS_KREA_REPOSITORY` and then writes its own
+    ///   `MemoryGeometry { frames: 1 }`. Five SHIPPED Candle plan rows carry the second shape
+    ///   (`krea-q4-1024-seed42` and its q8/bf16/768/v2 siblings), so it is the live one; the third
+    ///   row below is one of them verbatim. Until it was added, every case in this table began
+    ///   `fresh-five-rung-`, so all of them short-circuited into `run_five_rung_reference` and
+    ///   `run`'s own guard was shadowed by the redundant copy at the head of that function —
+    ///   deleting `run`'s guard left this test green.
+    /// * `run_five_rung_batch` — reached straight from `main`, so `run`'s guard never sees it. Its
+    ///   per-item pre-load loop is the guard under test; the fixture is irrelevant to it, so the
+    ///   canonical five-rung shape is the only one it is exercised with.
+    ///
+    /// The other two copies of the refusal are redundant defense-in-depth and are NOT what this
+    /// test pins: the one at the head of `run_five_rung_reference` (whose only caller is `run`,
+    /// which already refused) and the one in `run_five_rung_reference_loaded` (reachable only after
+    /// a real generator load, so no unit test can enter it). Removing either of those alone leaves
+    /// this suite green — which is exactly why a future reader must not "clean up" `run`'s or
+    /// `run_five_rung_batch`'s on the strength of them still being there.
     #[test]
     fn every_candle_arm_still_refuses_a_multi_frame_geometry() {
+        for (provider, label, fixture) in [
+            (QWEN_ID, QWEN_STILL_CALIBRATION, "fresh-five-rung-unused"),
+            (KREA_ID, KREA_STILL_CALIBRATION, "fresh-five-rung-unused"),
+            // The inline Krea arm — a real shipped plan fixture, which the two rows above cannot
+            // reach.
+            (KREA_ID, KREA_STILL_CALIBRATION, "krea-q4-1024-seed42"),
+        ] {
+            for frames in [0_u64, 2, 97] {
+                let expected = format!("{label} requires geometry.frames == 1, got {frames}");
+                let request = json!({
+                    "action": "run",
+                    "planned": still_planned_case_with_fixture(
+                        provider, "resident", frames, fixture,
+                    )
+                });
+                assert_eq!(
+                    run(&request).expect_err("the Candle dispatcher must refuse a video geometry"),
+                    expected,
+                    "run: {provider} at frames={frames} via fixture {fixture:?}"
+                );
+            }
+        }
         for (provider, label) in [
             (QWEN_ID, QWEN_STILL_CALIBRATION),
             (KREA_ID, KREA_STILL_CALIBRATION),
         ] {
             for frames in [0_u64, 2, 97] {
                 let expected = format!("{label} requires geometry.frames == 1, got {frames}");
-                let request = json!({
-                    "action": "run",
-                    "planned": still_planned_case(provider, "resident", frames)
-                });
-                assert_eq!(
-                    run(&request).expect_err("the Candle dispatcher must refuse a video geometry"),
-                    expected,
-                    "run: {provider} at frames={frames}"
-                );
                 assert_eq!(
                     run_five_rung_batch(&still_batch_request(provider, frames))
                         .expect_err("the Candle batch arm must refuse a video geometry"),
@@ -1797,6 +1864,45 @@ mod tests {
                     "run_batch: {provider} at frames={frames}"
                 );
             }
+        }
+    }
+
+    /// The third row above is not decoration: the fixtures the SHIPPED Candle plan gives the inline
+    /// Krea arm really do take that branch, so `run`'s own guard — not the redundant copy inside
+    /// [`run_five_rung_reference`] — is the one standing in front of them.
+    ///
+    /// Asserted against the dispatch predicate itself rather than by observing an error, because
+    /// both branches resolve the same `SCENEWORKS_KREA_REPOSITORY` and would report the same
+    /// sentence: the error is not a routing witness, the predicate is. Widening the prefix (or
+    /// renaming these fixtures into it) would re-shadow `run`'s guard, and this reds when it does.
+    #[test]
+    fn the_shipped_krea_fixtures_take_the_inline_arm_not_the_five_rung_branch() {
+        for fixture in [
+            "krea-q4-1024-seed42",
+            "krea-q8-1024-seed42",
+            "krea-bf16-1024-seed42",
+            "krea-q4-768-seed42",
+            "krea-q4-1024-seed42-v2-candidate",
+        ] {
+            let request = json!({
+                "planned": still_planned_case_with_fixture(KREA_ID, "resident", 1, fixture)
+            });
+            assert!(
+                !routes_to_five_rung_reference(&request).unwrap(),
+                "{fixture} must reach the inline Krea arm"
+            );
+        }
+        for (provider, fixture) in [
+            (KREA_ID, "fresh-five-rung-krea-q4-1024-seed16402-step2"),
+            (QWEN_ID, "qwen-image-candle-q4-seed15817-step2"),
+        ] {
+            let request = json!({
+                "planned": still_planned_case_with_fixture(provider, "resident", 1, fixture)
+            });
+            assert!(
+                routes_to_five_rung_reference(&request).unwrap(),
+                "{fixture} must reach the five-rung reference path"
+            );
         }
     }
 

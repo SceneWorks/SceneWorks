@@ -184,6 +184,29 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   );
 });
 
+// The third `--bin` guard (sc-18808 review), and the one that actually runs on a feature-targeted
+// PR. The two above pin CI workflows that do NOT: windows-candle.yml has no `pull_request` trigger
+// for these branches, so `check.yml`'s hosted `candle` job — which is just
+// `scripts/check-candle-build.mjs` — is the ONLY candle-configured compiler a PR here reaches.
+// `cargo check --bin` does not compile `#[cfg(test)]`, so under the narrow selector the crate's
+// candle test module was not typechecked in any PR-reachable lane at all: a test that failed to
+// compile merged green and first broke on the self-hosted `cuda` pool ~24m later.
+test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not just its bin", async () => {
+  const script = await source("scripts/check-candle-build.mjs");
+  assert.match(
+    script,
+    /\["check", "-p", "sceneworks-memory-adapter", "--features", "candle", "--all-targets"\]/,
+  );
+  assert.doesNotMatch(
+    script,
+    /"--bin",\s*\n?\s*"memory-candle-adapter"/,
+    "`cargo check --bin` skips #[cfg(test)] — the candle test module would go untypechecked on PRs",
+  );
+  // And this script is genuinely the lane that runs: check.yml must still call it.
+  assert.match(await source(".github/workflows/check.yml"), /run: npm run rust:check:candle$/m);
+  assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
+});
+
 test("Docker relevance gate paginates and checks for truncated file lists", async () => {
   const workflow = await source(".github/workflows/check.yml");
   assert.match(workflow, /gh api --paginate/);
