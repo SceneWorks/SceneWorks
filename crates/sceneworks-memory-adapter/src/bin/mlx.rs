@@ -6,7 +6,7 @@ use mlx_gen::gen_core::{
     MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
     MemorySelection, MemoryStrategy, MemoryStrategyParameters, TransformerComponent,
 };
-use mlx_gen::tiling::{SpatialTiling, TilingConfig};
+use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
     Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadShape,
     LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
@@ -1223,6 +1223,13 @@ impl PhaseMemory {
         }
     }
 
+    /// TWO DIFFERENT INSTANTS, and every consumer of `allocatorBytes` has to know it (sc-18810
+    /// review). `active` is `get_peak_memory()` — the MAXIMUM over the phase window since the last
+    /// `reset_peak_memory`. `cache` is `get_cache_memory()` — the INSTANTANEOUS reading at the
+    /// moment of capture, i.e. the end of the phase. MLX exposes no "cache at the active peak", so
+    /// their sum is an UPPER BOUND on what co-existed, not a simultaneous maximum: during an LTX
+    /// decode the cache is ~0 on entry and grows monotonically to its end-of-phase value, so the
+    /// bound is loosest exactly where it is largest.
     fn capture() -> Self {
         Self {
             active: get_peak_memory() as u64,
@@ -4971,6 +4978,237 @@ fn ltx_load_spec(
     Ok((repository, revision, root, text_encoder, spec))
 }
 
+/// What the engine's OWN decode-tiling selector decides for this exact geometry.
+///
+/// sc-18808 recorded `bounded_decode` as "implemented but not engaged", true at the single
+/// 768x512x97 geometry it captured — and the arm then hardcoded `staged_residency` for every
+/// geometry. That is only safe while the sweep stays small. `budgeted_plan` engages tiling on TWO
+/// independent bounds, and the claim that survives on EVERY host is one-sided — the machine-
+/// independent bound is a CEILING on single-pass frames, not a prediction of where tiling starts:
+///
+/// * the **write bound** — `VaeTiling::LTX.writable_frame_cap(h, w) = i32::MAX / (8 * h * w)`
+///   (`gen-core/src/tiling.rs:167`, `:65`, `full_res_channels: 8`). At the 0.90 MP buckets
+///   (1280x704 / 704x1280) that is **297 output frames**; at the 0.39-0.41 MP buckets it is 682 /
+///   655, above the declared 449-frame envelope maximum. It is a correctness bound, not a memory
+///   one, so it does not move with the host.
+/// * the **memory bound** — single-pass `3.3 GB + 340 B/voxel` against `get_memory_limit() * 0.85`
+///   (`mlx-gen-ltx/src/pipeline.rs:218-256`, `:264-269`). This one DOES move with the host, and it
+///   binds EARLIER on a smaller machine: a CI runner with a fraction of 128 GiB tiles at
+///   768x512 x 97, hundreds of frames below any write cap.
+///
+/// So: **no host can exceed 297 single-pass output frames at 0.90 MP; smaller hosts tile earlier via
+/// the memory bound.** Saying instead that tiling "engages at 298 frames on every host" is falsified
+/// by this repository's own CI.
+///
+/// So asking the selector is the only honest way to know which rung a capture engaged, and a record
+/// that claims `staged_residency` through a tiled decode is a false attestation. This calls the
+/// production entry point rather than re-deriving either bound, so the arm cannot drift from the
+/// engine it is measuring.
+#[derive(Clone, Copy, Debug)]
+struct LtxDecodePlan {
+    tiling: Option<TilingConfig>,
+    writable_frame_cap: i64,
+}
+
+/// The engine's own committed decode cost model (`mlx-gen-ltx/src/pipeline.rs:218-256`), restated
+/// for TEST preconditions only — never to make a production decision. Production always asks
+/// `auto_tiling_budgeted_ltx`, which is the point of `LtxDecodePlan`. Three call sites derived
+/// these numbers inline before; one definition means a mutation of the model moves all of them.
+#[cfg(test)]
+mod ltx_decode_cost {
+    pub(super) const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    /// `auto_tiling_budgeted_ltx`'s own headroom factor, applied on top of the MLX limit it reads.
+    pub(super) const SAFETY_FACTOR: f64 = 0.85;
+    const FIXED_BYTES: f64 = 3.3e9;
+    const ACCUMULATOR_BYTES_PER_VOXEL: f64 = 40.0;
+    const SINGLE_PASS_BYTES_PER_VOXEL: f64 = 340.0;
+
+    fn voxels(width: u32, height: u32, frames: u32) -> f64 {
+        f64::from(width) * f64::from(height) * f64::from(frames)
+    }
+
+    /// The full-output accumulators, which hold the assembled video and therefore cost the same at
+    /// EVERY tiling. Below this the engine refuses outright; no tile size buys it back.
+    pub(super) fn accumulator_floor_gib(width: u32, height: u32, frames: u32) -> f64 {
+        (FIXED_BYTES + ACCUMULATOR_BYTES_PER_VOXEL * voxels(width, height, frames)) / GIB
+    }
+
+    /// One untiled decode pass.
+    pub(super) fn single_pass_gib(width: u32, height: u32, frames: u32) -> f64 {
+        (FIXED_BYTES + SINGLE_PASS_BYTES_PER_VOXEL * voxels(width, height, frames)) / GIB
+    }
+}
+
+/// The geometry every `run_ltx` test drives (`ltx_request_json(768, 512, 97)`). It is named here
+/// because an injected budget's blast radius reaches it — see `LTX_BUDGET_INJECTION_LOCK`.
+#[cfg(test)]
+const LTX_UNLOCKED_SMOKE_GEOMETRY: (u32, u32, u32) = (768, 512, 97);
+
+/// Serialises the MLX-global memory-limit swap that `LtxInjectedBudget` performs.
+///
+/// **What it guarantees:** two *lock takers* never overlap. No injected-budget resolve observes
+/// another's budget, and each restore pairs with its own swap.
+///
+/// 🔴 **What it does NOT guarantee, though an earlier revision of this comment claimed it did:**
+/// that no test can observe an injected budget. The MLX memory limit is process-GLOBAL, and
+/// `run_ltx` resolves its decode plan through `LtxDecodePlan::resolve`, which reads that limit
+/// **without taking this lock**. The `run_ltx` refusal tests
+/// (`the_ltx_arm_fails_closed_on_a_non_t2v_target_before_weight_work`,
+/// `the_ltx_arm_refuses_a_malformed_plan_before_it_consults_the_host_budget`) reach exactly that
+/// call, and a budget small enough to make the engine refuse their geometry would replace the
+/// message they assert with the engine's refusal.
+///
+/// Those tests are safe only because every injected budget leaves `LTX_UNLOCKED_SMOKE_GEOMETRY`'s
+/// full-output accumulators affordable — 4.49 GiB against a lowest safe budget of 6.8 GiB, a 1.51x
+/// margin that nothing used to assert. `LtxInjectedBudget::install` asserts it on **every**
+/// injection, so a new row below the floor fails loudly at its own injection site instead of
+/// turning an unrelated test into an intermittent failure carrying the wrong message. That covers
+/// future `run_ltx` call sites too, which taking the lock at today's four would not: this lock is
+/// `#[cfg(test)]` and `resolve` is production code, so the read genuinely cannot be routed through
+/// it from the production side.
+#[cfg(test)]
+static LTX_BUDGET_INJECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// An injected MLX memory limit, installed for as long as this value lives.
+///
+/// RAII rather than a restore statement because `auto_tiling_budgeted_ltx` can panic: on that path
+/// a trailing `set_memory_limit(previous)` never runs, and the injected limit leaks to every later
+/// test in the process. `unwrap_or_else(PoisonError::into_inner)` then deliberately ignores the
+/// poisoning, so the leak would have had no signal at all.
+#[cfg(test)]
+struct LtxInjectedBudget {
+    previous: usize,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl LtxInjectedBudget {
+    fn install(budget_gib: f64) -> Self {
+        let (width, height, frames) = LTX_UNLOCKED_SMOKE_GEOMETRY;
+        let floor = ltx_decode_cost::accumulator_floor_gib(width, height, frames);
+        let safe = budget_gib * ltx_decode_cost::SAFETY_FACTOR;
+        assert!(
+            safe > floor,
+            "an injected budget of {budget_gib} GiB leaves {safe:.2} GiB safe, at or below the \
+             {floor:.2} GiB accumulator floor of the {width}x{height} x {frames} smoke geometry. \
+             `run_ltx` reads the process-global MLX limit WITHOUT LTX_BUDGET_INJECTION_LOCK, so a \
+             concurrently running `run_ltx` refusal test would be refused by the engine and fail \
+             carrying the wrong message. Raise the budget, or take this lock around every \
+             `run_ltx` call site."
+        );
+        let guard = LTX_BUDGET_INJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous =
+            mlx_rs::memory::set_memory_limit((budget_gib * ltx_decode_cost::GIB) as usize);
+        Self {
+            previous,
+            _guard: guard,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LtxInjectedBudget {
+    fn drop(&mut self) {
+        mlx_rs::memory::set_memory_limit(self.previous);
+    }
+}
+
+impl LtxDecodePlan {
+    fn resolve(geometry: LtxGeometry) -> Result<Self, String> {
+        Self::resolve_against_live_budget(geometry)
+    }
+
+    fn resolve_against_live_budget(geometry: LtxGeometry) -> Result<Self, String> {
+        let (height, width, frames) = Self::i32_geometry(geometry)?;
+        // Argument order mirrors the production call site (`pipeline.rs:168`), which passes
+        // (out_h, out_w, out_f) — NOT the (out_w, out_h, out_f) spelling one of that crate's own
+        // sweep tests uses. At a non-square bucket the two disagree, so this is load-bearing.
+        let tiling = mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
+            .map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?;
+        Ok(Self {
+            tiling,
+            writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
+        })
+    }
+
+    /// The same production selector, resolved against an INJECTED memory budget instead of this
+    /// machine's.
+    ///
+    /// `budget_gib` is the MLX memory limit the selector sees; `auto_tiling_budgeted_ltx` applies
+    /// its own 0.85 safety factor on top, exactly as it does in production. The pinned crate exposes
+    /// no budget-taking entry point (`plan_ltx_tiling` is private), so the budget is injected by
+    /// swapping `mlx_rs::memory::set_memory_limit` around the production call and restoring the
+    /// previous value — the ONE production selector still decides both bounds, rather than this arm
+    /// re-deriving either of them from copied constants.
+    ///
+    /// Test-only, and the reason it exists: `resolve` is host-dependent by construction, so an
+    /// assertion about WHERE tiling engages is otherwise either machine-specific or silently skipped
+    /// on the machine (CI) where it most needs to run.
+    #[cfg(test)]
+    fn resolve_with_budget(geometry: LtxGeometry, budget_gib: f64) -> Result<Self, String> {
+        let (height, width, frames) = Self::i32_geometry(geometry)?;
+        let planned = {
+            // Installed for this call only, and restored on the unwind path as well as the normal
+            // one — `auto_tiling_budgeted_ltx` panicking must not leak the budget to later tests.
+            let _budget = LtxInjectedBudget::install(budget_gib);
+            mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
+        };
+        Ok(Self {
+            tiling: planned.map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?,
+            writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
+        })
+    }
+
+    fn i32_geometry(geometry: LtxGeometry) -> Result<(i32, i32, i32), String> {
+        Ok((
+            i32::try_from(geometry.height).map_err(|_| "LTX height must fit i32".to_owned())?,
+            i32::try_from(geometry.width).map_err(|_| "LTX width must fit i32".to_owned())?,
+            i32::try_from(geometry.frames).map_err(|_| "LTX frames must fit i32".to_owned())?,
+        ))
+    }
+
+    fn budget_refusal(geometry: LtxGeometry, error: &str) -> String {
+        format!(
+            "the pinned MLX LTX-2.3 decode budget refuses {}x{} x {} frames before any render: \
+             {error}",
+            geometry.width, geometry.height, geometry.frames
+        )
+    }
+
+    fn rung(self) -> &'static str {
+        if self.tiling.is_some() {
+            "bounded_decode"
+        } else {
+            "staged_residency"
+        }
+    }
+
+    fn engaged_rungs(self) -> Vec<&'static str> {
+        let mut rungs = vec!["resident", "staged_residency"];
+        if self.tiling.is_some() {
+            rungs.push("bounded_decode");
+        }
+        rungs
+    }
+
+    /// The selected spatial tile edge in OUTPUT pixels, or 0 when that axis is not tiled. Reported
+    /// so a rung-2 record says which plan produced its decode peak, not merely that one was chosen.
+    fn spatial_tile_px(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.spatial)
+            .map_or(0, |spatial| u64::from(spatial.tile_px.max(0) as u32))
+    }
+
+    /// The selected temporal tile length in OUTPUT frames, or 0 when that axis is not tiled.
+    fn temporal_tile_frames(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.temporal)
+            .map_or(0, |temporal| u64::from(temporal.tile_frames.max(0) as u32))
+    }
+}
+
 /// The rung this arm can honestly attest, verified against the plan rather than copied from it.
 ///
 /// MLX LTX has no selectable residency seam: `supports_sequential_offload: false` is honest about the
@@ -4978,27 +5216,38 @@ fn ltx_load_spec(
 /// ~26 GB Gemma text encoder and the AvDiT INSIDE `generate` — TE built, used, dropped and
 /// `clear_cache()`d before the DiT materializes, DiT dropped and cleared before the VAE decode. That
 /// is staged residency, unconditionally and undeclared. `resident` is therefore not a reachable state
-/// for this provider, and `bounded_decode` is not engaged at small geometry
-/// (`auto_tiling_budgeted_ltx` returns `None` and the decode runs single-pass), so the arm accepts
-/// exactly one rung and refuses the rest by name.
-fn ltx_attested_strategy(request: &Value) -> Result<Value, String> {
+/// for this provider.
+///
+/// `bounded_decode` IS reachable, but it is not selectable — `decode_to_frames` auto-selects it from
+/// the geometry (sc-18810). The plan therefore declares which rung it expects and this fails closed
+/// when the engine disagrees, rather than stamping whichever rung the plan asked for.
+fn ltx_attested_strategy(request: &Value, decode: LtxDecodePlan) -> Result<Value, String> {
     let rung = protocol::planned_rung(request)?;
-    if rung != "staged_residency" {
+    let measured = decode.rung();
+    if rung != measured {
         return Err(format!(
-            "the pinned MLX LTX-2.3 provider stages its text encoder and transformer unconditionally \
-             and exposes no residency seam, so staged_residency is the only capturable rung; rung \
-             {rung:?} is not capturable"
+            "the pinned MLX LTX-2.3 provider exposes no residency seam and auto-selects its decode \
+             tiling from the geometry, so its rung is a FUNCTION of the request: this geometry \
+             engages {measured:?} (writable frame cap {}, tiling {}), and the plan declared \
+             {rung:?}",
+            decode.writable_frame_cap,
+            if decode.tiling.is_some() {
+                "selected"
+            } else {
+                "single-pass"
+            }
         ));
     }
     let parameters = protocol::strategy_parameters(request)?;
     if !parameters.is_empty() {
         return Err(format!(
-            "staged_residency takes no strategy parameters, got {parameters:?}"
+            "the MLX LTX-2.3 decode tiling is auto-selected from the geometry, so no rung on this \
+             arm takes strategy parameters; got {parameters:?}"
         ));
     }
     let strategy = json!({
-        "rung": "staged_residency",
-        "engagedRungs": ["resident", "staged_residency"],
+        "rung": measured,
+        "engagedRungs": decode.engaged_rungs(),
         "parameters": parameters,
     });
     let planned_strategy = protocol::planned(request)?
@@ -5108,6 +5357,58 @@ fn safetensors_bytes(directory: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+/// Does this run prove sc-10976's load→use→drop actually happened?
+///
+/// sc-18808 asked a different question — `overall_peak < text_encoder + transformer` — and that
+/// question **does not survive the declared envelope**. It infers "the two giants never co-resided"
+/// from an aggregate that ACTIVATIONS dominate at scale, so it is only sound while activations are
+/// small next to the weights. It was calibrated at one geometry, 768x512 x 97 frames, where the peak
+/// (35.56 GB) sat 17.8 GB under the 53.35 GB co-staged bound.
+///
+/// sc-18810 broke it with a real capture: q8 at **704x1280 x 177 frames** peaked at 54,153,098,156
+/// active bytes, 0.8 GB ABOVE that bound, and the arm refused a perfectly good run. The peak was the
+/// **decode** phase, not co-resident weights — this sweep's own measured decode relation
+/// (~2.75 GB + 322 B per output voxel, against the engine's own committed `3.3e9 + 340 B/voxel`
+/// model at `mlx-gen-ltx/src/pipeline.rs:218-228`) predicts 54,108,433,280 for that geometry's
+/// 159,498,240 output voxels, i.e. within 0.08% of what was measured.
+///
+/// The right witness is a PHASE BOUNDARY reading, not a peak, because a boundary reading contains
+/// the resident weights and almost nothing else. `denoise_entry` is sampled at
+/// `Progress::Step { current: 1 }` — after the text encoder is dropped and `clear_cache()`d and
+/// after the AvDiT is built. Across every sc-18810 capture it sits at 20.72-20.80 GB against a
+/// 20.61 GB transformer, flat in geometry over a 3.3x latent-token range. Were the Gemma encoder
+/// still resident it could not be below 53.3 GB.
+///
+/// Two-sided on purpose: the upper bound catches the regression the old check was aiming at, and the
+/// lower bound catches a progress hook that fires BEFORE the transformer materializes, which would
+/// otherwise make the upper bound pass vacuously.
+fn ltx_staging_is_proven(
+    denoise_entry: AllocatorState,
+    costaged_bytes: u64,
+    text_encoder_bytes: u64,
+    transformer_bytes: u64,
+) -> Result<(), String> {
+    if denoise_entry.active >= costaged_bytes {
+        return Err(format!(
+            "LTX-2.3 held {} active bytes entering the first denoise step, at or above the \
+             {costaged_bytes} bytes the staged text encoder ({text_encoder_bytes}) and transformer \
+             ({transformer_bytes}) occupy together — the text encoder was not dropped before the \
+             AvDiT materialized, so the staged-residency claim this record makes is not supported \
+             by the run",
+            denoise_entry.active
+        ));
+    }
+    if denoise_entry.active < transformer_bytes {
+        return Err(format!(
+            "LTX-2.3 held only {} active bytes entering the first denoise step, below the \
+             {transformer_bytes}-byte transformer — the denoise boundary was sampled before the \
+             AvDiT materialized, so the staged-residency bound above it proves nothing",
+            denoise_entry.active
+        ));
+    }
+    Ok(())
+}
+
 /// The eight required scenarios for a gated LTX receipt.
 ///
 /// NOT `protocol::not_run_scenarios(blocker)`. That helper marks all eight `not_run`, which would
@@ -5152,7 +5453,12 @@ fn ltx_scenarios(blocker: &str) -> Value {
 fn run_ltx(request: &Value) -> Result<Value, String> {
     let geometry = validate_ltx_target(request)?;
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
-    let strategy = ltx_attested_strategy(request)?;
+    // ORDER IS LOAD-BEARING (sc-18810 review). Every check that is a pure function of the REQUEST
+    // runs first; `LtxDecodePlan::resolve` runs last of the pre-weight checks because it is the only
+    // one whose verdict depends on the HOST — it budgets the decode against `get_memory_limit()`, so
+    // the same plan row resolves single-pass on a 128 GiB Mac and tiled on a 16 GiB CI runner. A
+    // malformed plan must be refused for the malformation, on every machine, rather than for
+    // whichever rung the local memory budget happened to select first.
     let load_shape = planned_load_shape(request)?;
     if load_shape != LoadShape::EagerMaterialization {
         return Err(
@@ -5181,6 +5487,8 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
              implements {LTX_CALIBRATION_FINGERPRINT}"
         ));
     }
+    let decode_plan = LtxDecodePlan::resolve(geometry)?;
+    let strategy = ltx_attested_strategy(request, decode_plan)?;
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, tier, &selection)?;
     // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
@@ -5278,19 +5586,14 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
 
-    // THE STAGED-RESIDENCY PROOF, and the reason the record may claim rung 1 at all. If sc-10976's
-    // load->use->drop regressed and the Gemma text encoder stayed resident into the DiT phase, the
-    // peak would have to cover both giants at once. It does not have to be smaller by a hair: on this
-    // artifact the two sum to tens of GB more than the observed peak.
+    // THE STAGED-RESIDENCY PROOF, and the reason the record may claim rung 1 at all.
     let costaged_bytes = text_encoder_bytes.saturating_add(transformer_bytes);
-    if overall.active >= costaged_bytes {
-        return Err(format!(
-            "LTX-2.3 peaked at {} active bytes, at or above the {costaged_bytes} bytes the staged \
-             text encoder ({text_encoder_bytes}) and transformer ({transformer_bytes}) occupy \
-             together — the staged-residency claim this record makes is not supported by the run",
-            overall.active
-        ));
-    }
+    ltx_staging_is_proven(
+        denoise_entry,
+        costaged_bytes,
+        text_encoder_bytes,
+        transformer_bytes,
+    )?;
     // The second handoff: the DiT is dropped and the cache cleared before the VAE decode, so the
     // allocator at the decode boundary must hold less than it did entering the denoise.
     if decode_entry.active >= denoise_entry.active {
@@ -5400,8 +5703,16 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("warmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
                 ("renderedFrames", "count", u64::from(geometry.frames)),
                 ("latentTemporalDepth", "count", u64::from(geometry.latent_frames)),
+                ("latentTokens", "count", u64::from(geometry.latent_frames) * u64::from(geometry.width / 32) * u64::from(geometry.height / 32)),
                 ("outputFps", "count", u64::from(fps)),
                 ("audioTrackDecoded", "count", u64::from(has_audio)),
+                // The rung-2 engagement boundary, read from the engine's own selector at this exact
+                // geometry rather than inferred from the measured decode peak (sc-18810).
+                ("decodeTilingEngaged", "count", u64::from(decode_plan.tiling.is_some())),
+                ("decodeWritableFrameCap", "count", decode_plan.writable_frame_cap.max(0) as u64),
+                ("decodeTileSpatialPx", "count", decode_plan.spatial_tile_px()),
+                ("decodeTileFrames", "count", decode_plan.temporal_tile_frames()),
+                ("mlxMemoryLimitBytes", "bytes", get_memory_limit() as u64),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
@@ -6691,10 +7002,15 @@ mod ltx_tests {
                 json!("lora"),
                 "refusing rather than recording false overlay coverage",
             ),
+            // `resident` is unreachable on this provider on EVERY host, so the refusal is
+            // host-independent — but WHICH rung the engine measures instead is not: this geometry
+            // is single-pass on a 128 GiB Mac and tiled on a small CI runner. Assert the
+            // machine-independent half of the message; the rung itself is pinned, at a fixed
+            // budget, by `the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary`.
             (
                 "/planned/strategy/rung",
                 json!("resident"),
-                "staged_residency is the only capturable rung",
+                "its rung is a FUNCTION of the request",
             ),
             (
                 "/planned/loadShape",
@@ -6735,26 +7051,390 @@ mod ltx_tests {
         }
     }
 
+    /// The ORDER of `run_ltx`'s pre-weight checks, pinned host-independently.
+    ///
+    /// `LtxDecodePlan::resolve` budgets against `get_memory_limit()`, so it is the one pre-weight
+    /// check whose verdict depends on the machine. A request that is malformed AND rung-mismatched
+    /// must be refused for the malformation on every host — otherwise the same bad plan produces a
+    /// different reason on a 128 GiB Mac than on a CI runner, and the refusal is not reproducible.
+    /// Reverting the order makes this fail with the rung message instead.
+    #[test]
+    fn the_ltx_arm_refuses_a_malformed_plan_before_it_consults_the_host_budget() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f97-fps24-seed42"),
+                "does not match the LTX-2.3 calibration seed",
+            ),
+            (
+                "/planned/calibrationFingerprint",
+                json!("sc-18808-ltx-2-3-mlx-t2v-staged-capture-v0"),
+                "plan/adapter calibration mismatch",
+            ),
+            (
+                "/planned/loadShape",
+                json!("deferred_materialization"),
+                "never reads LoadSpec::load_shape",
+            ),
+            (
+                "/planned/target/tier",
+                json!("q2"),
+                "unsupported MLX numeric tier",
+            ),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            // Rung-mismatched as well: `resident` is unreachable on this provider at ANY geometry,
+            // so whichever check runs first is the one that speaks.
+            request["planned"]["strategy"]["rung"] = json!("resident");
+            *request.pointer_mut(pointer).unwrap() = value.clone();
+            let error = run_ltx(&request).expect_err("a malformed LTX plan must be refused");
+            assert!(
+                error.contains(expected),
+                "{pointer}={value} must be refused for the malformation, not the rung: {error}"
+            );
+            assert!(
+                !error.contains("is a FUNCTION of the request"),
+                "{pointer}={value} was refused by the host-dependent rung check first: {error}"
+            );
+        }
+    }
+
+    /// A single-pass decode plan, stated rather than resolved.
+    ///
+    /// Both tests below are about what `ltx_attested_strategy` does GIVEN a single-pass decode. If
+    /// they resolved against the host instead, the input would silently become `bounded_decode` on a
+    /// machine whose memory budget tiles 768x512 x 97 — which is what a hosted CI runner does — and
+    /// the tests would then be asserting something they were never written to assert.
+    const SINGLE_PASS_768X512: LtxDecodePlan = LtxDecodePlan {
+        tiling: None,
+        writable_frame_cap: 682,
+    };
+
     #[test]
     fn the_ltx_arm_refuses_a_parameterized_staged_residency_row() {
         let mut request = ltx_request_json(768, 512, 97);
         request["planned"]["strategy"]["parameters"] = json!({ "decodeTileEdge": 512 });
-        let error = ltx_attested_strategy(&request)
-            .expect_err("staged residency has no strategy parameters at the pin");
-        assert!(error.contains("takes no strategy parameters"), "{error}");
+        let error = ltx_attested_strategy(&request, SINGLE_PASS_768X512)
+            .expect_err("no rung on this arm takes strategy parameters at the pin");
+        assert!(error.contains("takes strategy parameters"), "{error}");
     }
 
     /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would
     /// have to be an explicit edit here.
     #[test]
     fn the_ltx_arm_attests_exactly_resident_plus_staged_residency() {
-        let strategy = ltx_attested_strategy(&ltx_request_json(768, 512, 97)).unwrap();
+        let request = ltx_request_json(768, 512, 97);
+        let strategy = ltx_attested_strategy(&request, SINGLE_PASS_768X512).unwrap();
         assert_eq!(strategy["rung"], "staged_residency");
         assert_eq!(
             strategy["engagedRungs"],
             json!(["resident", "staged_residency"])
         );
         assert_eq!(strategy["parameters"], json!({}));
+    }
+
+    /// sc-18810: the staged-residency witness must be a PHASE BOUNDARY reading, not a peak. The
+    /// numbers here are the real ones from this story's captures — the first row is the geometry
+    /// that broke sc-18808's `overall_peak < text_encoder + transformer` form.
+    #[test]
+    fn the_staging_proof_survives_a_peak_above_the_costaged_bound() {
+        const TEXT_ENCODER: u64 = 32_733_043_614;
+        const TRANSFORMER: u64 = 20_614_103_249;
+        const COSTAGED: u64 = TEXT_ENCODER + TRANSFORMER; // 53,347,146,863
+        let entering_denoise = |active: u64| AllocatorState { active, cache: 0 };
+
+        // q8 704x1280 x 177: measured overall peak 54,153,098,156 — ABOVE the co-staged bound — while
+        // the denoise boundary held 20.7 GB, i.e. the transformer and nothing else. The peak is the
+        // decode phase's output buffers. This run is valid and must be accepted.
+        assert!(
+            ltx_staging_is_proven(
+                entering_denoise(20_765_156_098),
+                COSTAGED,
+                TEXT_ENCODER,
+                TRANSFORMER
+            )
+            .is_ok(),
+            "a decode-dominated peak above the co-staged bound is not a staging regression"
+        );
+
+        // The regression the check exists for: the text encoder still resident when the AvDiT is up.
+        let regressed = ltx_staging_is_proven(
+            entering_denoise(COSTAGED + 1),
+            COSTAGED,
+            TEXT_ENCODER,
+            TRANSFORMER,
+        )
+        .expect_err("a co-resident text encoder must be refused");
+        assert!(
+            regressed.contains("was not dropped before the AvDiT"),
+            "{regressed}"
+        );
+
+        // The vacuity guard: a boundary sampled before the transformer materializes would make the
+        // upper bound pass while proving nothing.
+        let too_early = ltx_staging_is_proven(
+            entering_denoise(TRANSFORMER - 1),
+            COSTAGED,
+            TEXT_ENCODER,
+            TRANSFORMER,
+        )
+        .expect_err("a boundary sampled before the AvDiT exists must be refused");
+        assert!(too_early.contains("proves nothing"), "{too_early}");
+    }
+
+    /// sc-18810: WHERE rung 2 engages, derived from the engine's own bound rather than from the
+    /// measured decode peak. `writable_frame_cap = i32::MAX / (8 * h * w)` is pure arithmetic over
+    /// `VaeTiling::LTX` and does not move with the host, so it is asserted exactly. The memory bound
+    /// (`3.3 GB + 340 B/voxel` vs `get_memory_limit() * 0.85`) DOES move with the host, which is
+    /// precisely why the boundary is attributed to the write bound and not to a machine.
+    #[test]
+    fn the_ltx_decode_tiling_boundary_is_the_machine_independent_write_bound() {
+        let caps = LTX_RESOLUTIONS.map(|(width, height)| {
+            (
+                (width, height),
+                VaeTiling::LTX.writable_frame_cap(height as i32, width as i32),
+            )
+        });
+        assert_eq!(
+            caps,
+            [
+                ((768, 512), 682),
+                ((512, 768), 682),
+                ((640, 640), 655),
+                ((1280, 704), 297),
+                ((704, 1280), 297),
+            ]
+        );
+        let (_, envelope_maximum) = LTX_FRAME_ENVELOPE;
+        for ((width, height), cap) in caps {
+            // Only the two 0.90 MP buckets can reach their cap inside the declared envelope. The
+            // others cannot tile at ANY declared geometry, on any host, for this reason.
+            let reachable = cap < i64::from(envelope_maximum);
+            assert_eq!(
+                reachable,
+                (width, height) == (1280, 704) || (width, height) == (704, 1280),
+                "{width}x{height} cap {cap} against envelope maximum {envelope_maximum}"
+            );
+        }
+    }
+
+    /// The companion behavioural half: the arm's rung FOLLOWS the engine across that boundary, in
+    /// both directions, **at a FIXED budget so both directions are asserted on every host** — a CI
+    /// runner included. `resolve` budgets against `get_memory_limit()`, so a test that resolved
+    /// against the live host would assert one thing on a 128 GiB Mac and another on a 16 GiB runner;
+    /// guarding it behind "only if the memory bound does not bind" would make it vacuous exactly
+    /// where it runs unattended.
+    #[test]
+    fn the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary() {
+        // A budget far above any single-pass cost in the declared envelope: 1280x704 x 297 costs
+        // 3.3e9 + 340 * 267,632,640 B = 87.8 GiB single-pass, and the selector's own 0.85 factor
+        // leaves 217.6 GiB here. Whatever tiles under THIS budget tiles for the write bound alone.
+        const UNCONSTRAINED_GIB: f64 = 256.0;
+        // 297 is the cap itself (a declared 10 s x 30 fps cell) and 305 is the next lattice step
+        // above it. Above the cap `budgeted_plan` tiles unconditionally — memory cannot buy it back.
+        let tiled = LtxDecodePlan::resolve_with_budget(
+            validate_ltx_geometry(1280, 704, 305).unwrap(),
+            UNCONSTRAINED_GIB,
+        )
+        .unwrap();
+        assert!(
+            tiled.tiling.is_some(),
+            "305 frames is over the 297 write cap, so no budget keeps it single-pass"
+        );
+        assert_eq!(tiled.rung(), "bounded_decode");
+        assert_eq!(
+            tiled.engaged_rungs(),
+            ["resident", "staged_residency", "bounded_decode"]
+        );
+        assert!(
+            tiled.spatial_tile_px() > 0 || tiled.temporal_tile_frames() > 0,
+            "a selected tiling must name at least one tiled axis"
+        );
+
+        // The other direction, pinned at the same fixed budget: AT the cap and with memory to spare,
+        // the decode stays single-pass. Together with the row above this is the write bound, isolated
+        // from the host.
+        let single = LtxDecodePlan::resolve_with_budget(
+            validate_ltx_geometry(1280, 704, 297).unwrap(),
+            UNCONSTRAINED_GIB,
+        )
+        .unwrap();
+        assert!(
+            single.tiling.is_none(),
+            "at the cap and inside the memory budget the decode must stay single-pass"
+        );
+        assert_eq!(single.rung(), "staged_residency");
+        let mut request = ltx_request_json(1280, 704, 297);
+        request["planned"]["strategy"]["rung"] = json!("bounded_decode");
+        request["planned"]["strategy"]["engagedRungs"] =
+            json!(["resident", "staged_residency", "bounded_decode"]);
+        let error = ltx_attested_strategy(&request, single)
+            .expect_err("a plan may not claim a rung the geometry does not engage");
+        assert!(error.contains("is a FUNCTION of the request"), "{error}");
+
+        // The one-sided half of the claim, asserted rather than assumed: the write cap is a CEILING
+        // on single-pass frames, not the place tiling starts. A smaller host tiles the very same
+        // f297 geometry the row above kept single-pass — and 768x512 x 97, which is 585 frames below
+        // its 682 cap and is exactly what a hosted CI runner does to this arm's own smoke geometry.
+        // `slack` is how far each row sits below the write bound: 0 at the cap, 585 at the smoke
+        // geometry. Both tile anyway, which is the point — the write bound is not what forces it.
+        for (width, height, frames, budget_gib, slack) in [
+            (1280u32, 704u32, 297u32, 32.0f64, 0i64),
+            (768, 512, 97, 16.0, 585),
+        ] {
+            // The precondition is DERIVED, not asserted in prose: this budget must actually be below
+            // the engine's own single-pass cost, or the row proves nothing.
+            let single_pass_gib = ltx_decode_cost::single_pass_gib(width, height, frames);
+            assert!(
+                single_pass_gib > budget_gib * ltx_decode_cost::SAFETY_FACTOR,
+                "{width}x{height} f{frames}: {budget_gib} GiB does not constrain a \
+                 {single_pass_gib:.2} GiB single-pass decode, so this row would be vacuous"
+            );
+            let constrained = LtxDecodePlan::resolve_with_budget(
+                validate_ltx_geometry(width, height, frames).unwrap(),
+                budget_gib,
+            )
+            .unwrap();
+            assert!(
+                constrained.tiling.is_some(),
+                "{width}x{height} f{frames} must tile for MEMORY under a {budget_gib} GiB budget"
+            );
+            assert_eq!(constrained.rung(), "bounded_decode");
+            // The write bound PERMITTED a single pass here (`f <= cap`) and memory still tiled it.
+            assert_eq!(
+                constrained.writable_frame_cap - i64::from(frames),
+                slack,
+                "{width}x{height} f{frames} must tile with the write bound still permitting a \
+                 single pass (cap {})",
+                constrained.writable_frame_cap
+            );
+        }
+
+        // The third outcome, which CI found and this test did not originally model: below the
+        // full-output ACCUMULATOR floor (`3.3 GB + 40 B/voxel`, 13.05 GiB at the cap geometry) no
+        // tiling helps — the accumulators hold the assembled video — so the engine refuses outright
+        // before any render. A hosted macOS runner lands here at ~6 GiB of safe budget. Pinned at a
+        // fixed budget so the refusal is asserted on every host, not only on a small one.
+        const BELOW_THE_ACCUMULATOR_FLOOR_GIB: f64 = 8.0;
+        let accumulators_gib = ltx_decode_cost::accumulator_floor_gib(1280, 704, 297);
+        assert!(
+            accumulators_gib > BELOW_THE_ACCUMULATOR_FLOOR_GIB * ltx_decode_cost::SAFETY_FACTOR,
+            "this budget must sit below the {accumulators_gib:.2} GiB accumulator floor or the \
+             refusal below would be proving something else"
+        );
+        let refused = LtxDecodePlan::resolve_with_budget(
+            validate_ltx_geometry(1280, 704, 297).unwrap(),
+            BELOW_THE_ACCUMULATOR_FLOOR_GIB,
+        )
+        .expect_err("under the accumulator floor the decode must be refused, not tiled");
+        assert!(refused.contains("just for the output buffers"), "{refused}");
+        assert!(
+            refused.contains("refuses 1280x704 x 297 frames before any render"),
+            "{refused}"
+        );
+    }
+
+    /// The margin the fixed-budget injections above ride on, asserted instead of assumed.
+    ///
+    /// `run_ltx` reads the process-global MLX limit without `LTX_BUDGET_INJECTION_LOCK`, so an
+    /// injected budget below the `run_ltx` smoke geometry's accumulator floor would make the engine
+    /// refuse that geometry and replace the message those refusal tests assert. The lowest budget
+    /// injected today (8 GiB, 6.8 GiB safe) clears the 4.49 GiB floor by 1.51x — a margin that used
+    /// to be load-bearing and unstated.
+    #[test]
+    #[should_panic(expected = "accumulator floor of the 768x512 x 97 smoke geometry")]
+    fn an_injected_budget_below_the_smoke_geometrys_accumulator_floor_is_refused() {
+        // 5.2 GiB leaves 4.42 GiB safe, just under the 4.49 GiB floor. This is exactly the row a
+        // future author would add to probe a smaller host, and it must fail HERE — loudly, at the
+        // injection site — rather than intermittently in an unrelated `run_ltx` refusal test.
+        let _ =
+            LtxDecodePlan::resolve_with_budget(validate_ltx_geometry(768, 512, 97).unwrap(), 5.2);
+    }
+
+    /// The other side of that boundary: the assertion is a FLOOR, not a blanket refusal. 5.3 GiB
+    /// leaves 4.505 GiB safe against the same 4.494 GiB floor the 5.2 GiB row falls through, so the
+    /// two rows bracket it to within 0.1 GiB and neither can pass by being trivially true.
+    #[test]
+    fn an_injected_budget_just_above_the_smoke_geometrys_accumulator_floor_is_accepted() {
+        let before = get_memory_limit();
+        drop(LtxInjectedBudget::install(5.3));
+        assert_eq!(get_memory_limit(), before);
+    }
+
+    /// The injected limit is process-global, so failing to restore it leaks into every later test.
+    #[test]
+    fn an_injected_budget_is_restored_on_the_normal_and_the_unwind_path() {
+        let before = get_memory_limit();
+        {
+            let _budget = LtxInjectedBudget::install(32.0);
+            assert_eq!(
+                get_memory_limit(),
+                (32.0 * ltx_decode_cost::GIB) as usize,
+                "the budget must actually be installed while the guard lives"
+            );
+        }
+        assert_eq!(get_memory_limit(), before, "restored on the normal path");
+        // The path a trailing `set_memory_limit(previous)` statement misses entirely — and which
+        // `unwrap_or_else(PoisonError::into_inner)` would then hide, because the poisoned lock is
+        // the only signal the leak leaves behind.
+        let outcome = std::panic::catch_unwind(|| {
+            let _budget = LtxInjectedBudget::install(32.0);
+            panic!("the selector blew up mid-plan");
+        });
+        assert!(outcome.is_err(), "the closure must actually have panicked");
+        assert_eq!(
+            get_memory_limit(),
+            before,
+            "the injected limit leaked past a panic"
+        );
+    }
+
+    /// The live host, stated as its own claim so the fixed-budget test above cannot be mistaken for
+    /// a statement about this machine.
+    ///
+    /// The cap geometry has THREE outcomes, not two, and which one a host gets is a total function
+    /// of its budget. Exactly one arm below fires on any machine, so this is host-adaptive rather
+    /// than host-conditional — nothing is skipped anywhere:
+    ///
+    /// * the full-output accumulators alone (`3.3 GB + 40 B/voxel`) exceed the budget → **refused**
+    ///   before any render. A hosted CI runner lands here: ~13 GB of buffers against a ~6 GB safe
+    ///   budget. Tiling cannot help, because the accumulators hold the assembled video.
+    /// * a single pass (`3.3 GB + 340 B/voxel`) fits → **single-pass**. This Mac lands here.
+    /// * in between → **tiled**, or refused if not even the smallest tile fits.
+    #[test]
+    fn the_ltx_arm_resolves_the_cap_geometry_against_this_hosts_live_budget() {
+        // Read the limit and resolve under the SAME lock `LtxInjectedBudget` swaps under.
+        // MLX's memory limit is process-global: without this, the boundary test's injected budget
+        // can land between the read and the resolve and this comparison reads two different hosts.
+        let guard = LTX_BUDGET_INJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let budget_gib =
+            get_memory_limit() as f64 / ltx_decode_cost::GIB * ltx_decode_cost::SAFETY_FACTOR;
+        let live = LtxDecodePlan::resolve(validate_ltx_geometry(1280, 704, 297).unwrap());
+        drop(guard);
+        let accumulators_gib = ltx_decode_cost::accumulator_floor_gib(1280, 704, 297);
+        let single_pass_gib = ltx_decode_cost::single_pass_gib(1280, 704, 297);
+        let where_we_are = format!(
+            "accumulators {accumulators_gib:.2} GiB, single-pass {single_pass_gib:.2} GiB, this \
+             host's safe budget {budget_gib:.2} GiB"
+        );
+        if accumulators_gib >= budget_gib {
+            let error = live.expect_err("the accumulators alone do not fit — this must be refused");
+            assert!(
+                error.contains("just for the output buffers"),
+                "{where_we_are}: {error}"
+            );
+        } else if single_pass_gib <= budget_gib {
+            let plan = live.unwrap_or_else(|error| panic!("{where_we_are}: {error}"));
+            assert!(plan.tiling.is_none(), "{where_we_are}");
+            assert_eq!(plan.rung(), "staged_residency");
+        } else {
+            assert!(
+                live.map_or(true, |plan| plan.tiling.is_some()),
+                "{where_we_are}: a decode over budget must not resolve single-pass"
+            );
+        }
     }
 
     /// AC3, and the reason the video arm is safe to add: EVERY image arm still refuses a
