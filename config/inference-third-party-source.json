@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 56285e04 is the SC-17087 Z-Image control memory-behavior merge on the epic inference feature branch, atop current-main sync 01085dde. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against 01085dde, every candidate path, source-area classification, normalized provenance marker, crate prefix, production include site, and disclosure remains unchanged; only the existing candle-gen-z-image lib.rs candidate source blob changed for the first-party control-route behavior registration. The 01085dde..56285e04 delta changes no NOTICE or LICENSE file and adds no production Rust crate or embedded artifact.",
-  "inferenceRevision": "56285e040a57f71c628f3ee15e983890a509cc27",
-  "auditDigest": "eb05e8cac82a503cfa5e8ab056abeb2f1a6abbe9d702714679b52e81e205f1a4",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. cc413e1d is the SC-18804 immutable media-mirror, tier-exact Mage receipt, durable seed-promotion, and unattended Windows Python merge on the epic inference feature branch, atop SC-17087 merge 56285e04. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against 56285e04, every candidate path, source-area classification, normalized provenance marker, crate prefix, production include site, and disclosure remains unchanged; production Rust changes are confined to first-party Mage request-memory receipt filtering and its real-weight evidence. The 56285e04..cc413e1d delta changes no NOTICE, LICENSE, Cargo manifest, production Rust crate, production include site, or embedded artifact.",
+  "inferenceRevision": "cc413e1df4f195c1d86932c5d0bcc77f82f59f03",
+  "auditDigest": "2f845d5d74724aa7c86634ce4f6c381a12ea1a94b3beefcede63d61c16dca737",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "56285e040a57f71c628f3ee15e983890a509cc27",
+    "revision": "cc413e1df4f195c1d86932c5d0bcc77f82f59f03",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "56285e040a57f71c628f3ee15e983890a509cc27",
+    "revision": "cc413e1df4f195c1d86932c5d0bcc77f82f59f03",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"
