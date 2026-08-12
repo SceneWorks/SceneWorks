@@ -16514,6 +16514,14 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "ZimageEdit",
         "MageEdit",
         "KreaEdit",
+        // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
+        // separately loaded conditioning network is overlaid. The route then uses the generic
+        // `generate_candle_stream` base-model admission gate.
+        "SenseNovaEdit",
+        // Kolors source edit lazily VAE-encodes the img2img init inside the registered base pipeline;
+        // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
+        // and reaches the generic `generate_candle_stream` base-model admission gate.
+        "KolorsEdit",
         // Krea sampling-regime lanes: the same base, a different schedule / phase list.
         "KreaTurboOnRaw",
         "KreaMultiPhase",
