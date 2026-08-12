@@ -91,6 +91,17 @@ const FLUX2_RMS_THRESHOLD: f64 = 1.5 / 255.0;
 /// One fixed seed for every q4/q8 `mlx:flux2_dev` fixture
 /// (`flux2-dev-mlx-<tier>-<edge>-seed18218-step2`).
 const FLUX2_SEED: u64 = 18218;
+/// LTX-2.3 quality is the same KIND of claim as FLUX.2-dev's — repeat determinism on one loaded
+/// provider, with no alternate code path selected between the two renders — so it adopts the same
+/// numeric envelope deliberately rather than inventing a looser one for video. The values are
+/// restated under LTX names because the record embeds them as `maximumErrorThreshold` and friends:
+/// an `mlx:ltx_2_3` receipt must not be traceable to a constant that asserts a FLUX.2 provenance.
+/// The margin is if anything wider here: LTX's distilled schedule is fully seeded and the measured
+/// warm repeat is bit-identical (0/255 on all three metrics), while the mandatory broad-bias
+/// mutation must breach all three.
+const LTX_MAX_THRESHOLD: f64 = FLUX2_MAX_THRESHOLD;
+const LTX_MEAN_THRESHOLD: f64 = FLUX2_MEAN_THRESHOLD;
+const LTX_RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
 /// The `mlx:ltx_2_3` lane (sc-18808) — the FIRST video arm in this adapter. Every arm above it is an
 /// image arm and keeps its `geometry.frames == 1` refusal (`protocol::validate_still_geometry`);
 /// this one is the single arm allowed to accept a multi-frame geometry, and it pays for that by
@@ -1884,6 +1895,12 @@ fn image_max_mean_rms_abs(left: &Image, right: &Image) -> Result<(f64, f64, f64)
 
 fn flux2_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= FLUX2_MAX_THRESHOLD && mean <= FLUX2_MEAN_THRESHOLD && rms <= FLUX2_RMS_THRESHOLD
+}
+
+/// The LTX-2.3 twin of [`flux2_quality_passes`], over the LTX-named thresholds so an `mlx:ltx_2_3`
+/// receipt's numbers trace to an LTX constant.
+fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
 }
 
 /// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
@@ -5238,7 +5255,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     clear_cache();
     let warm_post_cleanup = AllocatorState::capture_current();
     let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &repeat)?;
-    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+    if !ltx_quality_passes(maximum_error, mean_error, rms_error) {
         return Err(format!(
             "LTX-2.3 warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
              mean={mean_error:.6}, rms={rms_error:.6}"
@@ -5251,7 +5268,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         .map(qwen_negative_mutation)
         .collect::<Vec<_>>();
     let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &repeat)?;
-    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+    if ltx_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err("LTX-2.3 output mutation did not breach the determinism envelope".to_owned());
     }
 
@@ -5288,9 +5305,9 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
             "maximumError": maximum_error,
             "meanError": mean_error,
             "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
-            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+            "maximumErrorThreshold": LTX_MAX_THRESHOLD,
+            "meanErrorThreshold": LTX_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": LTX_RMS_THRESHOLD,
         },
         "negativeMutation": null,
         "loadability": {
@@ -6763,13 +6780,13 @@ mod ltx_tests {
         let identical = left.clone();
         let (maximum, mean, rms) = video_max_mean_rms_abs(&left, &identical).unwrap();
         assert_eq!((maximum, mean, rms), (0.0, 0.0, 0.0));
-        assert!(flux2_quality_passes(maximum, mean, rms));
+        assert!(ltx_quality_passes(maximum, mean, rms));
 
         let mut late = left.clone();
         late[2] = frame(200);
         let (maximum, mean, rms) = video_max_mean_rms_abs(&left, &late).unwrap();
-        assert!(maximum > FLUX2_MAX_THRESHOLD, "max={maximum}");
-        assert!(!flux2_quality_passes(maximum, mean, rms));
+        assert!(maximum > LTX_MAX_THRESHOLD, "max={maximum}");
+        assert!(!ltx_quality_passes(maximum, mean, rms));
 
         assert!(video_max_mean_rms_abs(&left, &left[..2])
             .unwrap_err()
