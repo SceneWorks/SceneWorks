@@ -76,8 +76,10 @@ test("a comment-only manifest edit produces no generated matrix change", async (
 
 test("runtime-only CUDA telemetry surfaces its measured active-byte peak", () => {
   assert.equal(observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234 } } }), 1234);
+  // sc-18864: full phase telemetry publishes the allocator bound, which is what `deviceBytes`
+  // carried before it was removed, so every published cell keeps its value.
   assert.equal(
-    observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234, deviceBytes: 5678 } } }),
+    observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234, allocatorBytes: 5678 } } }),
     5678,
   );
   assert.equal(observedPeakBytes({ observedMemory: { overall: {} } }), null);
@@ -302,7 +304,7 @@ test("catalog-relative inventory guard rejects whole-scope loss without freezing
       cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
       sourceOverrides: {
         calibrationEvidence: JSON.stringify({
-          schemaVersion: 4,
+          schemaVersion: 5,
           harnessVersion: "sceneworks-memory-v5",
           records: [],
         }),
@@ -813,8 +815,8 @@ test("MLX generated evidence derives the same exact static host boundary as runt
     predictedPeakBytes: { overall: 5 * 1024 ** 3 },
     observedMemory: {
       overall: {
-        wiredBytes: 4 * 1024 ** 3,
-        reclaimableBytes: 1 * 1024 ** 3,
+        // sc-18864: the non-reclaimable residency, formerly recovered as wired - reclaimable.
+        activeBytes: 3 * 1024 ** 3,
       },
     },
   };
@@ -833,10 +835,7 @@ test("MLX generated evidence derives the same exact static host boundary as runt
       },
       predictedPeakBytes: { overall: 46_305_116_160 },
       observedMemory: {
-        overall: {
-          wiredBytes: 44_056_333_980,
-          reclaimableBytes: 3_852_363_372,
-        },
+        overall: { activeBytes: 40_203_970_608 },
       },
     }),
     73_113_341_306,
@@ -862,7 +861,7 @@ test("MLX generated evidence derives the same exact static host boundary as runt
   assert.equal(
     mlxRequiredHostBytes({
       ...record,
-      observedMemory: { overall: { wiredBytes: 9 * 1024 ** 3, reclaimableBytes: 0 } },
+      observedMemory: { overall: { activeBytes: 9 * 1024 ** 3 } },
     }),
     11 * 1024 ** 3,
     "observed non-reclaimable wired peak wins when it exceeds prediction",

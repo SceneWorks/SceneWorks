@@ -916,16 +916,19 @@ export function mlxRequiredHostBytes(record) {
   const mlxLimit = record.hardware?.mlxMemoryLimitBytes;
   const wiredLimit = record.hardware?.wiredLimitBytes;
   const predicted = record.predictedPeakBytes?.overall;
-  const wired = record.observedMemory?.overall?.wiredBytes;
-  const reclaimable = record.observedMemory?.overall?.reclaimableBytes;
-  const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, wired, reclaimable];
+  // sc-18864: this read `wiredBytes - reclaimableBytes`. Schema v5 has no `wiredBytes` — it was a
+  // copy of `allocatorBytes`, and that subtraction was recovering `activeBytes` the long way round.
+  // The mirrored Rust law (`EvidenceRecord::mlx_admission_envelope`) reads the same field, and the
+  // arithmetic is unchanged on every committed record.
+  const resident = record.observedMemory?.overall?.activeBytes;
+  const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, resident];
   if (!inputs.every((value) => Number.isSafeInteger(value) && value >= 0)) return null;
 
   const captureHost = BigInt(memoryBytes);
   if (captureHost === 0n) return null;
   const processCeiling = BigInt(Math.min(memoryBytes, mlxLimit, wiredLimit));
   const foreignReserve = captureHost - processCeiling;
-  const nonReclaimableWired = BigInt(Math.max(0, wired - reclaimable));
+  const nonReclaimableWired = BigInt(resident);
   const peak = BigInt(predicted) > nonReclaimableWired ? BigInt(predicted) : nonReclaimableWired;
   const absoluteRequirement = peak + foreignReserve;
 
@@ -939,9 +942,13 @@ export function mlxRequiredHostBytes(record) {
   return required <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(required) : null;
 }
 
+// The published peak is the ALLOCATOR bound (active + reclaimable), which is what `deviceBytes`
+// carried before sc-18864 removed it — so every published cell keeps its exact value. It is a
+// footprint figure for the matrix, not a feasibility figure: `mlxRequiredHostBytes` above is the
+// one that sizes a host, and it reads the non-reclaimable residency instead.
 export function observedPeakBytes(record) {
   const overall = record?.observedMemory?.overall;
-  const value = overall?.deviceBytes ?? overall?.activeBytes;
+  const value = overall?.allocatorBytes ?? overall?.activeBytes;
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 

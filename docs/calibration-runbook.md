@@ -1085,6 +1085,49 @@ against the shipped bundle. **Every q8 coefficient in §2 is therefore fitted on
 (seven records), not six**, and re-capturing either missing row is a change to the fit, not a
 confirmation of it.
 
+## 6d. What the emitted memory counters mean (schema v5, sc-18864)
+
+A phase carries **three** numbers, and only two of them are measurements.
+
+| field | MLX | CUDA | kind |
+|---|---|---|---|
+| `activeBytes` | `mlx_rs::memory::get_peak_memory()` | `nvidia-smi memory.used` delta | peak over the phase window |
+| `reclaimableBytes` | `mlx_rs::memory::get_cache_memory()` | `0` (no caching allocator) | instantaneous at the phase boundary |
+| `allocatorBytes` | `activeBytes + reclaimableBytes` | same | **derived**, and the validators enforce the identity |
+
+`allocatorBytes` is an **upper bound on co-existence, not a simultaneous maximum**: it adds a
+peak-over-window to an instantaneous-at-boundary reading, and MLX exposes no "cache at the active
+peak". During an LTX decode the cache is ~0 on entry and grows monotonically to its end-of-phase
+value, so the bound is loosest exactly where it is largest — up to **142.6 GB on a 137.4 GB host**
+for a q8 render that completed and was bit-identical on warm repeat.
+
+**Only `activeBytes` may be compared against a hardware or wired ceiling.** The allocator cache is
+elastic; MLX releases it under pressure, which is why a completing render co-existed **7.46 GiB
+above** Metal's `recommendedMaxWorkingSetSize` (§6c). Both `validate_complete` and
+`validate_runtime_complete` — and their JS mirrors — now run that check against `activeBytes`.
+
+Schema v4 also carried `deviceBytes` and `wiredBytes`. **Both adapters set them to verbatim copies
+of `allocatorBytes`**, provably so across all 321 committed phase objects, and MLX exposes no third
+counter they could have carried. Schema v5 removes them rather than inventing readings for them, so
+a record can no longer *represent* `wiredBytes > hardware.wiredLimitBytes` — the shape every
+committed MLX record used to carry, and the reason none could be promoted past `gated`.
+
+### What happened to the records captured under v4
+
+**Migrated in place, not re-captured and not tombstoned.** No capture was ever physically
+impossible: across every committed MLX record, `activeBytes` is under both `memoryBytes` and
+`wiredLimitBytes` — the inversion lived entirely in the aliased names. Dropping the two aliases is
+lossless, so the corrected record is exactly what the fixed adapter would have emitted for the same
+measurement, and re-running renders would have destroyed information (fresh weights, fresh host
+state) to recover numbers already retained. `docs/generated/memory-matrix.json` re-generates
+**bitwise identical outside its provenance block**, which is the check that the migration moved no
+published cell.
+
+The immutable provider-stdout receipts under `docs/calibration/` still carry the v4 shape and
+**must not be rewritten** — they are byte-addressed provenance. `recordFromPhysicalMlxResponse`
+projects v4 → v5 during reconstruction, and **refuses** a receipt whose aliases are not copies of
+`allocatorBytes`, because that would mean the adapter measured something the names claimed.
+
 ## 7. Ingest, stamping, and a new lane
 
 A capture has **two halves**, and both must land or the lane does not move. §7a-7b update the

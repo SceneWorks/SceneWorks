@@ -169,33 +169,30 @@
         "conditioning": {
           "activeBytes": 35561029352,
           "allocatorBytes": 37349335840,
-          "deviceBytes": 37349335840,
-          "reclaimableBytes": 1788306488,
-          "wiredBytes": 37349335840
+          "reclaimableBytes": 1788306488
         },
         "decode": {
           "activeBytes": 15032119664,
           "allocatorBytes": 79212111912,
-          "deviceBytes": 79212111912,
-          "reclaimableBytes": 64179992248,
-          "wiredBytes": 79212111912
+          "reclaimableBytes": 64179992248
         },
         "denoise": {
           "activeBytes": 27444099160,
           "allocatorBytes": 27444099160,
-          "deviceBytes": 27444099160,
-          "reclaimableBytes": 0,
-          "wiredBytes": 27444099160
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35561029352,
           "allocatorBytes": 99741021600,
-          "deviceBytes": 99741021600,
-          "reclaimableBytes": 64179992248,
-          "wiredBytes": 99741021600
+          "reclaimableBytes": 64179992248
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37379637248,
+        "decode": 15837691904,
+        "denoise": 28856811520,
+        "overall": 37379637248
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -294,6 +291,6 @@
       }
     }
   ],
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "sourceSessions": []
 }

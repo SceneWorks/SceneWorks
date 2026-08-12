@@ -11,11 +11,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
-/// Schema v4 adds the required per-record `loadShape` axis. v3 bundles (including the currently
-/// packaged production evidence, whose records were measured before the shape was typed) load as
-/// `BundleLoad::Stale` and every consumer falls back to the legacy admission path until the
-/// evidence is re-collected under the new harness.
-pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 4;
+/// Schema v5 (sc-18864) REMOVES the per-phase `deviceBytes` and `wiredBytes` counters. Both
+/// adapters emitted them as verbatim copies of `allocatorBytes`, so a v4 record could — and every
+/// committed MLX record did — assert wired residency above the probed wired ceiling as a pure
+/// artifact of that aliasing. A v4 bundle is not upgradeable in place by a reader (it carries no
+/// way to tell a measured field from an aliased one), so it loads as `BundleLoad::Stale`.
+///
+/// Schema v4 added the required per-record `loadShape` axis; v3 and earlier are likewise stale.
+pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 5;
 pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// ABI paired by the manifest/query side of the reader.
 ///
@@ -528,9 +531,17 @@ impl ObservedMemory {
         }
     }
 
-    pub fn overall_device_or_active_bytes(&self) -> u64 {
+    /// The NON-RECLAIMABLE residency high-water mark — the only observed quantity that may be
+    /// compared against a hardware ceiling.
+    ///
+    /// This used to read `overall.device_bytes`, which the adapters emitted as a copy of
+    /// `allocatorBytes` = peak-active + end-of-phase cache. That sum is an upper bound across TWO
+    /// INSTANTS, so it legitimately exceeds physical memory on a capture that completed — every
+    /// committed LTX record reported 142.6 GB against a 137.4 GB host and was refused promotion
+    /// for it (sc-18864). The allocator cache is released under pressure; the live arrays are not.
+    pub fn overall_non_reclaimable_bytes(&self) -> u64 {
         match self {
-            Self::Full(value) => value.overall.device_bytes,
+            Self::Full(value) => value.overall.active_bytes,
             Self::RuntimeOverall(value) => value.overall.active_bytes,
         }
     }
@@ -557,14 +568,30 @@ pub struct PhaseMetrics {
     pub overall: Phase,
 }
 
+/// One phase's memory counters, each a SINGLE named backend reading or a derived function of two.
+///
+/// `deny_unknown_fields` plus the absence of `device_bytes` / `wired_bytes` is what makes
+/// `wiredBytes > wiredLimitBytes` UNREPRESENTABLE rather than merely rejected: schemaVersion 5
+/// carries no wired field, and the wired-eligible residency is derived from
+/// [`Phase::non_reclaimable_bytes`], which cannot diverge from the active peak.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Phase {
+    /// MLX `get_peak_memory()` / CUDA `nvidia-smi memory.used` delta — the peak live residency.
     pub active_bytes: u64,
+    /// Derived: `active_bytes + reclaimable_bytes`, an upper bound on co-existence across two
+    /// instants. [`validate_phase_metrics`] enforces the identity.
     pub allocator_bytes: u64,
-    pub device_bytes: u64,
-    pub wired_bytes: u64,
+    /// MLX `get_cache_memory()` at the phase boundary / CUDA 0 — elastic, never charged as wired.
     pub reclaimable_bytes: u64,
+}
+
+impl Phase {
+    /// The residency that must physically fit, and the only figure a hardware or wired ceiling may
+    /// be checked against. The allocator cache is reclaimed under pressure, so it is excluded.
+    pub fn non_reclaimable_bytes(&self) -> u64 {
+        self.active_bytes
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1031,10 +1058,7 @@ impl EvidenceRecord {
             .min(hardware.wired_limit_bytes)
             .min(hardware.memory_bytes);
         let foreign_reserve_bytes = hardware.memory_bytes.saturating_sub(process_ceiling);
-        let non_reclaimable_wired = observed
-            .overall
-            .wired_bytes
-            .saturating_sub(observed.overall.reclaimable_bytes);
+        let non_reclaimable_wired = observed.overall.non_reclaimable_bytes();
         Some(MlxAdmissionEnvelope {
             peak_bytes: predicted.overall.max(non_reclaimable_wired),
             observed_non_reclaimable_wired_bytes: non_reclaimable_wired,
@@ -1788,11 +1812,22 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     if let Some(observed) = observed.full() {
         validate_phase_metrics(observed, &record.id)?;
     }
-    if observed.overall_device_or_active_bytes() > record.hardware.memory_bytes() {
+    if observed.overall_non_reclaimable_bytes() > record.hardware.memory_bytes() {
         return Err(format!(
-            "{} observed device memory exceeds hardware",
+            "{} observed resident memory exceeds hardware",
             record.id
         ));
+    }
+    // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three
+    // runtime-complete `mlx:flux2_dev` records shipped asserting up to 26.0 GB more wired residency
+    // than the probed limit. Both statuses now carry the check, against the non-reclaimable figure.
+    if let (Hardware::Mlx(hardware), Some(observed)) = (&record.hardware, observed.full()) {
+        if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
+            return Err(format!(
+                "{} observed wired memory exceeds hardware",
+                record.id
+            ));
+        }
     }
     let scenarios: BTreeMap<_, _> = record
         .scenarios
@@ -2067,14 +2102,14 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         )
     })?;
     validate_phase_metrics(observed, &record.id)?;
-    if observed.overall.device_bytes > record.hardware.memory_bytes() {
+    if observed.overall.non_reclaimable_bytes() > record.hardware.memory_bytes() {
         return Err(format!(
-            "{} observed device memory exceeds hardware",
+            "{} observed resident memory exceeds hardware",
             record.id
         ));
     }
     if let Hardware::Mlx(hardware) = &record.hardware {
-        if observed.overall.wired_bytes > hardware.wired_limit_bytes {
+        if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
             return Err(format!(
                 "{} observed wired memory exceeds hardware",
                 record.id
@@ -2262,12 +2297,11 @@ fn require_complete_quality_fields(
 
 fn validate_phase_metrics(metrics: &PhaseMetrics, id: &str) -> Result<(), String> {
     let phases = [&metrics.conditioning, &metrics.denoise, &metrics.decode];
-    for phase in phases {
-        if phase.allocator_bytes < phase.active_bytes
-            || phase.device_bytes < phase.active_bytes
-            || phase.wired_bytes < phase.active_bytes
-            || phase.reclaimable_bytes > phase.allocator_bytes
-        {
+    // `allocatorBytes` is DERIVED, so this is an identity, not an ordering. Before sc-18864 the
+    // rule was `allocator >= active`, which let three names carry one number and let the derived
+    // bound drift from its own definition.
+    for phase in phases.into_iter().chain([&metrics.overall]) {
+        if phase.allocator_bytes != phase.active_bytes.saturating_add(phase.reclaimable_bytes) {
             return Err(format!("{id} phase metrics are internally inconsistent"));
         }
     }
@@ -2285,22 +2319,6 @@ fn validate_phase_metrics(metrics: &PhaseMetrics, id: &str) -> Result<(), String
             phases
                 .iter()
                 .map(|phase| phase.allocator_bytes)
-                .max()
-                .unwrap_or(0),
-        ),
-        (
-            metrics.overall.device_bytes,
-            phases
-                .iter()
-                .map(|phase| phase.device_bytes)
-                .max()
-                .unwrap_or(0),
-        ),
-        (
-            metrics.overall.wired_bytes,
-            phases
-                .iter()
-                .map(|phase| phase.wired_bytes)
                 .max()
                 .unwrap_or(0),
         ),
@@ -2453,16 +2471,15 @@ mod tests {
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
         MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable,
         SourceSessionKind, StaleBundleReason, StaleEvidenceReason, StrategyRung,
-        MEMORY_CALIBRATION_ABI, PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        MEMORY_CALIBRATION_ABI, MEMORY_CALIBRATION_SCHEMA_VERSION,
+        PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
     fn phase(value: u64) -> Value {
         json!({
             "activeBytes": value,
             "allocatorBytes": value + 10,
-            "deviceBytes": value + 20,
-            "wiredBytes": value + 30,
-            "reclaimableBytes": 0
+            "reclaimableBytes": 10
         })
     }
 
@@ -2594,7 +2611,7 @@ mod tests {
 
     fn bundle(record: Value) -> String {
         json!({
-            "schemaVersion": 4,
+            "schemaVersion": MEMORY_CALIBRATION_SCHEMA_VERSION,
             "harnessVersion": "sceneworks-memory-v5",
             "records": [record]
         })
@@ -2688,7 +2705,7 @@ mod tests {
             "result": "passed"
         });
         let document = json!({
-            "schemaVersion": 4,
+            "schemaVersion": MEMORY_CALIBRATION_SCHEMA_VERSION,
             "harnessVersion": "sceneworks-memory-v5",
             "sourceSessions": [source_session],
             "records": [record]
@@ -2765,6 +2782,13 @@ mod tests {
     fn mlx_record(total: u64, memory_limit: u64, wired_limit: u64) -> Value {
         let mut record = complete_record();
         record["backend"] = json!("mlx");
+        // sc-18864: the observed RESIDENT peak must differ from `predictedPeakBytes.overall` (200)
+        // or the envelope's "observed telemetry is not overwritten by the predicted maximum"
+        // assertion is vacuous. Before this story the two differed only because `wiredBytes` was
+        // `active + 30` — an offset invented by the fixture to stand in for a counter MLX never had.
+        record["observedMemory"]["overall"] = json!({
+            "activeBytes": 230, "allocatorBytes": 240, "reclaimableBytes": 10,
+        });
         record["hardware"] = json!({
             "probe": "mlx-rs",
             "memoryBytes": total,
@@ -3248,9 +3272,9 @@ mod tests {
         let predicted = record["predictedPeakBytes"]["overall"]
             .as_u64()
             .expect("predicted overall");
-        let observed = record["observedMemory"]["overall"]["deviceBytes"]
+        let observed = record["observedMemory"]["overall"]["activeBytes"]
             .as_u64()
-            .expect("observed device overall");
+            .expect("observed active overall");
         record["predictedPeakBytes"] = json!({ "overall": predicted });
         record["observedMemory"] = json!({ "overall": { "activeBytes": observed } });
 
@@ -3289,6 +3313,193 @@ mod tests {
         ));
     }
 
+    /// sc-18864 helpers: reach the first MLX record carrying full phase telemetry in the packaged
+    /// bundle, by status. Kept separate from the `runtime_record` helpers above so a change to one
+    /// status's fixture cannot silently retarget the other's guards.
+    fn packaged_mlx_record<'a>(raw: &'a mut Value, status: &str) -> &'a mut Value {
+        raw["records"]
+            .as_array_mut()
+            .expect("records array")
+            .iter_mut()
+            .find(|record| {
+                record["status"] == status
+                    && record["hardware"]["wiredLimitBytes"].is_number()
+                    && record["observedMemory"]["conditioning"].is_object()
+            })
+            .expect("packaged MLX record with full phase telemetry")
+    }
+
+    fn set_uniform_phases(record: &mut Value, active: u64, reclaimable: u64) {
+        let phase = json!({
+            "activeBytes": active,
+            "allocatorBytes": active + reclaimable,
+            "reclaimableBytes": reclaimable,
+        });
+        record["observedMemory"] = json!({
+            "conditioning": phase,
+            "denoise": phase,
+            "decode": phase,
+            "overall": phase,
+        });
+    }
+
+    /// sc-18864, GUARD 1 — the aliases are UNREPRESENTABLE, not merely rejected.
+    ///
+    /// `Phase` is `deny_unknown_fields` and carries no `deviceBytes`/`wiredBytes`, so a record
+    /// asserting `wiredBytes > wiredLimitBytes` cannot be parsed at all. Both aliases are mutated
+    /// individually: asserting them together would prove only that the pair is refused.
+    #[test]
+    fn phase_telemetry_cannot_represent_device_or_wired_aliases() {
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+        assert!(
+            matches!(load_bundle(&clean.to_string()), Ok(BundleLoad::Ready(_))),
+            "the unmutated packaged bundle must load, or the mutations below prove nothing"
+        );
+
+        for alias in ["deviceBytes", "wiredBytes"] {
+            let mut aliased = clean.clone();
+            let record = packaged_mlx_record(&mut aliased, "runtime_complete");
+            let wired_limit = record["hardware"]["wiredLimitBytes"]
+                .as_u64()
+                .expect("wired limit");
+            // The exact shape every committed MLX record used to carry: an alias above the ceiling.
+            record["observedMemory"]["overall"][alias] = json!(wired_limit + 1);
+            assert!(
+                matches!(
+                    load_bundle(&aliased.to_string()),
+                    Err(BundleLoadError::Json(_))
+                ),
+                "{alias} must be unrepresentable, not validated"
+            );
+        }
+    }
+
+    /// sc-18864, GUARD 2 — `allocatorBytes` is DERIVED, so the rule is an identity.
+    ///
+    /// The pre-fix rule was `allocator >= active`, which is what let one number wear three names.
+    /// Each side of the identity is broken on its own; breaking both at once would leave either
+    /// term untested.
+    #[test]
+    fn allocator_bytes_must_equal_active_plus_reclaimable() {
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+        assert!(matches!(
+            load_bundle(&clean.to_string()),
+            Ok(BundleLoad::Ready(_))
+        ));
+
+        for field in ["allocatorBytes", "reclaimableBytes"] {
+            let mut drifted = clean.clone();
+            let record = packaged_mlx_record(&mut drifted, "complete");
+            let current = record["observedMemory"]["decode"][field]
+                .as_u64()
+                .expect("decode field");
+            record["observedMemory"]["decode"][field] = json!(current + 1);
+            assert!(
+                matches!(
+                    load_bundle(&drifted.to_string()),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("phase metrics are internally inconsistent")
+                ),
+                "{field} drifting from the derivation must be refused"
+            );
+        }
+    }
+
+    /// sc-18864, GUARD 3 — the wired ceiling is checked on `runtime_complete` too.
+    ///
+    /// It was checked only on `complete` before, which is exactly how three `mlx:flux2_dev`
+    /// runtime-complete records shipped claiming up to 26.0 GB more wired residency than the probed
+    /// limit. Both directions are exercised at the boundary: `limit` loads, `limit + 1` does not.
+    #[test]
+    fn runtime_complete_checks_the_wired_ceiling_against_resident_bytes() {
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+
+        let mut at_limit = clean.clone();
+        let record = packaged_mlx_record(&mut at_limit, "runtime_complete");
+        let wired_limit = record["hardware"]["wiredLimitBytes"]
+            .as_u64()
+            .expect("wired limit");
+        set_uniform_phases(record, wired_limit, 0);
+        assert!(
+            matches!(load_bundle(&at_limit.to_string()), Ok(BundleLoad::Ready(_))),
+            "resident bytes exactly at the wired ceiling must be admissible"
+        );
+
+        let mut over_limit = clean;
+        let record = packaged_mlx_record(&mut over_limit, "runtime_complete");
+        set_uniform_phases(record, wired_limit + 1, 0);
+        assert!(matches!(
+            load_bundle(&over_limit.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("observed wired memory exceeds hardware")
+        ));
+    }
+
+    /// sc-18864, GUARD 4 and the story's headline claim: a soundly-measured MLX capture whose
+    /// allocator BOUND exceeds the host is admissible, while one whose RESIDENT peak does is not.
+    ///
+    /// The numbers are `imc-2c064567893ea869006e` verbatim — a q8 LTX render that completed,
+    /// returned all 121 frames and was bit-identical on warm repeat, yet reported
+    /// `observedMemory.overall.deviceBytes` of 142.6 GB against a 137.4 GB host and was refused
+    /// promotion for it. `allocatorBytes` still carries that 142.6 GB, because it is a real upper
+    /// bound across two instants; it is simply not the quantity a host-capacity check may use.
+    #[test]
+    fn a_sound_mlx_capture_reaches_runtime_complete_despite_an_over_host_allocator_bound() {
+        const LTX_RESIDENT: u64 = 35_678_641_896;
+        const LTX_RECLAIMABLE: u64 = 106_969_676_964;
+
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+
+        let mut sound = clean.clone();
+        let record = packaged_mlx_record(&mut sound, "runtime_complete");
+        let host_bytes = record["hardware"]["memoryBytes"]
+            .as_u64()
+            .expect("host bytes");
+        assert!(
+            LTX_RESIDENT + LTX_RECLAIMABLE > host_bytes && LTX_RESIDENT < host_bytes,
+            "the fixture must be the discriminating case: bound over the host, resident under it"
+        );
+        set_uniform_phases(record, LTX_RESIDENT, LTX_RECLAIMABLE);
+        let record_id = record["id"].as_str().expect("record id").to_owned();
+        let bundle = match load_bundle(&sound.to_string()).expect("sound capture parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("bundle must be current: {reason:?}"),
+        };
+        let loaded = bundle
+            .records
+            .iter()
+            .find(|record| record.id == record_id)
+            .expect("sound record survives");
+        assert_eq!(loaded.status, RecordStatus::RuntimeComplete);
+        let RequiredNullable::Value(observed) = &loaded.observed_memory else {
+            panic!("sound record keeps its observed telemetry");
+        };
+        assert_eq!(observed.overall_non_reclaimable_bytes(), LTX_RESIDENT);
+        assert_eq!(
+            observed
+                .full()
+                .expect("full phases")
+                .overall
+                .allocator_bytes,
+            LTX_RESIDENT + LTX_RECLAIMABLE,
+            "the co-existence bound is retained, not clamped away"
+        );
+
+        // The host-capacity check is still live: move the RESIDENT peak over the host and it bites.
+        let mut over_host = clean;
+        let record = packaged_mlx_record(&mut over_host, "runtime_complete");
+        set_uniform_phases(record, host_bytes + 1, 0);
+        assert!(matches!(
+            load_bundle(&over_host.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("observed resident memory exceeds hardware")
+        ));
+    }
+
     #[test]
     fn schema_and_harness_drift_are_stale_but_bad_json_is_an_error() {
         assert_eq!(
@@ -3299,7 +3510,7 @@ mod tests {
             BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(2) })
         );
         assert_eq!(
-            load_bundle(r#"{"schemaVersion":4,"harnessVersion":"old","records":[]}"#)
+            load_bundle(r#"{"schemaVersion":5,"harnessVersion":"old","records":[]}"#)
                 .expect("harness drift is not a parse failure"),
             BundleLoad::Stale(StaleBundleReason::HarnessVersion {
                 found: Some("old".to_owned())
@@ -3315,7 +3526,7 @@ mod tests {
                 load_bundle(&bundle(missing_load_shape)),
                 Err(BundleLoadError::Json(_))
             ),
-            "a v4 record without its measured loadShape must fail to parse, not default"
+            "a current record without its measured loadShape must fail to parse, not default"
         );
         let mut record_stale = complete_record();
         record_stale["harnessVersion"] = json!("old-record");

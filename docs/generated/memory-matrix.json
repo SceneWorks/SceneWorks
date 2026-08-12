@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d6d4559c2a982565e7549914df53b20bcdee7512aea51397bdc01f8474f6aa31",
+    "sceneWorksRevision": "source-tree:2191650637ea80a3818c1faa34d38080f37478c652ea312d0e1bd4528b99014e",
     "inferenceRevision": "b965641e388f4db646e4c60ab3f75219737e2cc8",
     "sources": {
       "manifest": {
@@ -58,7 +58,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "270d35228f06ebc74e86801cffcb1544a89f643d7e6f5c6846bc9863454e9abd"
+        "sha256": "ad32487c5dbd3189bd8c427232158088dedcd8c3b669e53ca82f7e3507b03d2b"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -74,7 +74,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "2fc469cb22a2aeef5141a6712c1cb0dc7b648aaf3f8fb3c1eba43bed65ba7080"
+        "sha256": "fc0e172e59d99ab12a2cda4e050c0f3ee7488b277956dbcb393497778dca64a8"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",

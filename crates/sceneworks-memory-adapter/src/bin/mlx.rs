@@ -446,6 +446,83 @@ mod tests {
         assert!(predicted_ceiling(overall.allocator_bytes()) >= overall.allocator_bytes());
     }
 
+    /// sc-18864. The emitted phase object must carry ONE named MLX quantity per field. Before this
+    /// story it carried five keys for two readings: `deviceBytes` and `wiredBytes` were both set to
+    /// `active + cache`, which is how every committed MLX record claimed wired residency of
+    /// 99.7-159.6 GB against a probed 87.0 GB ceiling.
+    ///
+    /// Asserting the key SET is the load-bearing half — an assertion that only checked the three
+    /// surviving values would still pass if the two aliases came back.
+    #[test]
+    fn phase_json_emits_one_named_mlx_quantity_per_field() {
+        let phase = PhaseMemory {
+            active: 35_678_641_896,
+            cache: 106_969_676_964,
+        };
+        let value = phase.json();
+        let object = value.as_object().expect("phase json object");
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, ["activeBytes", "allocatorBytes", "reclaimableBytes"]);
+        assert_eq!(object["activeBytes"], json!(35_678_641_896u64));
+        assert_eq!(object["reclaimableBytes"], json!(106_969_676_964u64));
+        // `allocatorBytes` is DERIVED, and the derivation is the whole content of the field.
+        assert_eq!(object["allocatorBytes"], json!(142_648_318_860u64));
+        assert_eq!(
+            object["allocatorBytes"].as_u64().expect("allocator bytes"),
+            object["activeBytes"].as_u64().expect("active bytes")
+                + object["reclaimableBytes"]
+                    .as_u64()
+                    .expect("reclaimable bytes")
+        );
+    }
+
+    /// sc-18864. `predictedPeakBytes` was hardcoded `null` on the LTX arm, which failed both
+    /// `mlx_admission_envelope` and the worker's `RequiredNullable::Value` seed check. Nothing
+    /// about it is contract-dependent — it is `predicted_ceiling` over the arm's own phases.
+    ///
+    /// The measured q8 LTX numbers below are `imc-2c064567893ea869006e` verbatim, and they are the
+    /// discriminating case: a ceiling taken over `allocator_bytes()` instead of `active` would
+    /// predict 149.8 GB of demand on a 137.4 GB host for a render that completed comfortably.
+    #[test]
+    fn ltx_predicted_peak_is_derived_from_the_resident_peak_not_the_co_existence_bound() {
+        let conditioning = PhaseMemory {
+            active: 35_678_641_896,
+            cache: 4_371_718_590,
+        };
+        let denoise = PhaseMemory {
+            active: 36_831_735_964,
+            cache: 0,
+        };
+        let decode = PhaseMemory {
+            active: 37_931_479_408,
+            cache: 104_716_839_452,
+        };
+        let predicted = ltx_predicted_peak_bytes(conditioning, denoise, decode);
+        assert_eq!(
+            predicted,
+            json!({
+                "conditioning": predicted_ceiling(35_678_641_896),
+                "denoise": predicted_ceiling(36_831_735_964),
+                "decode": predicted_ceiling(37_931_479_408),
+                "overall": predicted_ceiling(37_931_479_408),
+            })
+        );
+        let host_bytes = 137_438_953_472u64;
+        let overall = predicted["overall"].as_u64().expect("predicted overall");
+        assert!(
+            overall < host_bytes,
+            "a resident-peak ceiling must fit the capture host, got {overall}"
+        );
+        let overall_phase = PhaseMemory::overall(&[conditioning, denoise, decode]);
+        assert!(
+            predicted_ceiling(overall_phase.allocator_bytes()) > host_bytes,
+            "the co-existence bound must NOT fit, or this test does not discriminate"
+        );
+        // Monotonicity is what lets the `predictedOverallCeiling` diagnostic agree with the record.
+        assert_eq!(overall, predicted_ceiling(overall_phase.active));
+    }
+
     /// sc-18104: an unimplemented provider must be refused by name at dispatch, not fall through to
     /// the Qwen arm. The regression this guards is silent MISROUTING, so asserting "it errored" is
     /// not enough — the old code errored too, just with a Qwen-shaped message after entering the
@@ -1237,13 +1314,34 @@ impl PhaseMemory {
         }
     }
 
+    /// ONE NAMED MLX QUANTITY PER FIELD, and nothing else (sc-18864).
+    ///
+    /// MLX exposes exactly two per-phase counters, so the record carries exactly two counters plus
+    /// their documented sum. Schema v4 also carried `deviceBytes` and `wiredBytes`, and this
+    /// function set BOTH of them to `active + cache` — the same number as `allocatorBytes`, under
+    /// two names that claim to be different quantities. Neither claim was measurable: MLX has no
+    /// device-residency counter and no wired-residency counter, and Metal's
+    /// `recommendedMaxWorkingSetSize` does not bound `active + cache` either (a completing LTX
+    /// render co-existed 7.46 GiB above it, sc-18810). The consequence was a physically impossible
+    /// record: `wiredBytes` 99.7-159.6 GB against a probed `wiredLimitBytes` of 87.0 GB on every
+    /// committed MLX capture. Schema v5 removes both fields rather than inventing readings for
+    /// them.
+    ///
+    /// - `activeBytes` is [`get_peak_memory`] — the MAXIMUM live-array byte count since the last
+    ///   `reset_peak_memory`, i.e. the phase window. This is the quantity MLX's own
+    ///   [`get_memory_limit`] enforces, and the only one a hardware or wired ceiling may be
+    ///   checked against.
+    /// - `reclaimableBytes` is [`get_cache_memory`] — the allocator's free-buffer cache, read
+    ///   INSTANTANEOUSLY at the phase boundary. MLX releases it under pressure.
+    /// - `allocatorBytes` is their sum, and is an UPPER BOUND ON CO-EXISTENCE, not a simultaneous
+    ///   maximum: it adds a peak-over-window to an instantaneous-at-boundary reading, and MLX
+    ///   exposes no "cache at the active peak". During an LTX decode the cache is ~0 on entry and
+    ///   grows monotonically to its end-of-phase value, so the bound is loosest exactly where it
+    ///   is largest.
     fn json(self) -> Value {
-        let allocator = self.allocator_bytes();
         json!({
             "activeBytes": self.active,
-            "allocatorBytes": allocator,
-            "deviceBytes": allocator,
-            "wiredBytes": allocator,
+            "allocatorBytes": self.allocator_bytes(),
             "reclaimableBytes": self.cache,
         })
     }
@@ -5419,6 +5517,40 @@ fn ltx_staging_is_proven(
 /// of dishonesty as a complete one overstating it. `overlay` is emitted `not_run` here and then
 /// replaced by `settle_plain_overlay_scenario`, which derives the verdict from the declared target
 /// rather than letting this arm assert it.
+/// The LTX arm's `predictedPeakBytes`, derived from its own measured phases (sc-18864).
+///
+/// This was hardcoded `null`, which fails BOTH `EvidenceRecord::mlx_admission_envelope` and the
+/// `RequiredNullable::Value` check in the worker's estimate seeding — so a record could not seed an
+/// estimate even once its status question was resolved. Nothing about the field is
+/// contract-dependent: every other MLX arm in this adapter derives it the same way, from
+/// `predicted_ceiling` over its own phases. The missing `MemoryStrategyContract` blocks the
+/// SCENARIOS (there is no admission check to interrogate), not this arithmetic.
+///
+/// It differs from the image arms in ONE respect, deliberately: the ceiling is taken over each
+/// phase's `active` peak, NOT over `PhaseMemory::allocator_bytes()`. `allocator_bytes` is the
+/// two-instant co-existence bound (see [`PhaseMemory::json`]), and for a staged video capture the
+/// allocator cache reaches 72-106 GB, so a ceiling over it predicts ~150 GB of demand on a 128 GiB
+/// host for a render that completed comfortably. A gate must budget the RESIDENT demand; the cache
+/// is elastic and MLX releases it under pressure. The image arms are left on their historical
+/// `allocator_bytes` input because changing them would move shipped admission decisions on
+/// evidence this story did not re-measure — their caches are <= 6.4 GB, so the two definitions
+/// differ by under 5% there. Raised on sc-18864 as a follow-up for the image lane.
+fn ltx_predicted_peak_bytes(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+) -> Value {
+    let conditioning = predicted_ceiling(conditioning.active);
+    let denoise = predicted_ceiling(denoise.active);
+    let decode = predicted_ceiling(decode.active);
+    json!({
+        "conditioning": conditioning,
+        "denoise": denoise,
+        "decode": decode,
+        "overall": conditioning.max(denoise).max(decode),
+    })
+}
+
 fn ltx_scenarios(blocker: &str) -> Value {
     Value::Array(
         [
@@ -5450,6 +5582,12 @@ fn ltx_scenarios(blocker: &str) -> Value {
 /// the measured peak is bounded by the staged-residency claim rather than by the sum of the two
 /// giants, the output is deterministic across a warm repeat, and that determinism envelope is
 /// breachable.
+///
+/// sc-18864: the missing contract is now the ONLY thing gating this receipt. `predictedPeakBytes`
+/// was also hardcoded `null`, an independent block on the record ever seeding an estimate; it is
+/// derived from the arm's own measured phases by [`ltx_predicted_peak_bytes`] and needs no
+/// contract. When `mlx-gen-ltx` registers a `MemoryStrategyContract` the six `not_run` scenarios
+/// become runnable and this arm can claim `runtime_complete` with no further change here.
 fn run_ltx(request: &Value) -> Result<Value, String> {
     let geometry = validate_ltx_target(request)?;
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
@@ -5655,7 +5793,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         },
         "sweep": ltx_complete_sweep(request)?,
         "scenarios": scenarios,
-        "predictedPeakBytes": null,
+        "predictedPeakBytes": ltx_predicted_peak_bytes(conditioning, denoise, decode),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -5689,7 +5827,9 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("denoiseActivePeak", "bytes", denoise.active),
                 ("decodeActivePeak", "bytes", decode.active),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
-                ("predictedOverallCeiling", "bytes", predicted_ceiling(overall.allocator_bytes())),
+                // Agrees with the emitted predictedPeakBytes.overall by construction:
+                // `predicted_ceiling` is monotonic, so ceiling(max(active)) == max(ceiling(active)).
+                ("predictedOverallCeiling", "bytes", predicted_ceiling(overall.active)),
                 ("denoiseEntryActive", "bytes", denoise_entry.active),
                 ("decodeEntryActive", "bytes", decode_entry.active),
                 ("stagedGemmaBytes", "bytes", gemma_bytes),
