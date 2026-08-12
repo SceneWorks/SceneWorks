@@ -680,6 +680,7 @@ fn finish_row(
         "name": format!("{} (ComfyUI)", anchor.name),
         "type": family.as_deref().map(model_type_for_family).unwrap_or("image"),
         "catalogScope": EXTERNAL_SCOPE,
+        "importSourceShape": "comfy_ui_tree",
         "removable": false,
         "downloadable": false,
         "downloads": [],
@@ -834,6 +835,7 @@ mod tests {
         assert_eq!(row["family"], "z-image");
         assert_eq!(row["type"], "image");
         assert_eq!(row["catalogScope"], EXTERNAL_SCOPE);
+        assert_eq!(row["importSourceShape"], "comfy_ui_tree");
         assert_eq!(row["removable"], false);
         assert_eq!(row["assembly"], "complete");
         // sc-10668: z-image bf16 complete is now runnable (the candle loader exists),
@@ -901,6 +903,8 @@ mod tests {
         assert_eq!(rows.len(), 1, "one anchored DiT model");
         let row = &rows[0];
         assert_eq!(row["family"], "qwen-image");
+        assert_eq!(row["catalogScope"], EXTERNAL_SCOPE);
+        assert_eq!(row["importSourceShape"], "comfy_ui_tree");
         assert_eq!(row["type"], "image");
         assert_eq!(row["quant"], "fp8_e4m3");
         assert_eq!(row["assembly"], "complete");

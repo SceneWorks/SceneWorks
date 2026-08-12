@@ -1665,6 +1665,10 @@ pub(crate) async fn create_training_job(
                 "paths".to_owned(),
                 json!({ "model": output_dir.display().to_string() }),
             );
+            entry.insert(
+                "importSourceShape".to_owned(),
+                Value::String("transformer_directory".to_owned()),
+            );
             // The catalog has one global user manifest; record the effective scope honestly rather
             // than echoing a "project" the model store cannot honour.
             entry.insert("scope".to_owned(), Value::String("global".to_owned()));

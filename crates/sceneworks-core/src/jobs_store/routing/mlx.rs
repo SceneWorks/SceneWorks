@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_family_eligible, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
-    MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
+    imported_image_request_provider_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
+    MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
     has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
@@ -61,12 +61,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         // `MLX_IMPORTED_CAPS`: the MLX native single-file loader takes an adapter slice
         // (inference #211) — LoRAs (sc-14111) + Kontext edit (sc-14119) — and assembles the Krea
         // pose control branch around the file-loaded DiT (strict-pose sets on the krea_2 family).
-        return imported_image_request_family_eligible(
-            model,
-            payload,
-            MLX_ROUTED_FAMILIES,
-            MLX_IMPORTED_CAPS,
-        );
+        return imported_image_request_provider_eligible(model, payload, "mlx");
     }
     match model {
         "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),

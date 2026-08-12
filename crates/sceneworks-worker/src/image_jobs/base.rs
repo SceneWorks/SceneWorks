@@ -49,6 +49,51 @@ fn fit_rgb(source: &image::RgbImage, width: u32, height: u32, mode: &str) -> ima
     }
 }
 
+/// Resolve one exact imported generate surface and reject every request axis the selected provider
+/// cannot execute. Source shape is part of the registry key: a sibling route for the same family is
+/// never unioned in. The ComfyUI lanes are ordinary Generate routes; only a singular Reference is
+/// admitted when that exact descriptor advertises it.
+fn imported_generate_request_supported(
+    request: &ImageRequest,
+    family: &str,
+    source: gen_core::ImportedModelSource,
+) -> Option<gen_core::ModelDescriptor> {
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        family,
+        source,
+        gen_core::ImportedModelOperation::Generate,
+    )?;
+    if request.mode == "edit_image"
+        || !pose_entries(request).is_empty()
+        || request.source_asset_id.is_some()
+        || request.mask_asset_id.is_some()
+        || request.character_id.is_some()
+        || request.character_look_id.is_some()
+        || !request.reference_asset_ids.is_empty()
+        || request_has_multiphase(request)
+        || request
+            .advanced
+            .get("controlImage")
+            .is_some_and(|value| !value.is_null())
+    {
+        return None;
+    }
+    if request.reference_asset_id.is_some()
+        && !descriptor
+            .capabilities
+            .conditioning
+            .contains(&gen_core::ConditioningKind::Reference)
+    {
+        return None;
+    }
+    if (!request.loras.is_empty())
+        && !(descriptor.capabilities.supports_lora || descriptor.capabilities.supports_lokr)
+    {
+        return None;
+    }
+    Some(descriptor)
+}
+
 /// Fit an engine [`Image`] (RGB8) to `width`×`height` by `mode` via [`fit_rgb`].
 /// `pub(crate)` so the video I2V resolve paths (`video_jobs.rs`, sc-6139) can pre-fit a
 /// starting image to the output dims with the same crop/pad geometry as the image-edit lane.
@@ -201,6 +246,7 @@ fn resolve_image_route_with_imported_availability(
     settings: &Settings,
     imported_control_available: bool,
     imported_available: bool,
+    sdxl_imported_available: bool,
 ) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
@@ -271,7 +317,7 @@ fn resolve_image_route_with_imported_availability(
         // builtin Krea. The imported id is in no `MODEL_TABLE`, so `mlx_available` is `false` for it — this
         // arm is what routes it to real MLX generation at all (S0d marked it Mac-routable; this loads it).
         Some(ImageRoute::KreaImported)
-    } else if sdxl_imported_available(request, settings) {
+    } else if sdxl_imported_available {
         Some(ImageRoute::SdxlImported)
     } else if mage_finetuned_available(request, settings) {
         // A fine-tuned Mage-Flow base (sc-15036). The fine-tune's id is in no `MODEL_TABLE`, so
@@ -333,6 +379,7 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         settings,
         krea_imported_control_available(request, settings),
         krea_imported_available(request, settings),
+        sdxl_imported_available(request, settings),
     )
 }
 
@@ -341,6 +388,7 @@ enum PreparedImageRoute {
     Plain(ImageRoute),
     KreaImported(Box<PreparedKreaImportedSources>),
     KreaImportedControl(Box<PreparedKreaImportedControlSources>),
+    SdxlImported(Box<PreparedSdxlImportedSources>),
 }
 
 #[cfg(target_os = "macos")]
@@ -350,6 +398,7 @@ impl PreparedImageRoute {
             Self::Plain(route) => *route,
             Self::KreaImported(_) => ImageRoute::KreaImported,
             Self::KreaImportedControl(_) => ImageRoute::KreaImportedControl,
+            Self::SdxlImported(_) => ImageRoute::SdxlImported,
         }
     }
 }
@@ -368,11 +417,13 @@ fn prepare_image_route(
     } else {
         None
     };
+    let sdxl = prepare_sdxl_imported_sources(request, settings)?;
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         settings,
         imported_control.is_some(),
         imported.is_some(),
+        sdxl.is_some(),
     ) else {
         return Ok(None);
     };
@@ -382,6 +433,9 @@ fn prepare_image_route(
         ),
         ImageRoute::KreaImported => PreparedImageRoute::KreaImported(Box::new(
             imported.expect("prepared imported route lost its sources"),
+        )),
+        ImageRoute::SdxlImported => PreparedImageRoute::SdxlImported(Box::new(
+            sdxl.expect("prepared SDXL imported route lost its sources"),
         )),
         route => PreparedImageRoute::Plain(route),
     }))
@@ -708,6 +762,7 @@ impl CandleImageRoute {
 enum PreparedCandleImageRoute {
     Plain(CandleImageRoute),
     KreaImported(Box<PreparedKreaImportedSources>),
+    SdxlImported(Box<PreparedSdxlImportedSources>),
     ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
     QwenImageComfyui(Box<qwen_comfyui_candle::ComfyuiQwenPaths>),
     Flux2Comfyui(Box<flux2_comfyui_candle::ComfyuiFlux2Paths>),
@@ -719,6 +774,7 @@ impl PreparedCandleImageRoute {
         match self {
             Self::Plain(route) => *route,
             Self::KreaImported(_) => CandleImageRoute::KreaImported,
+            Self::SdxlImported(_) => CandleImageRoute::SdxlImported,
             Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
             Self::QwenImageComfyui(_) => CandleImageRoute::QwenImageComfyui,
             Self::Flux2Comfyui(_) => CandleImageRoute::Flux2Comfyui,
@@ -736,6 +792,7 @@ fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
     settings: &Settings,
     imported_available: bool,
+    sdxl_imported_available: bool,
     zimage_comfyui_available: bool,
     qwen_comfyui_available: bool,
     flux2_comfyui_available: bool,
@@ -823,7 +880,7 @@ fn resolve_candle_image_route_with_prepared_availability(
         // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
         // this bespoke route must claim them before the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
-    } else if sdxl_imported_available(request, settings) {
+    } else if sdxl_imported_available {
         Some(CandleImageRoute::SdxlImported)
     } else if zimage_comfyui_available {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
@@ -882,6 +939,7 @@ fn resolve_candle_image_route(
         request,
         settings,
         krea_imported_available(request, settings),
+        sdxl_imported_available(request, settings),
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),
         qwen_comfyui_candle::qwen_comfyui_available(request, settings),
         flux2_comfyui_candle::flux2_comfyui_available(request, settings),
@@ -899,6 +957,7 @@ fn prepare_candle_image_route(
         return Ok(None);
     }
     let imported = prepare_krea_imported_sources(request, settings)?;
+    let sdxl = prepare_sdxl_imported_sources(request, settings)?;
     let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources(request, settings)?;
     let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources(request, settings)?;
     let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources(request, settings)?;
@@ -906,6 +965,7 @@ fn prepare_candle_image_route(
         request,
         settings,
         imported.is_some(),
+        sdxl.is_some(),
         zimage.is_some(),
         qwen.is_some(),
         flux2.is_some(),
@@ -916,6 +976,9 @@ fn prepare_candle_image_route(
         CandleImageRoute::KreaImported => PreparedCandleImageRoute::KreaImported(
             Box::new(imported.expect("prepared imported route lost its sources")),
         ),
+        CandleImageRoute::SdxlImported => PreparedCandleImageRoute::SdxlImported(Box::new(
+            sdxl.expect("prepared SDXL imported route lost its sources"),
+        )),
         CandleImageRoute::ZimageComfyui => PreparedCandleImageRoute::ZimageComfyui(
             Box::new(zimage.expect("prepared Z-Image route lost its sources")),
         ),
@@ -3519,7 +3582,11 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     Ok(AdapterKind::Lora)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<AdapterKind> {
     let header = pin
         .read_unchanged(|file| {
@@ -3540,13 +3607,21 @@ fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<
 }
 
 #[derive(Debug)]
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 struct PreparedAdapters {
     specs: Vec<AdapterSpec>,
     pins: Vec<gen_core::PinnedWeightsFile>,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 impl PreparedAdapters {
     #[cfg(all(target_os = "macos", test))]
     fn is_empty(&self) -> bool {
@@ -3557,7 +3632,11 @@ impl PreparedAdapters {
 /// Prepared counterpart of [`resolve_adapters`]. Classification reads through the exact token that
 /// is later installed on the `LoadSpec`; repeated references to the same lexical entry share one
 /// token, while preserving every requested adapter spec and its scale/order.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 fn resolve_prepared_adapters(
     request: &ImageRequest,
     settings: &Settings,

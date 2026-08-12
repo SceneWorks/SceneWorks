@@ -4370,6 +4370,10 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
     assert_eq!(entry["type"], "image");
     assert_eq!(entry["family"], "mage-flow");
     assert_eq!(entry["catalogScope"], "user");
+    assert_eq!(
+        entry["importSourceShape"], "transformer_directory",
+        "the completion trust boundary must stamp the exact Mage directory route"
+    );
     // The three fields the picker gates on: install state, `usable`, and a `text_to_image` capability.
     assert_eq!(entry["installState"], "installed");
     assert_ne!(

@@ -199,6 +199,14 @@ function sortByTierOrder(a, b) {
 
 export function installedTiers(model, options = {}) {
   const hostEligible = (tier) => tierHostEligible(tier, options);
+  // Imported same-shape providers can quantize the caller-owned checkpoint at load without a
+  // separate downloaded tier. The API projects exactly the provider descriptor's supported set;
+  // these are immediately selectable because they reuse the one installed source file/tree.
+  if (Array.isArray(model?.runtimeQuantTiers) && model.runtimeQuantTiers.length > 0) {
+    return model.runtimeQuantTiers
+      .filter((tier) => isSelectableTier(tier) && hostEligible(tier))
+      .sort(sortByTierOrder);
+  }
   // Download-matrix models (sc-8508): per-tier DOWNLOAD entries, install-tracked individually.
   if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
     return model.variants
@@ -281,6 +289,11 @@ function tierStateLookup(model) {
 // Returns [] when the model exposes no tier information at all.
 export function allPossibleTiers(model, options = {}) {
   const hostEligible = (tier) => tierHostEligible(tier, options);
+  if (Array.isArray(model?.runtimeQuantTiers) && model.runtimeQuantTiers.length > 0) {
+    return model.runtimeQuantTiers
+      .filter((tier) => isSelectableTier(tier) && hostEligible(tier))
+      .sort(sortByTierOrder);
+  }
   if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
     return model.variants
       .filter(
@@ -447,7 +460,8 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
     base = floor;
   }
   const cleanFallback =
-    !model?.hasVariantMatrix && Array.isArray(model?.mlxTiers)
+    !model?.hasVariantMatrix &&
+    (Array.isArray(model?.mlxTiers) || Array.isArray(model?.runtimeQuantTiers))
       ? ["q8", "bf16", "q4"]
       : ["q8", "q4"];
   const preferred = [base, ...cleanFallback.filter((tier) => tier !== base)];

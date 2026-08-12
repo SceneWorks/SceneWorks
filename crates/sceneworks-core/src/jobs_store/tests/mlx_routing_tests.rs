@@ -50,6 +50,7 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         "prompt": "a red fox",
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         }
     });
@@ -80,6 +81,7 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
     // claim-eligible via the family fallback.
     let entry = json!({
         "family": "krea_2",
+        "importSourceShape": "transformer_file",
         "paths": { "model": "/app/models/imports/kreamania_variant4" }
     });
     for (label, extra) in [
@@ -88,6 +90,17 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         (
             "edit",
             json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
+        ),
+        (
+            "multi-reference edit",
+            json!({ "mode": "edit_image", "referenceAssetIds": ["scene_1", "person_1"] }),
+        ),
+        (
+            "multi-phase",
+            json!({
+                "loras": [{ "id": "adapter_1" }],
+                "advanced": { "phases": [{ "steps": 4, "loras": [{ "index": 0, "weight": 0.8 }] }] }
+            }),
         ),
     ] {
         let mut payload = json!({ "model": "kreamania_variant4", "prompt": "a red fox" });
@@ -113,6 +126,7 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         "advanced": { "poses": [{ "id": "pose_1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         }
     }))));
@@ -124,12 +138,24 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         "advanced": { "poses": [{ "id": "pose_1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         }
     }))));
     assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
         "model": "kreamania_variant4",
-        "modelManifestEntry": { "family": "krea_2" }
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "transformer_file"
+        }
+    }))));
+    assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+        "model": "kreamania_variant4",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "fused_checkpoint",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        }
     }))));
 }
 

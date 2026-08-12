@@ -596,11 +596,17 @@ pub(crate) async fn run_image_generate_job(
                 .await?;
             }
             ImageRoute::SdxlImported => {
+                let PreparedImageRoute::SdxlImported(sources) = route else {
+                    unreachable!("SDXL imported route missing its prepared sources")
+                };
                 generate_sdxl_imported_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -1114,11 +1120,17 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::SdxlImported => {
+                    let PreparedCandleImageRoute::SdxlImported(sources) = route else {
+                        unreachable!("SDXL imported route missing its prepared sources")
+                    };
                     generate_sdxl_imported_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1489,7 +1501,11 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 /// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
 /// confined as directories, then their selected child is independently pinned and confined so a
 /// child symlink cannot inherit trust from its parent.
-#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 fn resolve_prepared_adapter_file(
     lora: &Value,
     settings: &Settings,

@@ -417,6 +417,21 @@ describe("quantTier — convert-at-install mlxTiers (sc-10730)", () => {
   });
 });
 
+describe("quantTier — provider-owned runtime tiers", () => {
+  const imported = { id: "external_base_krea", runtimeQuantTiers: ["q8", "bf16", "q4"] };
+
+  it("offers every provider-advertised runtime quant without download-state gating", () => {
+    expect(installedTiers(imported)).toEqual(["q4", "q8", "bf16"]);
+    expect(allPossibleTiers(imported)).toEqual(["q4", "q8", "bf16"]);
+    expect(tierPickerOptions(imported)).toEqual([
+      { tier: "q4", label: "Q4 (smallest)", disabled: false },
+      { tier: "q8", label: "Q8 (balanced)", disabled: false },
+      { tier: "bf16", label: "Full precision (bf16)", disabled: false },
+    ]);
+    expect(defaultTierSelection(imported, null)).toBe("q8");
+  });
+});
+
 // Per-model quality floor (sc-10731, epic 10721): the backend surfaces the manifest `mlx.minQualityTier`
 // as a top-level `minQualityTier`. `defaultTierSelection` clamps the DEFAULT (rungs 2–4) UP to it — a
 // floored model (Anima base/aesthetic = q8) never lets a low global setting / fallback land the default

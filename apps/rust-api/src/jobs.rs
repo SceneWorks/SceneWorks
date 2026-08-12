@@ -1347,6 +1347,10 @@ pub(crate) async fn register_trained_base_checkpoint(
         "paths".to_owned(),
         json!({ "model": output_dir.display().to_string() }),
     );
+    entry.insert(
+        "importSourceShape".to_owned(),
+        Value::String("transformer_directory".to_owned()),
+    );
     entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
     sceneworks_core::lora_family::apply_model_manifest_defaults(
         &mut entry,

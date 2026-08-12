@@ -94,6 +94,7 @@ pub(crate) async fn create_image_job(
         &mut job_payload,
     )
     .await?;
+    validate_imported_candle_submission(&state, &model_id, &job_payload)?;
     if payload.seed.is_none() {
         // `job_payload["count"]` is the resolved count — the block above writes the model's declared
         // `defaults.count` whenever the caller named none, so the seed batch matches what actually
@@ -127,6 +128,69 @@ pub(crate) async fn create_image_job(
         crate::ideogram::spawn_ideogram_caption_watcher(state, job.id.clone(), caption_request);
     }
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Refuse an imported source/operation combination the required Candle topology has no exact
+/// provider route for before it enters the queue. Builtins are explicitly scoped by the manifest
+/// resolver and retain their id-keyed routing.
+fn validate_imported_candle_submission(
+    state: &AppState,
+    model_id: &str,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    if cfg!(target_os = "macos") && !state.settings.candle_required {
+        return Ok(());
+    }
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if entry.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+        || sceneworks_core::jobs_store::is_builtin_image_model(model_id)
+    {
+        return Ok(());
+    }
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .unwrap_or("unknown");
+    if sceneworks_core::jobs_store::imported_image_request_provider_eligible(
+        model_id, payload, "candle",
+    ) {
+        return Ok(());
+    }
+    let feature = if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "strict-pose control"
+    } else if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("phases"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "multi-phase denoise"
+    } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        "image edit"
+    } else if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "LoRA/LoKr adapters"
+    } else {
+        "requested generation shape"
+    };
+    Err(ApiError::bad_request(format!(
+        "candle_unsupported: imported {family} {feature} is not supported by the resolved Candle \
+         provider registration for this exact source and operation; the request was not queued"
+    )))
 }
 
 pub(crate) async fn create_vqa_job(
