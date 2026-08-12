@@ -5,6 +5,8 @@
       "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
       "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
       "resolvedSha": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+      "servedRepo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -39,6 +41,8 @@
       "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
       "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
       "resolvedSha": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+      "servedRepo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -69,6 +73,8 @@
       "repo": "Comfy-Org/Krea-2",
       "revision": "952f49d49653cb42e7d6cf7cbfad74738073ec7d",
       "resolvedSha": "952f49d49653cb42e7d6cf7cbfad74738073ec7d",
+      "servedRepo": "Comfy-Org/Krea-2",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.pdf",
@@ -102,6 +108,8 @@
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
       "revision": null,
       "resolvedSha": "577ab50f447358d00ba68ef204648dfe05646300",
+      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+      "gated": "auto",
       "files": [
         ".gitattributes",
         "README.md",
@@ -114,6 +122,8 @@
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
       "revision": null,
       "resolvedSha": "1456334c3d69924de5083e553733b108ed1147f2",
+      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+      "gated": "auto",
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -126,6 +136,8 @@
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
       "revision": null,
       "resolvedSha": "572bb9c9a1ba3d8e8724cce69783ffc2422386db",
+      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -138,6 +150,8 @@
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
       "revision": null,
       "resolvedSha": "b4d1c4d8c9e544e9bbbd6811bb4363708b6093ff",
+      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -150,6 +164,8 @@
       "repo": "OpenMOSS-Team/MOSS-Audio-Tokenizer",
       "revision": "3cd226ba2947efa357ef453bcad111b6eafba782",
       "resolvedSha": "3cd226ba2947efa357ef453bcad111b6eafba782",
+      "servedRepo": "OpenMOSS-Team/MOSS-Audio-Tokenizer",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -172,6 +188,8 @@
       "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
       "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
       "resolvedSha": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
+      "servedRepo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -197,6 +215,8 @@
       "repo": "OpenMOSS-Team/MOSS-TTS-Realtime",
       "revision": "6acbc7f161a0db71c291f2d0aaa9eee59334cab2",
       "resolvedSha": "6acbc7f161a0db71c291f2d0aaa9eee59334cab2",
+      "servedRepo": "OpenMOSS-Team/MOSS-TTS-Realtime",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -219,6 +239,8 @@
       "repo": "OpenMOSS-Team/MOSS-TTSD-v0.5",
       "revision": "8527b9136b6afefe2252ae597cecea2e80e7ebeb",
       "resolvedSha": "8527b9136b6afefe2252ae597cecea2e80e7ebeb",
+      "servedRepo": "OpenMOSS-Team/MOSS-TTSD-v0.5",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -243,6 +265,8 @@
       "repo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
       "revision": "c83433728e698ed0698e88cb5096bc221fb8f8c5",
       "resolvedSha": "c83433728e698ed0698e88cb5096bc221fb8f8c5",
+      "servedRepo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -254,6 +278,8 @@
       "repo": "ResembleAI/chatterbox",
       "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
       "resolvedSha": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+      "servedRepo": "ResembleAI/chatterbox",
+      "gated": false,
       "files": [
         ".gitattributes",
         "Cangjie5_TC.json",
@@ -280,6 +306,8 @@
       "repo": "SceneWorks/Mage-Flow-Base",
       "revision": "d642341926fcdb450c17c8fbda03759e8f731c9b",
       "resolvedSha": "d642341926fcdb450c17c8fbda03759e8f731c9b",
+      "servedRepo": "SceneWorks/Mage-Flow-Base",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -347,6 +375,8 @@
       "repo": "SceneWorks/Mage-Flow-Components-mlx",
       "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
       "resolvedSha": "c936de2a107ee8d0869137e73943f6414f23adaa",
+      "servedRepo": "SceneWorks/Mage-Flow-Components-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -396,6 +426,8 @@
       "repo": "SceneWorks/Mage-Flow-Edit-Base",
       "revision": "6c119cdac7ce7cf8c1ab4990d9c8ca18641f2c5d",
       "resolvedSha": "6c119cdac7ce7cf8c1ab4990d9c8ca18641f2c5d",
+      "servedRepo": "SceneWorks/Mage-Flow-Edit-Base",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -463,6 +495,8 @@
       "repo": "SceneWorks/Mage-Flow-Edit-Turbo",
       "revision": "75c11a2957aca2c78272984375502105b2b235ab",
       "resolvedSha": "75c11a2957aca2c78272984375502105b2b235ab",
+      "servedRepo": "SceneWorks/Mage-Flow-Edit-Turbo",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -530,6 +564,8 @@
       "repo": "SceneWorks/Mage-Flow-Edit",
       "revision": "dbd4a9c07faca94491ad88ab21225d62e054d9cc",
       "resolvedSha": "dbd4a9c07faca94491ad88ab21225d62e054d9cc",
+      "servedRepo": "SceneWorks/Mage-Flow-Edit",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -597,6 +633,8 @@
       "repo": "SceneWorks/Mage-Flow-Turbo",
       "revision": "79016f10f96b441bebb6e6f461838adb8fb3ff5c",
       "resolvedSha": "79016f10f96b441bebb6e6f461838adb8fb3ff5c",
+      "servedRepo": "SceneWorks/Mage-Flow-Turbo",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -664,6 +702,8 @@
       "repo": "SceneWorks/Mage-Flow",
       "revision": "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db",
       "resolvedSha": "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db",
+      "servedRepo": "SceneWorks/Mage-Flow",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -731,6 +771,8 @@
       "repo": "SceneWorks/Sana_1600M_1024px_mlx",
       "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
       "resolvedSha": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+      "servedRepo": "SceneWorks/Sana_1600M_1024px_mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -759,6 +801,8 @@
       "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
       "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
       "resolvedSha": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+      "servedRepo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -787,6 +831,8 @@
       "repo": "SceneWorks/bernini-mlx",
       "revision": "533d688f16c8f33dc832890c1e16c11921a2019a",
       "resolvedSha": "533d688f16c8f33dc832890c1e16c11921a2019a",
+      "servedRepo": "SceneWorks/bernini-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -903,6 +949,8 @@
       "repo": "SceneWorks/boogu-image-mlx",
       "revision": "a459e614d408bfdf57089c32cc3da706f5a017de",
       "resolvedSha": "a459e614d408bfdf57089c32cc3da706f5a017de",
+      "servedRepo": "SceneWorks/boogu-image-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -1027,6 +1075,8 @@
       "repo": "SceneWorks/chroma1-base-mlx",
       "revision": "e7330dda29d00ffdeeb719b28e92ee74cff0884c",
       "resolvedSha": "e7330dda29d00ffdeeb719b28e92ee74cff0884c",
+      "servedRepo": "SceneWorks/chroma1-base-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE",
@@ -1086,6 +1136,8 @@
       "repo": "SceneWorks/chroma1-flash-mlx",
       "revision": "6a9cb6178709559461506bf247f708d0d1008d00",
       "resolvedSha": "6a9cb6178709559461506bf247f708d0d1008d00",
+      "servedRepo": "SceneWorks/chroma1-flash-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE",
@@ -1145,6 +1197,8 @@
       "repo": "SceneWorks/chroma1-hd-mlx",
       "revision": "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
       "resolvedSha": "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
+      "servedRepo": "SceneWorks/chroma1-hd-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE",
@@ -1204,6 +1258,8 @@
       "repo": "SceneWorks/dwpose-onnx",
       "revision": "c330a9609201343576b8b69d222e38c1486d2854",
       "resolvedSha": "c330a9609201343576b8b69d222e38c1486d2854",
+      "servedRepo": "SceneWorks/dwpose-onnx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -1217,6 +1273,8 @@
       "repo": "SceneWorks/flux1-dev-mlx",
       "revision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
       "resolvedSha": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+      "servedRepo": "SceneWorks/flux1-dev-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -1292,6 +1350,8 @@
       "repo": "SceneWorks/flux1-schnell-mlx",
       "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
       "resolvedSha": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+      "servedRepo": "SceneWorks/flux1-schnell-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -1363,6 +1423,8 @@
       "repo": "SceneWorks/flux2-dev-mlx",
       "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
       "resolvedSha": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+      "servedRepo": "SceneWorks/flux2-dev-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -1437,6 +1499,8 @@
       "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
       "revision": "406265beebe141024a06e24038c3713cf7af87d8",
       "resolvedSha": "406265beebe141024a06e24038c3713cf7af87d8",
+      "servedRepo": "SceneWorks/flux2-klein-9b-kv-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -1500,6 +1564,8 @@
       "repo": "SceneWorks/flux2-klein-9b-mlx",
       "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
       "resolvedSha": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+      "servedRepo": "SceneWorks/flux2-klein-9b-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -1563,6 +1629,8 @@
       "repo": "SceneWorks/ideogram-4-mlx",
       "revision": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
       "resolvedSha": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
+      "servedRepo": "SceneWorks/ideogram-4-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -1604,6 +1672,8 @@
       "repo": "SceneWorks/ideogram-4",
       "revision": "2e8fb610109bf0db195344cc424df98b301d3cad",
       "resolvedSha": "2e8fb610109bf0db195344cc424df98b301d3cad",
+      "servedRepo": "SceneWorks/ideogram-4",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE.md",
@@ -1629,6 +1699,8 @@
       "repo": "SceneWorks/illustrious-xl-v1-mlx",
       "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
       "resolvedSha": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+      "servedRepo": "SceneWorks/illustrious-xl-v1-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -1695,6 +1767,8 @@
       "repo": "SceneWorks/illustrious-xl-v2-mlx",
       "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
       "resolvedSha": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+      "servedRepo": "SceneWorks/illustrious-xl-v2-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -1761,6 +1835,8 @@
       "repo": "SceneWorks/kolors-mlx",
       "revision": "aadbd49f53b66a33ef1be09384eac409cbc44061",
       "resolvedSha": "aadbd49f53b66a33ef1be09384eac409cbc44061",
+      "servedRepo": "SceneWorks/kolors-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -1817,6 +1893,8 @@
       "repo": "SceneWorks/krea-2-raw-mlx",
       "revision": "b88090c79762ba34b1de23a892da239eb76962e4",
       "resolvedSha": "b88090c79762ba34b1de23a892da239eb76962e4",
+      "servedRepo": "SceneWorks/krea-2-raw-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.pdf",
@@ -1864,6 +1942,8 @@
       "repo": "SceneWorks/krea-2-turbo-int8-convrot",
       "revision": "b25730586dceb84efdc8286df586ba47103dba3f",
       "resolvedSha": "b25730586dceb84efdc8286df586ba47103dba3f",
+      "servedRepo": "SceneWorks/krea-2-turbo-int8-convrot",
+      "gated": false,
       "files": [
         ".gitattributes",
         "krea2_turbo_int8_convrot.safetensors"
@@ -1874,6 +1954,8 @@
       "repo": "SceneWorks/krea-2-turbo-mlx",
       "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
       "resolvedSha": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+      "servedRepo": "SceneWorks/krea-2-turbo-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.pdf",
@@ -1921,6 +2003,8 @@
       "repo": "SceneWorks/krea-realtime-14b-mlx",
       "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
       "resolvedSha": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+      "servedRepo": "SceneWorks/krea-realtime-14b-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -1952,6 +2036,8 @@
       "repo": "SceneWorks/lens-mlx",
       "revision": "4e1349c1962950eee328c69537904631ebc64283",
       "resolvedSha": "4e1349c1962950eee328c69537904631ebc64283",
+      "servedRepo": "SceneWorks/lens-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2006,6 +2092,8 @@
       "repo": "SceneWorks/lens-turbo-mlx",
       "revision": "d3f485c320039595cff16d4f686a5f9378714f25",
       "resolvedSha": "d3f485c320039595cff16d4f686a5f9378714f25",
+      "servedRepo": "SceneWorks/lens-turbo-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -2257,6 +2345,8 @@
       "repo": "SceneWorks/ltx-2.3-mlx",
       "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
       "resolvedSha": "01df27d308466533aa09d251e3aebdcc627d07eb",
+      "servedRepo": "SceneWorks/ltx-2.3-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2317,6 +2407,8 @@
       "repo": "SceneWorks/perth-implicit",
       "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec",
       "resolvedSha": "80b60f9caead09b8d3b512bda0b24038f28c08ec",
+      "servedRepo": "SceneWorks/perth-implicit",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2329,6 +2421,8 @@
       "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
       "revision": "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
       "resolvedSha": "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
+      "servedRepo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2345,6 +2439,8 @@
       "repo": "SceneWorks/qwen-image-edit-2511-mlx",
       "revision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
       "resolvedSha": "0dfbf3a018bcee42d77de14494c35f97a7531def",
+      "servedRepo": "SceneWorks/qwen-image-edit-2511-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2453,6 +2549,8 @@
       "repo": "SceneWorks/qwen-image-mlx",
       "revision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
       "resolvedSha": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+      "servedRepo": "SceneWorks/qwen-image-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2538,6 +2636,8 @@
       "repo": "SceneWorks/real-esrgan-onnx",
       "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",
       "resolvedSha": "09f741bac80a246b407da3ee902bf5f3291b602f",
+      "servedRepo": "SceneWorks/real-esrgan-onnx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -2550,6 +2650,8 @@
       "repo": "SceneWorks/realvisxl-lightning-mlx",
       "revision": "c09fd586989bdc3c658d4acd03e8ae81677ade8e",
       "resolvedSha": "c09fd586989bdc3c658d4acd03e8ae81677ade8e",
+      "servedRepo": "SceneWorks/realvisxl-lightning-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2619,6 +2721,8 @@
       "repo": "SceneWorks/realvisxl-mlx",
       "revision": "e40202d63baef826c7df95a639a811698c1178d2",
       "resolvedSha": "e40202d63baef826c7df95a639a811698c1178d2",
+      "servedRepo": "SceneWorks/realvisxl-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2686,6 +2790,8 @@
       "repo": "SceneWorks/sam2-mlx",
       "revision": "fbc86db0dceb8c744e5fc95feadc37572107be69",
       "resolvedSha": "fbc86db0dceb8c744e5fc95feadc37572107be69",
+      "servedRepo": "SceneWorks/sam2-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -2697,6 +2803,8 @@
       "repo": "SceneWorks/sam3-mlx",
       "revision": "3ed10b164a755c00b1a4d671dde95719c127e1a7",
       "resolvedSha": "3ed10b164a755c00b1a4d671dde95719c127e1a7",
+      "servedRepo": "SceneWorks/sam3-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -2710,6 +2818,8 @@
       "repo": "SceneWorks/scail2-dpo-lora",
       "revision": null,
       "resolvedSha": "15c2060c7604e18c33a9220402123ad440643d20",
+      "servedRepo": "SceneWorks/scail2-dpo-lora",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -2721,6 +2831,8 @@
       "repo": "SceneWorks/scail2-mlx",
       "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
       "resolvedSha": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+      "servedRepo": "SceneWorks/scail2-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -2760,6 +2872,8 @@
       "repo": "SceneWorks/sd3.5-large-mlx",
       "revision": "0cf819d00d30d296cee58e02c59b0daa5b8ede89",
       "resolvedSha": "0cf819d00d30d296cee58e02c59b0daa5b8ede89",
+      "servedRepo": "SceneWorks/sd3.5-large-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -2869,6 +2983,8 @@
       "repo": "SceneWorks/sd3.5-large-turbo-mlx",
       "revision": "e9166f4632ec64f74d560be3ac778d346f89a364",
       "resolvedSha": "e9166f4632ec64f74d560be3ac778d346f89a364",
+      "servedRepo": "SceneWorks/sd3.5-large-turbo-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -2978,6 +3094,8 @@
       "repo": "SceneWorks/sd3.5-medium-mlx",
       "revision": "5413e962bb326db248be2026a93b147c323392b6",
       "resolvedSha": "5413e962bb326db248be2026a93b147c323392b6",
+      "servedRepo": "SceneWorks/sd3.5-medium-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -3085,6 +3203,8 @@
       "repo": "SceneWorks/sdxl-base-mlx",
       "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
       "resolvedSha": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+      "servedRepo": "SceneWorks/sdxl-base-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -3154,6 +3274,8 @@
       "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
       "revision": "d432225e00e5b6f59a86602e237876c9298b3a77",
       "resolvedSha": "d432225e00e5b6f59a86602e237876c9298b3a77",
+      "servedRepo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE",
@@ -3202,6 +3324,8 @@
       "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
       "revision": "33d42d2e3b2c3dce102f8982d173c98ef361d098",
       "resolvedSha": "33d42d2e3b2c3dce102f8982d173c98ef361d098",
+      "servedRepo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE",
@@ -3250,6 +3374,8 @@
       "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
       "revision": "9c2f476b136ff146691fc7c792e46c8a8df6a10b",
       "resolvedSha": "9c2f476b136ff146691fc7c792e46c8a8df6a10b",
+      "servedRepo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE",
@@ -3303,6 +3429,8 @@
       "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
       "revision": "660506e94bf0b0898476949f9e661dc58611d70f",
       "resolvedSha": "660506e94bf0b0898476949f9e661dc58611d70f",
+      "servedRepo": "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -3346,6 +3474,8 @@
       "repo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
       "revision": "34f24bc8195f601cb90cb207acd4233eb7d0e2d3",
       "resolvedSha": "34f24bc8195f601cb90cb207acd4233eb7d0e2d3",
+      "servedRepo": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -3394,6 +3524,8 @@
       "repo": "SceneWorks/sensenova-u1-8b-mlx",
       "revision": "b6206ea2e888198418b92f3bed31f5506c6183f9",
       "resolvedSha": "b6206ea2e888198418b92f3bed31f5506c6183f9",
+      "servedRepo": "SceneWorks/sensenova-u1-8b-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "bf16/LICENSE",
@@ -3447,6 +3579,8 @@
       "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
       "revision": "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0",
       "resolvedSha": "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0",
+      "servedRepo": "SceneWorks/wan2.2-i2v-a14b-candle",
+      "gated": false,
       "files": [
         ".gitattributes",
         "q4/.gitattributes",
@@ -3512,6 +3646,8 @@
       "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
       "revision": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
       "resolvedSha": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
+      "servedRepo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -3547,6 +3683,8 @@
       "repo": "SceneWorks/wan2.2-t2v-a14b-candle",
       "revision": "da1909b66b360e1ea8cdeb3e39e40dca172cfa32",
       "resolvedSha": "da1909b66b360e1ea8cdeb3e39e40dca172cfa32",
+      "servedRepo": "SceneWorks/wan2.2-t2v-a14b-candle",
+      "gated": false,
       "files": [
         ".gitattributes",
         "q4/.gitattributes",
@@ -3610,6 +3748,8 @@
       "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
       "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
       "resolvedSha": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
+      "servedRepo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -3645,6 +3785,8 @@
       "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
       "revision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
       "resolvedSha": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+      "servedRepo": "SceneWorks/wan2.2-ti2v-5b-candle",
+      "gated": false,
       "files": [
         ".gitattributes",
         "q4/.gitattributes",
@@ -3704,6 +3846,8 @@
       "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
       "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
       "resolvedSha": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
+      "servedRepo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -3735,6 +3879,8 @@
       "repo": "SceneWorks/yolo11m-person-detect-mlx",
       "revision": "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777",
       "resolvedSha": "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777",
+      "servedRepo": "SceneWorks/yolo11m-person-detect-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "yolo11m_fused_mlx.safetensors"
@@ -3745,6 +3891,8 @@
       "repo": "SceneWorks/yolo11m-person-detect-onnx",
       "revision": "3cffbaccca4f239ae6301d8b66ba721401ecfa8d",
       "resolvedSha": "3cffbaccca4f239ae6301d8b66ba721401ecfa8d",
+      "servedRepo": "SceneWorks/yolo11m-person-detect-onnx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "yolo11m.onnx"
@@ -3755,6 +3903,8 @@
       "repo": "SceneWorks/z-image-mlx",
       "revision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
       "resolvedSha": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+      "servedRepo": "SceneWorks/z-image-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -3804,6 +3954,8 @@
       "repo": "SceneWorks/z-image-turbo-mlx",
       "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
       "resolvedSha": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+      "servedRepo": "SceneWorks/z-image-turbo-mlx",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -3850,6 +4002,8 @@
       "repo": "TenStrip/LTX2.3-10Eros",
       "revision": null,
       "resolvedSha": "84a05a13610d78dbe4340d1be23fd8185e10f697",
+      "servedRepo": "TenStrip/LTX2.3-10Eros",
+      "gated": false,
       "files": [
         ".gitattributes",
         "10Eros_v1-fp8mixed_learned.safetensors",
@@ -3872,6 +4026,8 @@
       "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
       "revision": null,
       "resolvedSha": "9c3548954510182827d7bfc872fd7cceb64230fd",
+      "servedRepo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -3889,6 +4045,8 @@
       "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
       "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
       "resolvedSha": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
+      "servedRepo": "apple/DFN5B-CLIP-ViT-H-14-378",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE",
@@ -3911,6 +4069,8 @@
       "repo": "circlestone-labs/Anima",
       "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
       "resolvedSha": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
+      "servedRepo": "circlestone-labs/Anima",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -3935,6 +4095,8 @@
       "repo": "conradlocke/krea2-identity-edit",
       "revision": null,
       "resolvedSha": "89e9e7a09ee2e5c9331e952063d79b1b8a703280",
+      "servedRepo": "conradlocke/krea2-identity-edit",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.pdf",
@@ -3971,6 +4133,8 @@
       "repo": "fal/AuraSR-v2",
       "revision": null,
       "resolvedSha": "ff452185a7c8b51206dd62c21c292e7baad5c3a3",
+      "servedRepo": "fal/AuraSR-v2",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.md",
@@ -3985,6 +4149,8 @@
       "repo": "hexgrad/Kokoro-82M",
       "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
       "resolvedSha": "f3ff3571791e39611d31c381e3a41a3af07b4987",
+      "servedRepo": "hexgrad/Kokoro-82M",
+      "gated": false,
       "files": [
         ".gitattributes",
         "DONATE.md",
@@ -4065,6 +4231,8 @@
       "repo": "hkchengrex/MMAudio",
       "revision": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
       "resolvedSha": "eb13a1a98fdbec91753775c57b074ccdfc60587c",
+      "servedRepo": "hkchengrex/MMAudio",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4099,6 +4267,8 @@
       "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
       "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
       "resolvedSha": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+      "servedRepo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4124,6 +4294,8 @@
       "repo": "laion/clap-htsat-unfused",
       "revision": "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
       "resolvedSha": "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
+      "servedRepo": "laion/clap-htsat-unfused",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4142,6 +4314,8 @@
       "repo": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v",
       "revision": null,
       "resolvedSha": "fef288b326f4fed6d2983b9800c35363da31fcfe",
+      "servedRepo": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v",
+      "gated": false,
       "files": [
         ".gitattributes",
         "LICENSE.txt",
@@ -4293,6 +4467,8 @@
       "repo": "lightx2v/Wan2.2-Lightning",
       "revision": null,
       "resolvedSha": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
+      "servedRepo": "lightx2v/Wan2.2-Lightning",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4325,6 +4501,8 @@
       "repo": "madebyollin/sdxl-vae-fp16-fix",
       "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
       "resolvedSha": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+      "servedRepo": "madebyollin/sdxl-vae-fp16-fix",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4345,6 +4523,8 @@
       "repo": "myshell-ai/OpenVoiceV2",
       "revision": "f36e7edfe1684461a8343844af60babc2efbb727",
       "resolvedSha": "f36e7edfe1684461a8343844af60babc2efbb727",
+      "servedRepo": "myshell-ai/OpenVoiceV2",
+      "gated": false,
       "files": [
         ".DS_Store",
         ".gitattributes",
@@ -4370,6 +4550,8 @@
       "repo": "numz/SeedVR2_comfyUI",
       "revision": "09ced71023636e9bc8cdf9cdecfb2625d1e691e8",
       "resolvedSha": "09ced71023636e9bc8cdf9cdecfb2625d1e691e8",
+      "servedRepo": "numz/SeedVR2_comfyUI",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4388,6 +4570,8 @@
       "repo": "nvidia/bigvgan_v2_44khz_128band_512x",
       "revision": "95a9d1dcb12906c03edd938d77b9333d6ded7dfb",
       "resolvedSha": "95a9d1dcb12906c03edd938d77b9333d6ded7dfb",
+      "servedRepo": "nvidia/bigvgan_v2_44khz_128band_512x",
+      "gated": false,
       "files": [
         ".gitattributes",
         ".gitignore",
@@ -4427,6 +4611,8 @@
       "repo": "openai/clip-vit-large-patch14",
       "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
       "resolvedSha": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+      "servedRepo": "openai/clip-vit-large-patch14",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4448,6 +4634,8 @@
       "repo": "openai/whisper-base",
       "revision": "e37978b90ca9030d5170a5c07aadb050351a65bb",
       "resolvedSha": "e37978b90ca9030d5170a5c07aadb050351a65bb",
+      "servedRepo": "openai/whisper-base",
+      "gated": false,
       "files": [
         ".gitattributes",
         "README.md",
@@ -4472,6 +4660,8 @@
       "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
       "revision": null,
       "resolvedSha": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
+      "servedRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
+      "gated": false,
       "files": [
         ".gitattributes",
         "Face-change-test.rar",
@@ -4495,6 +4685,8 @@
       "repo": "xinsir/controlnet-tile-sdxl-1.0",
       "revision": null,
       "resolvedSha": "1ae8d9529efe58f7362a987363ff86a7904dc84f",
+      "servedRepo": "xinsir/controlnet-tile-sdxl-1.0",
+      "gated": false,
       "files": [
         ".gitattributes",
         "000003.webp",
