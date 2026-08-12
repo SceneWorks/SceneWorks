@@ -1307,7 +1307,10 @@ pub(crate) async fn run_image_generate_job(
                 // Registry-driven candle generation. Mage Edit is named separately by the resolver so
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
-                CandleImageRoute::MageEdit | CandleImageRoute::CandleTxt2Img => {
+                CandleImageRoute::MageEdit
+                | CandleImageRoute::SenseNovaEdit
+                | CandleImageRoute::KolorsEdit
+                | CandleImageRoute::CandleTxt2Img => {
                     generate_candle_stream(
                         api,
                         settings,

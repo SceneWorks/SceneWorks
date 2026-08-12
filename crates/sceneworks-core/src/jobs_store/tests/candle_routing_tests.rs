@@ -120,6 +120,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::Flux2Edit,
             CandleImageLane::Flux2Edit,
             CandleImageLane::QwenEdit,
+            CandleImageLane::SenseNovaEdit,
             CandleImageLane::ZImageEdit,
             CandleImageLane::ZImageIdentity,
             CandleImageLane::IdeogramEdit,
@@ -134,6 +135,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::FluxIpAdapter,
             CandleImageLane::QwenControl,
             CandleImageLane::KolorsControl,
+            CandleImageLane::KolorsEdit,
             CandleImageLane::ZImageControl,
             CandleImageLane::ZImageImg2Img,
             CandleImageLane::Sd3Img2Img,
@@ -330,6 +332,115 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             Some(expected)
         );
     }
+}
+
+#[test]
+fn conditioned_routes_fail_closed_on_conflicts_malformed_references_and_cfg() {
+    for model in ["qwen_image_edit_2511", "sensenova_u1_8b"] {
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": model, "mode": "character_image",
+            "referenceAssetIds": ["a", "b"], "advanced": { "trueCfgScale": "2.5" }
+        }))));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+                "model": model, "mode": "character_image",
+                "referenceAssetIds": absent_plural, "referenceAssetId": "a"
+            }))));
+        }
+        for malformed in [
+            json!({ "model": model, "mode": "character_image", "referenceAssetIds": ["a", ""] }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetIds": ["a", "b", "c", "d", "e", "f"] }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetIds": "a" }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "" }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "a", "referenceAssetIds": ["b"] }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "a", "advanced": { "trueCfgScale": {} } }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "a", "advanced": { "trueCfgScale": "not-a-number" } }),
+        ] {
+            assert!(!image_job_is_candle_eligible(&image_generate_job(
+                malformed
+            )));
+        }
+    }
+    for model in ["krea_2_raw", "krea_2_turbo"] {
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "edit_image", "referenceAssetId": "a"
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "edit_image", "referenceAssetIds": ["a", "b", "c"]
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "b"
+        }))));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+                "model": model, "mode": "edit_image",
+                "referenceAssetIds": absent_plural, "referenceAssetId": "a"
+            }))));
+        }
+        for unsupported in [
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "maskAssetId": "mask" }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "controls": [{}] }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "poses": [{}] } }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "phases": [{}] } }),
+        ] {
+            assert!(!image_job_is_candle_eligible(&image_edit_job(unsupported)));
+        }
+    }
+
+    for model in [
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "style_variations",
+            "referenceAssetIds": null, "referenceAssetId": "a"
+        }))));
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "reference",
+            "referenceAssetIds": [], "referenceAssetId": "a"
+        }))));
+        for malformed in [
+            json!({ "model": model, "mode": "reference", "referenceAssetIds": ["a", "b", "c", "d", "e"] }),
+            json!({ "model": model, "mode": "reference", "referenceAssetIds": ["a", null] }),
+            json!({ "model": model, "mode": "reference", "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "model": model, "mode": "reference", "referenceAssetId": "a", "advanced": { "trueCfgScale": [] } }),
+        ] {
+            assert!(!image_job_is_candle_eligible(&image_edit_job(malformed)));
+        }
+    }
+
+    for strength in [json!(0.0), json!("0.6"), Value::Null] {
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": "kolors", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "strength": strength }
+        }))));
+    }
+    for strength in [json!(false), json!({}), json!("not-a-number")] {
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": "kolors", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "strength": strength }
+        }))));
+    }
+    assert_eq!(
+        image_job_candle_lane(&image_generate_job(json!({
+            "model": "kolors", "referenceAssetId": "ip-ref"
+        }))),
+        Some(CandleImageLane::KolorsIpAdapter)
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_generate_job(json!({
+            "model": "kolors", "advanced": { "poses": [{}] }
+        }))),
+        Some(CandleImageLane::KolorsControl)
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_edit_job(json!({
+            "model": "kolors", "mode": "edit_image", "sourceAssetId": "source"
+        }))),
+        Some(CandleImageLane::KolorsEdit)
+    );
 }
 
 #[test]
@@ -684,8 +795,8 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
         // lane (asserted via `image_job_is_candle_eligible` in `candle_worker_claims_*`), like SDXL
         // edit. The txt2img gate still rejects it (it rejects all `edit_image`), but the bespoke
         // candle edit lane claims it at the router level.
-        // sc-5484 / sc-5576: Chroma / Kolors / SenseNova-U1 are pure T2I on candle. Their MLX-only
-        // conditioning shapes (Kolors edit / IP-reference / pose-control; SenseNova edit) defer.
+        // These assertions exercise only the generic T2I gate. Kolors and SenseNova conditioning is
+        // intentionally rejected here and claimed by their dedicated routes at the full scheduler.
         (
             "chroma1_hd",
             json!({ "mode": "edit_image", "sourceAssetId": "a" }),
@@ -1566,7 +1677,7 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         ),
         "candle SANA base supports no adapters — a LoRA request defers to torch"
     );
-    assert!(!worker_supports_job(
+    assert!(worker_supports_job(
         &candle,
         &image_generate_job(json!({
             "model": "kolors",
@@ -1680,17 +1791,37 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
     }))));
     assert!(image_job_is_candle_eligible(&image_generate_job(json!({
         "model": "flux2_dev",
-        "mode": "edit_image",
-        "sourceAssetId": "asset_1",
+        "mode": "character_image",
         "referenceAssetIds": ["asset_1", "asset_2"]
     }))));
-    // sc-7736: a pure-reference flux2_dev job (a `referenceAssetId`, NO `edit_image` source, NO poses)
-    // is neither the edit lane (needs `edit_image` + a source) nor the control lane (needs poses), so
-    // the txt2img gate rejects the reference shape, so it remains queued.
-    assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+    // sc-18476: a pure-reference flux2_dev job is now claimed by Flux2Edit; it no longer falls through
+    // the generic T2I gate or remains queued.
+    assert!(image_job_is_candle_eligible(&image_generate_job(json!({
         "model": "flux2_dev",
+        "mode": "reference",
         "referenceAssetId": "asset_1"
     }))));
+    for (mode, reference_field) in [
+        ("image_to_image", "sourceAssetId"),
+        ("style_variations", "referenceAssetId"),
+    ] {
+        let mut payload = json!({ "model": "flux2_dev", "mode": mode });
+        payload
+            .as_object_mut()
+            .expect("image payload")
+            .insert(reference_field.to_owned(), json!("asset_1"));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+    }
+    for malformed in [
+        json!({ "model": "flux2_dev", "mode": "reference", "referenceAssetId": " " }),
+        json!({ "model": "flux2_dev", "mode": "character_image", "referenceAssetIds": ["asset_1", ""] }),
+        json!({ "model": "flux2_dev", "mode": "style_variations", "referenceAssetId": "asset_1", "sourceAssetId": "asset_2" }),
+        json!({ "model": "flux2_dev", "mode": "edit_image", "sourceAssetId": "asset_1", "referenceAssetIds": ["asset_2"] }),
+    ] {
+        assert!(!image_job_is_candle_eligible(&image_generate_job(
+            malformed
+        )));
+    }
     // sc-7736: FLUX.2-dev strict pose (`advanced.poses`, not edit) is the candle `Flux2Control`
     // Fun-Controlnet-Union lane — the worker CLAIMS it (the 4th wired strict-pose family). A pose job
     // with no poses array is plain txt2img (claimed by the generic candle lane, not the control one).
@@ -3129,25 +3260,19 @@ fn image_edit_job_type_routes_through_candle_edit_lane() {
             "{model} edit via the `image_edit` job type must reach its candle lane"
         );
     }
-    // An unsupported edit family (`kolors` has a candle txt2img lane but no candle EDIT lane)
-    // submitted as `image_edit` is NOT candle-eligible. The generic descriptor asserted below is a
-    // synthetic compatibility check, not a deployed fallback; production leaves the job queued.
+    // Kolors source img2img is now a registered Candle Reference route.
     let kolors_edit = json!({
         "model": "kolors",
         "mode": "edit_image",
         "sourceAssetId": "asset_1"
     });
-    assert!(!image_job_is_candle_eligible(&image_edit_job(
+    assert!(image_job_is_candle_eligible(&image_edit_job(
         kolors_edit.clone()
     )));
-    assert!(!worker_supports_job(
+    assert!(worker_supports_job(
         &gpu_worker(CANDLE_CAPS),
         &image_edit_job(kolors_edit.clone())
     ));
-    assert!(
-        worker_supports_job(&gpu_worker(TORCH_CAPS), &image_edit_job(kolors_edit)),
-        "a torch-only edit model must still be claimable by the co-resident torch worker"
-    );
     // An `image_edit` job with no source image is not the edit lane → not candle-eligible.
     assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
         "model": "sdxl", "mode": "edit_image"

@@ -15,9 +15,11 @@ use crate::jobs_store::routing::mlx::{
     video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_or_malformed_array,
+    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
+    has_nonempty_nested_array, has_nonempty_or_malformed_array,
     has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
     has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier,
+    krea_edit_has_unsupported_carrier,
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
@@ -55,6 +57,7 @@ pub(crate) enum CandleImageLane {
     SdxlEdit,
     Flux2Edit,
     QwenEdit,
+    SenseNovaEdit,
     ZImageEdit,
     ZImageIdentity,
     IdeogramEdit,
@@ -69,6 +72,7 @@ pub(crate) enum CandleImageLane {
     FluxIpAdapter,
     QwenControl,
     KolorsControl,
+    KolorsEdit,
     ZImageControl,
     ZImageImg2Img,
     Sd3Img2Img,
@@ -136,6 +140,18 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
             "qwen_image_edit_2511_lightning",
         ]),
         shape: qwen_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::SenseNovaEdit,
+        models: ModelMatch::Any(&[
+            "sensenova_u1_8b",
+            "sensenova_u1_8b_infographic_v2",
+            "sensenova_u1_8b_infographic_v3",
+            "sensenova_u1_8b_fast",
+            "sensenova_u1_8b_infographic_v2_fast",
+            "sensenova_u1_8b_infographic_v3_fast",
+        ]),
+        shape: sensenova_edit_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::ZImageEdit,
@@ -210,6 +226,11 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         lane: CandleImageLane::KolorsControl,
         models: ModelMatch::Any(&["kolors"]),
         shape: kolors_control_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::KolorsEdit,
+        models: ModelMatch::Any(&["kolors"]),
+        shape: kolors_edit_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::ZImageControl,
@@ -333,6 +354,27 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
                 None => true,
             })
             || sana_has_unsupported_carrier(payload))
+    {
+        return false;
+    }
+    // These families' reference-bearing modes are owned exclusively by specialized routes above.
+    // If their carrier is blank/malformed or another shape check fails, never reinterpret the job as
+    // registered text-to-image and silently drop the user's conditioning intent.
+    let reference_only_mode = matches!(
+        payload.get("mode").and_then(Value::as_str),
+        Some("reference" | "image_to_image" | "character_image" | "style_variations")
+    );
+    if reference_only_mode
+        && (matches!(
+            model,
+            "flux2_dev" | "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2"
+        ) || matches!(
+            model,
+            "qwen_image_edit"
+                | "qwen_image_edit_2509"
+                | "qwen_image_edit_2511"
+                | "qwen_image_edit_2511_lightning"
+        ) || model.starts_with("sensenova_u1_8b"))
     {
         return false;
     }
@@ -701,41 +743,101 @@ pub(crate) fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     has_nonempty_string(payload, "sourceAssetId")
 }
 
-/// FLUX.2 Klein reference-route candle conditions. Edit/reference, character, and style requests all
-/// use native token-concat conditioning and must carry a concrete source/reference id. The route table
-/// scopes this expanded predicate to the three Klein catalog entries; dev retains its edit-only gate.
+/// FLUX.2 reference-route candle conditions. Edit/reference, character, and style requests all
+/// use native token-concat conditioning and must carry a concrete source/reference id.
 /// Mirrors the worker's `flux2_edit_candle_available` gate minus local weight resolution.
 pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
     if !matches!(
-        payload.get("mode").and_then(Value::as_str),
+        mode,
         Some(
             "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
         )
     ) {
         return false;
     }
-    has_nonempty_string_array(payload, "referenceAssetIds")
-        || has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "sourceAssetId")
+    conditioned_reference_count(
+        payload,
+        matches!(mode, Some("edit_image" | "image_to_image")),
+        4,
+    )
+    .is_some()
+        && !conditioned_edit_has_unsupported_carrier(payload, false, false)
+        && !conditioned_true_cfg_is_malformed(payload)
 }
 
 fn flux2_dev_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) == Some("edit_image")
-        && (has_nonempty_string_array(payload, "referenceAssetIds")
-            || has_nonempty_string(payload, "sourceAssetId"))
+    flux2_edit_candle_eligible(payload)
 }
 
-/// Qwen-Image-Edit candle-routing conditions (sc-5487, epic 5480). The candle `QwenEdit` provider
-/// serves `edit_image` mode with a `sourceAssetId` on the non-lightning Qwen-Image-Edit family —
-/// dual-latent reference editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit
-/// lane's). Same payload predicate as `flux2_edit_candle_eligible`, gated to the qwen-edit family by the
-/// caller. Mirrors the worker's `qwen_edit_candle_available` gate (minus the local weight-resolve check)
-/// so the router and worker agree. Candle-only — macOS keeps the MLX `qwen_image_edit` registry path.
+/// Qwen-Image-Edit candle-routing conditions (sc-5487, sc-18476). The candle `QwenEdit` provider
+/// serves instruction edit plus ordered singular/plural reference and character/angle workflows on
+/// the non-lightning Qwen-Image-Edit family. It rejects masks, controls, phases, poses, malformed CFG,
+/// and conflicting reference carriers rather than dropping them. Mirrors the worker's
+/// `qwen_edit_candle_available` gate (minus local weight resolution); macOS keeps the corresponding
+/// MLX `qwen_image_edit` path, including its pre-existing best-effort pose grouping.
 pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+    let mode = payload.get("mode").and_then(Value::as_str);
+    if !matches!(mode, Some("edit_image" | "character_image")) {
         return false;
     }
-    has_nonempty_string(payload, "sourceAssetId")
+    conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
+        && !conditioned_edit_has_unsupported_carrier(payload, true, false)
+        && !conditioned_true_cfg_is_malformed(payload)
+}
+
+/// SenseNova-U1's registered Candle generator accepts structural Reference/MultiReference
+/// conditioning plus image true-CFG. Unsupported blend-strength, control, mask, adapter, pose, and
+/// phase carriers are rejected here so they can never reach the generic registered stream as T2I.
+pub(crate) fn sensenova_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
+    if !matches!(mode, Some("edit_image" | "character_image")) {
+        return false;
+    }
+    conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
+        && !conditioned_edit_has_unsupported_carrier(payload, false, true)
+        && !conditioned_true_cfg_is_malformed(payload)
+}
+
+fn conditioned_true_cfg_is_malformed(payload: &Map<String, Value>) -> bool {
+    ["trueCfgScale", "imageGuidanceScale"]
+        .iter()
+        .any(|key| has_malformed_optional_nested_number(payload, "advanced", key))
+}
+
+fn conditioned_edit_has_unsupported_carrier(
+    payload: &Map<String, Value>,
+    allow_loras: bool,
+    reject_strength: bool,
+) -> bool {
+    (!allow_loras && has_nonempty_or_malformed_array(payload, "loras"))
+        || ["controls", "controlnets"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        || ["maskAssetId"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_string(payload, key))
+        || ["poses", "phases"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        || [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        || (reject_strength
+            && ["strength", "ipAdapterScale", "referenceStrength"]
+                .iter()
+                .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key)))
+        || (reject_strength
+            && ["strength", "referenceStrength"]
+                .iter()
+                .any(|key| payload.get(*key).is_some_and(|value| !value.is_null())))
 }
 
 /// Z-Image img2img / edit candle-routing conditions (sc-6595, epic 5480). The candle `ZImageEdit`
@@ -766,8 +868,8 @@ pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    has_nonempty_string_array(payload, "referenceAssetIds")
-        || has_nonempty_string(payload, "sourceAssetId")
+    conditioned_reference_count(payload, true, 2).is_some()
+        && !krea_edit_has_unsupported_carrier(payload)
 }
 
 /// Krea 2 img2img (reference-guided latent-init) candle-routing conditions (sc-10134 Turbo, sc-10226 Raw;
@@ -1049,6 +1151,35 @@ pub(crate) fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bo
         return false;
     }
     has_nonempty_nested_array(payload, "advanced", "poses")
+}
+
+/// Kolors source-image img2img/edit through the registered Candle generator. The existing pure
+/// `referenceAssetId` IP-Adapter route and pose ControlNet route are intentionally separate and
+/// precede this route. Only a singular `sourceAssetId` is accepted here; plural/reference/mask/
+/// control carriers fail closed rather than being discarded by the generic stream.
+pub(crate) fn kolors_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+        && has_nonempty_string(payload, "sourceAssetId")
+        && !["referenceAssetIds", "controls", "controlnets", "loras"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        && !["referenceAssetId", "maskAssetId"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_string(payload, key))
+        && !["poses", "phases"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        && [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .all(|key| !has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        && !has_malformed_optional_nested_number(payload, "advanced", "strength")
 }
 
 /// Z-Image strict-control Fun-ControlNet candle-routing conditions (sc-5489 origin / sc-8379 base, epic

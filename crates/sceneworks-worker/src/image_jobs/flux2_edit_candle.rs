@@ -1,9 +1,9 @@
 use super::{
     admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
-    consume_gen_events, drive_gen_items_reported, fit_engine_image, load_reference_image,
-    mlx_model, model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
-    resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
+    candle_conditioned_edit_work, consume_gen_events, drive_gen_items_reported, fit_engine_image,
+    load_reference_image, mlx_model, model_repo, pid_effective_dims, pid_output_tier,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
+    resolve_quant, resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
     Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
     Path, PathBuf, PromptEnhance, Settings, Value, WorkerError, WorkerResult,
 };
@@ -53,8 +53,7 @@ fn is_flux2_edit_candle_dev(model: &str) -> bool {
 }
 
 /// True for the Klein catalog family that shares the provider implementation. Keeping this
-/// separate from `flux2_dev` makes the expanded reference-mode surface explicit and prevents the
-/// worker predicate from admitting modes the scheduler intentionally leaves unsupported on dev.
+/// separate from `flux2_dev` keeps family-specific loading behavior explicit.
 fn is_flux2_edit_candle_klein(model: &str) -> bool {
     matches!(
         model,
@@ -76,14 +75,12 @@ pub(super) fn is_flux2_edit_candle_model(model: &str) -> bool {
 /// one concrete reference; otherwise it stays off the bespoke route and the generic Klein guard
 /// fails closed instead of silently rendering reference-free text-to-image.
 pub(super) fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
-    let supported_mode = if is_flux2_edit_candle_klein(&request.model) {
-        matches!(
+    let supported_mode = (is_flux2_edit_candle_klein(&request.model)
+        || is_flux2_edit_candle_dev(&request.model))
+        && matches!(
             request.mode.as_str(),
             "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
-        )
-    } else {
-        is_flux2_edit_candle_dev(&request.model) && request.mode == "edit_image"
-    };
+        );
     supported_mode && !flux2_edit_candle_reference_ids(request).is_empty()
 }
 
@@ -148,6 +145,13 @@ fn flux2_edit_candle_steps(request: &ImageRequest, default: u32) -> u32 {
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the family default
 /// (klein 1.0 / dev 4.0), clamped.
 fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
+    if let Some(value) = request.advanced.get("trueCfgScale").and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    }) {
+        return (value as f32).clamp(0.0, 30.0);
+    }
     resolve_advanced_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
 }
 
@@ -424,9 +428,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     }
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
-    let work: Vec<(i64, String)> = (0..request.count as usize)
-        .map(|index| (resolve_seed(request, index), request.prompt.clone()))
-        .collect();
+    let work = candle_conditioned_edit_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
     let enhance = PromptEnhance::from_advanced(&request.advanced)?;
@@ -534,4 +536,50 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(advanced: Value, manifest_guidance: Option<f64>) -> ImageRequest {
+        let mut value = json!({
+            "projectId": "p", "model": "flux2_dev", "mode": "character_image",
+            "prompt": "portrait", "referenceAssetId": "ref", "advanced": advanced
+        });
+        if let Some(guidance) = manifest_guidance {
+            value.as_object_mut().unwrap().insert(
+                "modelManifestEntry".to_owned(),
+                json!({ "guidanceScale": guidance }),
+            );
+        }
+        ImageRequest::from_payload(value.as_object().expect("image request object"))
+    }
+
+    #[test]
+    fn guidance_prefers_true_cfg_then_guidance_manifest_and_default() {
+        assert_eq!(
+            flux2_edit_candle_guidance(
+                &request(
+                    json!({ "trueCfgScale": 7.0, "guidanceScale": 2.0 }),
+                    Some(3.0)
+                ),
+                4.0,
+            ),
+            7.0
+        );
+        assert_eq!(
+            flux2_edit_candle_guidance(&request(json!({ "guidanceScale": 2.0 }), Some(3.0)), 4.0),
+            2.0
+        );
+        assert_eq!(
+            flux2_edit_candle_guidance(&request(json!({}), Some(3.0)), 4.0),
+            3.0
+        );
+        assert_eq!(
+            flux2_edit_candle_guidance(&request(json!({}), None), 4.0),
+            4.0
+        );
+    }
 }

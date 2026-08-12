@@ -29,7 +29,8 @@ fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
     };
     request
         .advanced
-        .get("imageGuidanceScale")
+        .get("trueCfgScale")
+        .or_else(|| request.advanced.get("imageGuidanceScale"))
         .and_then(|value| {
             value
                 .as_f64()

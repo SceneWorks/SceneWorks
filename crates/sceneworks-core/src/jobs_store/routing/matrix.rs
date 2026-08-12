@@ -849,6 +849,62 @@ fn backend_supports(job: &JobSnapshot, facts: &RuntimeDescriptorFacts) -> Result
     ))
 }
 
+/// The Qwen-Edit and FLUX.2 edit workers are bespoke SceneWorks lanes rather than registered
+/// generator descriptors, so their conditioning axes are absent from inference runtime facts. Keep
+/// this exception exact: the shared production lane table is consumed by both scheduler and worker,
+/// and only the modes/shapes that those concrete lanes implement may supplement descriptor truth.
+fn bespoke_image_lane_support(
+    backend: &str,
+    model: &str,
+    category: &str,
+    capability: &str,
+    job: &JobSnapshot,
+) -> bool {
+    use super::candle::CandleImageLane;
+
+    if job.payload.get("model").and_then(Value::as_str) != Some(model) {
+        return false;
+    }
+    if backend == "mlx" {
+        return model == "flux2_dev"
+            && category == "conditioning"
+            && capability == "multiReference"
+            && super::mlx::image_job_is_mlx_eligible(job);
+    }
+    if backend != "candle" {
+        return false;
+    }
+    let Some(lane) = super::candle::image_job_candle_lane(job) else {
+        return false;
+    };
+    match lane {
+        CandleImageLane::QwenEdit => {
+            matches!(
+                model,
+                "qwen_image_edit"
+                    | "qwen_image_edit_2509"
+                    | "qwen_image_edit_2511"
+                    | "qwen_image_edit_2511_lightning"
+            ) && matches!(
+                (category, capability),
+                ("operation", "edit_image" | "character_image")
+                    | ("conditioning", "reference" | "multiReference")
+            )
+        }
+        CandleImageLane::Flux2Edit => {
+            let exact_model = matches!(
+                model,
+                "flux2_dev" | "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2"
+            );
+            exact_model
+                && category == "conditioning"
+                && (capability == "reference"
+                    || (model == "flux2_dev" && capability == "multiReference"))
+        }
+        _ => false,
+    }
+}
+
 fn routed_cell(
     capability: &str,
     model: &str,
@@ -874,7 +930,14 @@ fn routed_cell(
                 facts.snapshot.backend
             ));
         }
-        Ok(!descriptors.is_empty())
+        Ok(!descriptors.is_empty()
+            || bespoke_image_lane_support(
+                &facts.snapshot.backend,
+                model,
+                category,
+                capability,
+                job,
+            ))
     };
     let mlx = evaluate(mlx_facts)?;
     let candle = evaluate(candle_facts)?;
@@ -929,6 +992,11 @@ fn operation_request(
         "edit_image" => (
             JobType::ImageEdit,
             json!({ "mode": operation, "sourceAssetId": "probe" }),
+            true,
+        ),
+        "style_variations" | "image_to_image" if model.id.starts_with("flux2_") => (
+            JobType::ImageGenerate,
+            json!({ "mode": operation, "referenceAssetId": "probe" }),
             true,
         ),
         "style_variations" | "image_to_image" => (
@@ -1098,6 +1166,16 @@ fn conditioning_payload(
             job_type = JobType::VideoGenerate;
             payload = video_payload("image_to_video");
         }
+        "reference"
+            if (model.id.starts_with("sensenova_")
+                || model.id.starts_with("qwen_image_edit")
+                || model.id.starts_with("flux2_"))
+                && operations.iter().any(|item| item == "character_image") =>
+        {
+            let (kind, character, _) = operation_request(model, "character_image")?;
+            job_type = kind;
+            payload = character;
+        }
         "reference" => {
             if job_type != JobType::ImageEdit {
                 payload["referenceAssetId"] = Value::String("probe".to_owned());
@@ -1106,6 +1184,11 @@ fn conditioning_payload(
         "multiReference" | "reduxRefs" => {
             if operations.iter().any(|item| item == "character_image") {
                 let (kind, mut character, _) = operation_request(model, "character_image")?;
+                // Plural references replace the singular carrier in the canonical character probe.
+                character
+                    .as_object_mut()
+                    .expect("canonical character request is an object")
+                    .remove("referenceAssetId");
                 character["referenceAssetIds"] = json!(["probe-a", "probe-b"]);
                 job_type = kind;
                 payload = character;
@@ -1226,6 +1309,13 @@ fn conditioning_cell(
         descriptors
             .into_iter()
             .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape))
+            || bespoke_image_lane_support(
+                &facts.snapshot.backend,
+                &model.id,
+                "conditioning",
+                shape,
+                &job,
+            )
     };
     let mlx = supports(mlx_facts) && backend_supports(&job, mlx_facts)?;
     let candle = supports(candle_facts) && backend_supports(&job, candle_facts)?;
@@ -2472,6 +2562,126 @@ mod tests {
             expected, actual,
             "backend capability matrix drifted; run `{GENERATOR} > config/backend-capabilities/matrix.json`"
         );
+    }
+
+    #[test]
+    fn bespoke_conditioning_authority_is_exact_and_route_backed() {
+        let qwen_character = probe_job(
+            JobType::ImageGenerate,
+            "qwen_image_edit_2511",
+            json!({ "mode": "character_image", "referenceAssetIds": ["a", "b"] }),
+        )
+        .unwrap();
+        assert!(bespoke_image_lane_support(
+            "candle",
+            "qwen_image_edit_2511",
+            "conditioning",
+            "multiReference",
+            &qwen_character,
+        ));
+        assert!(!bespoke_image_lane_support(
+            "candle",
+            "qwen_image",
+            "conditioning",
+            "multiReference",
+            &qwen_character,
+        ));
+        assert!(!bespoke_image_lane_support(
+            "candle",
+            "qwen_image_edit_2509",
+            "conditioning",
+            "multiReference",
+            &qwen_character,
+        ));
+        assert!(!bespoke_image_lane_support(
+            "candle",
+            "qwen_image_edit_2511",
+            "conditioning",
+            "control",
+            &qwen_character,
+        ));
+
+        let flux_multi = probe_job(
+            JobType::ImageGenerate,
+            "flux2_dev",
+            json!({ "mode": "character_image", "referenceAssetIds": ["a", "b"] }),
+        )
+        .unwrap();
+        for backend in ["mlx", "candle"] {
+            assert!(bespoke_image_lane_support(
+                backend,
+                "flux2_dev",
+                "conditioning",
+                "multiReference",
+                &flux_multi,
+            ));
+        }
+        assert!(!bespoke_image_lane_support(
+            "candle",
+            "flux2_dev",
+            "conditioning",
+            "control",
+            &flux_multi,
+        ));
+
+        let malformed = probe_job(
+            JobType::ImageGenerate,
+            "flux2_dev",
+            json!({ "mode": "reference", "referenceAssetId": " " }),
+        )
+        .unwrap();
+        assert!(!bespoke_image_lane_support(
+            "candle",
+            "flux2_dev",
+            "conditioning",
+            "reference",
+            &malformed,
+        ));
+    }
+
+    #[test]
+    fn sc18476_conditioning_cells_match_production_routes() {
+        let matrix = backend_capability_matrix().unwrap();
+        for model in [
+            "sensenova_u1_8b",
+            "sensenova_u1_8b_infographic_v2",
+            "sensenova_u1_8b_infographic_v3",
+            "sensenova_u1_8b_fast",
+            "sensenova_u1_8b_infographic_v2_fast",
+            "sensenova_u1_8b_infographic_v3_fast",
+            "qwen_image_edit_2511",
+            "qwen_image_edit_2511_lightning",
+            "flux2_dev",
+        ] {
+            let row = matrix
+                .models
+                .iter()
+                .find(|row| row.id == model)
+                .unwrap_or_else(|| panic!("missing matrix row for {model}"));
+            for shape in ["reference", "multiReference"] {
+                let cell = row
+                    .conditioning_shape
+                    .iter()
+                    .find(|cell| cell.capability == shape)
+                    .unwrap_or_else(|| panic!("missing {model}/{shape} matrix cell"));
+                assert_eq!(
+                    (cell.mlx, cell.candle),
+                    (Some(true), Some(true)),
+                    "{model}/{shape} must match the strict native route"
+                );
+            }
+        }
+        for model in ["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            for operation in ["edit_image", "character_image"] {
+                let cell = row
+                    .operation_and_mode
+                    .iter()
+                    .find(|cell| cell.capability == operation)
+                    .unwrap();
+                assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
+            }
+        }
     }
 
     #[test]

@@ -2730,6 +2730,13 @@ fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
     assert_eq!(
         resolve_sensenova_img_cfg(&request(json!({
             "projectId": "p", "mode": "character_image",
+            "advanced": { "trueCfgScale": 3.0, "imageGuidanceScale": 2.5 }
+        }))),
+        3.0
+    );
+    assert_eq!(
+        resolve_sensenova_img_cfg(&request(json!({
+            "projectId": "p", "mode": "character_image",
             "advanced": { "imageGuidanceScale": 2.5 }
         }))),
         2.5
@@ -7197,6 +7204,32 @@ fn flux2_edit_image_guidance_lever() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
+    let model = mlx_model("flux2_dev").unwrap();
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "character_image",
+                "advanced": { "trueCfgScale": 7.0, "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(7.0)
+    );
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "edit_image",
+                "advanced": { "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(2.0)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn build_edit_conditioning_single_vs_multi() {
     let img = |seed| gen_core::Image {
         width: 8,
@@ -7874,6 +7907,29 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&zimage_base_t2i, &settings).unwrap();
     assert_eq!(route, ImageRoute::Mlx);
     assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() {
+    let req = request(json!({
+        "projectId": "p", "model": "sensenova_u1_8b", "mode": "character_image",
+        "prompt": "portrait", "referenceAssetIds": ["first", "second"], "count": 1,
+        "seed": 123, "advanced": { "angleSet": true, "trueCfgScale": 1.5 }
+    }));
+    let work = candle_conditioned_edit_work(&req);
+    assert_eq!(work.len(), 11);
+    assert!(work.iter().all(|(seed, _)| *seed == work[0].0));
+    assert_eq!(work[0].0, 123);
+    assert_eq!(
+        CandleImageRoute::SenseNovaEdit.image_count(&req, &Settings::from_env()),
+        11
+    );
+    assert_eq!(
+        sensenova_edit_candle_reference_ids(&req),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+    assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
@@ -9906,11 +9962,18 @@ fn qwen_edit_engine_id_maps_variants() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn qwen_edit_reference_ids_prefers_reference_then_source() {
-    // referenceAssetId (character flow) wins over a source.
+fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
+    // Ordered plural references are the character/reference-array contract.
     assert_eq!(
         qwen_edit_reference_ids(&request(json!({
-            "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
+            "projectId": "p", "mode": "character_image",
+            "referenceAssetIds": ["ref_1", "ref_2"]
+        }))),
+        vec!["ref_1".to_owned(), "ref_2".to_owned()]
+    );
+    assert_eq!(
+        qwen_edit_reference_ids(&request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref_1"
         }))),
         vec!["ref_1".to_owned()]
     );
@@ -9963,6 +10026,17 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             &model
         ),
         6.0
+    );
+    assert_eq!(
+        resolve_qwen_edit_guidance(
+            &request(json!({
+                "projectId": "p", "mode": "character_image",
+                "advanced": { "imageGuidanceScale": 2.5 }
+            })),
+            &model
+        ),
+        2.5,
+        "legacy imageGuidanceScale remains a deliberate fallback"
     );
     // The character reference path clamps to [1, 10].
     assert_eq!(
