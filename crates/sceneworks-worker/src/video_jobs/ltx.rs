@@ -45,8 +45,16 @@ pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682).
 /// The native downloader still verifies each file's own hash on download. Bumped in sc-13870 to the
 /// packed-q4 + Gemma revision validated by the candle training and inference round-trip.
+///
+/// Bumped again in sc-18809 from `254989c3…` to `01df27d3…`. `254989c3…` (2026-06-14) predates the
+/// upstream "Add dense bf16 tier (sc-8513)" upload (2026-07-05) and therefore contains **no `bf16/`
+/// path at all**, so [`ensure_ltx_bf16_present`] fetched an empty file set and reported success — the
+/// bf16 tier was unreachable through the product. `01df27d3…` is a strict superset (it only added
+/// `bf16/`; `gemma/`, `q4/`, `q8/` keep byte-identical LFS digests), and the cache is keyed by those
+/// digests, so the bump re-materializes symlinks and re-downloads nothing. Must stay equal to the
+/// `revision` on every `ltx_2_3` `downloads` row in `builtin.models.jsonc`.
 #[cfg(target_os = "macos")]
-pub(super) const LTX_BUNDLE_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
+pub(super) const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -142,6 +150,46 @@ pub(super) fn ltx_bundle_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> 
         .find(|dir| ltx_dir_is_complete(dir))
 }
 
+/// [`ltx_bundle_subdir`] widened to every snapshot revision of the same repo cache (sc-18809).
+///
+/// `huggingface_snapshot_dir` resolves ONE snapshot dir, but the cache legitimately holds several: the
+/// sc-18809 revision bump means a machine installed before it keeps `snapshots/254989c3…` (gemma + q4 +
+/// q8) and gains `snapshots/01df27d3…` when the bf16 tier is fetched. Looking in the selected snapshot
+/// only would then find no `bf16/` and silently fall through to `q8/` — rendering at a tier the user did
+/// not pick. This mirrors [`bundled_ltx_gemma_dir`]'s sibling-revision scan (sc-14377), which solved the
+/// same split for the co-requisite TE.
+///
+/// **Tier preference dominates revision**: the whole `order` is tried against each revision-set pass, so
+/// `bf16/` in a sibling snapshot beats `q8/` in the selected one. Sibling revisions are visited in sorted
+/// order so resolution is deterministic. `selected` itself is always tried first for a given tier.
+#[cfg(target_os = "macos")]
+pub(super) fn ltx_bundle_subdir_across_revisions(
+    selected: &Path,
+    order: &[&str],
+) -> Option<PathBuf> {
+    let mut roots = vec![selected.to_path_buf()];
+    if let Some(snapshots) = selected.parent() {
+        if snapshots.file_name().and_then(|name| name.to_str()) == Some("snapshots") {
+            if let Ok(entries) = std::fs::read_dir(snapshots) {
+                let mut siblings: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir() && path != selected)
+                    .collect();
+                siblings.sort();
+                roots.extend(siblings);
+            }
+        }
+    }
+    // Tier-outer, revision-inner — the loop nesting IS the precedence rule. Each (tier, root) pair
+    // goes through [`ltx_bundle_subdir`] so the completeness predicate has exactly one caller shape.
+    order.iter().find_map(|sub| {
+        roots
+            .iter()
+            .find_map(|root| ltx_bundle_subdir(root, &[sub]))
+    })
+}
+
 /// Resolve the converted LTX MLX snapshot dir. Env override (`SCENEWORKS_MLX_LTX_DIR` /
 /// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey SceneWorks bundle
 /// [`LTX_BUNDLE_REPO`], descending into its `q4/`/`q8/` subdir. Only a dir **complete for the
@@ -191,7 +239,11 @@ pub(super) fn resolve_ltx_model_dir(
     // load.
     if !eros {
         if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
-            if let Some(dir) = ltx_bundle_subdir(&root, ltx_bundle_tier_order(request)) {
+            // Across revisions (sc-18809): the cache can hold the pre-bump `254989c3…` snapshot beside
+            // the bf16-bearing `01df27d3…` one, and the selected root is only one of them.
+            if let Some(dir) =
+                ltx_bundle_subdir_across_revisions(&root, ltx_bundle_tier_order(request))
+            {
                 return Ok(dir);
             }
         }
@@ -295,8 +347,10 @@ pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf>
 /// first, then the fetched [`LTX_BUNDLE_REPO`] snapshot's `gemma/`. Resolution order: an operator
 /// `$LTX_GEMMA_DIR` override (existence-checked, [`ltx_gemma_env_override`]) — threaded onto the spec
 /// because the MLX provider dropped its own env read (sc-13664) — then the complete `<parent>/gemma`
-/// sibling, then the bundle snapshot's `gemma/`. `None` only when nothing complete is on disk (the
-/// provider then surfaces its required-`LoadSpec::text_encoder` error) — a partial dir never wins.
+/// sibling, then the bundle snapshot's `gemma/` **and its sibling revisions'** (sc-18809: the same
+/// cross-revision predicate [`ensure_ltx_bundle_gemma_present`] probes with, so the probe can never be
+/// more permissive than this resolver). `None` only when nothing complete is on disk (the provider
+/// then surfaces its required-`LoadSpec::text_encoder` error) — a partial dir never wins.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<PathBuf> {
     if let Some(env_dir) = ltx_gemma_env_override() {
@@ -308,8 +362,15 @@ pub(super) fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) 
             return Some(sibling);
         }
     }
-    let bundle_gemma = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma");
-    ltx_gemma_dir_is_complete(&bundle_gemma).then_some(bundle_gemma)
+    // The SAME sibling-revision scan [`ensure_ltx_bundle_gemma_present`] probes with: it takes a tier
+    // dir and reads its parent snapshot, so `root.join("gemma")` asks it about `root` itself, then the
+    // siblings. A single-snapshot check here would be STRICTLY NARROWER than that probe — on a
+    // split-revision install the probe would report gemma present, skip the fetch, and this resolver
+    // would then return `None`, dead-ending the job on the provider's required-`LoadSpec::text_encoder`
+    // error (sc-18809). Probe and resolver share one predicate.
+    bundled_ltx_gemma_dir(
+        &huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma"),
+    )
 }
 
 /// The amoral 4-bit Gemma prompt-enhancer snapshot the OPT-IN `useUncensoredEnhancer` path loads
@@ -484,6 +545,13 @@ pub(super) fn resolve_selected_ltx_text_encoder(
 /// bundle" error), or `q8/` is already present. Fails loud on a real download error — fast, before
 /// any compute; a `q8/` tier that isn't published yet stays absent so resolve falls back to Q4.
 /// Mirrors the eros [`ensure_ltx_upscaler_cached`] on-demand fetch.
+///
+/// The presence probe must be the SAME cross-revision scan [`resolve_ltx_model_dir`] loads through
+/// (sc-18809). Probing only the selected snapshot on a split-revision install is permanently false —
+/// the pre-bump `254989c3…` snapshot wins `resolve_huggingface_snapshot_dir`'s most-files fallback and
+/// never gains the tier — so every job would re-enter `ensure_hf_files_cached` for weights already on
+/// disk. That transfers no bytes, but it still does a `HuggingFaceSnapshot::resolve` plus a HEAD per
+/// file, which turns a fully-provisioned tier into a HARD FAILURE offline or during a hub outage.
 #[cfg(target_os = "macos")]
 pub(super) async fn ensure_ltx_q8_present(
     api: &ApiClient,
@@ -497,7 +565,7 @@ pub(super) async fn ensure_ltx_q8_present(
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
         return Ok(());
     };
-    if ltx_dir_is_complete(&root.join("q8")) {
+    if ltx_bundle_subdir_across_revisions(&root, &["q8"]).is_some() {
         return Ok(());
     }
     let files = vec!["q8/*".to_owned()];
@@ -516,9 +584,12 @@ pub(super) async fn ensure_ltx_q8_present(
 /// Fetch the SceneWorks LTX bundle's dense `bf16/` subdir on demand (sc-8513, epic 8506). The macOS
 /// default download is lean (`q4/` + `gemma/`); a bf16 job ([`ltx_wants_bf16`]) pulls the ~47 GB
 /// `bf16/*` from the FIXED [`LTX_BUNDLE_REVISION`] the first time it is requested. No-op for eros, for
-/// non-bf16 jobs, or when `bf16/` is already complete. Mirrors [`ensure_ltx_q8_present`].
+/// non-bf16 jobs, or when `bf16/` is already complete. Mirrors [`ensure_ltx_q8_present`], including its
+/// cross-revision presence probe — and bf16 is the tier that MAKES installs split-revision, since
+/// `bf16/` only exists at the bumped pin, so a single-snapshot probe here would be wrong on exactly the
+/// machines this story creates.
 #[cfg(target_os = "macos")]
-async fn ensure_ltx_bf16_present(
+pub(super) async fn ensure_ltx_bf16_present(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -530,7 +601,7 @@ async fn ensure_ltx_bf16_present(
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
         return Ok(());
     };
-    if ltx_dir_is_complete(&root.join("bf16")) {
+    if ltx_bundle_subdir_across_revisions(&root, &["bf16"]).is_some() {
         return Ok(());
     }
     let files = vec!["bf16/*".to_owned()];
@@ -589,7 +660,13 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
         return Ok(());
     }
     if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
-        if ltx_gemma_dir_is_complete(&root.join("gemma")) {
+        // Probe with the SAME sibling-revision scan the eros resolver loads through
+        // ([`bundled_ltx_gemma_dir`], sc-14377) — it takes a tier dir and reads its parent snapshot,
+        // so `root.join("gemma")` asks it about `root` itself, then the siblings. Probing only
+        // `root/gemma` would re-fetch a co-requisite the resolver can already see in a sibling
+        // revision, which needs the hub for weights that are on disk (sc-18809, same class as the
+        // q8/bf16 probes above).
+        if bundled_ltx_gemma_dir(&root.join("gemma")).is_some() {
             return Ok(());
         }
     }
