@@ -6257,10 +6257,10 @@ fn resolve_generic_lane_conditioning(
         // Generic plain-t2i img2img latent-init for any `ui.img2img` model (epic 8588 A4, sc-10189):
         // a `referenceAssetId` + `advanced.strength` seeds the denoise from the VAE-encoded reference,
         // which the engine routes to that model's img2img entrypoint via the single
-        // `Conditioning::Reference`. Krea 2 Turbo (sc-8591 #666) + SD3.5 large/turbo/medium (sc-10189
-        // #667) opt in today; a new text-only model joins by flipping `ui.img2img` + landing its
-        // mlx-gen entrypoint. Sits after the model-specific reference arms (z-image/flux/kolors/ideogram)
-        // so their bespoke surfaces keep precedence. Candle parity per model is a deferred follow-up.
+        // `Conditioning::Reference`. Krea 2 Turbo (sc-8591 #666), SD3.5 large/turbo/medium (sc-10189
+        // #667), and SANA base/Sprint (sc-18475) opt in today; a new text-only model joins by flipping
+        // `ui.img2img` and landing its engine entrypoint. Sits after the model-specific reference arms
+        // (z-image/flux/kolors/ideogram) so their bespoke surfaces keep precedence.
         Ok(LaneConditioning {
             identity_init: resolve_img2img_init_generic(request, settings, project_path)?,
             ..Default::default()
@@ -8172,9 +8172,9 @@ async fn generate_candle_stream(
     // img2img entrypoint (VAE-encode the reference → blend at `sigmas[init_time_step]` → denoise; CFG-free
     // for distilled families, two-forward CFG for the base ones like Krea Raw `render_base_img2img`,
     // sc-10226). Model-agnostic here — the candle router gates which ids reach this lane with a reference
-    // (`krea_2_turbo`/`krea_2_raw`, SD3.5, Z-Image, Boogu, Ideogram all wired). Disjoint from the Ideogram
-    // `edit_reference` (edit_image vs text_to_image) and the registry editors' `edit_refs` (guarded here
-    // so a future overlap never double-drives the single `reference` slot).
+    // (`krea_2_turbo`/`krea_2_raw`, SD3.5, SANA base/Sprint, Z-Image, Boogu, Ideogram all wired).
+    // Disjoint from the Ideogram `edit_reference` (edit_image vs text_to_image) and the registry
+    // editors' `edit_refs` (guarded here so a future overlap never double-drives the single slot).
     let img2img_reference = if edit_reference.is_none()
         && edit_refs.is_empty()
         && uses_generic_img2img(request, has_reference)

@@ -205,12 +205,33 @@ pub(super) fn has_nonempty_string(payload: &Map<String, Value>, key: &str) -> bo
         .is_some_and(|value| !value.trim().is_empty())
 }
 
+/// True when an optional string carrier is either non-blank or has a malformed non-string shape.
+/// Missing, `null`, and a blank string are all the product-level "not supplied" representation.
+pub(super) fn has_nonempty_or_malformed_string(payload: &Map<String, Value>, key: &str) -> bool {
+    match payload.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(_) => true,
+    }
+}
+
 /// True when a payload key contains a non-empty JSON array.
 pub(super) fn has_nonempty_array(payload: &Map<String, Value>, key: &str) -> bool {
     payload
         .get(key)
         .and_then(Value::as_array)
         .is_some_and(|values| !values.is_empty())
+}
+
+/// True when an optional array carrier is either non-empty or has a malformed non-array shape.
+/// Missing, `null`, and an empty array are all the product-level "not supplied" representation.
+/// Use this for unsupported carriers that must fail closed instead of being silently ignored.
+pub(super) fn has_nonempty_or_malformed_array(payload: &Map<String, Value>, key: &str) -> bool {
+    match payload.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(values)) => !values.is_empty(),
+        Some(_) => true,
+    }
 }
 
 /// True when a payload array contains at least one non-blank string id.
@@ -238,4 +259,18 @@ pub(super) fn has_nonempty_nested_array(
         .and_then(|object| object.get(array_key))
         .and_then(Value::as_array)
         .is_some_and(|values| !values.is_empty())
+}
+
+/// Nested equivalent of [`has_nonempty_or_malformed_array`]. A malformed parent object or child
+/// carrier fails closed; a missing/null parent and a missing/null/empty child mean "not supplied".
+pub(super) fn has_nonempty_or_malformed_nested_array(
+    payload: &Map<String, Value>,
+    object_key: &str,
+    array_key: &str,
+) -> bool {
+    match payload.get(object_key) {
+        None | Some(Value::Null) => false,
+        Some(Value::Object(object)) => has_nonempty_or_malformed_array(object, array_key),
+        Some(_) => true,
+    }
 }

@@ -15,7 +15,9 @@ use crate::jobs_store::routing::mlx::{
     video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
+    has_nonempty_array, has_nonempty_nested_array, has_nonempty_or_malformed_array,
+    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
+    has_nonempty_string_array,
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
@@ -324,12 +326,13 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     // sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
     // singular carrier is present but not a non-empty string, do not let it fall through as txt2img.
     if matches!(model, "sana_1600m" | "sana_sprint_1600m")
-        && payload
+        && (payload
             .get("referenceAssetId")
             .is_some_and(|value| match value.as_str() {
                 Some(id) => id.trim().is_empty(),
                 None => true,
             })
+            || sana_has_unsupported_carrier(payload))
     {
         return false;
     }
@@ -829,13 +832,40 @@ pub(crate) fn sd3_img2img_candle_eligible(payload: &Map<String, Value>) -> bool 
 pub(crate) fn sana_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
         && has_nonempty_string(payload, "referenceAssetId")
-        && !has_nonempty_string(payload, "sourceAssetId")
-        && !has_nonempty_string_array(payload, "referenceAssetIds")
-        && !has_nonempty_string(payload, "maskAssetId")
-        && !has_nonempty_nested_array(payload, "advanced", "poses")
-        && !has_nonempty_nested_array(payload, "advanced", "phases")
-        && !has_nonempty_array(payload, "loras")
-        && !candle_request_wants_quant(payload)
+        && !sana_has_unsupported_carrier(payload)
+}
+
+/// SANA consumes only one singular reference. Optional empty/null carriers mean "absent"; any
+/// non-empty unsupported or malformed carrier must not fall through to the generic txt2img lane,
+/// whose worker request type would otherwise ignore it.
+fn sana_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
+    ["referenceAssetIds", "controls", "controlnets", "loras"]
+        .iter()
+        .any(|key| has_nonempty_or_malformed_array(payload, key))
+        || ["sourceAssetId", "maskAssetId"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_string(payload, key))
+        || ["poses", "phases"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        || sana_has_unsupported_quant_carrier(payload)
+}
+
+fn sana_has_unsupported_quant_carrier(payload: &Map<String, Value>) -> bool {
+    let Some(value) = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"))
+    else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
+        .map_or(true, |bits| bits > 0)
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic

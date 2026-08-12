@@ -531,9 +531,9 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
     // `candle-gen-sana` provider, candle-gen #495 — the whole `Efficient-Large-Model/
     // Sana_1600M_1024px_diffusers` snapshot). sc-11781: the CFG-free SANA-Sprint distill
     // `sana_sprint_1600m` rides it too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the
-    // whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot). Pure txt2img on BOTH:
-    // any conditioning / LoRA / quant shape is refused and remains queued (neither candle base path
-    // advertises adapters or quant — the Sprint adapter rejects all three).
+    // whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot). Both also accept one
+    // singular reference for non-edit img2img; edit/control/multiple-reference, LoRA, and quant shapes
+    // are refused rather than silently ignored.
     for model in ["sana_1600m", "sana_sprint_1600m"] {
         assert!(
             image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
@@ -548,6 +548,31 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
             }))),
             Some(CandleImageLane::SanaImg2Img)
         );
+        for empty_carriers in [
+            json!({
+                "model": model,
+                "prompt": "p",
+                "controls": [],
+                "controlnets": [],
+                "referenceAssetIds": []
+            }),
+            json!({
+                "model": model,
+                "referenceAssetId": "reference-1",
+                "controls": null,
+                "controlnets": [],
+                "referenceAssetIds": [],
+                "loras": [],
+                "sourceAssetId": " ",
+                "maskAssetId": null,
+                "advanced": { "strength": 0.5, "poses": [], "phases": null, "mlxQuantize": 0 }
+            }),
+        ] {
+            assert!(
+                image_job_candle_lane(&image_generate_job(empty_carriers.clone())).is_some(),
+                "{model} empty/null optional carriers preserve txt2img/img2img: {empty_carriers}"
+            );
+        }
         for payload in [
             json!({ "prompt": "p", "mode": "edit_image", "sourceAssetId": "a" }),
             json!({ "prompt": "p", "maskAssetId": "a" }),
@@ -570,6 +595,19 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
             json!({ "model": model, "referenceAssetId": "a", "advanced": { "poses": [{}] } }),
             json!({ "model": model, "referenceAssetId": "a", "advanced": { "phases": [{}] } }),
             json!({ "model": model, "referenceAssetId": "a", "advanced": { "mlxQuantize": 4 } }),
+            json!({ "model": model, "referenceAssetId": "a", "referenceAssetIds": [7] }),
+            json!({ "model": model, "referenceAssetId": "a", "referenceAssetIds": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "controls": [{}] }),
+            json!({ "model": model, "referenceAssetId": "a", "controls": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "controlnets": [{}] }),
+            json!({ "model": model, "referenceAssetId": "a", "controlnets": "invalid" }),
+            json!({ "model": model, "referenceAssetId": "a", "loras": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "sourceAssetId": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "maskAssetId": {} }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "poses": 7 } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "phases": {} } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "mlxQuantize": {} } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": 7 }),
         ] {
             assert_eq!(
                 image_job_candle_lane(&image_generate_job(malformed.clone())),
@@ -1470,12 +1508,12 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         // t2i (the dedicated `generate_candle_bernini_image_stream` lane, `frames:1`).
         "bernini_image",
         // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane now (the
-        // `candle-gen-sana` provider, candle-gen #495). Pure txt2img — its conditioning/adapter/quant
-        // refusal is asserted just below.
+        // `candle-gen-sana` provider, candle-gen #495). It also accepts one singular img2img reference;
+        // its unsupported adapter/quant/control refusal is asserted elsewhere.
         "sana_1600m",
         // sc-11781 (epic 8485): the CFG-free SANA-Sprint distill `sana_sprint_1600m` rides the candle
-        // lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498). Pure txt2img (1–4 step
-        // SCM/TrigFlow) — the Sprint adapter rejects quant / LoRA / control, so those requests remain queued.
+        // lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498). Its 1–4 step SCM/TrigFlow
+        // path also accepts one singular img2img reference; quant / LoRA / control remain unsupported.
         "sana_sprint_1600m",
     ] {
         assert!(
@@ -1488,8 +1526,8 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
     }
     // Refuses a genuinely unsupported plain-txt2img image id (`pulid_flux_dev` — its only candle lane is the
     // bespoke character-reference path, so a PLAIN txt2img prompt has no candle route, candle_routed=
-    // false), an adapter shape on the txt2img-only SANA base (candle SANA advertises neither quant nor
-    // LoRA — sc-11780/sc-11781), and a conditioning shape on a wired family — all are refused.
+    // false), an adapter shape on dense SANA base (which advertises neither quant nor LoRA), and an
+    // unsupported conditioning shape on a wired family — all are refused.
     assert!(!worker_supports_job(
         &candle,
         &image_generate_job(json!({ "model": "pulid_flux_dev", "prompt": "p" }))
@@ -1503,7 +1541,7 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
                 "loras": [{ "path": "x", "weight": 0.8 }]
             }))
         ),
-        "candle SANA base is pure txt2img — a LoRA request defers to torch (sc-11780)"
+        "candle SANA base supports no adapters — a LoRA request defers to torch"
     );
     assert!(!worker_supports_job(
         &candle,
@@ -1680,8 +1718,9 @@ fn torch_worker_claims_everything_the_candle_worker_defers() {
     // Production has no fallback: shapes refused by candle remain queued, including unsupported-pose
     // shapes that candle owns-to-reject (sc-5968) to prevent unconditioned T2I rendering.
     let torch = gpu_worker(TORCH_CAPS);
-    // A family with no candle provider (`sana_1600m` — MLX-only, candle_routed=false; `bernini_image`
-    // is now candle-routed off-Mac, sc-10996), and a conditioning shape on a wired family.
+    // The legacy torch worker may also claim a model that now has a native provider; scheduler
+    // precedence still prefers the native SANA lane. The second assertion covers an unsupported
+    // conditioning shape on another wired family.
     assert!(worker_supports_job(
         &torch,
         &image_generate_job(json!({ "model": "sana_1600m", "prompt": "p" }))

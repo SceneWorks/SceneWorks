@@ -152,6 +152,24 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             model,
             &object(json!({ "referenceAssetId": "reference-1", "advanced": { "strength": 0.5 } }))
         ));
+        for empty_carriers in [
+            json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
+            json!({
+                "referenceAssetId": "reference-1",
+                "controls": null,
+                "controlnets": [],
+                "referenceAssetIds": [],
+                "loras": [],
+                "sourceAssetId": " ",
+                "maskAssetId": null,
+                "advanced": { "strength": 0.5, "poses": [], "phases": null }
+            }),
+        ] {
+            assert!(
+                image_request_mlx_eligible(model, &object(empty_carriers.clone())),
+                "{model} empty/null optional carriers preserve txt2img/img2img: {empty_carriers}"
+            );
+        }
         for malformed in [
             json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
             json!({ "referenceAssetIds": ["reference-1"] }),
@@ -162,6 +180,18 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             json!({ "referenceAssetId": "reference-1", "loras": [{ "id": "lora-1" }] }),
             json!({ "referenceAssetId": "reference-1", "advanced": { "poses": [{}] } }),
             json!({ "referenceAssetId": "reference-1", "advanced": { "phases": [{}] } }),
+            json!({ "referenceAssetId": "reference-1", "referenceAssetIds": [7] }),
+            json!({ "referenceAssetId": "reference-1", "referenceAssetIds": 7 }),
+            json!({ "referenceAssetId": "reference-1", "controls": [{}] }),
+            json!({ "referenceAssetId": "reference-1", "controls": 7 }),
+            json!({ "referenceAssetId": "reference-1", "controlnets": [{}] }),
+            json!({ "referenceAssetId": "reference-1", "controlnets": "invalid" }),
+            json!({ "referenceAssetId": "reference-1", "loras": 7 }),
+            json!({ "referenceAssetId": "reference-1", "sourceAssetId": 7 }),
+            json!({ "referenceAssetId": "reference-1", "maskAssetId": {} }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "poses": 7 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "phases": {} } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": 7 }),
         ] {
             assert!(
                 !image_request_mlx_eligible(model, &object(malformed.clone())),

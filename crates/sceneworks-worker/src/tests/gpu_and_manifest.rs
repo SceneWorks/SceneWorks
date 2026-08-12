@@ -2166,7 +2166,8 @@ fn kolors_manifest_entry_gates_correctly() {
         Some("kolors"),
         "kolors family"
     );
-    // Kolors keeps its full surface (unlike base SANA's t2i-only): edit/character/style variations.
+    // Kolors keeps its full edit/character/style surface; SANA's narrower reference surface is
+    // non-edit singular-reference img2img.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
