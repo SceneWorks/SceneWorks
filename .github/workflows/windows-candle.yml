@@ -334,87 +334,48 @@ jobs:
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
-      # PATH, so cargo/rustc/clippy never dispatch through the fragile
-      # %USERPROFILE%\.cargo\bin proxies (0-byte symlinks -> rustup.exe that go dangling
-      # when rustup self-updates or its rustup.exe is deleted, or that fail to launch as
-      # symlinks in the runner's Windows-service context — both surface as the cryptic
-      # Windows ERROR_NO_ASSOCIATION at `cargo fetch` and turned every PR red, forcing
-      # admin-override merges). The action fails loudly with an actionable message if no
-      # usable toolchain is installed. See .github/actions/prepare-rust-runner.
-      - uses: ./.github/actions/prepare-rust-runner
-      # The shared runner exports RUSTC_WRAPPER=sccache. The prep action correctly clears a
-      # missing wrapper, but an installed daemon can still reset its local connection mid-build
-      # (Windows os error 10054), observed independently in both the backend-candle test and the
-      # sidecar check. This is the repository's heaviest Rust/CUDA lane, so make rustc direct and
-      # deterministic for this job only. Cargo registry/git/target caches remain intact; sibling
-      # workflows may continue using sccache.
-      - name: Disable unstable sccache wrapper for the heavy Candle lane
-        shell: powershell
-        run: |
-          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
-          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
-      # Multiple runner services share %USERPROFILE%\.cargo. A sibling job can replace
-      # that global git checkout while rustc is still reading vendored inference sources,
-      # which surfaces as an unrelated missing-path/os-error-267 failure. Keep dependency
-      # state job-local; the verified toolchain remains on PATH from the step above.
-      - name: Isolate Cargo dependency checkout
-        shell: powershell
-        run: |
-          $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'
-          New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
-          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
-      - name: Fetch the pinned inference release
-        env:
-          CARGO_NET_OFFLINE: "false"
-        run: cargo fetch --locked
-      # No rust-toolchain action: the self-hosted box has rustup + the repo's
-      # `rust-toolchain.toml`-pinned toolchain (incl. clippy) pre-installed, and the
-      # action's bash step breaks here — `bash` resolves to the box's WSL stub, not
-      # Git Bash. cargo in-repo auto-selects the pinned toolchain.
-      # nvcc needs the MSVC 14.44 host compiler (NOT VS2026 14.51, which CUDA 12.9
-      # rejects). Load the BuildTools vcvars in-shell, then build+test in the same
-      # cmd invocation so the toolchain env survives (each step is a fresh shell).
-      - name: Test the candle GPU worker (backend-candle)
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle
-      # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
-      # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
-      # compile) and typechecks the full graph, so a candle sidecar build break is
-      # caught on the PR — cheap here on the warm, CUDA-equipped box.
+      # PROVISIONING RUNS BEFORE ANY CARGO INVOCATION (sc-18691). It used to sit BELOW the three
+      # compile steps with no guard, so an unrelated build break made landing weights on this box
+      # impossible rather than merely slow -- the fetch was never reached. That is not hypothetical
+      # for this epic: sc-17149 must provision `transformer_ref` (+66.28 GB, taking the resident set
+      # from 144.051 GB to 210.332 GB) onto this exact runner, and a red candle lane at that moment
+      # would block it for reasons that have nothing to do with the weights.
       #
-      # NB: `embed-web` is intentionally OMITTED. It embeds apps/web/dist via
-      # rust-embed (with `debug-embed`, so it embeds at compile time even under
-      # `cargo check`), which requires a built web bundle — this lane never runs a
-      # web build, so including it fails with "no `get` on WebAssets". embed-web is
-      # orthogonal to candle (static-serving glue) and is compiled on the push:main /
-      # release.yml package builds, where web/dist exists. (Release-only codegen/link
-      # breaks also still surface first in those builds.)
-      - name: Check the candle sidecar builds (rust-api, backend-candle)
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo check -p sceneworks-rust-api --features backend-candle
-      # PR guard for the Candle memory-calibration adapter binary (epic 15448). Like the
-      # candle-gated worker code it is invisible to every other lane: `src/bin/candle.rs` is
-      # `compile_error!` on macOS, macos-mlx.yml builds only `--bin memory-mlx-adapter`, and the
-      # Linux candle lane is workflow_dispatch-only. Before this step a break in it stayed hidden
-      # until someone ran Candle calibration on a CUDA host — which is exactly where this epic's
-      # downstream Candle stories start (sc-15804 review: an exhaustive
-      # `MemoryStrategyParameters` literal here went stale against the inference contract with
-      # nothing to catch it). Keep both the production typecheck and the binary's CUDA-only unit
-      # tests here: the batching contamination guard cannot be compiled or exercised on macOS.
-      - name: Check and test the candle memory adapter (memory-candle-adapter)
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-          cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+      # TWO changes make provisioning independent, and BOTH are load-bearing:
+      #   1. ORDER. This whole block moved above `Fetch the pinned inference release` -- above even
+      #      `prepare-rust-runner`, which fails loudly on a broken rustup, because a weights fetch
+      #      has no business depending on toolchain discovery either. Every step below needs only
+      #      the checkout and the box's Python.
+      #   2. SKIP. A weights-only dispatch (`provision_snapshot` without `run_five_rung_reference`)
+      #      now skips the compile chain entirely -- see the guard on `Fetch the pinned inference
+      #      release` below. Order ALONE would still drag a provision-only run red on an unrelated
+      #      break, and still burn the ~24m of box time this lane costs, which is the scarce
+      #      resource the whole story is about.
+      #
+      # WHAT DID NOT CHANGE, deliberately: there is no `continue-on-error`, no `if: always()` and no
+      # swallowed exit code anywhere in this block. sc-18677's whole point was that provisioning
+      # fails LOUDLY, and decoupling must not turn a genuine provisioning failure into a silent
+      # skip. Every `throw` below is still fatal, and platform-review-contracts.test.mjs COUNTS them
+      # per step, so a `throw` -> `Write-Warning` downgrade goes red instead of passing with the
+      # message string still present.
+      #
+      # Consequence worth knowing: a five-rung dispatch whose provisioning fails no longer runs the
+      # compile steps at all, since they are now downstream. That loses nothing -- those steps are
+      # PR/push guards, and a five-rung dispatch that cannot resolve its snapshot produces no
+      # capture either way.
+      #
+      # PYTHON HOSTING DECISION (sc-18691). The `huggingface_hub` body below stays inline Python on
+      # this lane, deliberately, and this comment is the record. Epic 3482 is Done and was
+      # macOS-runtime-scoped, so it gives this no home. Both alternatives are worse HERE
+      # specifically: a Rust downloader would have to be produced by the very compile chain this
+      # story just decoupled provisioning from, which reintroduces the coupling under a new name,
+      # and a vendored .py file still needs the same interpreter while moving the logic away from
+      # the step that owns it. `huggingface_hub` is also the reference implementation of the
+      # `models--<owner>--<name>\snapshots\<rev>` cache layout the resolve step asserts against, so
+      # replacing it means reimplementing the thing the proof is written in terms of. It is pinned
+      # exactly (`huggingface_hub==0.36.0`), anonymous (`token=False`), and its exit code is checked
+      # -- which is the whole of what a hosted implementation would buy. Revisit if a SECOND lane
+      # ever needs the same fetch; at that point a composite action is the move, not a rewrite.
       # Two independent validations, in one step because both are pure input checks.
       #
       # (1) PROVISIONING. `provision_snapshot` no longer requires `run_five_rung_reference`
@@ -709,6 +670,105 @@ jobs:
           if ($isKrea) {
             "SCENEWORKS_KREA_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
+      # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
+      # PATH, so cargo/rustc/clippy never dispatch through the fragile
+      # %USERPROFILE%\.cargo\bin proxies (0-byte symlinks -> rustup.exe that go dangling
+      # when rustup self-updates or its rustup.exe is deleted, or that fail to launch as
+      # symlinks in the runner's Windows-service context — both surface as the cryptic
+      # Windows ERROR_NO_ASSOCIATION at `cargo fetch` and turned every PR red, forcing
+      # admin-override merges). The action fails loudly with an actionable message if no
+      # usable toolchain is installed. See .github/actions/prepare-rust-runner.
+      - uses: ./.github/actions/prepare-rust-runner
+      # The shared runner exports RUSTC_WRAPPER=sccache. The prep action correctly clears a
+      # missing wrapper, but an installed daemon can still reset its local connection mid-build
+      # (Windows os error 10054), observed independently in both the backend-candle test and the
+      # sidecar check. This is the repository's heaviest Rust/CUDA lane, so make rustc direct and
+      # deterministic for this job only. Cargo registry/git/target caches remain intact; sibling
+      # workflows may continue using sccache.
+      - name: Disable unstable sccache wrapper for the heavy Candle lane
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      # Multiple runner services share %USERPROFILE%\.cargo. A sibling job can replace
+      # that global git checkout while rustc is still reading vendored inference sources,
+      # which surfaces as an unrelated missing-path/os-error-267 failure. Keep dependency
+      # state job-local; the verified toolchain remains on PATH from the step above.
+      - name: Isolate Cargo dependency checkout
+        shell: powershell
+        run: |
+          $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'
+          New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
+      # THE COMPILE CHAIN, skipped for a weights-only dispatch (sc-18691). The condition names
+      # exactly one dispatch shape -- `provision_snapshot` true AND `run_five_rung_reference` false
+      # -- and excludes only that. Everything else is untouched: PR and push runs (`github.event_name`
+      # is not `workflow_dispatch`, so the inner conjunction is false), a plain no-input dispatch, and
+      # EVERY five-rung dispatch, which still runs this entire chain exactly as it did before.
+      #
+      # This is a SKIP, not a swallow. A skipped step cannot mask a failure the way
+      # `continue-on-error` can, so a weights-only dispatch's conclusion is decided solely by the
+      # provisioning steps above -- each of which still throws.
+      #
+      # The expression is repeated verbatim on each guarded step rather than hoisted into a job-level
+      # env, because platform-review-contracts.test.mjs asserts it PER STEP with `stepBody()`, and
+      # byte-identical neighbours are precisely why that scoping exists: sc-18677's third review
+      # round found three narrowing mutations green against a file-wide `assert.match`.
+      - name: Fetch the pinned inference release
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      # No rust-toolchain action: the self-hosted box has rustup + the repo's
+      # `rust-toolchain.toml`-pinned toolchain (incl. clippy) pre-installed, and the
+      # action's bash step breaks here — `bash` resolves to the box's WSL stub, not
+      # Git Bash. cargo in-repo auto-selects the pinned toolchain.
+      # nvcc needs the MSVC 14.44 host compiler (NOT VS2026 14.51, which CUDA 12.9
+      # rejects). Load the BuildTools vcvars in-shell, then build+test in the same
+      # cmd invocation so the toolchain env survives (each step is a fresh shell).
+      - name: Test the candle GPU worker (backend-candle)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle
+      # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
+      # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
+      # compile) and typechecks the full graph, so a candle sidecar build break is
+      # caught on the PR — cheap here on the warm, CUDA-equipped box.
+      #
+      # NB: `embed-web` is intentionally OMITTED. It embeds apps/web/dist via
+      # rust-embed (with `debug-embed`, so it embeds at compile time even under
+      # `cargo check`), which requires a built web bundle — this lane never runs a
+      # web build, so including it fails with "no `get` on WebAssets". embed-web is
+      # orthogonal to candle (static-serving glue) and is compiled on the push:main /
+      # release.yml package builds, where web/dist exists. (Release-only codegen/link
+      # breaks also still surface first in those builds.)
+      - name: Check the candle sidecar builds (rust-api, backend-candle)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo check -p sceneworks-rust-api --features backend-candle
+      # PR guard for the Candle memory-calibration adapter binary (epic 15448). Like the
+      # candle-gated worker code it is invisible to every other lane: `src/bin/candle.rs` is
+      # `compile_error!` on macOS, macos-mlx.yml builds only `--bin memory-mlx-adapter`, and the
+      # Linux candle lane is workflow_dispatch-only. Before this step a break in it stayed hidden
+      # until someone ran Candle calibration on a CUDA host — which is exactly where this epic's
+      # downstream Candle stories start (sc-15804 review: an exhaustive
+      # `MemoryStrategyParameters` literal here went stale against the inference contract with
+      # nothing to catch it). Keep both the production typecheck and the binary's CUDA-only unit
+      # tests here: the batching contamination guard cannot be compiled or exercised on macOS.
+      - name: Check and test the candle memory adapter (memory-candle-adapter)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+          cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
       - name: Check out the exact inference reference source
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -748,6 +808,7 @@ jobs:
             ${{ runner.temp }}/sc-16059-candle-reuse-comparison.json
           if-no-files-found: error
       - name: Clippy (candle worker)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -807,6 +868,7 @@ jobs:
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
       - name: Verify capabilities.candle.json is a real dump, not a restamp
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1

@@ -518,6 +518,204 @@ test("windows-candle validates every provisioning input that reaches a path", as
   assert.match(workflow, /\$env:PROVISION_CACHE_DIR_INPUT -notmatch '\^\[A-Za-z\]:\\\\'/);
 });
 
+// sc-18691: provisioning must be INDEPENDENT of the compile chain. It used to sit BELOW
+// `cargo test -p sceneworks-worker --features backend-candle` with no guard, so an unrelated build
+// break made landing weights on the CUDA box impossible rather than merely slow -- the fetch was
+// never reached. Epic 17137 hits that concretely at sc-17149, which must land `transformer_ref`
+// (+66.28 GB) onto a box whose resident set is already 144.051 GB.
+//
+// TWO properties, pinned by two separate tests because either alone is insufficient. ORDER without
+// SKIP still drags a weights-only run red on an unrelated break and still burns the lane's ~24m of
+// box time; SKIP without ORDER leaves a five-rung dispatch's provisioning downstream of the compile
+// chain. Both are DERIVED from the workflow's own cargo invocations rather than from a hand-written
+// step order, so a NEW compile step added above provisioning, or added unguarded, goes red.
+
+const PROVISIONING_STEPS = [
+  "Validate dispatch inputs",
+  "Resolve snapshot provisioning parameters",
+  "Validate runner Python for snapshot provisioning",
+  "Provision exact snapshot",
+  "Resolve exact snapshot",
+];
+
+const COMPILE_CHAIN_STEPS = [
+  "Fetch the pinned inference release",
+  "Test the candle GPU worker (backend-candle)",
+  "Check the candle sidecar builds (rust-api, backend-candle)",
+  "Check and test the candle memory adapter (memory-candle-adapter)",
+  "Clippy (candle worker)",
+  "Verify capabilities.candle.json is a real dump, not a restamp",
+];
+
+// The ORDERED view of the job's steps. `stepBody()` above finds one step by name; this keeps
+// position, and keeps the `uses:`-only steps (checkout, prepare-rust-runner) that have no name at
+// all and so are invisible to `stepBody`.
+function jobSteps(workflow) {
+  const start = workflow.indexOf("\n    steps:\n");
+  assert.ok(start >= 0, "windows-candle.yml must keep a steps: block");
+  const body = workflow.slice(start);
+  const steps = [];
+  const marker = "\n      - ";
+  for (let at = body.indexOf(marker); at !== -1; ) {
+    const next = body.indexOf(marker, at + 1);
+    const chunk = body.slice(at, next === -1 ? undefined : next);
+    const named = chunk.match(/^\n      - name: (.*)$/m);
+    const used = chunk.match(/^\n      - uses: (.*)$/m);
+    steps.push({
+      name: named ? named[1] : `uses:${used ? used[1].trim() : "?"}`,
+      body: chunk,
+      // A cargo COMMAND, line-initial, so an `echo`ed fix-it message that merely QUOTES
+      // `cargo run -p sceneworks-worker` (the restamp step has one) counts as the prose it is.
+      cargo: chunk.split("\n").some((line) => /^\s+(run: )?cargo\s/.test(line)),
+    });
+    at = next;
+  }
+  return steps;
+}
+
+// A step's body with comment lines removed. Both YAML and PowerShell comment with a leading `#`,
+// and the counts below must not be movable by editing prose -- in either direction. This file's own
+// header comments narrate `throw` and `continue-on-error` as history.
+function stepCode(workflow, name) {
+  return stepBody(workflow, name)
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+test("windows-candle provisions before it compiles anything", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const steps = jobSteps(workflow);
+  const indexOf = (name) => {
+    const at = steps.findIndex((step) => step.name === name);
+    assert.ok(at >= 0, `windows-candle.yml must keep a step named ${name}`);
+    return at;
+  };
+
+  const compiling = steps.map((step, at) => (step.cargo ? at : -1)).filter((at) => at >= 0);
+  // Anti-vacuity. If the derivation stops recognising cargo steps, "provisioning comes first" is
+  // trivially true and this whole test means nothing -- which is precisely how the sibling audit at
+  // the bottom of this file silently emptied itself when sc-18691 changed a guard's polarity.
+  assert.ok(
+    compiling.length >= COMPILE_CHAIN_STEPS.length,
+    `expected at least ${COMPILE_CHAIN_STEPS.length} cargo steps, derived ${compiling.length}`,
+  );
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.ok(steps[indexOf(name)].cargo, `${name} must still be a cargo invocation`);
+  }
+
+  const firstCompile = Math.min(...compiling);
+  for (const name of PROVISIONING_STEPS) {
+    assert.ok(
+      indexOf(name) < firstCompile,
+      `${name} must run before the first cargo step (${steps[firstCompile].name}); a build ` +
+        "break must not be able to starve a weights dispatch",
+    );
+  }
+  // Stronger than "ahead of the compile chain": ahead of the Rust setup too. prepare-rust-runner
+  // fails loudly on a broken rustup, and a weights fetch has no business depending on toolchain
+  // discovery -- it needs the checkout and the box's Python, nothing else.
+  for (const name of PROVISIONING_STEPS) {
+    assert.ok(
+      indexOf(name) < indexOf("uses:./.github/actions/prepare-rust-runner"),
+      `${name} must not depend on toolchain discovery either`,
+    );
+  }
+  // ...but still after the checkout, which every one of them reads (INFERENCE_PIN lives in the
+  // worktree, and an unchecked-out repo has no workflow to run).
+  assert.ok(
+    steps[0].name.startsWith("uses:actions/checkout@"),
+    "the checkout must remain the job's first step",
+  );
+});
+
+test("a weights-only dispatch skips the entire compile chain, pinned per step", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true AND
+  // `run_five_rung_reference` false; every other shape must still compile. Half of this is not a
+  // weaker version of it -- dropping `&& !inputs.run_five_rung_reference` would strip the compile
+  // chain off Krea's five-rung capture too, which this story's scope guard forbids, and dropping
+  // `github.event_name == 'workflow_dispatch'` would strip it off every PR and push.
+  const skip =
+    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
+
+  // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
+  // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
+  // stays green. That is not hypothetical -- it is trap 1 from sc-18677's third review round, which
+  // found three such mutations green against this same file.
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.match(stepBody(workflow, name), skip, `${name} must carry the weights-only skip guard`);
+  }
+
+  // Derived backstop, so a NEW compile step cannot appear without a decision: every cargo step is
+  // either skipped for a weights-only dispatch, or gated on the five-rung capture -- which is not a
+  // weights-only dispatch and legitimately compiles its adapter.
+  for (const step of jobSteps(workflow).filter((candidate) => candidate.cargo)) {
+    assert.ok(
+      skip.test(step.body) || /if: \$\{\{[^\n]*inputs\.run_five_rung_reference/.test(step.body),
+      `${step.name} would compile on a weights-only dispatch; guard it or gate it`,
+    );
+  }
+});
+
+// sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With
+// the compile chain skipped, these five steps ARE the entire verdict of a weights-only dispatch, so
+// every failure mode they carry has to stay fatal.
+//
+// PIN THE THROW, NOT THE MESSAGE -- trap 2 from sc-18677's third review round, and it is live in
+// this file right now: "Windows Krea provisioning accepts supported newer Python 3 runtimes" above
+// asserts the string `Python 3.12 or newer`, which survives a `throw` -> `Write-Warning` downgrade
+// completely intact. Counting `throw`s is what makes a downgrade red, and the count is taken PER
+// STEP because a file-wide count is satisfied by adding a throw anywhere else.
+test("every failure mode a weights-only dispatch can hit is still fatal", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  const throwCounts = {
+    // repo-id shape, revision shape, empty allow-list, rooted pattern, the two containment guards
+    // (segment shape + canonical probe), subdir shape, subdir traversal, cache-dir newline,
+    // cache-dir absoluteness, and the three five-rung guards (inference_revision shape, the fixed
+    // Krea repository, INFERENCE_PIN agreement).
+    "Validate dispatch inputs": 13,
+    // Pure derivation: it writes GITHUB_ENV and throws nothing.
+    "Resolve snapshot provisioning parameters": 0,
+    // A non-zero `python --version`, and a minor version below 12.
+    "Validate runner Python for snapshot provisioning": 2,
+    // pip install, and the heredoc'd snapshot_download -- `@'...'@ | python -` does not propagate
+    // its exit code, so the explicit $LASTEXITCODE check is the only thing that fails the step.
+    "Provision exact snapshot": 2,
+    // Absent snapshot, canonical-suffix mismatch, escaping component, missing components. The
+    // suffix one is the dangerous downgrade: warned rather than thrown, a snapshot that does NOT
+    // match the requested repo+revision is exported as SCENEWORKS_PROVISIONED_ROOT and a per-tier
+    // VRAM measurement silently runs against the wrong weights.
+    "Resolve exact snapshot": 4,
+  };
+  for (const [name, expected] of Object.entries(throwCounts)) {
+    assert.equal(
+      (stepCode(workflow, name).match(/\bthrow /g) || []).length,
+      expected,
+      `${name} must keep exactly ${expected} fatal throw(s); a throw -> Write-Warning downgrade ` +
+        "leaves every message assertion in this file green",
+    );
+  }
+  // The Python body guards itself with a `raise`, which the count above cannot see.
+  assert.match(
+    stepCode(workflow, "Provision exact snapshot"),
+    /raise SystemExit\("provision_patterns resolved to an empty allow-list"\)/,
+  );
+
+  // Decoupling by SKIPPING is safe; decoupling by SWALLOWING is not. `continue-on-error` on any of
+  // these would let a weights-only dispatch report success with no weights on the box -- strictly
+  // worse than the coupling this story removed, because the coupling at least failed visibly.
+  for (const name of [...PROVISIONING_STEPS, ...COMPILE_CHAIN_STEPS]) {
+    assert.doesNotMatch(
+      stepCode(workflow, name),
+      /continue-on-error|always\(\)/,
+      `${name} must not degrade a failure into a warning`,
+    );
+  }
+});
+
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(
@@ -1300,12 +1498,23 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
     // dispatch-only calibration build that reaches a member is not PR coverage of it, so
     // drop every step block gated on workflow_dispatch before scanning (same step-splitting
     // idiom as the capability-dump ordering check above).
-    const prSteps = lane
-      .split(/\n {6}- (?=name: |uses: )/)
-      .filter(
-        (block) => !/if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/.test(block),
-      )
-      .join("\n");
+    //
+    // POLARITY MATTERS, and it did not used to (sc-18691). This filter was a bare substring test
+    // for `github.event_name == 'workflow_dispatch'` inside the step's `if:`. sc-18691 added the
+    // opposite polarity to windows-candle.yml -- `!(github.event_name == 'workflow_dispatch' &&
+    // inputs.provision_snapshot && !inputs.run_five_rung_reference)`, which skips the compile chain
+    // for a weights-only dispatch and therefore RUNS on every PR and push. The substring test read
+    // those two forms as identical, dropped all six compile steps, and left this audit with zero
+    // cargo invocations to reason about -- it survived only because of the `invocations.length > 0`
+    // assertion below, which is exactly the vacuity backstop that case is for. Strip negated groups
+    // before looking for the positive requirement, so "requires a dispatch" means what it says.
+    const requiresDispatch = (block) => {
+      const gate = block.match(/^\s*if: ([^\n]*)$/m);
+      if (!gate) return false;
+      return /github\.event_name == 'workflow_dispatch'/.test(gate[1].replace(/!\([^)]*\)/g, ""));
+    };
+    const blocks = lane.split(/\n {6}- (?=name: |uses: )/);
+    const prSteps = blocks.filter((block) => !requiresDispatch(block)).join("\n");
     // Strip comment lines, then re-join backslash line continuations so a `-p <pkg>` split
     // across lines cannot degrade into a "package-less" invocation (which the rule below
     // would over-widen into the whole default-member set).
