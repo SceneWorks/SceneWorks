@@ -48,6 +48,7 @@ function backendFacts(backend) {
       tier: "q4",
       mode: "text_to_image",
       overlay: "none",
+      loadProfile: "plain",
     }],
   };
 }
@@ -177,6 +178,19 @@ test("manifest to route is mutation-proven green-red-green", () => {
   );
   greenRedGreen(
     (input) => input.engineFacts[0].memoryRouteWitnesses[0].overlay = "lora",
+    /belongs to overlay none/,
+  );
+  greenRedGreen(
+    (input) => input.engineFacts[0].memoryRouteWitnesses[0].loadProfile = "pid",
+    /belongs to overlay none|unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => {
+      input.engineFacts[0].memoryRouteWitnesses[0].overlay = "control";
+      input.engineFacts[0].memoryRouteWitnesses[0].loadProfile = "multi_control";
+      input.manifest.models[0].mlx.memoryStrategyContract.implementations[0].overlays = ["control"];
+      input.cells[0].overlay = "control";
+    },
     /unwaived mismatch/,
   );
 });

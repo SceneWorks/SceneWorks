@@ -751,6 +751,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
         tier: "q4",
         mode: "text_to_image",
         overlay: "none",
+        loadProfile: "plain",
       }],
       ...extra,
     });

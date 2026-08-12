@@ -121,18 +121,73 @@ impl MemoryRouteOverlay {
             Self::Identity => "identity",
         }
     }
+}
+
+/// Exact load-time component shape behind a public matrix overlay.
+///
+/// The matrix deliberately has four user-facing overlay coordinates, but those coordinates are not
+/// interchangeable load specs. In particular, one ControlNet is not MultiControlNet, and an
+/// IP-Adapter is not PiD or a provider-owned identity stack. Production matching and generated route
+/// facts therefore key on this exact profile while [`MemoryRouteOverlay`] remains the manifest join.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryRouteLoadProfile {
+    Plain,
+    Lora,
+    SingleControl,
+    MultiControl,
+    IpAdapter,
+    Pid,
+    Identity,
+}
+
+impl MemoryRouteLoadProfile {
+    pub const ALL: [Self; 7] = [
+        Self::Plain,
+        Self::Lora,
+        Self::SingleControl,
+        Self::MultiControl,
+        Self::IpAdapter,
+        Self::Pid,
+        Self::Identity,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::Lora => "lora",
+            Self::SingleControl => "single_control",
+            Self::MultiControl => "multi_control",
+            Self::IpAdapter => "ip_adapter",
+            Self::Pid => "pid",
+            Self::Identity => "identity",
+        }
+    }
+
+    pub const fn overlay(self) -> MemoryRouteOverlay {
+        match self {
+            Self::Plain | Self::Pid => MemoryRouteOverlay::None,
+            Self::Lora => MemoryRouteOverlay::Lora,
+            Self::SingleControl | Self::MultiControl => MemoryRouteOverlay::Control,
+            Self::IpAdapter | Self::Identity => MemoryRouteOverlay::Identity,
+        }
+    }
 
     fn from_spec(spec: &LoadSpec) -> Option<Self> {
-        let lora = !spec.adapters.is_empty();
-        let control = spec.control.is_some() || !spec.extra_controls.is_empty();
-        let identity = spec.ip_adapter.is_some() || spec.pid.is_some() || spec.identity.is_some();
-        match (lora, control, identity) {
-            (false, false, false) => Some(Self::None),
-            (true, false, false) => Some(Self::Lora),
-            (false, true, false) => Some(Self::Control),
-            (false, false, true) => Some(Self::Identity),
-            _ => None,
+        let profiles = [
+            (!spec.adapters.is_empty()).then_some(Self::Lora),
+            (spec.control.is_some() && spec.extra_controls.is_empty())
+                .then_some(Self::SingleControl),
+            (!spec.extra_controls.is_empty()).then_some(Self::MultiControl),
+            spec.ip_adapter.is_some().then_some(Self::IpAdapter),
+            spec.pid.is_some().then_some(Self::Pid),
+            spec.identity.is_some().then_some(Self::Identity),
+        ];
+        let mut present = profiles.into_iter().flatten();
+        let first = present.next();
+        if present.next().is_some() {
+            return None;
         }
+        Some(first.unwrap_or(Self::Plain))
     }
 }
 
@@ -143,6 +198,7 @@ pub struct MemoryRouteSelector {
     pub tier: MemoryRouteTier,
     pub mode: MemoryRouteMode,
     pub overlay: MemoryRouteOverlay,
+    pub load_profile: MemoryRouteLoadProfile,
 }
 
 #[derive(Clone, Copy)]
@@ -151,21 +207,25 @@ struct MemoryRouteRule {
     provider: &'static str,
     tiers: &'static [MemoryRouteTier],
     modes: &'static [MemoryRouteMode],
-    overlays: &'static [MemoryRouteOverlay],
+    load_profiles: &'static [MemoryRouteLoadProfile],
     requires_sequential_selection: bool,
 }
 
 const ALL_TIERS: &[MemoryRouteTier] = &MemoryRouteTier::ALL;
 const ALL_MODES: &[MemoryRouteMode] = &MemoryRouteMode::ALL;
-const NONE: &[MemoryRouteOverlay] = &[MemoryRouteOverlay::None];
-const NONE_LORA: &[MemoryRouteOverlay] = &[MemoryRouteOverlay::None, MemoryRouteOverlay::Lora];
-const NONE_CONTROL: &[MemoryRouteOverlay] =
-    &[MemoryRouteOverlay::None, MemoryRouteOverlay::Control];
-const NONE_CONTROL_IDENTITY: &[MemoryRouteOverlay] = &[
-    MemoryRouteOverlay::None,
-    MemoryRouteOverlay::Control,
-    MemoryRouteOverlay::Identity,
+const PLAIN: &[MemoryRouteLoadProfile] = &[MemoryRouteLoadProfile::Plain];
+const PLAIN_LORA: &[MemoryRouteLoadProfile] =
+    &[MemoryRouteLoadProfile::Plain, MemoryRouteLoadProfile::Lora];
+const PLAIN_SINGLE_CONTROL: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::Plain,
+    MemoryRouteLoadProfile::SingleControl,
 ];
+const PLAIN_SINGLE_CONTROL_IP: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::Plain,
+    MemoryRouteLoadProfile::SingleControl,
+    MemoryRouteLoadProfile::IpAdapter,
+];
+const ALL_LOAD_PROFILES: &[MemoryRouteLoadProfile] = &MemoryRouteLoadProfile::ALL;
 const TEXT_ONLY: &[MemoryRouteMode] = &[MemoryRouteMode::TextToImage];
 const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
 const BF16_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Bf16];
@@ -176,7 +236,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "lens",
         tiers: Q4_ONLY,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -184,7 +244,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "lens_turbo",
         tiers: BF16_ONLY,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -192,7 +252,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE_LORA,
+        load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -200,7 +260,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image_edit",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE_LORA,
+        load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -208,7 +268,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "krea_2_turbo",
         tiers: ALL_TIERS,
         modes: TEXT_ONLY,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -216,7 +276,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "sdxl",
         tiers: ALL_TIERS,
         modes: TEXT_ONLY,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -224,7 +284,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "z_image_turbo",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: &MemoryRouteOverlay::ALL,
+        load_profiles: ALL_LOAD_PROFILES,
         requires_sequential_selection: true,
     },
     MemoryRouteRule {
@@ -232,7 +292,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -240,7 +300,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image_edit",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -248,7 +308,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "flux1_schnell",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE_CONTROL_IDENTITY,
+        load_profiles: PLAIN_SINGLE_CONTROL_IP,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -256,7 +316,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "flux1_dev",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE_CONTROL_IDENTITY,
+        load_profiles: PLAIN_SINGLE_CONTROL_IP,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -264,7 +324,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "flux2_dev",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE_CONTROL,
+        load_profiles: PLAIN_SINGLE_CONTROL,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -272,7 +332,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "flux2_klein_9b",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE_CONTROL,
+        load_profiles: PLAIN_SINGLE_CONTROL,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -280,7 +340,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "mage_flow_base",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -288,7 +348,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "mage_flow",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -296,7 +356,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "mage_flow_turbo",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -304,7 +364,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "mage_flow_edit_base",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -312,7 +372,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "mage_flow_edit",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
     MemoryRouteRule {
@@ -320,7 +380,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "mage_flow_edit_turbo",
         tiers: ALL_TIERS,
         modes: ALL_MODES,
-        overlays: NONE,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
     },
 ];
@@ -331,7 +391,8 @@ fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> boo
             && rule.provider == selector.provider
             && rule.tiers.contains(&selector.tier)
             && rule.modes.contains(&selector.mode)
-            && rule.overlays.contains(&selector.overlay)
+            && rule.load_profiles.contains(&selector.load_profile)
+            && selector.overlay == selector.load_profile.overlay()
             && (!rule.requires_sequential_selection || sequential_selected)
     })
 }
@@ -363,9 +424,9 @@ pub fn apply_registered_load_shape(
     if !matches!(spec.weights, WeightsSource::Dir(_)) {
         return spec;
     }
-    let (Some(tier), Some(overlay)) = (
+    let (Some(tier), Some(load_profile)) = (
         MemoryRouteTier::from_spec(&spec),
-        MemoryRouteOverlay::from_spec(&spec),
+        MemoryRouteLoadProfile::from_spec(&spec),
     ) else {
         return spec;
     };
@@ -374,7 +435,8 @@ pub fn apply_registered_load_shape(
         provider: rule.provider,
         tier,
         mode,
-        overlay,
+        overlay: load_profile.overlay(),
+        load_profile,
     };
     if rule_matches(selector, sequential_selected) {
         spec.with_load_shape(LoadShape::DeferredMaterialization)
@@ -389,13 +451,14 @@ pub fn deferred_route_witnesses() -> Vec<MemoryRouteSelector> {
     for rule in RULES {
         for &tier in rule.tiers {
             for &mode in rule.modes {
-                for &overlay in rule.overlays {
+                for &load_profile in rule.load_profiles {
                     out.push(MemoryRouteSelector {
                         backend: rule.backend,
                         provider: rule.provider,
                         tier,
                         mode,
-                        overlay,
+                        overlay: load_profile.overlay(),
+                        load_profile,
                     });
                 }
             }
@@ -410,7 +473,7 @@ pub fn deferred_route_witnesses() -> Vec<MemoryRouteSelector> {
 mod tests {
     use super::*;
 
-    fn spec(tier: MemoryRouteTier, overlay: MemoryRouteOverlay) -> LoadSpec {
+    fn spec(tier: MemoryRouteTier, profile: MemoryRouteLoadProfile) -> LoadSpec {
         let base = LoadSpec::new(WeightsSource::Dir("fixture".into()));
         let base = match tier {
             MemoryRouteTier::Bf16 => base,
@@ -418,18 +481,34 @@ mod tests {
             MemoryRouteTier::Q8 => base.with_quant(Quant::Q8),
             MemoryRouteTier::Nvfp4 => base.with_quant(Quant::Nvfp4),
         };
-        match overlay {
-            MemoryRouteOverlay::None => base,
-            MemoryRouteOverlay::Lora => base.with_adapters(vec![gen_core::AdapterSpec::new(
+        match profile {
+            MemoryRouteLoadProfile::Plain => base,
+            MemoryRouteLoadProfile::Lora => base.with_adapters(vec![gen_core::AdapterSpec::new(
                 "adapter.safetensors".into(),
                 1.0,
                 gen_core::AdapterKind::Lora,
             )]),
-            MemoryRouteOverlay::Control => {
+            MemoryRouteLoadProfile::SingleControl => {
                 base.with_control(WeightsSource::File("control.safetensors".into()))
             }
-            MemoryRouteOverlay::Identity => {
+            MemoryRouteLoadProfile::MultiControl => base
+                .with_control(WeightsSource::File("control.safetensors".into()))
+                .with_extra_control(WeightsSource::File("control-2.safetensors".into())),
+            MemoryRouteLoadProfile::IpAdapter => {
                 base.with_ip_adapter(WeightsSource::Dir("ip-adapter".into()))
+            }
+            MemoryRouteLoadProfile::Pid => base.with_pid(
+                WeightsSource::File("pid.safetensors".into()),
+                WeightsSource::Dir("gemma".into()),
+            ),
+            MemoryRouteLoadProfile::Identity => {
+                let mut base = base;
+                base.identity = Some(gen_core::IdentityWeights {
+                    encoder: Some(WeightsSource::File("identity.safetensors".into())),
+                    eva: Some(WeightsSource::File("vision.safetensors".into())),
+                    face_dir: Some(WeightsSource::Dir("face-analysis".into())),
+                });
+                base
             }
         }
     }
@@ -450,7 +529,7 @@ mod tests {
             apply(
                 MemoryRouteTier::Q4,
                 MemoryRouteMode::TextToImage,
-                MemoryRouteOverlay::None
+                MemoryRouteLoadProfile::Plain
             ),
             LoadShape::DeferredMaterialization
         );
@@ -458,7 +537,7 @@ mod tests {
             apply(
                 MemoryRouteTier::Q8,
                 MemoryRouteMode::EditImage,
-                MemoryRouteOverlay::Lora
+                MemoryRouteLoadProfile::Lora
             ),
             LoadShape::DeferredMaterialization
         );
@@ -466,7 +545,7 @@ mod tests {
             apply(
                 MemoryRouteTier::Q4,
                 MemoryRouteMode::TextToImage,
-                MemoryRouteOverlay::Control
+                MemoryRouteLoadProfile::SingleControl
             ),
             LoadShape::EagerMaterialization
         );
@@ -479,7 +558,7 @@ mod tests {
                 MemoryRouteBackend::Mlx,
                 "lens",
                 MemoryRouteMode::EditImage,
-                spec(MemoryRouteTier::Q4, MemoryRouteOverlay::None),
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
                 false
             )
             .load_shape,
@@ -490,7 +569,7 @@ mod tests {
                 MemoryRouteBackend::Mlx,
                 "lens",
                 MemoryRouteMode::EditImage,
-                spec(MemoryRouteTier::Q8, MemoryRouteOverlay::None),
+                spec(MemoryRouteTier::Q8, MemoryRouteLoadProfile::Plain),
                 false
             )
             .load_shape,
@@ -501,7 +580,7 @@ mod tests {
                 MemoryRouteBackend::Mlx,
                 "sdxl",
                 MemoryRouteMode::EditImage,
-                spec(MemoryRouteTier::Q4, MemoryRouteOverlay::None),
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
                 false
             )
             .load_shape,
@@ -529,19 +608,20 @@ mod tests {
         for rule in RULES {
             for tier in MemoryRouteTier::ALL {
                 for mode in MemoryRouteMode::ALL {
-                    for overlay in MemoryRouteOverlay::ALL {
+                    for load_profile in MemoryRouteLoadProfile::ALL {
                         let selector = MemoryRouteSelector {
                             backend: rule.backend,
                             provider: rule.provider,
                             tier,
                             mode,
-                            overlay,
+                            overlay: load_profile.overlay(),
+                            load_profile,
                         };
                         let shape = apply_registered_load_shape(
                             selector.backend,
                             selector.provider,
                             selector.mode,
-                            spec(selector.tier, selector.overlay),
+                            spec(selector.tier, selector.load_profile),
                             rule.requires_sequential_selection,
                         )
                         .load_shape;
@@ -581,5 +661,73 @@ mod tests {
             .load_shape,
             LoadShape::EagerMaterialization,
         );
+    }
+
+    #[test]
+    fn flux_load_profiles_preserve_the_pre_registry_fail_closed_predicates() {
+        for provider in ["flux1_schnell", "flux1_dev"] {
+            for profile in [
+                MemoryRouteLoadProfile::Pid,
+                MemoryRouteLoadProfile::Identity,
+                MemoryRouteLoadProfile::MultiControl,
+            ] {
+                assert_eq!(
+                    apply_registered_load_shape(
+                        MemoryRouteBackend::Candle,
+                        provider,
+                        MemoryRouteMode::TextToImage,
+                        spec(MemoryRouteTier::Bf16, profile),
+                        false,
+                    )
+                    .load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{provider} must reject {profile:?}",
+                );
+            }
+            for profile in [
+                MemoryRouteLoadProfile::SingleControl,
+                MemoryRouteLoadProfile::IpAdapter,
+            ] {
+                assert_eq!(
+                    apply_registered_load_shape(
+                        MemoryRouteBackend::Candle,
+                        provider,
+                        MemoryRouteMode::TextToImage,
+                        spec(MemoryRouteTier::Bf16, profile),
+                        false,
+                    )
+                    .load_shape,
+                    LoadShape::DeferredMaterialization,
+                    "{provider} must retain {profile:?}",
+                );
+            }
+        }
+
+        for provider in ["flux2_dev", "flux2_klein_9b"] {
+            assert_eq!(
+                apply_registered_load_shape(
+                    MemoryRouteBackend::Candle,
+                    provider,
+                    MemoryRouteMode::TextToImage,
+                    spec(MemoryRouteTier::Bf16, MemoryRouteLoadProfile::MultiControl),
+                    false,
+                )
+                .load_shape,
+                LoadShape::EagerMaterialization,
+                "{provider} must reject MultiControlNet",
+            );
+            assert_eq!(
+                apply_registered_load_shape(
+                    MemoryRouteBackend::Candle,
+                    provider,
+                    MemoryRouteMode::TextToImage,
+                    spec(MemoryRouteTier::Bf16, MemoryRouteLoadProfile::SingleControl,),
+                    false,
+                )
+                .load_shape,
+                LoadShape::DeferredMaterialization,
+                "{provider} must retain one ControlNet",
+            );
+        }
     }
 }
