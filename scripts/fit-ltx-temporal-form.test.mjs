@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   FORMS,
+  coverageOf,
+  driverStatesFrom,
   fitSlice,
   latentTemporalDepth,
   latentTokens,
@@ -18,6 +20,10 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLAN = JSON.parse(
   readFileSync(path.join(ROOT, "docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json"), "utf8"),
+);
+const DRIVER_LOG = readFileSync(
+  path.join(ROOT, "docs/calibration/sc-18810/sweep-run.log"),
+  "utf8",
 );
 
 const geometry = (width, height, frames, fps = 30) => ({
@@ -189,7 +195,11 @@ test("every fit and held-out point in the plan is a single-pass rung-1 decode", 
   );
 });
 
-test("roles come from the plan, so the fit/held-out split cannot be redrawn after the fact", () => {
+test("a record with no declared role is refused rather than scored", () => {
+  // NOT evidence of pre-registration — that lives in the commit timeline (plan 301fb80e 04:07, fit
+  // e8c8353f 08:23, no captured fixture's `_role` touched by the 07:51 amendment) and no unit test
+  // can stand in for it. What this pins is narrower and still worth pinning: every scored point's
+  // role comes from the PLAN, so a record the plan never declared cannot slip into a fit at all.
   const roles = rolesFromPlan(PLAN);
   assert.equal(roles.size, PLAN.providers.length);
   assert.throws(
@@ -209,4 +219,114 @@ test("roles come from the plan, so the fit/held-out split cannot be redrawn afte
       ),
     /has no role in the sweep plan/,
   );
+});
+
+test("the scored roles are exactly the declared vocabulary, and host-outcome labels never score", () => {
+  // Binding roles to their declaration: the committed plan may only use these seven labels, the two
+  // `*_host_limit` ones are FEASIBILITY labels rather than fit membership, and neither may ever be
+  // read as a scored point. A new label — or a `fit` silently renamed — reds here.
+  const SCORED = new Set(["fit", "held_out", "held_out_fps_probe"]);
+  const HOST_OUTCOME = new Set(["not_attempted_host_limit", "attempted_failed_host_limit"]);
+  const DECLARED = new Set([...SCORED, ...HOST_OUTCOME, "reproduction_probe", "rung2_boundary"]);
+  for (const provider of PLAN.providers) {
+    assert.ok(DECLARED.has(provider._role), `${provider.name} uses undeclared role ${provider._role}`);
+    if (HOST_OUTCOME.has(provider._role)) {
+      assert.ok(
+        !SCORED.has(provider._role) && !provider._role.startsWith("held_out"),
+        `${provider.name} is a host-outcome label and must not be scored`,
+      );
+    }
+  }
+  // Six fit + three held-out in every tier, plus q8's one fps probe: 28 scorable rows in all.
+  for (const tier of ["q8", "bf16", "q4"]) {
+    const rows = PLAN.providers.filter((provider) => provider.target.tier === tier);
+    assert.equal(rows.filter((provider) => provider._role === "fit").length, 6, `${tier} fit`);
+    assert.equal(
+      rows.filter((provider) => provider._role === "held_out").length,
+      3,
+      `${tier} held_out`,
+    );
+  }
+  assert.equal(PLAN.providers.filter((provider) => SCORED.has(provider._role)).length, 28);
+});
+
+test("the driver log, not a hardcoded list, says what was attempted", () => {
+  const states = driverStatesFrom(DRIVER_LOG);
+  // Every terminal state the log actually distinguishes, on a real row of the committed log.
+  assert.equal(states.get("mlx-ltx-2-3-q8-768x512-f121-fps30").terminal, "completed");
+  assert.equal(states.get("mlx-ltx-2-3-q8-768x512-f361-fps30").terminal, "failed");
+  // The row the previous hardcoded list got wrong: BEGIN at 11:40:16 with free=16GiB and no
+  // terminal line — the driver itself did not survive to write one.
+  assert.equal(states.get("mlx-ltx-2-3-q8-1280x704-f241-fps30").terminal, "no_terminal_record");
+  // Refused by the staged-residency guard at 252 s, then re-run and captured. One OK is enough.
+  const rerun = states.get("mlx-ltx-2-3-q8-704x1280-f177-fps30");
+  assert.equal(rerun.fails, 1);
+  assert.equal(rerun.terminal, "completed");
+  // Named by the free-disk STOP, never begun.
+  const stopped = states.get("mlx-ltx-2-3-q8-1280x704-f177-fps30");
+  assert.equal(stopped.stoppedBefore, true);
+  assert.equal(stopped.terminal, "not_begun");
+  assert.equal(states.has("mlx-ltx-2-3-q8-1280x704-f297-fps30"), false);
+});
+
+test("coverage buckets are derived from the log and the dataset, not from the role", () => {
+  const points = [{ fixture: "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808", geometry: {} }];
+  const coverage = coverageOf(PLAN, points, driverStatesFrom(DRIVER_LOG));
+  const state = (fixture) =>
+    coverage.entries.find((entry) => entry.fixture === fixture).state;
+  assert.equal(state("ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808"), "captured");
+  // A `fit` row can be attempted-and-killed; the role does not decide the bucket.
+  assert.equal(
+    state("ltx-2-3-mlx-q8-768x512-f361-fps30-seed18808"),
+    "attempted_failed_host_limit",
+  );
+  assert.equal(
+    state("ltx-2-3-mlx-q8-1280x704-f241-fps30-seed18808"),
+    "attempted_failed_host_limit",
+  );
+  assert.equal(
+    state("ltx-2-3-mlx-q8-1280x704-f297-fps30-seed18808"),
+    "not_attempted_host_limit",
+  );
+  assert.equal(state("ltx-2-3-mlx-bf16-768x512-f121-fps30-seed18808"), "not_reached");
+  // One captured (the single point supplied) and three the log shows were begun and never OK'd —
+  // f361, f449 and f241. The old hardcoded list named two, and one of those two was wrong.
+  assert.equal(coverage.byState.captured, 1);
+  assert.equal(coverage.byState.attempted_failed_host_limit, 3);
+  // Withholding the other seven captured records puts them in the retention-hole bucket rather than
+  // silently in "failed" — the seven the log says completed and this call was not given.
+  assert.equal(coverage.byState.completed_without_record, 7);
+  assert.equal(coverage.plannedEntries, PLAN.providers.length);
+});
+
+test("a plan that contradicts the driver log is refused, in both directions", () => {
+  const states = driverStatesFrom(DRIVER_LOG);
+  const withRole = (name, role) => ({
+    providers: PLAN.providers.map((provider) =>
+      provider.name === name ? { ...provider, _role: role } : provider,
+    ),
+  });
+  // The exact defect this PR was reviewed for: claiming a geometry was never attempted when the log
+  // shows it was begun.
+  assert.throws(
+    () =>
+      coverageOf(
+        withRole("mlx-ltx-2-3-q8-768x512-f449-fps30", "not_attempted_host_limit"),
+        [],
+        states,
+      ),
+    /declared not_attempted_host_limit but the driver log records it as failed/,
+  );
+  // And the mirror: claiming an attempt the log has no BEGIN for.
+  assert.throws(
+    () =>
+      coverageOf(
+        withRole("mlx-ltx-2-3-bf16-1280x704-f297-fps30", "attempted_failed_host_limit"),
+        [],
+        states,
+      ),
+    /declared attempted_failed_host_limit but the driver log has no BEGIN line/,
+  );
+  // The committed plan itself passes both.
+  assert.ok(coverageOf(PLAN, [], states).plannedEntries > 0);
 });

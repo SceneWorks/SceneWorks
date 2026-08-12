@@ -31,6 +31,7 @@
  * within the noise floor" is a comparison against a number this dataset produced.
  *
  * Usage: node scripts/fit-ltx-temporal-form.mjs [--dataset <bundle.json>] [--plan <plan.json>]
+ *                                               [--driver-log <sweep-run.log>]
  *                                               [--write <report.json>] [--check]
  */
 import { readFile, writeFile } from "node:fs/promises";
@@ -222,10 +223,15 @@ const SERIES = Object.freeze({
   denoise: (record) => record.observedMemory.denoise.activeBytes,
   decode: (record) => record.observedMemory.decode.activeBytes,
   overallActive: (record) => record.observedMemory.overall.activeBytes,
-  // The honest active+cache quantity: the largest sum that actually CO-EXISTED, taken per phase.
-  // `observedMemory.overall.allocatorBytes` is `max(active) + max(cache)` across phases, and on this
-  // provider those maxima land in DIFFERENT phases (active peaks in the text phase at q4/q8, cache
-  // in the decode), so it over-bounds by tens of GiB.
+  // The tightest active+cache quantity this apparatus can produce: per-phase peak ACTIVE plus
+  // end-of-phase CACHE, maximised over the phases. It is an UPPER BOUND on co-existence, not a
+  // simultaneous maximum — `PhaseMemory::capture()` (`mlx.rs`, `get_peak_memory` + `get_cache_memory`)
+  // pairs a phase-WINDOW peak with an INSTANTANEOUS end-of-phase cache reading, and MLX exposes no
+  // "cache at the active peak". During an LTX decode the cache enters at ~0 and grows monotonically,
+  // so the two instants are furthest apart exactly where the number is largest.
+  // It is still strictly tighter than `observedMemory.overall.allocatorBytes`, which is
+  // `max(active) + max(cache)` across DIFFERENT phases (active peaks in the text phase at q4/q8,
+  // cache in the decode) and over-bounds by tens of GiB.
   maxPhaseActivePlusCache: (record) =>
     Math.max(
       ...["conditioning", "denoise", "decode"].map(
@@ -274,38 +280,128 @@ export function pointsFrom(records, roleByFixture) {
 }
 
 /**
+ * The driver's own terminal state per plan entry, parsed from the committed sweep log
+ * (`docs/calibration/sc-18810/sweep-run.log`, written verbatim by the sweep driver — see its
+ * `BEGIN`/`OK`/`FAIL`/`STOP` writes).
+ *
+ * This exists because the previous version of this script carried a HARDCODED two-element list of
+ * "attempted and killed" fixtures, and it was wrong: `1280x704 f241` was reported
+ * `not_attempted_host_limit` while the log shows `BEGIN ... free=16GiB 11:40:16` and no terminal
+ * line at all. A coverage state that is typed by hand is a claim about the run that nothing checks.
+ *
+ * Terminal states, all four of which the log distinguishes:
+ *   `completed`           — the driver wrote `OK`.
+ *   `failed`              — the driver wrote `FAIL`; the child exited non-zero or was killed.
+ *   `no_terminal_record`  — a `BEGIN` with no `OK`/`FAIL`. The driver ITSELF did not survive to
+ *                           write one. Attempted, and it did not survive; not "never run".
+ *   `not_begun`           — no `BEGIN` line. `stoppedBefore` marks the entry the driver named when
+ *                           it halted on the free-disk floor.
+ * An entry re-run after a failure (`704x1280 f177` was refused by the staged-residency guard, then
+ * re-run and captured) counts as `completed`: one `OK` is enough.
+ */
+export function driverStatesFrom(logText) {
+  const states = new Map();
+  const of = (name) => {
+    if (!states.has(name)) {
+      states.set(name, { begins: 0, oks: 0, fails: 0, stoppedBefore: false });
+    }
+    return states.get(name);
+  };
+  for (const line of logText.split("\n")) {
+    let match;
+    if ((match = /^BEGIN (\S+) /.exec(line))) of(match[1]).begins += 1;
+    else if ((match = /^OK (\S+) /.exec(line))) of(match[1]).oks += 1;
+    else if ((match = /^FAIL (\S+) /.exec(line))) of(match[1]).fails += 1;
+    else if ((match = /^STOP .* before (\S+)\s*$/.exec(line))) of(match[1]).stoppedBefore = true;
+  }
+  for (const state of states.values()) {
+    state.terminal =
+      state.oks > 0
+        ? "completed"
+        : state.begins === 0
+          ? "not_begun"
+          : state.fails > 0
+            ? "failed"
+            : "no_terminal_record";
+  }
+  return states;
+}
+
+/**
  * Per-planned-entry coverage. A sweep that silently drops points is indistinguishable from one that
  * never planned them, so every planned entry lands in exactly one bucket and the report carries the
- * count. `attempted_failed` is supplied by the caller from the driver's own failure logs — the
- * dataset cannot distinguish "never run" from "run and killed".
+ * count.
+ *
+ * The bucket is DERIVED — from the dataset (was a record captured?) and from the driver log (was the
+ * geometry ever begun?). `_role` is consulted for exactly one thing: telling a geometry the sweep
+ * deliberately declined to attempt (`not_attempted_host_limit`) apart from one it simply never got
+ * to (`not_reached`), which the log cannot distinguish because neither has a `BEGIN`.
+ *
+ * `_role` is a PRE-REGISTRATION label and the driver log is a RUN RECORD, so the two are checked
+ * against each other rather than one being derived from the other. A `fit` row can perfectly well
+ * have been attempted and killed — `q8 768x512 f361` is — and that does not make it any less a `fit`
+ * row. What is NOT allowed is a `*_host_limit` role that contradicts the log; that is the exact
+ * defect this function now throws on.
  */
-export function coverageOf(plan, points, attemptedFailed = []) {
+export function coverageOf(plan, points, driverStates = new Map()) {
   const captured = new Map();
   for (const point of points) {
     captured.set(point.fixture, (captured.get(point.fixture) ?? 0) + 1);
   }
-  const failed = new Set(attemptedFailed);
-  const entries = plan.providers.map((provider) => ({
-    fixture: provider.fixture,
-    role: provider._role,
-    tier: provider.target.tier,
-    outputVoxels: provider._outputVoxels,
-    latentTokens: provider._latentTokens,
-    state: captured.has(provider.fixture)
-      ? "captured"
-      : failed.has(provider.fixture)
-        ? "attempted_failed_host_limit"
-        : provider._role === "not_attempted_host_limit"
-          ? "not_attempted_host_limit"
-          : "not_reached",
-    captures: captured.get(provider.fixture) ?? 0,
-  }));
+  const entries = plan.providers.map((provider) => {
+    const terminal = driverStates.get(provider.name)?.terminal ?? "not_begun";
+    const attempted = terminal !== "not_begun";
+    if (provider._role === "not_attempted_host_limit" && attempted) {
+      throw new Error(
+        `${provider.fixture} is declared not_attempted_host_limit but the driver log records it as ` +
+          `${terminal} — the plan and the log disagree about whether it was run`,
+      );
+    }
+    if (provider._role === "attempted_failed_host_limit" && !attempted) {
+      throw new Error(
+        `${provider.fixture} is declared attempted_failed_host_limit but the driver log has no ` +
+          `BEGIN line for it`,
+      );
+    }
+    return {
+      fixture: provider.fixture,
+      role: provider._role,
+      tier: provider.target.tier,
+      outputVoxels: provider._outputVoxels,
+      latentTokens: provider._latentTokens,
+      driverTerminalState: terminal,
+      state: captured.has(provider.fixture)
+        ? "captured"
+        : terminal === "failed" || terminal === "no_terminal_record"
+          ? "attempted_failed_host_limit"
+          : // The driver wrote OK and the dataset has no record for it — a retention hole, not a
+            // host limit. Given its own bucket rather than folded into either neighbour, because
+            // silently calling it "failed" is the same class of mislabel this function exists to
+            // stop. Zero of these in the committed run.
+            terminal === "completed"
+            ? "completed_without_record"
+            : provider._role === "not_attempted_host_limit"
+              ? "not_attempted_host_limit"
+              : "not_reached",
+      captures: captured.get(provider.fixture) ?? 0,
+    };
+  });
   const byState = {};
   for (const entry of entries) byState[entry.state] = (byState[entry.state] ?? 0) + 1;
-  return { plannedEntries: entries.length, byState, entries };
+  return {
+    plannedEntries: entries.length,
+    capturedGeometries: new Set(
+      points.map((point) => {
+        const { width, height, frames, fps } = point.geometry;
+        return `${width}x${height}:f${frames}:fps${fps}`;
+      }),
+    ).size,
+    byState,
+    entries,
+  };
 }
 
-export function buildReport(points, plan = null, attemptedFailed = []) {
+export function buildReport(points, plan = null, driverStates = new Map()) {
   const tiers = [...new Set(points.map((point) => point.tier))].sort();
   const bySeries = {};
   for (const series of Object.keys(SERIES)) {
@@ -356,7 +452,7 @@ export function buildReport(points, plan = null, attemptedFailed = []) {
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
     capturedRecords: points.length,
     tiers,
-    ...(plan ? { coverage: coverageOf(plan, points, attemptedFailed) } : {}),
+    ...(plan ? { coverage: coverageOf(plan, points, driverStates) } : {}),
     noiseFloors,
     observations: points
       .map((point) => ({
@@ -406,20 +502,15 @@ async function main() {
     ROOT,
     value("--write", "docs/generated/ltx-temporal-form-fit-sc-18810.json"),
   );
+  const driverLogPath = path.resolve(
+    ROOT,
+    value("--driver-log", "docs/calibration/sc-18810/sweep-run.log"),
+  );
   const dataset = await readJson(datasetPath);
   const plan = await readJson(planPath);
-  // Attempted-and-killed geometries, named explicitly. These were RUN and the adapter process was
-  // terminated by a signal under memory pressure; the dataset alone cannot tell them apart from
-  // geometries that were never scheduled.
-  const attemptedFailed = [
-    "ltx-2-3-mlx-q8-768x512-f449-fps30-seed18808",
-    "ltx-2-3-mlx-q8-768x512-f361-fps30-seed18808",
-  ];
-  const report = buildReport(
-    pointsFrom(dataset.records, rolesFromPlan(plan)),
-    plan,
-    attemptedFailed,
-  );
+  // Which geometries were ATTEMPTED comes from the driver's own log, not from a hand-typed list.
+  const driverStates = driverStatesFrom(await readFile(driverLogPath, "utf8"));
+  const report = buildReport(pointsFrom(dataset.records, rolesFromPlan(plan)), plan, driverStates);
   const serialised = `${JSON.stringify(report, null, 2)}\n`;
   if (args.includes("--check")) {
     const existing = await readFile(reportPath, "utf8");

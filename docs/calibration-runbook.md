@@ -887,20 +887,24 @@ max-envelope bf16 row took **14.1 minutes**, and `nax-worker` caps at 240 minute
 
 ### sc-18810 re-measured it through the committed apparatus — three of those claims did not survive
 
-Every number below comes from `docs/generated/ltx-mlx-geometry-sweep-sc-18810.json`, captured through
-the sc-18808 MLX arm and `scripts/memory-calibration-harness.mjs` on the **production full-A/V path**
-(`video_mode` unset, audio track decoded — the row above used `no_audio`), q8, inference pin
-`b965641e`. Replicates on four geometries give a measured noise floor rather than an assumed one:
-decode is byte-identical across repeats, denoise varies by 0.001%, and the text phase by 0.33%.
+Every number below is **measured** — from `docs/generated/ltx-mlx-geometry-sweep-sc-18810.json`,
+captured through the sc-18808 MLX arm and `scripts/memory-calibration-harness.mjs` on the
+**production full-A/V path** (`video_mode` unset, audio track decoded — the row above used
+`no_audio`), q8, inference pin `b965641e` — **except where a paragraph says PREDICTED**, which means
+it is computed from the engine's committed `LTX_VAE_*` cost model and has no record behind it. §5 is
+the only such paragraph. 13 records over **8 distinct geometries**; replicates on four of them give a
+measured noise floor rather than an assumed one: decode is byte-identical across repeats, denoise
+varies by 0.001% (2.7e-4 GiB), and the text phase by 0.33% (0.110 GiB).
 
 **1. The peak is not one curve — it is the max of three, and only the phases are fittable.** The
 shipped structure already does this (`KreaTurboPhasePeaks::peak_gb`), and it is load-bearing rather
 than incidental. Fitting the *overall* peak with any single form leaves a held-out error of
-**≥10.3 GiB** (94× the noise floor) for all five candidate forms, because a max of linear pieces is
-not linear. Fitting each phase separately lands at **0.02–0.13 GiB**. Add the temporal term
-*per phase*; never to the aggregate.
+**≥10.26 GiB** (94× the text-phase noise floor) for all five candidate forms, because a max of linear
+pieces is not linear. Fitting each phase separately lands at **0.019–0.30 GiB** — denoise and decode
+at 0.019–0.13, text at 0.30. Add the temporal term *per phase*; never to the aggregate.
 
-**2. The phase coefficients are physical constants, and two independent sources agree with them.**
+**2. The phase coefficients are the right order of magnitude for the staged components, and the
+per-voxel one matches the engine's own fit to 0.3%.**
 
 | phase | best form | coefficients (q8) | held-out max residual |
 | --- | --- | --- | --- |
@@ -908,46 +912,103 @@ not linear. Fitting each phase separately lands at **0.02–0.13 GiB**. Add the 
 | denoise | `fixedGb + perLatentTokenGb·T_lat·(W/32)·(H/32)` | 20.52 + 0.000986/token | **0.13 GiB** |
 | decode | `fixedGb + perMpxGb·mpx + perMpxFrameGb·(mpx·frames)` | 2.52 + 0.12·mpx + 0.2998·mpx·frames | **0.019 GiB** |
 
-`fixedGb` 20.52 GiB for denoise is the 20.61 GB q8 transformer; 32.92 GiB for text is the 32.73 GB
-staged text encoder. `perMpxFrameGb` 0.2998 is **322 B per output voxel**, against the engine's own
-committed single-pass decode model of `3.3 GB + 340 B/voxel` — fitted at ~2.5 GB / ~287 B/voxel and
-documented as rounded **up** for headroom (`mlx-gen-ltx/src/pipeline.rs:218-228`). `perLatentTokenGb`
-0.000986 is **1.009 MiB/token**, which reproduces the withdrawn `0.997–1.032 MiB/token` above — as a
-**denoise-phase** relation, not an overall-peak one. The additive `perFrameGb` form is 15–350× worse
-on held-out points and should not be adopted.
+🔴 **The intercepts are NOT identities, and an earlier revision of this section said they were by
+comparing GiB against GB.** The coefficient column is GiB; `stagedTextEncoderBytes` and
+`stagedTransformerBytes` are decimal bytes. In **one unit (GB)**:
 
-**3. 🔴 fps is NOT a memory axis.** Measured at identical `{768x512, 241 frames}`, fps 30 vs 24 — a
-25% difference in audio-latent length: conditioning **identical to the byte**, decode identical to
-within 400 B, denoise +0.075%. The joint audio denoise is real but its memory cost is ~0.07% of peak,
-far under the replicate noise floor. `GeometryEnvelope`'s missing fps axis is not a correctness gap
-for memory.
+- denoise intercept **22.03 GB** against a **20.61 GB** transformer — **1.42 GB unexplained (6.9%)**
+- text intercept **35.35 GB** against a **32.73 GB** staged text encoder — **2.62 GB unexplained (8.0%)**
+
+The GiB→GB factor is **7.37%**, so the apparent agreement WAS that factor. The residue is plausibly
+other resident state (the connector, small components, allocator overhead), but nothing here
+establishes that — and the denoise gap is ~10× that fit's own 0.13 GiB held-out residual, so it is
+not measurement slack either. Treat the intercepts as fitted parameters near the component sizes, not
+as the component sizes.
+
+The **per-voxel** result is unit-clean and stronger than first claimed. `perMpxFrameGb` 0.2998 GiB per
+`mpx·frames` is **322 B per output voxel**. The engine's own single-pass decode cost is
+`LTX_VAE_ACCUM_BYTES_PER_VOXEL + LTX_VAE_TILE_BYTES_PER_OUT_VOXEL` (a single pass is one tile, so
+both terms apply), and those two are documented as fitted at **~36 + ~287 = 323 B/voxel**, then
+rounded *up* to 40 + 300 = 340 for headroom (`mlx-gen-ltx/src/pipeline.rs:218-228`). Measured 322
+against the engine's fitted **323** is **0.3%** — an independent reproduction of that fit, not of the
+rounded constant. `perLatentTokenGb` 0.000986 is **1.009 MiB/token**, which reproduces the withdrawn
+`0.997–1.032 MiB/token` above — as a **denoise-phase** relation, not an overall-peak one. The additive
+`perFrameGb` form is 15–350× worse on held-out points and should not be adopted.
+
+**3. 🔴 fps is a real but negligible memory axis — not an unmeasurable one.** Measured at identical
+`{768x512, 241 frames}`, fps 30 vs 24 (a 25% difference in audio-latent length): conditioning
+**identical to the byte**, decode identical to within 400 B, denoise **+26.0 MB (+0.075%)**. The
+argument for ignoring it is MAGNITUDE, not resolution: 26.0 MB is **90× this dataset's own denoise
+replicate floor** (2.7e-4 GiB) and is comfortably resolvable — it is under the *text*-phase floor
+only. It is 0.075% of the denoise phase and 0.07% of the run's 33.23 GiB active peak, and at this
+geometry the admission quantity (`max` over phases, here the text phase) is **identical to the byte**
+across the two fps values. So the joint audio denoise does cost memory, and the cost is far below any
+headroom a budget would carry. `GeometryEnvelope`'s missing fps axis is not a correctness gap for
+memory — but sc-18812 should record it as *small*, not as *unmeasured*.
 
 **4. 🔴 `recommendedMaxWorkingSetSize` does not bound active + cache.** Measured directly here:
 `recommendedMaxWorkingSetSize` = 115,448,725,504 B = **107.52 GiB**, `maxBufferLength` = 80.64 GiB,
 `hw.memsize` = 128 GiB, MLX's own `get_memory_limit()` = 130,567,005,798 B = **121.60 GiB**
-(0.95 × `hw.memsize`). q8 at 640x640 x 177 co-existed at 24.30 GiB active **+ 90.68 GiB allocator
-cache = 114.98 GiB**, i.e. 7.46 GiB *above* the 107.52 GiB ceiling, on a render that completed and was
-bit-identical on warm repeat. MLX's cache is elastic and released under pressure. Log it — but a
-feasibility ceiling is not made of active+cache, and the cache series is unfittable (held-out error
-≥20 GiB for every form).
+(0.95 × `hw.memsize`). q8 at 640x640 x 177 reached **24.30 GiB peak active + 90.68 GiB end-of-phase
+allocator cache = 114.98 GiB**, i.e. 7.46 GiB *above* the 107.52 GiB ceiling, on a render that
+completed and was bit-identical on warm repeat.
 
-**5. 🔴 Peak memory is NON-MONOTONIC in frames, and the worst geometry is the write cap.** Rung 2
-engages on a machine-INDEPENDENT bound: `VaeTiling::LTX.writable_frame_cap(h,w) = i32::MAX/(8·h·w)`
-(`gen-core/src/tiling.rs:166`, `full_res_channels: 8`) = 682 / 682 / 655 / **297** / **297** over the
-five declared resolutions. So only the two 0.90 MP buckets reach it inside the 449-frame envelope,
-and they reach it at **298 output frames** — roughly 55 frames before the memory bound would bind on
-this host. Single-pass decode cost climbs to ~94 GB at 1280x704 f297 and **collapses to ~19 GB at
-f305** once tiling engages. The most expensive geometry in the declared envelope is the cap, not the
-maximum, and a curve fitted across that boundary fits through a capability change.
+⚠️ That 114.98 GiB is an **upper bound on co-existence, not a simultaneous maximum**.
+`PhaseMemory::capture()` pairs a phase-**window** peak (`get_peak_memory`) with an **instantaneous**
+end-of-phase cache reading (`get_cache_memory`); MLX exposes no "cache at the active peak". Cache
+enters the decode at ~0 and grows monotonically to 90.68 GiB, so the two readings are furthest apart
+exactly where the number is largest, and the 7.46 GiB excess is 6.5% of the reading — inside that
+uncertainty. The **qualitative** finding is not in doubt (it is corroborated by the driver log's
+free-disk trace, 81 → 16 GiB across two large decodes): MLX's cache is elastic, grows past the
+recommended working set, and is released under pressure. Log it — but a feasibility ceiling is not
+made of active+cache, and the cache series is unfittable (held-out error ≥20 GiB for every form).
+Tightening 114.98 GiB into a true simultaneous reading would need cache sampled at the active peak —
+an MLX-side hook this apparatus does not have — and a re-render, so the bound is stated rather than
+closed.
+
+**5. 🔴 Peak memory is NON-MONOTONIC in frames, and the worst geometry is the write cap. PREDICTED —
+no f297 or f305 record was captured.** Rung 2 engages on TWO independent bounds:
+
+- the **write bound**, `VaeTiling::LTX.writable_frame_cap(h,w) = i32::MAX/(8·h·w)`
+  (`gen-core/src/tiling.rs:167`, `full_res_channels: 8`) = 682 / 682 / 655 / **297** / **297** over
+  the five declared resolutions. It does not move with the host.
+- the **memory bound**, single-pass `3.3 GB + 340 B/voxel` against `get_memory_limit() × 0.85`. It
+  does, and it binds **earlier** on a smaller machine.
+
+🔴 So the claim that holds everywhere is **ONE-SIDED: no host can exceed 297 single-pass output frames
+at 0.90 MP, and smaller hosts tile earlier via the memory bound.** "The 0.90 MP buckets tile from 298
+frames on every host" is FALSE and this repository's own CI falsifies it — the hosted `macos-26`
+runner tiles `768x512 x 97`, **585 frames below that bucket's 682 cap**, purely for memory.
+
+Predicted from the committed cost model: single-pass decode climbs to **94.3 GB** at 1280x704 f297
+(`3.3 GB + 340 B/voxel × 267,632,640`). One lattice step above, at f305, the decode must tile, and its
+cost is `3.3 GB + 40 B/voxel × 274,841,600 = 14.3 GB` of unavoidable full-output accumulators plus
+`300 B` per tile-voxel. The selector keeps the **largest** tile that fits, so the tiled cost *rises*
+with host memory: **≈15.0 GB** where only the smallest selectable tile (192 px × 64 frames) fits,
+**18.5–21.8 GB** across the 384–512 px × 96-frame range, and **≈63.8 GB** on this 128 GiB host, which
+affords 768 px × the full 305 frames under its 103.4 GiB ceiling. The collapse across the cap is real
+on every host but much smaller on a large one (94.3 → 63.8 GB here). The most expensive geometry in
+the declared envelope is still the cap, not the maximum, and a curve fitted across that boundary fits
+through a capability change.
 
 **6. 🔴 What actually bounds this host is FREE DISK, via swap.** Because the allocator cache grows
-past physical memory, large single-pass decodes push the box into swap. Measured: 704x1280 x 177
-(159,498,240 output voxels) completed; 768x512 x 449 (176,553,984 voxels) was **killed by a signal**
-with free disk falling 81 → 16 GiB, and 768x512 x 361 (141,950,976 voxels) was killed later in the
-same session at lower free space. The safe ceiling therefore *moves with free disk* and degraded
-across one session as APFS local snapshots pinned the churn. Check `df -h /System/Volumes/Data`
-before AND during, and treat any single-pass decode above ~150M output voxels as needing tens of GiB
-of headroom. This is a HOST verdict, not a model verdict.
+past physical memory, large single-pass decodes push the box into swap. From the committed driver log
+(`docs/calibration/sc-18810/sweep-run.log`): 704x1280 x 177 (159,498,240 output voxels) completed;
+768x512 x 449 (176,553,984 voxels) was **killed by a signal** after 1238 s with free disk falling
+81 → 16 GiB; 1280x704 x 241 (217,169,920 voxels) was begun at 16 GiB free and left **no terminal line
+at all** — the driver itself did not survive it; and 768x512 x 361 (141,950,976 voxels) was killed
+later in the same session at lower free space. The safe ceiling therefore *moves with free disk* and
+degraded across one session as APFS local snapshots pinned the churn. Check
+`df -h /System/Volumes/Data` before AND during, and treat any single-pass decode above ~150M output
+voxels as needing tens of GiB of headroom. This is a HOST verdict, not a model verdict.
+
+**Coverage is derived, not asserted.** `scripts/fit-ltx-temporal-form.mjs` buckets every planned entry
+from two artifacts — the dataset (was a record captured?) and the driver log (was it ever begun?) —
+and **throws** when the plan's `_role` contradicts the log. It used to take "attempted and killed"
+from a hardcoded two-element array, and that array was wrong: `1280x704 f241` was published as
+`not_attempted_host_limit` while the log shows it was begun. Final counts: **8 captured geometries /
+13 records**, 3 attempted-and-not-survived, 7 `not_attempted_host_limit`, 26 never reached (all bf16
+and q4).
 
 ## 7. Ingest, stamping, and a new lane
 
