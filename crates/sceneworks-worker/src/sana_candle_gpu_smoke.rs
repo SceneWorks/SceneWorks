@@ -20,7 +20,8 @@
 //! ```text
 //! $env:HF_HUB_CACHE="E:\huggingface\hub"
 //! $env:SANA_OUT_DIR="D:\sceneworks-sana-validate"
-//! # optional: SANA_STEPS=20  SANA_GUIDANCE=4.5  SANA_SEED=42  SANA_PROMPT="..."  SANA_NEG="..."
+//! $env:SANA_REFERENCE_IMAGE="D:\sceneworks-sana-validate\reference.png"
+//! # optional: SANA_IMG2IMG_STRENGTH=0.5  SANA_STEPS=20  SANA_GUIDANCE=4.5  SANA_SEED=42
 //! cargo test -p sceneworks-worker --no-default-features --features backend-candle --release \
 //!   sana_worker_lane_gpu_smoke -- --ignored --nocapture
 //! # SANA-Sprint (CFG-free, 1–4 step; optional SANA_SPRINT_STEPS=2 SANA_SPRINT_GUIDANCE=4.5):
@@ -28,18 +29,44 @@
 //!   sana_sprint_worker_lane_gpu_smoke -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, WeightsSource};
+use gen_core::{Conditioning, GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource};
 
 use super::smoke_support::{env_or, image_mean, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
+
+fn load_rgb(path: &Path) -> Image {
+    let image = image::open(path)
+        .unwrap_or_else(|error| panic!("open reference {}: {error}", path.display()))
+        .to_rgb8();
+    Image {
+        width: image.width(),
+        height: image.height(),
+        pixels: image.into_raw(),
+    }
+}
+
+fn img2img_reference() -> (PathBuf, Image, f32) {
+    let path = PathBuf::from(
+        std::env::var("SANA_REFERENCE_IMAGE")
+            .expect("set SANA_REFERENCE_IMAGE to a real PNG/JPEG reference")
+            .trim(),
+    );
+    let strength: f32 = env_or("SANA_IMG2IMG_STRENGTH", "0.5")
+        .parse()
+        .expect("SANA_IMG2IMG_STRENGTH");
+    assert!(strength.is_finite(), "SANA_IMG2IMG_STRENGTH must be finite");
+    let image = load_rgb(&path);
+    (path, image, strength)
+}
 
 /// sc-11780 worker-lane E2E: drive the ACTUAL worker weight-resolution + dense-load + render for the
 /// candle SANA 1600M lane on real CUDA. Calls the WORKER's [`crate::image_jobs::resolve_weights_dir`]
 /// the way `generate_candle_stream` does, asserts it resolves the whole `Efficient-Large-Model/
 /// Sana_1600M_1024px_diffusers` diffusers snapshot ROOT off-Mac (the candle-sana branch — NOT the MLX
 /// turnkey the macOS path loads, NOT a tier subdir), then loads DENSE and renders a coherent true-CFG
-/// 1024² image. SANA is a true-CFG flow-match model (20 steps / guidance 4.5 + negative prompt).
+/// 1024² img2img result. SANA is a true-CFG flow-match model (20 steps / guidance 4.5 + negative
+/// prompt).
 #[test]
 #[ignore = "real-weight worker-lane GPU smoke; needs the Efficient-Large-Model/Sana_1600M_1024px_diffusers \
             snapshot in the HF cache (HF_HUB_CACHE/HF_HOME) + a CUDA device (cap=120)"]
@@ -66,6 +93,7 @@ fn sana_worker_lane_gpu_smoke() {
          golden hour lighting",
     );
     let negative = env_or("SANA_NEG", "blurry, low quality, jpeg artifacts, deformed");
+    let (reference_path, reference, strength) = img2img_reference();
 
     // A minimal job payload — resolve_weights_dir keys off `model` (+ absent modelPath), the exact shape
     // the router hands `generate_candle_stream`. No `mlxQuantize`: the candle SANA base path is dense.
@@ -119,10 +147,17 @@ fn sana_worker_lane_gpu_smoke() {
         seed: Some(seed),
         steps: Some(steps),
         guidance: Some(guidance),
+        strength: Some(strength),
+        conditioning: vec![Conditioning::Reference {
+            image: reference,
+            strength: Some(strength),
+        }],
         ..Default::default()
     };
     println!(
-        "[worker-smoke] sana_1600m: rendering {w}x{h} @ {steps} steps, guidance {guidance}, seed {seed} ..."
+        "[worker-smoke] sana_1600m img2img: reference={} strength={strength} rendering {w}x{h} @ \
+         {steps} steps, guidance {guidance}, seed {seed} ...",
+        reference_path.display()
     );
     let started = std::time::Instant::now();
     let mut last = String::new();
@@ -143,7 +178,7 @@ fn sana_worker_lane_gpu_smoke() {
 
     let mean = image_mean(&image);
     let std = image_std(&image);
-    let png = out_dir.join(format!("sana_1600m_candle_{w}x{h}_{steps}step.png"));
+    let png = out_dir.join(format!("sana_1600m_candle_img2img_{w}x{h}_{steps}step.png"));
     save_png(&image, &png);
     println!(
         "[worker-smoke] sana_1600m: {}x{} mean {:.2} std {:.2} in {:.1}s -> {}",
@@ -165,7 +200,8 @@ fn sana_worker_lane_gpu_smoke() {
          (check CUDA_COMPUTE_CAP=120)"
     );
     println!(
-        "[worker-smoke] DONE: sana_1600m candle true-CFG render coherent at {steps} steps (eyeball {})",
+        "[worker-smoke] DONE: sana_1600m candle img2img true-CFG render coherent at {steps} steps \
+         (eyeball {})",
         png.display()
     );
 }
@@ -175,8 +211,9 @@ fn sana_worker_lane_gpu_smoke() {
 /// Calls the WORKER's [`crate::image_jobs::resolve_weights_dir`] the way `generate_candle_stream` does,
 /// asserts it resolves the whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` diffusers
 /// snapshot ROOT off-Mac (the candle-sana branch — NOT the MLX turnkey, NOT a tier subdir), then loads
-/// DENSE and renders a coherent image. Sprint is CFG-FREE (guidance embedded, no negative-prompt second
-/// pass) and runs in the 1–4 step SCM/TrigFlow band — this smoke drives a 2-step render.
+/// DENSE and renders a coherent img2img result. Sprint is CFG-FREE (guidance embedded, no
+/// negative-prompt second pass) and runs in the 1–4 step SCM/TrigFlow band — this smoke drives a
+/// 2-step render.
 #[test]
 #[ignore = "real-weight worker-lane GPU smoke; needs the Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers \
             snapshot in the HF cache (HF_HUB_CACHE/HF_HOME) + a CUDA device (cap=120)"]
@@ -206,6 +243,7 @@ fn sana_sprint_worker_lane_gpu_smoke() {
         "a photorealistic red fox sitting in a sunlit autumn forest, sharp focus, detailed fur, \
          golden hour lighting",
     );
+    let (reference_path, reference, strength) = img2img_reference();
 
     // A minimal job payload — resolve_weights_dir keys off `model` (+ absent modelPath), the exact shape
     // the router hands `generate_candle_stream`. No `mlxQuantize`: the candle Sprint path is dense.
@@ -261,11 +299,17 @@ fn sana_sprint_worker_lane_gpu_smoke() {
         seed: Some(seed),
         steps: Some(steps),
         guidance: Some(guidance),
+        strength: Some(strength),
+        conditioning: vec![Conditioning::Reference {
+            image: reference,
+            strength: Some(strength),
+        }],
         ..Default::default()
     };
     println!(
-        "[worker-smoke] sana_sprint_1600m: rendering {w}x{h} @ {steps} steps (CFG-free), guidance \
-         {guidance}, seed {seed} ..."
+        "[worker-smoke] sana_sprint_1600m img2img: reference={} strength={strength} rendering \
+         {w}x{h} @ {steps} steps (CFG-free), guidance {guidance}, seed {seed} ...",
+        reference_path.display()
     );
     let started = std::time::Instant::now();
     let mut last = String::new();
@@ -286,7 +330,9 @@ fn sana_sprint_worker_lane_gpu_smoke() {
 
     let mean = image_mean(&image);
     let std = image_std(&image);
-    let png = out_dir.join(format!("sana_sprint_1600m_candle_{w}x{h}_{steps}step.png"));
+    let png = out_dir.join(format!(
+        "sana_sprint_1600m_candle_img2img_{w}x{h}_{steps}step.png"
+    ));
     save_png(&image, &png);
     println!(
         "[worker-smoke] sana_sprint_1600m: {}x{} mean {:.2} std {:.2} in {:.1}s -> {}",
@@ -308,8 +354,8 @@ fn sana_sprint_worker_lane_gpu_smoke() {
          (check CUDA_COMPUTE_CAP=120)"
     );
     println!(
-        "[worker-smoke] DONE: sana_sprint_1600m candle CFG-free render coherent at {steps} steps \
-         (eyeball {})",
+        "[worker-smoke] DONE: sana_sprint_1600m candle img2img CFG-free render coherent at {steps} \
+         steps (eyeball {})",
         png.display()
     );
 }

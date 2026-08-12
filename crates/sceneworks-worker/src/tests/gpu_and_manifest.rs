@@ -1950,11 +1950,11 @@ fn sd3_5_manifest_entries_gate_correctly() {
 }
 
 /// sc-8489 (SANA Phase B2): the SANA builtin-manifest entry gates correctly at the catalog layer —
-/// family `sana`, `capabilities == ["text_to_image"]` only (edit/reference rejected), the UN-gated
+/// family `sana`, text-to-image plus non-edit image-to-image, the UN-gated
 /// `SceneWorks/Sana_1600M_1024px_mlx` MLX re-host (NOT gated — the mirror carries the NVIDIA
 /// non-commercial NOTICE), dense bf16 (NO `mlx.quantize` — the load path rejects a quant), the
-/// `mlx.minMemoryGb` memory-eligibility lever, the sana LoRA family, and the NVIDIA non-commercial
-/// notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
+/// `mlx.minMemoryGb` memory-eligibility lever, no unsupported LoRA advertisement, and the NVIDIA
+/// non-commercial notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
 /// shipped) so manifest drift on any of these levers fails CI without a real download. The
 /// descriptor-derived guidance/negative/backend surface is covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
@@ -1967,13 +1967,17 @@ fn sana_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (base SANA is plain t2i).
+    // sc-18475: both native backends accept the advertised non-edit singular-reference img2img shape.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE; OK to
     // ship un-gated with notice, the Krea/Boogu precedent) — so NO `gated: true`.
     assert_ne!(
@@ -2020,18 +2024,12 @@ fn sana_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet) — an empty list would match every
-    // LoRA (sc-1927).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana loraCompatibility.families"
+    // SANA adapters are not wired. Do not advertise a reserved LoRA family: the request router
+    // rejects LoRA carriers fail-closed, so surfacing an adapter picker here would promise an
+    // operation the worker intentionally refuses.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
@@ -2045,10 +2043,10 @@ fn sana_manifest_entry_gates_correctly() {
     );
 }
 
-/// sc-8490: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family, text_to_image
-/// only (CFG-free few-step distillation, no edit/reference surface), un-gated `SceneWorks/*` MLX
-/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and the
-/// SANA LoRA family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
+/// sc-8490/sc-18475: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family,
+/// text-to-image plus non-edit image-to-image, un-gated `SceneWorks/*` MLX
+/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and no
+/// unsupported LoRA advertisement. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
 /// loop fails CI. Descriptor-derived guidance/negative/backend flags are covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
 #[test]
@@ -2060,13 +2058,17 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana-sprint family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (Sprint is plain few-step t2i).
+    // sc-18475: Sprint exposes the same non-edit singular-reference img2img shape as base SANA.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana-sprint capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana-sprint capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE) — no `gated`.
     assert_ne!(
         entry.get("gated").and_then(Value::as_bool),
@@ -2118,17 +2120,10 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana-sprint mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana-sprint loraCompatibility.families"
+    // Sprint shares the same fail-closed adapter contract as base SANA.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana-sprint must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
@@ -2158,7 +2153,8 @@ fn kolors_manifest_entry_gates_correctly() {
         Some("kolors"),
         "kolors family"
     );
-    // Kolors keeps its full surface (unlike base SANA's t2i-only): edit/character/style variations.
+    // Kolors keeps its full edit/character/style surface; SANA's narrower reference surface is
+    // non-edit singular-reference img2img.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)

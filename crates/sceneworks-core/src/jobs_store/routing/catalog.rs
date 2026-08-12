@@ -841,10 +841,11 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("sd3_5_large", true, true, true, false, false),
     ModelCaps::new("sd3_5_large_turbo", true, true, true, false, false),
     ModelCaps::new("sd3_5_medium", true, true, true, false, false),
-    // SANA 1600M (epic 8485 / sc-8489 MLX; sc-11780 candle): NVIDIA's 1.6B Linear-DiT true-CFG txt2img.
+    // SANA 1600M (epic 8485 / sc-8489 MLX; sc-11780/sc-18475 candle): NVIDIA's 1.6B Linear-DiT
+    // true-CFG txt2img plus singular-reference non-edit img2img.
     // Both backends wired — `mlx-gen-sana` (macOS, MLX-packed q4/q8/bf16 turnkey) + `candle-gen-sana`
     // (Windows/CUDA + Linux, candle-gen #495 — loads the whole `Efficient-Large-Model/
-    // Sana_1600M_1024px_diffusers` HF snapshot dense), so `candle_routed = true`. Pure txt2img; NOT
+    // Sana_1600M_1024px_diffusers` HF snapshot dense), so `candle_routed = true`. NOT
     // `candle_quant` / `candle_lora`: the candle base path advertises neither (dense bf16, no adapter
     // fold) — an `mlxQuantize` or LoRA request is refused off-Mac and remains queued.
     ModelCaps::new("sana_1600m", true, true, false, false, false),
@@ -853,7 +854,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // continuous-time consistency loop in 1–4 steps. Both backends wired — `mlx-gen-sana` (macOS,
     // MLX-packed q4/q8/bf16 turnkey) + `candle-gen-sana`'s Sprint pipeline (Windows/CUDA + Linux,
     // candle-gen #498 — loads the whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF
-    // snapshot dense), so `candle_routed = true`. Pure txt2img; NOT `candle_quant` / `candle_lora`: the
+    // snapshot dense), so `candle_routed = true`, including singular-reference non-edit img2img. NOT
+    // `candle_quant` / `candle_lora`: the
     // candle Sprint path advertises neither (the adapter rejects quant / LoRA / control) — an `mlxQuantize`
     // or LoRA request is refused off-Mac and remains queued.
     ModelCaps::new("sana_sprint_1600m", true, true, false, false, false),
@@ -1579,11 +1581,12 @@ mod tests {
         "sd3_5_large_turbo",
         "sd3_5_medium",
         // sc-11780 (epic 8485): the candle SANA 1600M provider (candle-gen #495) joins the routed set —
-        // true-CFG txt2img on the whole `Efficient-Large-Model/Sana_1600M_1024px_diffusers` snapshot.
+        // true-CFG txt2img plus singular-reference img2img on the whole
+        // `Efficient-Large-Model/Sana_1600M_1024px_diffusers` snapshot.
         "sana_1600m",
         // sc-11781 (epic 8485): the candle SANA-Sprint provider (candle-gen #498) joins the routed set too —
-        // CFG-free 1–4 step SCM/TrigFlow txt2img on the whole `Efficient-Large-Model/
-        // Sana_Sprint_1.6B_1024px_diffusers` snapshot.
+        // CFG-free 1–4 step SCM/TrigFlow txt2img plus singular-reference img2img on the whole
+        // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot.
         "sana_sprint_1600m",
         "anima_base",
         "anima_aesthetic",

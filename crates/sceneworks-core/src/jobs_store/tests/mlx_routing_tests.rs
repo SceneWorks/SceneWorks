@@ -142,6 +142,103 @@ fn z_image_plain_txt2img_is_eligible() {
 }
 
 #[test]
+fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
+    for model in ["sana_1600m", "sana_sprint_1600m"] {
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "prompt": "p" }))
+        ));
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "referenceAssetId": "reference-1", "advanced": { "strength": 0.5 } }))
+        ));
+        for bits in [4, 8] {
+            assert!(
+                image_request_mlx_eligible(
+                    model,
+                    &object(
+                        json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": bits } })
+                    )
+                ),
+                "{model} must preserve supported MLX Q{bits} selection"
+            );
+        }
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "advanced": { "mlxQuantize": " 4 " } }))
+        ));
+        for empty_carriers in [
+            json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
+            json!({
+                "referenceAssetId": "reference-1",
+                "controls": null,
+                "controlnets": [],
+                "referenceAssetIds": [],
+                "loras": [],
+                "sourceAssetId": " ",
+                "maskAssetId": null,
+                "advanced": {
+                    "strength": 0.5,
+                    "poses": [],
+                    "phases": null,
+                    "controlMode": null,
+                    "controlImage": null,
+                    "controlScale": null,
+                    "controlWeights": null,
+                    "convRot": null,
+                    "quantTier": null,
+                    "mlxQuantize": null
+                }
+            }),
+        ] {
+            assert!(
+                image_request_mlx_eligible(model, &object(empty_carriers.clone())),
+                "{model} empty/null optional carriers preserve txt2img/img2img: {empty_carriers}"
+            );
+        }
+        for malformed in [
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+            json!({ "referenceAssetId": 7 }),
+            json!({ "referenceAssetId": " " }),
+            json!({ "referenceAssetId": "reference-1", "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1", "maskAssetId": "mask-1" }),
+            json!({ "referenceAssetId": "reference-1", "loras": [{ "id": "lora-1" }] }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "poses": [{}] } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "phases": [{}] } }),
+            json!({ "referenceAssetId": "reference-1", "referenceAssetIds": [7] }),
+            json!({ "referenceAssetId": "reference-1", "referenceAssetIds": 7 }),
+            json!({ "referenceAssetId": "reference-1", "controls": [{}] }),
+            json!({ "referenceAssetId": "reference-1", "controls": 7 }),
+            json!({ "referenceAssetId": "reference-1", "controlnets": [{}] }),
+            json!({ "referenceAssetId": "reference-1", "controlnets": "invalid" }),
+            json!({ "referenceAssetId": "reference-1", "loras": 7 }),
+            json!({ "referenceAssetId": "reference-1", "sourceAssetId": 7 }),
+            json!({ "referenceAssetId": "reference-1", "maskAssetId": {} }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "poses": 7 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "phases": {} } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlMode": "canny" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlImage": "control-1" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlScale": 0.9 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "convRot": true } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "quantTier": "nvfp4" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": {} } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": true } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": 4.5 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": "q4" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": [] } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": 7 }),
+        ] {
+            assert!(
+                !image_request_mlx_eligible(model, &object(malformed.clone())),
+                "{model} malformed img2img shape must reject: {malformed}"
+            );
+        }
+    }
+}
+
+#[test]
 fn z_image_edit_mode_with_source_is_eligible() {
     // epic 3529: img2img-edit (sourceAssetId) now routes to MLX via the engine's
     // `Conditioning::Reference` img2img path.

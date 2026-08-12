@@ -9,8 +9,9 @@ use crate::jobs_store::routing::catalog::{
     MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
-    SENSENOVA_MODEL_IDS,
+    has_nonempty_array, has_nonempty_nested_array, has_nonempty_or_malformed_array,
+    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
+    has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier, SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -563,14 +564,56 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 }
 
 /// SANA 1600M (epic 8485 / sc-8489) + SANA-Sprint (sc-8490) MLX-eligibility. The native `mlx-gen-sana`
-/// engine serves the **text-to-image** surface only — base SANA (true-CFG, 20 steps / guidance 4.5) and
-/// the CFG-free few-step Sprint distillation (default 2 steps) share this gate; neither checkpoint has
-/// img2img/control conditioning, so an `edit_image` request is rejected (the same defensive shape
-/// Krea / SD3.5 / Lens reject). This keeps `model_mac_support`'s `features.edit` false (it probes with
-/// `mode: edit_image`). macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so
-/// nothing defers.
+/// engine serves non-edit text-to-image plus singular-reference latent-init img2img — base SANA
+/// (true-CFG, 20 steps / guidance 4.5) and the CFG-free few-step Sprint distillation (default 2 steps)
+/// share this gate. Edit, control, multiple-reference, adapter, pose, phase, and malformed unsupported
+/// carriers are rejected instead of being silently ignored. This keeps `model_mac_support`'s
+/// `features.edit` false (it probes with `mode: edit_image`). Off-Mac no MLX worker registers.
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+        && payload
+            .get("referenceAssetId")
+            .map(|value| value.as_str().is_some_and(|id| !id.trim().is_empty()))
+            .unwrap_or(true)
+        && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        && !["referenceAssetIds", "controls", "controlnets"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        && !has_nonempty_or_malformed_string(payload, "maskAssetId")
+        && !has_nonempty_or_malformed_nested_array(payload, "advanced", "poses")
+        && !has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
+        && ![
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        && !sana_has_malformed_quant_carrier(payload)
+        && !has_nonempty_or_malformed_array(payload, "loras")
+}
+
+/// Mirror the worker's `quant_int` request contract without treating an invalid explicit override as
+/// absence. Missing/null means "use the manifest default"; an integer or trimmed integer string is a
+/// valid explicit tier selection. Every other shape must fail closed instead of silently selecting Q4.
+fn sana_has_malformed_quant_carrier(payload: &Map<String, Value>) -> bool {
+    let Some(value) = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"))
+    else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
+        .is_none()
 }
 
 /// Anima base / aesthetic / turbo (epic 10512 / sc-10523) MLX-eligibility. The native `mlx-gen-anima`

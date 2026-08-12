@@ -297,6 +297,19 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
             Value::Bool(true),
             "{id} ui.img2img exposed"
         );
+        if matches!(id, "sana_1600m" | "sana_sprint_1600m") {
+            assert!(
+                m["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.contains(&Value::String("image_to_image".into()))),
+                "{id} must advertise image_to_image through /api/v1/models"
+            );
+            assert_eq!(
+                m["ui"]["img2imgStrength"]["default"],
+                serde_json::json!(0.5),
+                "{id} strength contract exposed"
+            );
+        }
     }
 }
 

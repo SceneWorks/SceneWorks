@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 91,
     "cellCount": 868,
-    "mlxOnlyCellCount": 213,
+    "mlxOnlyCellCount": 209,
     "candleOnlyCellCount": 37,
     "exceptionCount": 0
   },
@@ -13,18 +13,18 @@
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
     "apiGeneration": "fdf2170b59442994679decea4516c80658c2c407326d6f6a72444ead30e30ff6",
     "apiValidation": "4057d142373904f43546de63248b2dd9cd016998df901664921051fd80df7be2",
-    "descriptorAudioFacts": "bd7b7a5cc78b5c775e22dfa1ab3100deeb1f8f1bf34eb3ed13bd5afabacdbc9a",
-    "descriptorCandleFacts": "8824eac45d6bb26ce95a09becb515c73d678050388564528ab1715ca01b220da",
-    "descriptorCandleRuntime": "8f9298c9d252799258f8c86de63c3a8a6853405b7fbaabcf44a20c43eb5e5788",
-    "descriptorMlxFacts": "d1c40fdf5e0168168ad1d8224916d9487eaa3a08e14e389e3d69c4c2e4723da9",
-    "descriptorMlxRuntime": "b6331d4040c44747d9611e252e020ee5a7f018e5ec89e0027b7e98270e7d89e2",
-    "descriptorPreviewFacts": "74dfd4631ce36098315e383a767cd36a067dedd6e94ad6aa99783595e32455ea",
+    "descriptorAudioFacts": "547d6edc5c0055eb88a13bde126411f7633c928fb4e0d48e3bd054cb32693a09",
+    "descriptorCandleFacts": "9bddcf62057d09ae8982e3f64a48f8dcff585f14b73c24ad395f354d8774aa1b",
+    "descriptorCandleRuntime": "11fbf50e70c9a3cad1f1a0bb3384b7f808119b2d29a73a367a30228bf8144c45",
+    "descriptorMlxFacts": "8c32afe7bdc0cb012355763a63d4e4feda3c9875d5ba11e857a0f8c66f26fb17",
+    "descriptorMlxRuntime": "3defd88fc7cff6e682dca720a1baeba02142fe8e5e28daf5c0695be93e1a7a4c",
+    "descriptorPreviewFacts": "d0bcf56c3f61c7c3dfe204a36379530ef09200818c2e20b1b80f3e6aaf2ed23f",
     "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
-    "manifest": "3b316b576b63ef5fcb0f062ba59447b62241ad68e6be487d9df493a29ab4f968",
-    "routerCandle": "a51ba528a710428b1f77dadda6f8cbbdab2b34549ce6bf07d02b1f83d4111eb0",
-    "routerCatalog": "135bff1a323dd59e7318864f454e711e9a56253aeba9b148a36fdc816991e19a",
+    "manifest": "b82cdd647bcf8013a688e5a0fdb5dcb63d0eb759bd96e7a18f19dc8080e3d07b",
+    "routerCandle": "c2418042c22efe44d0c89371900db3ba6a433592348f014090c8f747f273e91f",
+    "routerCatalog": "de3fbbc6315c14def35e6c6a49c3f6c4980601a5d9e70e809ceab3e0df127c3b",
     "routerGaps": "e2b2fa7a5fe90832ff46f6de3fdf29a71c28ef5ed5e63b0faebe2dfbf51b99f1",
-    "routerMlx": "485f72eb161bdcad7dcd5891cb73e42db91b7af4da7f567db3a53c2c75296697",
+    "routerMlx": "417472ba8749438eded8a2e9eb0e47fb6724b969d829a1c78c8ca897ed47dd07",
     "scheduler": "1b05c5c9c33fe036276bffeb400637575dbcab309a2977e8b1702bfce669d52f",
     "trainingCatalog": "783b049b02a0e4085ddc0a4c59ace7b1093a6cc919fe26625109abf884b60a49",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
@@ -44,7 +44,7 @@
     "workerDispatch": "74251a96f9ae0ea50d166a2678609287c4eaaa946b35c931db6bb55e9443036e",
     "workerEngineTable": "ba4fbcc655cecf0d7c7235e4f894638a6c1a1d5c02837f82dc387929e5819c4d",
     "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
-    "workerImageDispatch": "dcedfeb127a1ad3a4f95f0a13dba9159123ddded7b600cfcf27d2b80ae6bea1f",
+    "workerImageDispatch": "b8626813daf5ab5b9ba867801076508cf8a483cd8fc1f84dfbe0c6f08c78179c",
     "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "0884a375e5006409d6f892212e1a4cb2bb250c18a8ef11f948d3d3098f63a651",
@@ -4293,12 +4293,7 @@
         {
           "capability": "image_to_image",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18475",
-            "url": "https://app.shortcut.com/trefry/story/18475",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "text_to_image",
@@ -4310,12 +4305,7 @@
         {
           "capability": "reference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18475",
-            "url": "https://app.shortcut.com/trefry/story/18475",
-            "authority": "epic-8588"
-          }
+          "candle": true
         }
       ],
       "userAdapters": [
@@ -4375,12 +4365,7 @@
         {
           "capability": "image_to_image",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18475",
-            "url": "https://app.shortcut.com/trefry/story/18475",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "text_to_image",
@@ -4392,12 +4377,7 @@
         {
           "capability": "reference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18475",
-            "url": "https://app.shortcut.com/trefry/story/18475",
-            "authority": "epic-8588"
-          }
+          "candle": true
         }
       ],
       "userAdapters": [

@@ -2856,12 +2856,10 @@ mod tests {
                     .find(|cell| cell.capability == "reference")
                     .unwrap(),
             ] {
-                assert_eq!(
-                    cell.parity_obligation
-                        .as_ref()
-                        .map(|item| item.work_item.as_str()),
-                    Some("sc-18475"),
-                    "SANA img2img belongs end-to-end to sc-18475"
+                assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
+                assert!(
+                    cell.parity_obligation.is_none(),
+                    "fulfilled SANA img2img parity must carry no open obligation"
                 );
             }
         }
