@@ -380,6 +380,8 @@ pub struct MemoryRouteWitnessFact {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    /// Exact load-time component profile behind the public overlay coordinate.
+    pub load_profile: String,
 }
 
 /// Finite registry-load selector owned by the pinned inference provider.
@@ -955,6 +957,7 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
                 tier: row.tier.as_str().to_owned(),
                 mode: row.mode.as_str().to_owned(),
                 overlay: row.overlay.as_str().to_owned(),
+                load_profile: row.load_profile.as_str().to_owned(),
             })
             .collect();
         if entry.memory_route_witnesses.is_empty() {

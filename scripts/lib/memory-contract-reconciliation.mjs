@@ -188,6 +188,23 @@ const ROUTE_MODES = new Set([
   "character_image",
 ]);
 const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
+const ROUTE_LOAD_PROFILES = new Map([
+  ["plain", "none"],
+  ["lora", "lora"],
+  ["single_control", "control"],
+  ["multi_control", "control"],
+  ["ip_adapter", "identity"],
+  ["pid", "none"],
+  ["identity", "identity"],
+]);
+// A manifest coordinate denotes the production shape it actually serves. MultiControlNet and PiD
+// are distinct load profiles, not aliases for the single-control or plain matrix coordinates.
+const MANIFEST_ROUTE_PROFILES = new Map([
+  ["none", new Set(["plain"])],
+  ["lora", new Set(["lora"])],
+  ["control", new Set(["single_control"])],
+  ["identity", new Set(["ip_adapter", "identity"])],
+]);
 
 /** Read the executable worker registry's pin-bound route witness, never Rust source text. */
 export function routeEligibilityFromEngineFacts(engineFacts) {
@@ -200,7 +217,7 @@ export function routeEligibilityFromEngineFacts(engineFacts) {
     }
     for (const [index, witness] of document.memoryRouteWitnesses.entries()) {
       requireObject(witness, `${backend} memory route witness ${index}`);
-      const allowed = new Set(["provider", "tier", "mode", "overlay"]);
+      const allowed = new Set(["provider", "tier", "mode", "overlay", "loadProfile"]);
       for (const field of Object.keys(witness)) {
         if (!allowed.has(field)) throw new Error(`${backend} memory route witness ${index} has unknown field ${field}`);
       }
@@ -210,6 +227,14 @@ export function routeEligibilityFromEngineFacts(engineFacts) {
       if (!ROUTE_TIERS.has(witness.tier)) throw new Error(`${backend}:${witness.provider} has unknown route tier ${witness.tier}`);
       if (!ROUTE_MODES.has(witness.mode)) throw new Error(`${backend}:${witness.provider}:${witness.tier} has unknown route mode ${witness.mode}`);
       if (!ROUTE_OVERLAYS.has(witness.overlay)) throw new Error(`${backend}:${witness.provider}:${witness.tier}:${witness.mode} has unknown route overlay ${witness.overlay}`);
+      const expectedOverlay = ROUTE_LOAD_PROFILES.get(witness.loadProfile);
+      if (!expectedOverlay) throw new Error(`${backend}:${witness.provider}:${witness.tier}:${witness.mode} has unknown load profile ${witness.loadProfile}`);
+      if (expectedOverlay !== witness.overlay) {
+        throw new Error(
+          `${backend}:${witness.provider}:${witness.tier}:${witness.mode}:${witness.loadProfile} ` +
+          `belongs to overlay ${expectedOverlay}, not ${witness.overlay}`,
+        );
+      }
       const row = { backend, ...witness };
       const key = JSON.stringify(row);
       if (seen.has(key)) throw new Error(`duplicate memory route witness ${key}`);
@@ -287,7 +312,8 @@ export function collectMemoryContractMismatches({
       row.provider === provider &&
       row.tier === tier &&
       row.mode === mode &&
-      row.overlay === overlay,
+      row.overlay === overlay &&
+      MANIFEST_ROUTE_PROFILES.get(overlay)?.has(row.loadProfile),
   );
   for (const row of declarations) {
     const contract = engine.get(laneKey(row.backend, row.provider));
