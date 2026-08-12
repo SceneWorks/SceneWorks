@@ -5107,11 +5107,19 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, tier, &selection)?;
     // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
-    // than in an allocator reading that a broken staging would itself corrupt.
-    let text_encoder_bytes = safetensors_bytes(&text_encoder_root)?;
-    let transformer_bytes = std::fs::metadata(root.join("transformer.safetensors"))
-        .map_err(|error| format!("stat the {tier} transformer.safetensors: {error}"))?
-        .len();
+    // than in an allocator reading that a broken staging would itself corrupt. The staged text
+    // phase is `build_text_encoder`, which materializes the Gemma snapshot AND the tier's
+    // `connector.safetensors` into one `LtxTextEncoder` — so the connector belongs on the TE side of
+    // the bound, not with the resident small components.
+    let component_bytes = |name: &str| {
+        std::fs::metadata(root.join(name))
+            .map_err(|error| format!("stat the {tier} {name}: {error}"))
+            .map(|metadata| metadata.len())
+    };
+    let connector_bytes = component_bytes("connector.safetensors")?;
+    let gemma_bytes = safetensors_bytes(&text_encoder_root)?;
+    let text_encoder_bytes = gemma_bytes.saturating_add(connector_bytes);
+    let transformer_bytes = component_bytes("transformer.safetensors")?;
     let tier_bytes = safetensors_bytes(&root)?;
 
     let registry =
@@ -5303,6 +5311,8 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("predictedOverallCeiling", "bytes", predicted_ceiling(overall.allocator_bytes())),
                 ("denoiseEntryActive", "bytes", denoise_entry.active),
                 ("decodeEntryActive", "bytes", decode_entry.active),
+                ("stagedGemmaBytes", "bytes", gemma_bytes),
+                ("stagedConnectorBytes", "bytes", connector_bytes),
                 ("stagedTextEncoderBytes", "bytes", text_encoder_bytes),
                 ("stagedTransformerBytes", "bytes", transformer_bytes),
                 ("costagedGiantsBytes", "bytes", costaged_bytes),
