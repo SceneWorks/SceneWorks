@@ -3274,13 +3274,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        // SenseNova-U1 is an 8B MoT autoregressive image model with no diffusion-LoRA merge path,
-        // so no user LoRAs apply. `supported:false` makes the empty compatibility lists fail closed.
-        "families": [],
-        "types": [],
-        "supported": false
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3422,11 +3415,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": [],
-        "types": [],
-        "supported": false
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3554,11 +3542,6 @@
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
-      },
-      "loraCompatibility": {
-        "families": [],
-        "types": [],
-        "supported": false
       },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
@@ -3691,13 +3674,6 @@
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
-      },
-      "loraCompatibility": {
-        // No user-LoRA path (MoT autoregressive; the distill LoRA is baked into this variant).
-        // `supported:false` makes the empty compatibility lists fail closed in the picker.
-        "families": [],
-        "types": [],
-        "supported": false
       },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
@@ -3844,11 +3820,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": [],
-        "types": [],
-        "supported": false
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3985,11 +3956,6 @@
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
-      },
-      "loraCompatibility": {
-        "families": [],
-        "types": [],
-        "supported": false
       },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`

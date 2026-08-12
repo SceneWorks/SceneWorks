@@ -249,7 +249,7 @@ pub(crate) fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
             && !mlx_conditioned_edit_has_unsupported_carrier(payload, true, false, true)
             && !conditioned_true_cfg_is_malformed(payload);
     }
-    matches!(mode, None | Some("text_to_image"))
+    matches!(mode, None | Some("image_generation" | "text_to_image"))
         && !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
         && !has_nonempty_or_malformed_string(payload, "referenceAssetId")
         && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
@@ -438,9 +438,10 @@ pub(crate) fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
     match mode {
         Some("edit_image") => conditioned_reference_count(payload, true, 5).is_some(),
         Some("character_image") => conditioned_reference_count(payload, false, 5).is_some(),
-        // Plain T2I (text_to_image / no mode) is eligible only without reference carriers. A
-        // reference submitted in T2I mode is malformed, not permission to drop conditioning.
-        None | Some("text_to_image") => {
+        // Plain T2I (`image_generation` / `text_to_image` / no mode) is eligible only without
+        // reference carriers. A reference submitted in T2I mode is malformed, not permission to
+        // drop conditioning.
+        None | Some("image_generation" | "text_to_image") => {
             !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
                 && !has_nonempty_or_malformed_string(payload, "referenceAssetId")
                 && !has_nonempty_or_malformed_string(payload, "sourceAssetId")

@@ -435,6 +435,9 @@ fn flux2_txt2img_edit_and_lycoris_all_route_mlx() {
         json!({ "prompt": "a red fox" })
     )));
     assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "image_generation", "prompt": "a red fox"
+    }))));
+    assert!(flux2_mlx_eligible(&object(json!({
         "mode": "edit_image", "sourceAssetId": "asset_1"
     }))));
     assert!(flux2_mlx_eligible(&object(
@@ -455,6 +458,9 @@ fn flux2_txt2img_edit_and_lycoris_all_route_mlx() {
     )));
     assert!(!flux2_mlx_eligible(&object(json!({
         "mode": "reference", "referenceAssetId": "asset_1", "sourceAssetId": "asset_2"
+    }))));
+    assert!(!flux2_mlx_eligible(&object(json!({
+        "mode": "image_generation", "referenceAssetId": "asset_1"
     }))));
     assert!(flux2_mlx_eligible(&object(json!({
         "loras": [{ "networkType": "lycoris" }]
@@ -494,6 +500,14 @@ fn conditioned_mlx_routes_reject_conflicting_malformed_and_silent_t2i_shapes() {
     assert!(!image_request_mlx_eligible(
         "sensenova_u1_8b",
         &object(json!({ "mode": "text_to_image", "referenceAssetId": "ignored" }))
+    ));
+    assert!(image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "image_generation", "prompt": "a red fox" }))
+    ));
+    assert!(!image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "image_generation", "referenceAssetId": "ignored" }))
     ));
     for model in ["krea_2_raw", "krea_2_turbo"] {
         assert!(image_request_mlx_eligible(

@@ -304,7 +304,6 @@ const seededFallbackModels = [
     // ≤2048 per side — the engine caps each side at 2048 and the former 2720/2496/2368 buckets were
     // silently squashed to a wrong aspect (sc-12384). Same aspect ladder, fit to the real envelope.
     limits: { resolutions: ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"] },
-    loraCompatibility: { families: [], types: [], supported: false },
     ui: {
       description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
       promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
@@ -327,7 +326,6 @@ const seededFallbackModels = [
     // ≤2048 per side — the engine caps each side at 2048 and the former 2720/2496/2368 buckets were
     // silently squashed to a wrong aspect (sc-12384). Same aspect ladder, fit to the real envelope.
     limits: { resolutions: ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"] },
-    loraCompatibility: { families: [], types: [], supported: false },
     ui: {
       description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image, editing, and Character Studio reference (~50s/image on MPS) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base 8B (carries outfit + accessories across new scenes; face may drift). Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality reference work.",
       promptGuide: { title: "SenseNova-U1 8B Fast Prompt Guide", path: "/prompt-guides/sensenova-u1-8b-fast.md" },

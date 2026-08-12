@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
+import { fallbackModels } from "./constants.js";
 import {
   EXTRA_COMPATIBLE_LORA_FAMILIES,
   acceptedLoraFamilies,
@@ -116,6 +117,28 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel(familylessLora, withdrawn)).toBe(false);
     // ...while a model that genuinely serves adapters is untouched.
     expect(loraMatchesModel(sdxlLora, { ...sdxlModel, loraCompatibility: { families: ["sdxl"], supported: true } })).toBe(true);
+  });
+
+  it("offers no LoRA for SenseNova when its schema-valid catalog rows omit the advertisement", () => {
+    const seededSenseNova = fallbackModels.filter((model) => model.id.startsWith("sensenova_u1_"));
+    expect(seededSenseNova.map((model) => model.id)).toEqual([
+      "sensenova_u1_8b",
+      "sensenova_u1_8b_fast",
+    ]);
+    for (const model of seededSenseNova) {
+      expect(model.loraCompatibility).toBeUndefined();
+      expect(loraMatchesModel(sdxlLora, model)).toBe(false);
+      expect(loraMatchesModel(familylessLora, model)).toBe(false);
+    }
+
+    // Live catalog rows include the family even when the pre-catalog seed does not. Keep that
+    // representation equally fail-closed, including future variants that share the same engine.
+    expect(
+      loraMatchesModel(sdxlLora, {
+        id: "sensenova_u1_8b_infographic_v3",
+        family: "sensenova-u1",
+      }),
+    ).toBe(false);
   });
 
   it("normalizes separators/underscores on both sides before comparing", () => {

@@ -10252,6 +10252,117 @@ mod candle_label_tests {
     }
 }
 
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod kolors_edit_worker_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settings(data_dir: &Path) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1".to_owned(),
+            access_token: None,
+            data_dir: data_dir.to_path_buf(),
+            config_dir: data_dir.join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: false,
+            backend_candle_enabled: true,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
+        let data = tempfile::tempdir().expect("data dir");
+        let settings = settings(data.path());
+        let weights = data.path().join("models/kolors-test");
+        std::fs::create_dir_all(&weights).expect("model path");
+
+        let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+        let project = store.create_project("Kolors edit contract").expect("project");
+        let project_path = PathBuf::from(&project.path);
+        let source_file = data.path().join("kolors-source.png");
+        image::RgbImage::from_pixel(48, 32, image::Rgb([180, 40, 90]))
+            .save(&source_file)
+            .expect("source PNG");
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "kolors-source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source_file,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("source asset");
+        let asset_id = asset["id"].as_str().expect("asset id");
+        let request = ImageRequest::from_payload(
+            json!({
+                "projectId": project.id,
+                "model": "kolors",
+                "mode": "edit_image",
+                "sourceAssetId": asset_id,
+                "fitMode": "stretch",
+                "advanced": {
+                    "modelPath": weights,
+                    "strength": "0.72"
+                }
+            })
+            .as_object()
+            .expect("request object"),
+        );
+
+        assert_eq!(
+            resolve_candle_image_route(&request, &settings),
+            Some(CandleImageRoute::KolorsEdit)
+        );
+        let (source, strength) = resolve_candle_kolors_edit_init(
+            &request,
+            &settings,
+            &project_path,
+        )
+        .expect("source resolution")
+        .expect("Kolors edit init");
+        assert_eq!((source.width, source.height), (48, 32));
+        assert_eq!(source.pixels[0..3], [180, 40, 90]);
+        assert!((strength - 0.72).abs() < f32::EPSILON);
+
+        let missing_source = ImageRequest::from_payload(
+            json!({
+                "projectId": project.id,
+                "model": "kolors",
+                "mode": "edit_image",
+                "advanced": { "modelPath": weights }
+            })
+            .as_object()
+            .expect("request object"),
+        );
+        assert_ne!(
+            resolve_candle_image_route(&missing_source, &settings),
+            Some(CandleImageRoute::KolorsEdit)
+        );
+        assert!(
+            resolve_candle_kolors_edit_init(&missing_source, &settings, &project_path)
+                .expect("missing source is not an I/O error")
+                .is_none()
+        );
+    }
+}
+
 #[cfg(test)]
 mod boogu_tier_tests {
     use super::*;
