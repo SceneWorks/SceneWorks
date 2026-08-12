@@ -530,6 +530,52 @@ describe("SceneWorks app shell", () => {
     }
   });
 
+  it("keeps Mac capability fallback pending until the endpoint returns authoritative facts", async () => {
+    const defaultFetch = global.fetch.getMockImplementation();
+    let resolveCapabilities;
+    global.fetch.mockImplementation((url, options) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/capabilities/mac")) {
+        return new Promise((resolve) => {
+          resolveCapabilities = resolve;
+        });
+      }
+      return defaultFetch(url, options);
+    });
+
+    const providedValues = [];
+    const OriginalProvider = AppStaticContext.Provider;
+    AppStaticContext.Provider = function RecordingProvider({ value, children }) {
+      providedValues.push(value);
+      return <OriginalProvider value={value}>{children}</OriginalProvider>;
+    };
+    try {
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      expect(resolveCapabilities).toBeTypeOf("function");
+      expect(providedValues.at(-1).macCapabilitiesAuthoritative).toBe(false);
+      expect(providedValues.at(-1).macCapabilities.macGatingActive).toBe(false);
+
+      const authoritative = {
+        macGatingActive: true,
+        platform: "macos",
+        features: {},
+        training: { supportedKernels: [], lokrOnWanSupported: false },
+      };
+      resolveCapabilities(response(authoritative));
+      await settle();
+
+      expect(providedValues.at(-1).macCapabilitiesAuthoritative).toBe(true);
+      expect(providedValues.at(-1).macCapabilities).toEqual(authoritative);
+    } finally {
+      AppStaticContext.Provider = OriginalProvider;
+    }
+  });
+
   // sc-8811 regression (F-009): the STATIC context value must keep its identity across an
   // App re-render that touches none of its entries. Before the fix, refreshData /
   // refreshDataWithLoraOverlay were plain per-render declarations passed into

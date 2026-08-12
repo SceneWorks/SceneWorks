@@ -322,6 +322,9 @@ export function ImageStudio() {
     setRequestedGpu,
     updateAssetStatus,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    // App supplies false until GET /capabilities/mac has returned real platform facts.
+    // Legacy/test providers omit the field and already pass authoritative fixtures.
+    macCapabilitiesAuthoritative = true,
     visibleWorkers = [],
     preferencesHydrated,
   } = useAppContext();
@@ -901,15 +904,23 @@ export function ImageStudio() {
   const hostMemory = useHostMemory();
   const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
   const decoderOptions = useMemo(
-    () => selectedModel?.decoders?.byBackend?.[activeBackend] ?? [],
-    [selectedModel, activeBackend],
+    () =>
+      macCapabilitiesAuthoritative
+        ? (selectedModel?.decoders?.byBackend?.[activeBackend] ?? [])
+        : null,
+    [selectedModel, activeBackend, macCapabilitiesAuthoritative],
   );
-  const showDecoderPicker = decoderOptions.length > 0;
+  const showDecoderPicker = Boolean(decoderOptions?.length);
+  // A restored alternate selection must survive the window where App still has only its
+  // inert fallback. During that window the empty Candle option list is not evidence that the
+  // decoder is incompatible, and omitting the selection from a request would silently change
+  // the user's run. Native requests remain safe and need not wait for this optional surface.
+  const decoderCapabilitiesPending = !macCapabilitiesAuthoritative && decoder !== "native";
   useEffect(() => {
-    if (!selectedModel) return;
+    if (!selectedModel || !macCapabilitiesAuthoritative) return;
     const reconciled = reconcileDecoderSelection(decoder, decoderOptions);
     if (reconciled !== decoder) setDecoder(reconciled);
-  }, [decoder, decoderOptions, selectedModel]);
+  }, [decoder, decoderOptions, selectedModel, macCapabilitiesAuthoritative]);
   useEffect(() => {
     if (decoder !== "native" && usePid) {
       setUsePid(false);
@@ -2079,7 +2090,9 @@ export function ImageStudio() {
   // ALSO gated on ui-preferences hydration (sc-15425): before the GET lands the localStorage
   // cache may be empty (a relaunched desktop app has a new origin), and persisting through it
   // would overwrite the durable copy with catalog defaults before anything read it.
-  preferencesHydrated && imageModels.length > 0);
+  // A restored alternate decoder also waits for authoritative platform facts. Otherwise the
+  // pending fallback can reconcile it to native and make that transient loss durable.
+  preferencesHydrated && imageModels.length > 0 && !decoderCapabilitiesPending);
 
   // Each stacked run carries its already-resolved completed assets + the
   // expected count, which the WorkerProgressCard image-grid variant uses to
@@ -2110,6 +2123,10 @@ export function ImageStudio() {
     // actual authorization to create a job.
     if (!selectedModelServesMode) {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
+    if (decoderCapabilitiesPending) {
+      setSubmitError("Waiting for engine capabilities before using the restored decoder.");
       return;
     }
     if (dimensionsInvalid || hiresFixTargetInvalid) {
@@ -2383,6 +2400,10 @@ export function ImageStudio() {
       setBatchError(`Install or select a model that supports ${modeLabel} generation.`);
       return;
     }
+    if (decoderCapabilitiesPending) {
+      setBatchError("Waiting for engine capabilities before using the restored decoder.");
+      return;
+    }
     const resolved = expandBatch(batchPrompts, batchVariables);
     if (!resolved.length) {
       return;
@@ -2550,6 +2571,7 @@ export function ImageStudio() {
       // Width/Height override uses (sc-14058). A native-resolution model narrows the batch check to its
       // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
       dimensionConstraints,
+      decoderCapabilitiesPending,
     }),
     [
       activeProject,
@@ -2559,6 +2581,7 @@ export function ImageStudio() {
       batchGroupIssues,
       batchResolutionIssues,
       dimensionConstraints,
+      decoderCapabilitiesPending,
     ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
@@ -2609,6 +2632,7 @@ export function ImageStudio() {
       // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
       // not only on click. null when the dimensions are valid.
       dimensionError,
+      decoderCapabilitiesPending,
     }),
     [
       activeProject,
@@ -2630,6 +2654,7 @@ export function ImageStudio() {
       selectedModel,
       multiPhaseValidationIssues,
       dimensionError,
+      decoderCapabilitiesPending,
     ],
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);

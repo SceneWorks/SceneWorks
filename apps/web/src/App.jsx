@@ -549,8 +549,11 @@ export function App() {
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], audio: [], document: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
-  // Mac UI gating (sc-3486): inert until the capabilities endpoint reports macGatingActive.
+  // Mac UI gating (sc-3486): the value is inert until the capabilities endpoint reports
+  // macGatingActive, but keep a separate readiness bit so consumers do not mistake that
+  // temporary fallback for authoritative Candle capability facts.
   const [macCapabilities, setMacCapabilities] = useState(DEFAULT_MAC_CAPABILITIES);
+  const [macCapabilitiesAuthoritative, setMacCapabilitiesAuthoritative] = useState(false);
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -1830,7 +1833,7 @@ export function App() {
         }
         const error = optional ? "" : `${label}: ${err.message}`;
         setDomainError(domain, error);
-        return { label, value: fallback, error };
+        return { label, value: fallback, error, failed: true };
       }
     };
     const projectsPromise = fetchInitial(
@@ -1851,7 +1854,18 @@ export function App() {
       DEFAULT_MAC_CAPABILITIES,
       true,
     )
-      .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
+      .then((result) => {
+        if (
+          !result.aborted &&
+          !result.failed &&
+          result.value &&
+          typeof result.value === "object" &&
+          !Array.isArray(result.value)
+        ) {
+          setMacCapabilities(result.value);
+          setMacCapabilitiesAuthoritative(true);
+        }
+      })
       .catch(() => {});
     const shellPromises = [
       fetchInitial("jobs", "Jobs", "/api/v1/jobs", []).then((result) => {
@@ -3339,6 +3353,7 @@ export function App() {
     models,
     // Mac UI gating (sc-3486)
     macCapabilities,
+    macCapabilitiesAuthoritative,
     loras,
     deleteLora,
     updateLora,
@@ -3454,6 +3469,7 @@ export function App() {
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, macCapabilities,
+    macCapabilitiesAuthoritative,
     loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, deleteModelVariant, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
     createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
