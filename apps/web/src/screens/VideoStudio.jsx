@@ -345,6 +345,11 @@ export function VideoStudio() {
   // Reference video for Bernini's ads2v mode (sc-5425): a second source clip distinct from the
   // edited source clip (sourceClipAssetId).
   const [referenceClipAssetId, setReferenceClipAssetId] = useState(saved.referenceClipAssetId ?? "");
+  // Reference AUDIO clips for a multi-modal reference mode (sc-17160). Held and replayed here so a
+  // re-run rebuilds the same conditioning; the picker that populates it is sc-17161's.
+  const [referenceAudioAssetIds, setReferenceAudioAssetIds] = useState(
+    saved.referenceAudioAssetIds ?? [],
+  );
   const [characterId, setCharacterId] = useState(saved.characterId ?? "");
   const [characterLookId, setCharacterLookId] = useState(saved.characterLookId ?? "");
   const [personTrackId, setPersonTrackId] = useState(saved.personTrackId ?? "");
@@ -852,6 +857,9 @@ export function VideoStudio() {
     setBridgeRightClipAssetId(settings.bridgeRightClipAssetId ?? "");
     setSourceClipAssetIds(Array.isArray(settings.sourceClipAssetIds) ? settings.sourceClipAssetIds : []);
     setReferenceAssetIds(Array.isArray(settings.referenceAssetIds) ? settings.referenceAssetIds : []);
+    setReferenceAudioAssetIds(
+      Array.isArray(settings.referenceAudioAssetIds) ? settings.referenceAudioAssetIds : [],
+    );
     setReferenceClipAssetId(settings.referenceClipAssetId ?? "");
     setFitMode(settings.fitMode ?? "crop");
     setCharacterId(settings.characterId ?? "");
@@ -1012,6 +1020,7 @@ export function VideoStudio() {
     sourceClipAssetId,
     bridgeRightClipAssetId,
     referenceAssetIds,
+    referenceAudioAssetIds,
     sourceClipAssetIds,
     referenceClipAssetId,
     characterId,
@@ -1293,6 +1302,12 @@ export function VideoStudio() {
         ].includes(mode)
           ? referenceAssetIds
           : [],
+        // Reference AUDIO clips (sc-17160). Deliberately NOT gated on a hardcoded mode list like
+        // the two above: which modes take audio references is a MODEL fact, declared as
+        // `limits.maxReferenceAudioAssets` and enforced server-side, and a model that takes none
+        // refuses a non-empty list at enqueue. Hardcoding a mode list here would have to be edited
+        // again the moment sc-17159 lands the modes.
+        referenceAudioAssetIds,
         // Bernini ads2v reference video (sc-5425).
         referenceClipAssetId: mode === "ads2v" ? referenceClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,

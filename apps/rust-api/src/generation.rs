@@ -608,6 +608,33 @@ pub(crate) async fn create_video_job(
     // resolved entry (reading either from the DTO is sc-12300). The RESOLVED rate is written back so
     // the enqueued payload records what was actually rendered — the worker re-resolves identically
     // from the same entry, but a recipe replay reads this row.
+    // The model's declared reference-media caps (sc-17160) — `limits.maxReferenceAssets` /
+    // `maxSourceClipAssets` / `maxReferenceAudioAssets` / `maxCombinedReferenceAssets`. This is the
+    // BINDING half of the caps; `validate_video_job`'s three constants are only the payload-sanity
+    // outer bound, for the same reason `1..=30` is for duration — that gate runs before the model is
+    // known, and a recipe preset can still replace it (sc-12300).
+    //
+    // It is what makes raising the image blanket 8 -> 9 for MiniMax-H3 safe for every OTHER video
+    // model: `reference_caps` defaults to 8 images / 8 clips / 0 audio / no combined ceiling, so a
+    // family that declares nothing behaves byte-for-byte as it did before this key had a reader — a
+    // 9th reference to bernini is still refused, just here instead of one layer up. A per-family cap
+    // rather than a global bump, which is what the "raising a shared constant affects every video
+    // model" warning on the story asks for.
+    //
+    // Same placement rationale as the duration and fps caps above: keyed off the post-preset
+    // `model_id` and the resolved entry. The counts come off the DTO, not `job_payload`, because no
+    // preset patches the id lists — they are the caller's media, verbatim.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(message) = reference_limit_error(
+            &model_id,
+            payload.reference_asset_ids.len(),
+            payload.source_clip_asset_ids.len(),
+            payload.reference_audio_asset_ids.len(),
+            entry,
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+    }
     if let Some(entry) = model_manifest_entry.as_object() {
         let fps = resolve_fps(job_payload.get("fps"), entry);
         if let Some(message) = fps_limit_error(&model_id, fps, entry) {

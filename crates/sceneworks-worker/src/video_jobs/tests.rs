@@ -439,6 +439,241 @@ fn video_preflight_refuses_a_clip_past_the_models_declared_hard_max_duration() {
     ));
 }
 
+/// sc-17160: the worker's backstop refuses reference media past what the model declares, BEFORE
+/// any weights load — pinned at the seam `run_video_generate_job` actually calls.
+///
+/// Kills the same mutation the two gates above do: deleting the `reference_limit_error` call from
+/// `video_preflight`. Every `sceneworks_core::video_request` test stays green through that — the
+/// function is still correct, it is simply no longer CALLED.
+///
+/// The audio arm is the one that matters most. An engine handed conditioning it does not consume
+/// renders UNCONDITIONED, and an unconditioned render is not an error — it is a plausible-looking
+/// clip that ignored the reference (the epic-1788 class). The API gate covers what it enqueues; a
+/// job replayed from a pre-sc-17160 row, or produced by any future non-HTTP path, reaches the
+/// engine through here.
+#[test]
+fn video_preflight_refuses_reference_media_past_what_the_model_declares() {
+    // An already-shipped model declares none of the four keys, so it keeps 8 / 8 / 0 — and a
+    // single audio reference is refused rather than silently dropped.
+    let legacy_audio = request(json!({
+        "projectId": "p", "model": "bernini", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["ref-1"],
+        "referenceAudioAssetIds": ["voice-1"],
+        "modelManifestEntry": { "limits": {} }
+    }));
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&legacy_audio) else {
+        panic!("a model declaring no audio-reference capability must refuse one");
+    };
+    assert!(message.contains("bernini"), "names the model: {message}");
+    assert!(
+        message.contains("takes no audio references"),
+        "says the model takes none: {message}"
+    );
+
+    // The same model still admits its historical 8 images + 8 clips: the cap change moved nothing
+    // for it, which is the regression this half exists to hold.
+    let legacy_at_cap = request(json!({
+        "projectId": "p", "model": "bernini", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"],
+        "sourceClipAssetIds": ["1", "2", "3", "4", "5", "6", "7", "8"],
+        "modelManifestEntry": { "limits": {} }
+    }));
+    assert!(
+        video_preflight(&legacy_at_cap).is_ok(),
+        "8 images + 8 clips is exactly what bernini accepted before this story"
+    );
+
+    // A model that DECLARES the Ref2VA surface: 9 + 2 + 1 = 12 admits, 9 + 3 + 3 = 15 does not.
+    let ref2va_limits = json!({
+        "limits": {
+            "maxReferenceAssets": 9,
+            "maxSourceClipAssets": 3,
+            "maxReferenceAudioAssets": 3,
+            "maxCombinedReferenceAssets": 12
+        }
+    });
+    let admitted = request(json!({
+        "projectId": "p", "model": "ref2va_probe", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        "sourceClipAssetIds": ["1", "2"],
+        "referenceAudioAssetIds": ["voice-1"],
+        "modelManifestEntry": ref2va_limits
+    }));
+    assert!(
+        video_preflight(&admitted).is_ok(),
+        "9 + 2 + 1 is exactly the declared 12-file budget"
+    );
+
+    let over_budget = request(json!({
+        "projectId": "p", "model": "ref2va_probe", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        "sourceClipAssetIds": ["1", "2", "3"],
+        "referenceAudioAssetIds": ["v1", "v2", "v3"],
+        "modelManifestEntry": ref2va_limits
+    }));
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&over_budget) else {
+        panic!("15 files against a declared 12 must be refused before the load");
+    };
+    assert!(message.contains("12"), "states the cap: {message}");
+    assert!(message.contains("15"), "states what was asked: {message}");
+
+    // A job carrying no manifest entry at all (the stub lane, an uncatalogued id) keeps the
+    // defaults rather than becoming unconstrained — the audio list is new surface, so "no
+    // declaration" must mean "not supported", not "anything goes".
+    let no_entry = request(json!({
+        "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+        "referenceAudioAssetIds": ["voice-1"]
+    }));
+    assert!(
+        video_preflight(&no_entry).is_err(),
+        "an undeclared model must not silently accept audio references"
+    );
+}
+
+/// sc-17160: the audio references resolve through the PROJECT-RELATIVE asset path, not a bare
+/// filename — the trap this story was explicitly warned about.
+///
+/// An asset id is not a path. It resolves through `ProjectStore::get_asset` to a project-relative
+/// `file.path` recorded in the sidecar, which `safe_project_path` then joins under the project
+/// root. This drives the whole chain on a real store with a real WAV on disk, and asserts the
+/// decoded samples come back — a resolver that returned the right count of empty tracks would
+/// pass a shape-only assertion.
+///
+/// The negative arms are the ones that pin the guard: an id that does not exist, and a project
+/// path that is not the asset's own, must both fail loudly rather than resolve to something.
+#[test]
+fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
+    let data_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc17160").expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+
+    // Two distinct clips, so an implementation that resolved one id and cloned it — or reordered
+    // the list — is caught: the sample counts differ.
+    //
+    // Registered through `persist_generated_asset`, the same entry point the Audio Studio lane
+    // writes its clips with. `import_asset` is the WRONG door here — it accepts image and video
+    // uploads only — and using it would have proved the resolution against an asset shape the
+    // audio references never actually have.
+    let mut asset_ids = Vec::new();
+    for (asset_id, name, samples) in [
+        ("asset_voice", "voice.wav", 4usize),
+        ("asset_music", "music.wav", 6usize),
+    ] {
+        let media_rel = format!("assets/audio/{name}");
+        let media_path = project_path.join(&media_rel);
+        std::fs::create_dir_all(media_path.parent().expect("audio dir"))
+            .expect("audio dir creates");
+        write_wav_pcm16(
+            &AudioTrack {
+                samples: vec![0.25; samples],
+                sample_rate: 32_000,
+                channels: 1,
+            },
+            &media_path,
+        )
+        .expect("wav writes");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-sc17160",
+                "genset-sc17160",
+                &json!({
+                    "type": "audio",
+                    "assetId": asset_id,
+                    "mediaPath": media_rel,
+                    "mimeType": "audio/wav",
+                    "displayName": name,
+                    "createdAt": "2026-08-11T00:00:00Z",
+                }),
+            )
+            .expect("audio asset persists");
+        asset_ids.push(asset_id.to_owned());
+    }
+
+    // The recorded media path is PROJECT-RELATIVE — the fact the resolver has to honor. Asserted
+    // here so this test fails on the store's contract changing rather than silently starting to
+    // prove something weaker.
+    let recorded = store
+        .get_asset(&project.id, &asset_ids[0])
+        .expect("asset reads");
+    let rel = recorded["file"]["path"].as_str().expect("media path");
+    assert!(
+        !rel.starts_with('/') && !PathBuf::from(rel).is_absolute(),
+        "the sidecar records a project-relative path, not an absolute one: {rel}"
+    );
+
+    let request = request(json!({
+        "projectId": project.id,
+        "model": "ref2va_probe",
+        "mode": "reference_to_video",
+        "prompt": "p",
+        "referenceAudioAssetIds": asset_ids
+    }));
+    let conditioning = resolve_reference_audio_conditioning(&settings, &request, &project_path)
+        .expect("both references resolve");
+    assert_eq!(conditioning.len(), 2);
+    let lengths: Vec<usize> = conditioning
+        .iter()
+        .map(|item| match item {
+            gen_core::Conditioning::ReferenceAudio { audio, strength } => {
+                assert_eq!(*strength, None, "no per-reference strength knob exists yet");
+                assert_eq!(audio.sample_rate, 32_000);
+                audio.samples.len()
+            }
+            other => panic!("expected ReferenceAudio, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        lengths,
+        vec![4, 6],
+        "each id decodes to ITS OWN clip, in submission order"
+    );
+
+    // An empty request resolves to no conditioning and touches no disk — the shape every
+    // already-shipped video model takes through this call.
+    let bare = noop_request(&project.id);
+    assert!(
+        resolve_reference_audio_conditioning(&settings, &bare, &project_path)
+            .expect("no references resolves cleanly")
+            .is_empty()
+    );
+
+    // An unknown id fails loudly rather than resolving to nothing.
+    let missing = request_with_audio(&project.id, &["not-an-asset"]);
+    assert!(matches!(
+        resolve_reference_audio_conditioning(&settings, &missing, &project_path),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+
+    // ...and so does a real id resolved against a DIFFERENT project root: the project-relative
+    // path only means anything under the project it came from, and `safe_project_path` is what
+    // keeps a sidecar path from reaching outside it (sc-4278 / F-MLXW-14).
+    let elsewhere = tempfile::tempdir().expect("temp dir creates");
+    assert!(matches!(
+        resolve_reference_audio_conditioning(&settings, &request, elsewhere.path()),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+}
+
+/// A [`VideoRequest`] carrying only a project id — the shape every video job that predates
+/// sc-17160 has.
+fn noop_request(project_id: &str) -> VideoRequest {
+    request(json!({
+        "projectId": project_id, "model": "bernini", "mode": "text_to_video", "prompt": "p"
+    }))
+}
+
+/// A [`VideoRequest`] carrying the given audio reference ids.
+fn request_with_audio(project_id: &str, ids: &[&str]) -> VideoRequest {
+    request(json!({
+        "projectId": project_id, "model": "ref2va_probe", "mode": "reference_to_video",
+        "prompt": "p", "referenceAudioAssetIds": ids
+    }))
+}
+
 /// sc-12347: the same backstop on the fps axis — refuses a rate the model does not advertise,
 /// and admits a payload that names no rate at all.
 ///

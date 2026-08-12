@@ -952,6 +952,21 @@ pub(crate) struct VideoJobRequest {
     /// The worker pushes it as a second `Conditioning::VideoClip`.
     #[serde(default)]
     pub(crate) reference_clip_asset_id: Option<String>,
+    /// Reference **audio** clips for a multi-modal reference video mode (sc-17160,
+    /// MiniMax-H3 Ref2VA). The audio sibling of [`Self::reference_asset_ids`]: the worker
+    /// resolves each id through the project-scoped asset guard and pushes one
+    /// `Conditioning::ReferenceAudio` per entry.
+    ///
+    /// Serialized unconditionally, exactly like the two id lists above, so the enqueued
+    /// payload has one shape and a replay reader never has to distinguish "absent" from
+    /// "empty" (the sc-12345 lesson).
+    ///
+    /// Bounded twice: by the payload-sanity blanket `MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS`
+    /// in `validate_video_job`, and — the binding one — by the model's declared
+    /// `limits.maxReferenceAudioAssets`, which defaults to 0 so no already-shipped video
+    /// model accepts one.
+    #[serde(default)]
+    pub(crate) reference_audio_asset_ids: Vec<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default)]

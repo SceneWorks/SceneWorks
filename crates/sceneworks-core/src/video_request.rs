@@ -106,6 +106,17 @@ pub struct VideoRequest {
     /// source video distinct from `source_clip_asset_id`. `generate_bernini` pushes
     /// it as a second `Conditioning::VideoClip` after the source clip.
     pub reference_clip_asset_id: Option<String>,
+    /// Reference **audio** clips for a multi-modal reference video mode (sc-17160,
+    /// MiniMax-H3 Ref2VA). The audio sibling of [`Self::reference_asset_ids`] (still
+    /// images) and [`Self::reference_clip_asset_id`] (a moving reference): the worker
+    /// resolves each id through the project-scoped asset guard, decodes the clip, and
+    /// pushes one `Conditioning::ReferenceAudio` per entry.
+    ///
+    /// Inert for every video model shipped before this field existed: the per-model cap
+    /// [`reference_caps`] resolves defaults to **0** audio references, so a payload that
+    /// carries any is refused at enqueue unless the model declares
+    /// `limits.maxReferenceAudioAssets`.
+    pub reference_audio_asset_ids: Vec<String>,
     /// Per-model advanced knobs (steps, guidanceScale, imageConditioningStrength,
     /// timelineContext, …), passed through.
     pub advanced: JsonObject,
@@ -155,6 +166,7 @@ impl VideoRequest {
             bridge_right_clip_asset_id: optional_id(payload, "bridgeRightClipAssetId"),
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
             reference_clip_asset_id: optional_id(payload, "referenceClipAssetId"),
+            reference_audio_asset_ids: string_list(payload, "referenceAudioAssetIds"),
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry,
         }
@@ -548,6 +560,140 @@ pub fn fps_limit_error(model: &str, fps: u32, model_manifest_entry: &JsonObject)
         format!(
             "{model} renders at {allowed} fps, but this request asks for {fps} fps. Set fps to \
              {allowed}, or choose a model that renders at {fps} fps."
+        )
+    })
+}
+
+/// The reference-image cap applied when a model declares no `limits.maxReferenceAssets` —
+/// the historical blanket, so every already-shipped video model keeps refusing a 9th
+/// reference exactly as it did before sc-17160 raised the API's payload-sanity ceiling.
+pub const DEFAULT_MAX_REFERENCE_ASSETS: usize = 8;
+/// The source-clip cap applied when a model declares no `limits.maxSourceClipAssets` —
+/// the historical blanket, unchanged for every already-shipped video model.
+pub const DEFAULT_MAX_SOURCE_CLIP_ASSETS: usize = 8;
+/// The reference-**audio** cap applied when a model declares no
+/// `limits.maxReferenceAudioAssets`.
+///
+/// **Zero, deliberately.** `referenceAudioAssetIds` is new surface (sc-17160) that no video
+/// model shipped before it could consume, and no engine silently ignores conditioning it was
+/// handed — it renders unconditioned, which is invisible in the output (the epic-1788 class).
+/// Defaulting to 0 means a model has to *declare* that it takes audio references before one
+/// can reach it, so the new field is inert for every existing family rather than accepted-and-
+/// dropped.
+pub const DEFAULT_MAX_REFERENCE_AUDIO_ASSETS: usize = 0;
+
+/// The per-model reference-media caps resolved from a manifest entry's `limits`.
+///
+/// Four independent facts, because a model's reference surface is not one number: MiniMax-H3's
+/// Ref2VA takes ≤9 images, ≤3 video clips and ≤3 audio clips but ≤12 **files in total**, so the
+/// per-list caps do not multiply out to the real ceiling and the combined cap is not derivable
+/// from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceCaps {
+    /// `limits.maxReferenceAssets` — still-image references (`referenceAssetIds`).
+    pub images: usize,
+    /// `limits.maxSourceClipAssets` — source/reference video clips (`sourceClipAssetIds`).
+    pub clips: usize,
+    /// `limits.maxReferenceAudioAssets` — audio references (`referenceAudioAssetIds`).
+    pub audio: usize,
+    /// `limits.maxCombinedReferenceAssets` — the ceiling on images + clips + audio together, or
+    /// `None` when the model declares none. Absent ⇒ no combined ceiling, so a model that
+    /// declares nothing behaves exactly as it did before this key had a reader.
+    pub combined: Option<usize>,
+}
+
+impl Default for ReferenceCaps {
+    fn default() -> Self {
+        Self {
+            images: DEFAULT_MAX_REFERENCE_ASSETS,
+            clips: DEFAULT_MAX_SOURCE_CLIP_ASSETS,
+            audio: DEFAULT_MAX_REFERENCE_AUDIO_ASSETS,
+            combined: None,
+        }
+    }
+}
+
+/// [`ReferenceCaps`] for a resolved manifest entry, falling back to the pre-sc-17160 defaults
+/// for every key the model does not declare.
+///
+/// Same never-block-without-evidence posture as [`hard_max_duration`]: a declared cap that is
+/// not a non-negative integer is not a constraint anyone could satisfy, so it falls back to the
+/// default rather than bricking the model.
+pub fn reference_caps(model_manifest_entry: &JsonObject) -> ReferenceCaps {
+    let limits = model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object);
+    let cap = |key: &str| -> Option<usize> {
+        limits
+            .and_then(|limits| limits.get(key))
+            .and_then(Value::as_u64)
+            .and_then(|cap| usize::try_from(cap).ok())
+    };
+    let defaults = ReferenceCaps::default();
+    ReferenceCaps {
+        images: cap("maxReferenceAssets").unwrap_or(defaults.images),
+        clips: cap("maxSourceClipAssets").unwrap_or(defaults.clips),
+        audio: cap("maxReferenceAudioAssets").unwrap_or(defaults.audio),
+        combined: cap("maxCombinedReferenceAssets"),
+    }
+}
+
+/// The actionable rejection for a request whose reference media exceeds what the model declares,
+/// or `None` to admit. The pure decision, so the API enqueue gate and the worker preflight assert
+/// on one message — the same shape as [`duration_limit_error`] / [`fps_limit_error`] (sc-17160).
+///
+/// **Per-model, not a global bump.** MiniMax-H3 accepts 9 images where every family before it
+/// accepted 8; raising the shared API constant alone would have handed every other video model a
+/// 9th reference its engine was never asked to encode. The manifest is the seam epic 12334
+/// established for exactly this: a model that takes more declares more, and one that declares
+/// nothing keeps the historical [`DEFAULT_MAX_REFERENCE_ASSETS`].
+///
+/// Per-list caps are checked before the combined one so the message names the list actually over
+/// budget; the combined cap is the only one that can reject a request in which every individual
+/// list fits.
+///
+/// Message follows the house convention (`mlx_fit_gate::too_big_error`): name the model, state
+/// what was asked and what the cap is, and give the lever.
+pub fn reference_limit_error(
+    model: &str,
+    images: usize,
+    clips: usize,
+    audio: usize,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    let caps = reference_caps(model_manifest_entry);
+    for (count, cap, field, noun) in [
+        (images, caps.images, "referenceAssetIds", "reference images"),
+        (clips, caps.clips, "sourceClipAssetIds", "source clips"),
+        (
+            audio,
+            caps.audio,
+            "referenceAudioAssetIds",
+            "audio references",
+        ),
+    ] {
+        if count > cap {
+            return Some(if cap == 0 {
+                format!(
+                    "{model} takes no {noun}, but this request supplies {count}. Remove \
+                     {field}, or choose a model that conditions on {noun}."
+                )
+            } else {
+                format!(
+                    "{model} takes up to {cap} {noun}, but this request supplies {count}. \
+                     Reduce {field} to {cap} or fewer, or choose a model that takes more."
+                )
+            });
+        }
+    }
+    let combined = caps.combined?;
+    let total = images + clips + audio;
+    (total > combined).then(|| {
+        format!(
+            "{model} takes up to {combined} reference files in total, but this request supplies \
+             {total} ({images} reference images + {clips} source clips + {audio} audio \
+             references). Remove {} of them.",
+            total - combined
         )
     })
 }
@@ -1476,6 +1622,177 @@ mod tests {
         assert_eq!(duration_limit_error("mochi_1", 5.0, &mochi), None);
         assert_eq!(duration_limit_error("mochi_1", 1.0, &mochi), None);
         assert!(duration_limit_error("mochi_1", 5.5, &mochi).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Reference-media caps (sc-17160).
+    // -----------------------------------------------------------------------
+
+    /// THE regression test for the cap change. Raising the API's image blanket from 8 to 9 for
+    /// MiniMax-H3 must not hand a 9th reference to any other video model, and the new audio list
+    /// must not become quietly acceptable to a family whose engine cannot consume it.
+    ///
+    /// This is the "existing video models unaffected" assertion in its purest form: a model that
+    /// declares NOTHING (which is every video model shipped before this story — no builtin
+    /// declares any of the four keys) keeps 8 / 8 / 0 / no-combined-ceiling. Driven off a matrix
+    /// of the shapes a manifest entry actually takes in the wild, including the `{}` an
+    /// uncatalogued id resolves to.
+    #[test]
+    fn an_undeclared_model_keeps_the_pre_sc_17160_reference_caps() {
+        for empty in [json!({}), json!({ "limits": {} })] {
+            let entry = payload(empty.clone());
+            assert_eq!(
+                reference_caps(&entry),
+                ReferenceCaps {
+                    images: 8,
+                    clips: 8,
+                    audio: 0,
+                    combined: None,
+                },
+                "undeclared entry must keep the historical caps: {empty}"
+            );
+            // 8 images and 8 clips still admit — the exact pre-story ceiling, unchanged.
+            assert_eq!(reference_limit_error("bernini", 8, 8, 0, &entry), None);
+            // ...and a 9th image is still refused, one layer down from the raised blanket.
+            assert!(
+                reference_limit_error("bernini", 9, 0, 0, &entry).is_some(),
+                "the raised API blanket must not let a 9th reference through: {empty}"
+            );
+            // 16 files in total admit: an undeclared model has NO combined ceiling, so the new
+            // combined cap cannot retroactively narrow a shape bernini accepts today.
+            assert_eq!(reference_limit_error("bernini", 8, 8, 0, &entry), None);
+            // A single audio reference is refused outright — the new field is inert here.
+            let audio = reference_limit_error("bernini", 0, 0, 1, &entry)
+                .expect("an undeclared model takes no audio references");
+            assert!(audio.contains("bernini"), "names the model: {audio}");
+            assert!(
+                audio.contains("takes no audio references"),
+                "says the model takes none rather than quoting a cap of 0: {audio}"
+            );
+            assert!(
+                audio.contains("referenceAudioAssetIds"),
+                "names the field to remove: {audio}"
+            );
+        }
+    }
+
+    /// The story's acceptance pair, at the layer that owns the decision: 9 images + 3 clips +
+    /// 3 audio is 15 files against a declared 12 and must be REFUSED, while 9 + 2 + 1 is 12 and
+    /// must be ADMITTED.
+    ///
+    /// The combined cap is the only bound that can decide either of these — every individual list
+    /// in the rejected shape is within its own per-list cap — which is why it is a separate key
+    /// rather than something derived from the three.
+    #[test]
+    fn the_combined_cap_refuses_fifteen_files_and_admits_twelve() {
+        let ref2va = payload(json!({
+            "limits": {
+                "maxReferenceAssets": 9,
+                "maxSourceClipAssets": 3,
+                "maxReferenceAudioAssets": 3,
+                "maxCombinedReferenceAssets": 12,
+            }
+        }));
+        assert_eq!(
+            reference_caps(&ref2va),
+            ReferenceCaps {
+                images: 9,
+                clips: 3,
+                audio: 3,
+                combined: Some(12),
+            }
+        );
+
+        // Every list is within ITS OWN cap — 9 <= 9, 3 <= 3, 3 <= 3 — so nothing but the combined
+        // budget can refuse this. That is the whole point of the assertion.
+        assert_eq!(reference_limit_error("minimax_h3", 9, 0, 0, &ref2va), None);
+        assert_eq!(reference_limit_error("minimax_h3", 0, 3, 0, &ref2va), None);
+        assert_eq!(reference_limit_error("minimax_h3", 0, 0, 3, &ref2va), None);
+        let message = reference_limit_error("minimax_h3", 9, 3, 3, &ref2va)
+            .expect("15 files is past the 12-file combined cap");
+        assert!(message.contains("minimax_h3"), "names the model: {message}");
+        assert!(message.contains("12"), "states the cap: {message}");
+        assert!(message.contains("15"), "states what was asked: {message}");
+        assert!(
+            message.contains("Remove 3"),
+            "gives the lever, counted: {message}"
+        );
+
+        // 9 + 2 + 1 is exactly 12 — at the cap, which admits, matching every other bound in this
+        // module being `>` rather than `>=`.
+        assert_eq!(reference_limit_error("minimax_h3", 9, 2, 1, &ref2va), None);
+        // ...and 13 does not.
+        assert!(reference_limit_error("minimax_h3", 9, 3, 1, &ref2va).is_some());
+    }
+
+    /// A per-list overage names the list that is over, not the total. A caller told only
+    /// "12 files maximum" for a request of 4 images + 9 clips would have to work out which list to
+    /// cut; naming `sourceClipAssetIds` and its cap is the actionable form, and it is why the
+    /// per-list checks run before the combined one.
+    #[test]
+    fn a_per_list_overage_names_the_list_rather_than_the_total() {
+        let ref2va = payload(json!({
+            "limits": {
+                "maxReferenceAssets": 9,
+                "maxSourceClipAssets": 3,
+                "maxReferenceAudioAssets": 3,
+                "maxCombinedReferenceAssets": 12,
+            }
+        }));
+        // 4 + 5 + 0 = 9 files, well inside the combined budget, but 5 clips is past the 3 declared.
+        let message = reference_limit_error("minimax_h3", 4, 5, 0, &ref2va)
+            .expect("5 clips is past the declared 3");
+        assert!(
+            message.contains("sourceClipAssetIds"),
+            "names the offending list: {message}"
+        );
+        assert!(
+            message.contains("up to 3 source clips"),
+            "states that list's cap: {message}"
+        );
+        assert!(
+            !message.contains("in total"),
+            "must not report this as a combined-budget failure: {message}"
+        );
+    }
+
+    /// The infallibility contract [`hard_max_duration`] holds to, applied here: a declared cap that
+    /// is not a non-negative integer is not a constraint anyone could satisfy, so it falls back to
+    /// the default rather than bricking the model. A typo'd `"9"` must not turn a model that takes
+    /// nine references into one that takes none.
+    #[test]
+    fn an_unhonorable_declared_reference_cap_falls_back_to_the_default() {
+        for bad in [json!(-1), json!("9"), json!(null), json!(9.5), json!([9])] {
+            let entry = payload(json!({ "limits": { "maxReferenceAssets": bad } }));
+            assert_eq!(
+                reference_caps(&entry).images,
+                DEFAULT_MAX_REFERENCE_ASSETS,
+                "unhonorable cap {bad} must fall back, not brick the model"
+            );
+        }
+        // A declared 0 IS honorable — "this model takes no references" is a real statement — so it
+        // must NOT fall back to 8. This is the case that separates "unparseable" from "zero".
+        let none = payload(json!({ "limits": { "maxReferenceAssets": 0 } }));
+        assert_eq!(reference_caps(&none).images, 0);
+        assert!(reference_limit_error("t2v_only", 1, 0, 0, &none).is_some());
+    }
+
+    /// The payload parse: the new list arrives through the same `string_list` filter the two
+    /// existing id lists use, so blanks and non-strings are dropped identically and an absent key
+    /// yields an empty list rather than a missing one.
+    #[test]
+    fn from_payload_parses_reference_audio_asset_ids_like_the_other_id_lists() {
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p1",
+            "referenceAudioAssetIds": ["voice-a", "  ", "music-b", 7]
+        })));
+        assert_eq!(
+            request.reference_audio_asset_ids,
+            vec!["voice-a", "music-b"]
+        );
+
+        let bare = VideoRequest::from_payload(&payload(json!({ "projectId": "p1" })));
+        assert!(bare.reference_audio_asset_ids.is_empty());
     }
 
     /// A model that declares no cap is UNCONSTRAINED — the default-absent behavior that keeps

@@ -275,6 +275,13 @@ pub struct SubmitVideoJobArgs {
     pub source_clip_asset_id: Option<String>,
     #[schemars(description = "RIGHT video clip asset id for bridge mode.")]
     pub bridge_right_clip_asset_id: Option<String>,
+    /// sc-17160. Only models that DECLARE `limits.maxReferenceAudioAssets` accept these; every
+    /// other video model refuses a non-empty list at enqueue, which is why the description says
+    /// so rather than letting the caller discover it from a 400.
+    #[schemars(
+        description = "Audio clip asset ids to condition the render on (up to 3), for a model whose reference modes take audio as well as images. Every other video model rejects a non-empty list."
+    )]
+    pub reference_audio_asset_ids: Option<Vec<String>>,
     #[schemars(description = "Person track id to replace (person_replace mode).")]
     pub person_track_id: Option<String>,
     #[schemars(description = "person_replace scope: \"face_only\" (default) or \"full_body\".")]
@@ -1056,6 +1063,10 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
             args.bridge_right_clip_asset_id.as_ref().map(|v| json!(v)),
         ),
         (
+            "referenceAudioAssetIds",
+            args.reference_audio_asset_ids.as_ref().map(|v| json!(v)),
+        ),
+        (
             "personTrackId",
             args.person_track_id.as_ref().map(|v| json!(v)),
         ),
@@ -1781,6 +1792,34 @@ mod tests {
         assert_eq!(body["personTrackId"], "track_1");
         assert_eq!(body["characterId"], "char_1");
         assert_eq!(body["replacementMode"], "full_body");
+    }
+
+    /// sc-17160: the audio references reach the request body verbatim, and are OMITTED when the
+    /// caller names none rather than being sent as an empty array.
+    ///
+    /// The omission matters: `video_job_body` only inserts keys the caller supplied, and the API's
+    /// DTO defaults an absent `referenceAudioAssetIds` to empty. Sending `[]` unconditionally would
+    /// be indistinguishable in behaviour but would put a key on every MCP video request that names
+    /// no audio, which is not what the other optional fields do.
+    #[test]
+    fn video_job_body_carries_reference_audio_asset_ids() {
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "the subject speaks",
+            "referenceAudioAssetIds": ["asset_voice", "asset_music"]
+        }));
+        let body = video_job_body(&args).expect("body builds");
+        assert_eq!(
+            body["referenceAudioAssetIds"],
+            json!(["asset_voice", "asset_music"])
+        );
+
+        let without = video_args_from(json!({ "projectId": "p1", "prompt": "a storm" }));
+        let body = video_job_body(&without).expect("body builds");
+        assert!(
+            body.get("referenceAudioAssetIds").is_none(),
+            "an unnamed optional field stays off the body: {body}"
+        );
     }
 
     #[test]
