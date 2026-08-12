@@ -746,6 +746,12 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
           surfaces,
         },
       ],
+      memoryRouteWitnesses: [{
+        provider: `${backend}_x`,
+        tier: "q4",
+        mode: "text_to_image",
+        overlay: "none",
+      }],
       ...extra,
     });
   };

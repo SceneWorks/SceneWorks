@@ -367,6 +367,19 @@ pub struct EngineCapabilityFacts {
     /// Omitted only by pure descriptor fixtures; real registry dumps always populate it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_contracts: Vec<MemoryContractFact>,
+    /// Exact production load-shape route witness. Every coordinate is concrete; there are no null
+    /// modes or tier/overlay wildcards for a consumer to broaden.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_route_witnesses: Vec<MemoryRouteWitnessFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRouteWitnessFact {
+    pub provider: String,
+    pub tier: String,
+    pub mode: String,
+    pub overlay: String,
 }
 
 /// Finite registry-load selector owned by the pinned inference provider.
@@ -492,6 +505,7 @@ pub fn facts_from_descriptors(
             engines,
             imports: Vec::new(),
             memory_contracts: Vec::new(),
+            memory_route_witnesses: Vec::new(),
         });
     }
     Ok(out)
@@ -925,6 +939,7 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
     let contract_registry = crate::inference_runtime::memory_contract_surface_registry()
         .map_err(|error| error.to_string())?;
     let mut memory_contracts = memory_contract_facts_from_registry(&contract_registry)?;
+    let route_witnesses = crate::memory_route_registry::deferred_route_witnesses();
     for entry in &mut facts {
         entry.memory_contracts = memory_contracts.remove(&entry.backend).ok_or_else(|| {
             format!(
@@ -932,6 +947,22 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
                 entry.backend
             )
         })?;
+        entry.memory_route_witnesses = route_witnesses
+            .iter()
+            .filter(|row| row.backend.as_str() == entry.backend)
+            .map(|row| MemoryRouteWitnessFact {
+                provider: row.provider.to_owned(),
+                tier: row.tier.as_str().to_owned(),
+                mode: row.mode.as_str().to_owned(),
+                overlay: row.overlay.as_str().to_owned(),
+            })
+            .collect();
+        if entry.memory_route_witnesses.is_empty() {
+            return Err(format!(
+                "{} descriptor facts have no typed memory-route witnesses",
+                entry.backend
+            ));
+        }
     }
     if !memory_contracts.is_empty() {
         return Err(format!(

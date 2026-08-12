@@ -3,8 +3,9 @@
   "$id": "https://sceneworks.ai/schemas/memory-contract-reconciliation-waivers.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "inferenceRevision", "waivers"],
+  "required": ["$schema", "schemaVersion", "inferenceRevision", "waivers"],
   "properties": {
+    "$schema": { "const": "../packages/schemas/memory-contract-reconciliation-waivers.schema.json" },
     "schemaVersion": { "const": 1 },
     "inferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "waivers": {
@@ -47,7 +48,8 @@
             "manifest_to_route",
             "plan_to_engine",
             "closure_to_engine",
-            "survey_to_engine"
+            "survey_to_engine",
+            "engine_to_survey"
           ]
         },
         "backend": { "$ref": "#/$defs/nullableString" },

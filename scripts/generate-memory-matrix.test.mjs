@@ -32,6 +32,7 @@ import {
 import { recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { reconciliationMismatchKey } from "./lib/memory-contract-reconciliation.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
 
@@ -41,34 +42,45 @@ async function memoryContractSource(name) {
   );
 }
 
-async function surveyWaiverFixture({ removeFamilyStories = [], add = [] } = {}) {
+async function surveyWaiverFixture(sourceOverrides) {
   const ledger = await memoryContractSource("memoryContractWaivers");
-  const removed = new Set(removeFamilyStories);
-  ledger.waivers = ledger.waivers.filter(
-    (waiver) => !(waiver.leg === "survey_engine" && removed.has(waiver.familyStory)),
-  );
-  if (add.length > 0) {
-    const facts = await memoryContractSource("engineCapabilitiesMlx");
-    const contracts = new Map(facts.memoryContracts.map((contract) => [contract.id, contract]));
-    for (const { provider, familyStory } of add) {
-      const contract = contracts.get(provider);
-      assert.ok(contract, `fixture provider ${provider} must have generated MLX contract facts`);
-      ledger.waivers.push({
-        leg: "survey_engine",
-        direction: "survey_to_engine",
-        backend: "mlx",
-        provider,
-        modelId: null,
-        familyStory,
-        mode: null,
-        tier: null,
-        overlay: null,
-        rung: "bounded_transformer_residency",
-        selectorDigest: contract.selectorDigest,
-        ownerStory: "sc-18461",
-        reason: "Synthetic survey mutation keeps the reconciliation fixture exact.",
-      });
+  let failure;
+  try {
+    await buildMatrix({
+      publish: false,
+      sourceOverrides: {
+        ...sourceOverrides,
+        memoryContractWaivers: JSON.stringify(ledger),
+      },
+    });
+    return JSON.stringify(ledger);
+  } catch (error) {
+    failure = error;
+  }
+
+  const message = String(failure?.message ?? failure);
+  if (!message.startsWith("memory-contract reconciliation found ")) throw failure;
+  const keys = { unwaived: [], stale: [] };
+  let section = null;
+  for (const line of message.split("\n")) {
+    if (line === "unwaived:" || line === "stale:") {
+      section = line.slice(0, -1);
+    } else if (section && line.startsWith("{")) {
+      keys[section].push(line);
     }
+  }
+  assert.ok(keys.unwaived.length + keys.stale.length > 0, "fixture must expose exact mismatch keys");
+
+  const stale = new Set(keys.stale);
+  ledger.waivers = ledger.waivers.filter(
+    (waiver) => !stale.has(reconciliationMismatchKey(waiver)),
+  );
+  for (const key of keys.unwaived) {
+    ledger.waivers.push({
+      ...JSON.parse(key),
+      ownerStory: "sc-18461",
+      reason: "Synthetic survey mutation keeps this exact reconciliation coordinate waived.",
+    });
   }
   return JSON.stringify(ledger);
 }
@@ -1904,14 +1916,11 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
     verdict.implementation = "shared-primitive";
     verdict.implementedEntries = [entry];
     verdict.strategyParameters = { transformerWindowSize: 1 };
+    const sourceOverrides = { rung4Survey: JSON.stringify(survey) };
+    sourceOverrides.memoryContractWaivers = await surveyWaiverFixture(sourceOverrides);
     const matrix = await buildMatrix({
       publish: false,
-      sourceOverrides: {
-        rung4Survey: JSON.stringify(survey),
-        memoryContractWaivers: await surveyWaiverFixture({
-          removeFamilyStories: [Number(group)],
-        }),
-      },
+      sourceOverrides,
     });
     const of = (rung) =>
       matrix.cells.filter(
@@ -2299,17 +2308,11 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   delete stated.families["15511"].backends.mlx.implementedTiers;
   delete stated.families["15511"].backends.mlx.implementedOverlays;
   stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
+  const sourceOverrides = { rung4Survey: JSON.stringify(stated) };
+  sourceOverrides.memoryContractWaivers = await surveyWaiverFixture(sourceOverrides);
   const matrix = await buildMatrix({
     publish: false,
-    sourceOverrides: {
-      rung4Survey: JSON.stringify(stated),
-      memoryContractWaivers: await surveyWaiverFixture({
-        add: [
-          { provider: "qwen_image", familyStory: 15511 },
-          { provider: "qwen_image_edit", familyStory: 15511 },
-        ],
-      }),
-    },
+    sourceOverrides,
   });
   const cells = matrix.cells.filter(
     (cell) =>

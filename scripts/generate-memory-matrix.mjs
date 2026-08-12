@@ -15,7 +15,6 @@ import {
 } from "./memory-calibration-harness.mjs";
 import {
   reconcileMemoryContracts,
-  routeEligibilityFromRust,
 } from "./lib/memory-contract-reconciliation.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -2512,10 +2511,6 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     calibrationPlan,
     closures: JSON.parse(bodies.inferenceClosures),
     survey: JSON.parse(bodies.rung4Survey),
-    routeEligibility: routeEligibilityFromRust({
-      imageRouting: bodies.imageRouting,
-      mlxFitGate: bodies.mlxFitGate,
-    }),
     waiverLedger: JSON.parse(bodies.memoryContractWaivers),
   });
   const calibrationRuns = calibrationBundle.records.map((record) => {
