@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6f0a7dd0aaa8514bc2793521779791e31192a765d9d8b1fbe49fdf66266b013c",
+    "sceneWorksRevision": "source-tree:d6d4559c2a982565e7549914df53b20bcdee7512aea51397bdc01f8474f6aa31",
     "inferenceRevision": "b965641e388f4db646e4c60ab3f75219737e2cc8",
     "sources": {
       "manifest": {
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "fd0600e34bf6013366f9b49488a1e22a11cfda064b0e8719a5c56ded4e7d0070"
+        "sha256": "32d3a642fcab73963063dc05eab5b2c9c1b2b9dd9717235f24bf19141272dbbe"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -103,7 +103,7 @@
     "memoryCharacterization": {
       "asserts": "the rung's PEAKS are known across the geometry envelope",
       "geometrySensitive": true,
-      "binding": "scripts/generate-memory-matrix.mjs#memoryCharacterization — the RANK of the measured design matrix, because `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames` takes as many independent geometries as the lane has coefficients: two on the image lane, and three once a temporal term is carried, where three frame counts at one area are still singular"
+      "binding": "scripts/generate-memory-matrix.mjs#memoryCharacterization — the RANK of the measured design matrix, because `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames` takes as many independent geometries as the lane has coefficients: two on the image lane, and three once a temporal term is carried, where three frame counts at one area are still singular. Which form applies is read from the cell's DECLARED curve first — a curve carrying `perMpxFrameGb` is graded against three coefficients even if every eligible record happens to be single-frame"
     }
   },
   "conformanceStates": [

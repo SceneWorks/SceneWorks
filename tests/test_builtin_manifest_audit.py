@@ -1732,6 +1732,96 @@ def test_schema_admits_the_temporal_coefficient_additively():
     ):
         assert mutated(mutate), f"{label} must be rejected by the schema"
 
+    # sc-18812 review pass: an evidence record must be ABLE to state the frame count it was
+    # captured at. Without this property the matrix generator would key every record as `WxH` and
+    # characterize a video capture as a one-frame design point nobody measured.
+    def record_of(candidate):
+        return candidate["models"][krea_index]["candle"]["turboFit"]["evidenceRecords"][0]
+
+    assert not mutated(
+        lambda candidate: record_of(candidate).update({"frames": 241})
+    ), "an evidence record must be able to declare its frame count"
+    for label, mutate in (
+        ("zero frames", lambda c: record_of(c).update({"frames": 0})),
+        ("fractional frames", lambda c: record_of(c).update({"frames": 24.5})),
+        ("string frames", lambda c: record_of(c).update({"frames": "241"})),
+        ("misspelled frames", lambda c: record_of(c).update({"frameCount": 241})),
+    ):
+        assert mutated(mutate), f"{label} must be rejected by the schema"
+
+
+def _tiers_declaring_a_temporal_curve(turbo_fit: dict) -> set:
+    """Tiers whose committed phase curves carry ``perMpxFrameGb`` on any rung or phase."""
+    declaring = set()
+    for tier, rungs in turbo_fit.get("phaseCurvesByTier", {}).items():
+        for phases in rungs.values():
+            if any("perMpxFrameGb" in curve for curve in phases.values()):
+                declaring.add(tier)
+    return declaring
+
+
+def _evidence_records_missing_frames(turbo_fit: dict) -> list:
+    """Evidence records that support a TEMPORAL curve without saying how many frames they measured.
+
+    This is the fabricated-rank hazard, named: ``generate-memory-matrix.mjs#measuredGeometryKey``
+    reads an absent ``frames`` as 1, which is correct for the image lane and a silent invention on
+    a tier whose curve has a temporal coefficient to determine.
+    """
+    declaring = _tiers_declaring_a_temporal_curve(turbo_fit)
+    return [
+        f"{record['tier']} {record['width']}x{record['height']} "
+        f"({record['sourceStory']} activity {record['sourceActivity']})"
+        for record in turbo_fit.get("evidenceRecords", [])
+        if record["tier"] in declaring and "frames" not in record
+    ]
+
+
+def test_temporal_curve_tiers_declare_frames_on_their_evidence_records():
+    """sc-18812: a tier carrying ``perMpxFrameGb`` may not have frame-silent evidence.
+
+    Inert on the shipped manifest — no committed curve declares the temporal term — so the guard is
+    exercised in BOTH directions against mutated manifests rather than asserted vacuously. Without
+    it, adding a temporal coefficient in one place and a video capture in another would silently
+    characterize that capture as a one-frame design point: a fabricated contribution to the design
+    matrix rank, which over-claims harder than the axis collapse sc-18812 set out to fix.
+    """
+    manifest = _load_builtin_models_manifest()
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    turbo_fit = krea["candle"]["turboFit"]
+
+    # The live guard. Trivially satisfied while the image lane stays two-coefficient (which
+    # ``test_image_lane_phase_curves_carry_no_temporal_coefficient`` is what enforces), and the
+    # first thing to fire on the day a temporal curve ships without its evidence catching up.
+    assert _evidence_records_missing_frames(turbo_fit) == []
+
+    # Direction 1: declare the term, change nothing else. Every record of that tier is now a
+    # frame-silent supporter of a temporal curve, and the audit must name them.
+    declared = copy.deepcopy(turbo_fit)
+    declared["phaseCurvesByTier"]["q8"]["threeStage"]["decode"]["perMpxFrameGb"] = 0.2998
+    assert _tiers_declaring_a_temporal_curve(declared) == {"q8"}
+    offenders = _evidence_records_missing_frames(declared)
+    assert offenders, "a temporal curve with frame-silent evidence must be rejected"
+    assert all(entry.startswith("q8 ") for entry in offenders), offenders
+    assert len(offenders) == sum(
+        1 for record in turbo_fit["evidenceRecords"] if record["tier"] == "q8"
+    ), "every q8 record supports the q8 curve, so every one of them must be named"
+
+    # Direction 2: the same manifest with the frame counts stated is accepted. So the rejection
+    # above is attributable to the missing property and not to the declaration.
+    repaired = copy.deepcopy(declared)
+    for record in repaired["evidenceRecords"]:
+        if record["tier"] == "q8":
+            record["frames"] = 1
+    assert _evidence_records_missing_frames(repaired) == []
+
+    # ...and it is per TIER, not global: q4's records stay frame-silent and stay legal, because no
+    # q4 curve has a temporal coefficient to determine.
+    assert all(
+        "frames" not in record
+        for record in repaired["evidenceRecords"]
+        if record["tier"] == "q4"
+    )
+
 
 def test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points():
     """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them.

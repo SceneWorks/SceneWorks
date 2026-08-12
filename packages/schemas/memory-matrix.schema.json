@@ -122,7 +122,8 @@
         },
         "geometry": {
           "type": "string",
-          "pattern": "^[1-9][0-9]*x[1-9][0-9]*$"
+          "description": "sc-18812. Same key vocabulary as `memoryCharacterization.measuredGeometries`, produced by the same `measuredGeometryKey`: `WxH` is one output frame, `WxHxfF` is F of them. Both forms are admitted here because an evidence record supporting a temporal curve must be able to STATE its frame count - a record forced into `WxH` would be characterized as a one-frame design point nobody measured.",
+          "pattern": "^[1-9][0-9]*x[1-9][0-9]*(xf[1-9][0-9]*)?$"
         },
         "capturedAt": {
           "type": "string",
@@ -239,7 +240,8 @@
         },
         "geometry": {
           "type": "string",
-          "pattern": "^[1-9][0-9]*x[1-9][0-9]*$"
+          "description": "sc-18812. `WxH` (one output frame) or `WxHxfF`, from the same `measuredGeometryKey` as every other geometry key in this document.",
+          "pattern": "^[1-9][0-9]*x[1-9][0-9]*(xf[1-9][0-9]*)?$"
         },
         "predictedPeakGb": {
           "type": "number",

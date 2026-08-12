@@ -772,9 +772,15 @@ export function calibrationBinding(record, cell) {
 //      matrix, not by a count. This also fixes a latent image-lane defect: `768x512` and `512x768`
 //      are two geometries carrying one area, and counting called that `fitted`.
 //
-// `coveredFrameBound` is emitted only on cells that carry a temporal geometry, mirroring how
-// `geometryEnvelope` gains `durations`/`fps` only for video. Image cells therefore keep the exact
-// shape they published before this change.
+// Which form to grade against comes from the cell's DECLARED curve first and the measurements only
+// second (`declaresTemporalCurve`). Reading it from the measurements alone fails in the flattering
+// direction: a cell carrying `perMpxFrameGb` whose eligible records all happen to be single-frame
+// would be graded against two coefficients and could report `fitted` at two areas while its third
+// coefficient is undetermined. Measurements can only ADD the temporal axis, never remove it.
+//
+// `coveredFrameBound` is emitted on cells whose form is temporal — declared or measured — mirroring
+// how `geometryEnvelope` gains `durations`/`fps` only for video. No committed curve declares
+// `perMpxFrameGb`, so every image cell keeps the exact shape it published before this change.
 function parseMeasuredGeometry(geometry) {
   const match = /^([1-9][0-9]*)x([1-9][0-9]*)(?:xf([1-9][0-9]*))?$/.exec(geometry ?? "");
   if (!match) return null;
@@ -811,12 +817,20 @@ export function measuredGeometryKey({ width, height, frames }) {
   return frames > 1 ? `${width}x${height}xf${frames}` : `${width}x${height}`;
 }
 
-export function memoryCharacterization(geometries) {
+// `declaresTemporalCurve` is the CELL's own curve form, read from the manifest rather than inferred
+// from what happened to be measured. It matters because the two inputs disagree in exactly the
+// direction that over-claims: a cell whose curve carries `perMpxFrameGb` has three coefficients
+// whether or not its eligible records are all single-frame, and grading it against two would let it
+// report `fitted` on two areas with the temporal coefficient undetermined — the same class of
+// over-claim the rank rule was written to close, arrived at from the other side. The measurements
+// can only ADD the temporal axis (a multi-frame geometry always implies three coefficients); they
+// can never remove it.
+export function memoryCharacterization(geometries, { declaresTemporalCurve = false } = {}) {
   const measured = sortedUnique(
     geometries.filter((geometry) => parseMeasuredGeometry(geometry) !== null),
   );
   const points = measured.map(parseMeasuredGeometry);
-  const temporal = points.some((point) => point.frames > 1);
+  const temporal = declaresTemporalCurve || points.some((point) => point.frames > 1);
   const coefficients = temporal ? 3 : 2;
   const determinable = designRank(points, temporal) >= coefficients;
   const status = measured.length === 0 ? "unmeasured" : determinable ? "fitted" : "point";
@@ -2217,13 +2231,25 @@ function strategyStatus({
         engagedRungs: model.candle.turboFit.engagedCompositions?.[manifestRung],
         calibrationFingerprint: model.candle.turboFit.calibrationFingerprint,
         maxPixels: model.candle.turboFit.maxMeasuredPixels,
+        // sc-18812: a declared curve carrying `perMpxFrameGb` needs three independent geometries,
+        // not two. Taking the coefficient count from the DECLARED form rather than from whichever
+        // records happen to exist is what stops a temporal cell whose evidence is all single-frame
+        // from reporting `fitted` on two areas with its third coefficient undetermined.
+        declaresTemporalCurve: Object.values(
+          model.candle.turboFit.phaseCurvesByTier?.[tier]?.[manifestRung] ?? {},
+        ).some((curve) => curve?.perMpxFrameGb !== undefined),
         historicalVerification: evidenceRecords.map((record) => ({
           source: `Shortcut ${record.sourceStory} activity ${record.sourceActivity}`,
           hardware: verification?.hardware,
           evidenceScope: record.evidenceScope,
           runtimeAdmission: record.evidenceScope === "exact_request",
           tier: record.tier,
-          geometry: `${record.width}x${record.height}`,
+          // sc-18812: ONE geometry key producer. Hand-building `WxH` here is what would let a
+          // record supporting a temporal curve be characterized as a one-frame design point it
+          // never measured — a FABRICATED rank contribution, worse than the collapse this story
+          // fixed. `frames` is optional in the manifest and absent reads as 1, so no image record
+          // moves; the audit forbids absence on any tier whose curves carry `perMpxFrameGb`.
+          geometry: measuredGeometryKey(record),
           capturedAt: record.capturedAt,
           harnessVersion: record.harnessVersion,
           engagedRungs: record.measuredCompositions?.[manifestRung],
@@ -2236,7 +2262,7 @@ function strategyStatus({
           .map((record) => ({
             source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit/evidenceRecords`,
             tier: record.tier,
-            geometry: `${record.width}x${record.height}`,
+            geometry: measuredGeometryKey(record),
             predictedPeakGb: record.predictedPeaksGb[manifestRung],
             engagedRungs: record.measuredCompositions?.[manifestRung],
             exactParameters: strategyParameters,
@@ -2425,32 +2451,67 @@ function validateMatrix(
         throw new Error(`${cell.id}: ${cell.state} lacks a ${requiredStatus} record`);
       }
     }
-    // SC-16060. The two claims are independent, and the invariants that keep them from silently
-    // merging back into one field belong here rather than in a consumer.
-    const characterization = cell.memoryCharacterization;
-    const measured = characterization.measuredGeometries.length;
-    const expected = measured === 0 ? "unmeasured" : measured === 1 ? "point" : "fitted";
-    if (characterization.status !== expected) {
-      throw new Error(
-        `${cell.id}: memoryCharacterization is ${characterization.status} on ${measured} measured geometr${measured === 1 ? "y" : "ies"}`,
-      );
-    }
-    // A bound without a determinable curve is the exact overclaim this story exists to stop: it
-    // would read as "covered up to here" on the strength of a single point.
-    if ((characterization.coveredPixelBound !== null) !== (characterization.status === "fitted")) {
-      throw new Error(
-        `${cell.id}: coveredPixelBound is only meaningful on a fitted curve (status ${characterization.status})`,
-      );
-    }
-    // `Verified` is the implementation claim and must never imply geometry coverage. A cell may be
-    // Verified while `unmeasured`/`point` — that is the honest combination. The reverse cannot hold:
-    // measured geometry that bound this cell came from a record, so a cell with no implementation
-    // cannot have one.
-    if (characterization.status !== "unmeasured" && !isImplemented(cell.state)) {
-      throw new Error(
-        `${cell.id}: ${cell.state} cell carries measured geometry (${characterization.measuredGeometries.join(",")})`,
-      );
-    }
+    assertCharacterizationIsConsistent(cell);
+  }
+}
+
+// SC-16060. `state` and `memoryCharacterization` are independent claims, and the invariants that
+// keep them from silently merging back into one field belong here rather than in a consumer.
+//
+// sc-18812 rewrote the first of them. Two or more geometries no longer IMPLY `fitted` — rank does,
+// and a rank-deficient multi-geometry cell (two resolutions of one area, several frame counts at
+// one area) is now legitimately `point`. Re-deriving the status by counting, as this did, would
+// have thrown on exactly the cells the rank rule exists to describe. Recomputing through
+// `memoryCharacterization` instead would be tautological and could not catch a bug in it. What is
+// asserted is therefore the part that stays independent of the rank computation: the two ends of
+// the vocabulary are still decided by count, and `fitted` still needs at least as many measured
+// geometries as the cell's own form has coefficients.
+//
+// Exported because it is the only guard here that a unit test can reach without reconstructing the
+// generator's whole source universe, and an unreachable guard is how SC-16060 got its `Verified`
+// producer wrong in the first place.
+export function assertCharacterizationIsConsistent(cell) {
+  const characterization = cell.memoryCharacterization;
+  const measured = characterization.measuredGeometries.length;
+  const plural = measured === 1 ? "y" : "ies";
+  const expected = measured === 0 ? "unmeasured" : measured === 1 ? "point" : null;
+  if (expected !== null && characterization.status !== expected) {
+    throw new Error(
+      `${cell.id}: memoryCharacterization is ${characterization.status} on ${measured} measured geometr${plural}`,
+    );
+  }
+  // `coveredFrameBound` is emitted iff the cell's curve form is temporal, so its presence is the
+  // published record of how many coefficients this cell had to determine.
+  const coefficients = "coveredFrameBound" in characterization ? 3 : 2;
+  if (characterization.status === "fitted" && measured < coefficients) {
+    throw new Error(
+      `${cell.id}: fitted on ${measured} measured geometr${plural}, but its curve has ${coefficients} coefficients`,
+    );
+  }
+  // A bound without a determinable curve is the exact overclaim this story exists to stop: it
+  // would read as "covered up to here" on the strength of a single point.
+  if ((characterization.coveredPixelBound !== null) !== (characterization.status === "fitted")) {
+    throw new Error(
+      `${cell.id}: coveredPixelBound is only meaningful on a fitted curve (status ${characterization.status})`,
+    );
+  }
+  // sc-18812: the temporal bound is the same claim on the other axis and gets the same rule.
+  if (
+    "coveredFrameBound" in characterization &&
+    (characterization.coveredFrameBound !== null) !== (characterization.status === "fitted")
+  ) {
+    throw new Error(
+      `${cell.id}: coveredFrameBound is only meaningful on a fitted curve (status ${characterization.status})`,
+    );
+  }
+  // `Verified` is the implementation claim and must never imply geometry coverage. A cell may be
+  // Verified while `unmeasured`/`point` — that is the honest combination. The reverse cannot hold:
+  // measured geometry that bound this cell came from a record, so a cell with no implementation
+  // cannot have one.
+  if (characterization.status !== "unmeasured" && !isImplemented(cell.state)) {
+    throw new Error(
+      `${cell.id}: ${cell.state} cell carries measured geometry (${characterization.measuredGeometries.join(",")})`,
+    );
   }
 }
 
@@ -3174,7 +3235,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 // suffix is emitted ONLY above one frame, which is what keeps every image cell's
                 // published `measuredGeometries` byte-identical to what it was before.
                 ...eligibleRuns.map((record) => measuredGeometryKey(record.target.geometry)),
-              ]);
+              ], { declaresTemporalCurve: status.declaresTemporalCurve === true });
               // SC-16060. The producer the vocabulary never had: `Verified` was a listed state with
               // nothing able to emit it, so the guard in `validateMatrix` was unreachable and a test
               // asserting zero of them was green for the trivial reason. Promotion is from
@@ -3440,7 +3501,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
           "design matrix, because `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames` takes as " +
           "many independent geometries as the lane has coefficients: two on the image lane, and " +
           "three once a temporal term is carried, where three frame counts at one area are still " +
-          "singular",
+          "singular. Which form applies is read from the cell's DECLARED curve first — a curve " +
+          "carrying `perMpxFrameGb` is graded against three coefficients even if every eligible " +
+          "record happens to be single-frame",
       },
     },
     conformanceStates: [

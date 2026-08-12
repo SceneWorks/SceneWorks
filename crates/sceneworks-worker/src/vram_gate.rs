@@ -370,9 +370,22 @@ impl KreaTurboPhasePeaks {
     /// This is why sc-18810 put the temporal term on each phase curve rather than on the
     /// aggregate: `peak_gb` is a `max` over three curves, and a max of linear pieces is not
     /// linear. Fitting one temporal coefficient to the aggregate missed it by >= 10.26 GiB on
-    /// held-out geometries — about 94x the measured noise floor — while the same forms fitted per
-    /// phase landed inside 0.30 GiB. Keeping the curves per phase is what makes both `peak_gb` and
-    /// this question answerable at an unmeasured geometry.
+    /// held-out geometries — about 94x the measured noise floor — while the ADOPTED per-phase
+    /// form stays inside 0.44 GiB: 0.0185 decode, 0.1741 denoise, 0.4438 text. Keeping the curves
+    /// per phase is what makes both `peak_gb` and this question answerable at an unmeasured
+    /// geometry.
+    ///
+    /// That per-phase band is 0.019-0.44 GiB, not the tighter 0.30 an earlier revision of this
+    /// comment quoted: 0.30 is `area_only`'s TEXT residual, and no cross-form phase equals it.
+    /// The distinction matters because the win is not uniform. On text the rejected additive form
+    /// scores 0.3445 against cross's 0.4438, so **cross is 1.29x worse there**. Cross is still the
+    /// correct adoption: it beats additive 355x on decode and 15.4x on denoise — the phases that
+    /// actually carry the temporal response and decide admission at scale — it strictly contains
+    /// the constrained candidates sharing its regressors (`area_only`, `output_voxels`), and the
+    /// 0.0993 GiB it concedes on text is under that phase's own 0.1095 GiB replicate floor, the
+    /// largest of the three by orders of magnitude. Every figure here is graded from the committed
+    /// artifact rather than from this comment, by the test
+    /// `the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve`.
     pub(crate) fn binding_phase(self) -> BindingPhase {
         let mut phase = BindingPhase::Text;
         let mut peak = self.text_gb;
@@ -558,11 +571,26 @@ impl KreaRuntimeEvidenceContext {
 /// `0.0`, and the sum is deliberately written so that the absent case reduces to the pre-sc-18812
 /// expression **bit for bit** — the area term keeps its original association
 /// (`per_mpx * pixels as f64 / 1_000_000.0`, not `per_mpx * (pixels as f64 / 1_000_000.0)`, which
-/// is a DIFFERENT f64 in general), and `x + 0.0 == x` exactly for every finite `x`. That identity
-/// is pinned bitwise over the real committed curves, not asserted against a default.
+/// is a DIFFERENT f64 in general), and `x + 0.0` is bitwise `x` for every finite `x` EXCEPT
+/// `x == -0.0`, where IEEE-754 round-to-nearest gives `+0.0` — a different bit pattern for the
+/// same numeric value. Reaching that here takes a curve declaring BOTH `fixedGb` and `perMpxGb`
+/// as `-0.0` (either one alone leaves the pre-term sum at `+0.0`); such a curve validates, since
+/// JSON Schema `minimum: 0` accepts `-0.0`, and clears the `< 0.0` guards below. No committed
+/// curve declares one. It is documented rather than guarded: a signed-zero branch would exist
+/// only to preserve the sign bit of a zero-valued phase prediction, which no consumer can
+/// observe. The identity itself is pinned bitwise over the real committed curves, not asserted
+/// against a default.
 ///
-/// A PRESENT but unreadable `perMpxFrameGb` still fails closed. Only true absence is zero;
-/// a malformed value must not silently degrade a video curve into an image curve.
+/// A PRESENT `perMpxFrameGb` that `json_f64` cannot read still fails closed, and so does a
+/// negative or non-finite one. Only true absence is zero; a malformed value must not silently
+/// degrade a video curve into an image curve. "Unreadable" is `json_f64`'s notion, not JSON's:
+/// it accepts a NUMERIC STRING, so `"0.3"` evaluates exactly as `0.3` would — deliberately, and
+/// identically to `fixedGb`/`perMpxGb`, which have always been read the same way. Rejecting a
+/// string-typed coefficient is the SCHEMA's job (`model-manifest.schema.json`
+/// `#/$defs/phaseVramCurve` types all three as `number`), and
+/// `test_schema_admits_the_temporal_coefficient_additively` is where that rejection is pinned.
+/// The string case is carried here as an explicitly-ACCEPTED control so the fail-closed set below
+/// is not read as broader than it is.
 ///
 /// SC-16514 recovered the q8/bf16 768² captures from SC-15205 activity 15272 and SC-15206 activity
 /// 15314 into `turboFit.evidenceRecords`. Every tier now carries 768² and 1024² phase cells, and every
@@ -2386,6 +2414,14 @@ mod tests {
     /// A PRESENT but unreadable temporal coefficient fails the whole curve closed. Absence is the
     /// only thing that means zero: silently degrading a malformed video curve into a valid image
     /// curve would hand admission a number nobody measured.
+    ///
+    /// The set below is NOT "everything a schema would reject", and the second control says so out
+    /// loud: `json_f64` reads a numeric STRING, so `"0.3"` evaluates exactly as `0.3` does. That is
+    /// deliberate and long-standing — `fixedGb` and `perMpxGb` are read through the same helper —
+    /// and rejecting a string-typed coefficient belongs to `#/$defs/phaseVramCurve`, which types
+    /// all three as `number` (pinned by `test_schema_admits_the_temporal_coefficient_additively`).
+    /// Asserting the accepted case here is what stops this test from being read as covering type
+    /// enforcement it does not perform.
     #[test]
     fn a_malformed_temporal_coefficient_fails_the_curve_closed() {
         let with =
@@ -2419,6 +2455,22 @@ mod tests {
                 }
             ),
             Some(1.0 + 2.0 + 0.25)
+        );
+        // The BOUNDARY control, stated rather than left to be discovered: a numeric string is
+        // READABLE, not malformed. `json_f64` parses it, so the curve evaluates and the temporal
+        // term is genuinely 0.25 — asserted against the literal sum, not against the bare-number
+        // call, so a reader that stopped honouring the coefficient at all cannot satisfy both.
+        // Type enforcement is the schema's job, not this reader's.
+        assert_eq!(
+            krea_phase_curve(
+                &with(json!("0.25")),
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 1
+                }
+            ),
+            Some(1.0 + 2.0 + 0.25),
+            "a numeric string is readable, not malformed: the schema rejects the type, not this reader"
         );
     }
 
