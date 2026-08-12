@@ -190,6 +190,12 @@ fn qwen_edit_worker_lane_gpu_smoke() {
             },
         )
         .unwrap_or_else(|e| panic!("{model} generate: {e}"));
+    let plural_frames = {
+        let mut frames = frames.lock().expect("preview frames");
+        let captured = frames.clone();
+        frames.clear();
+        captured
+    };
     let alternate_out = model_engine
         .generate(
             &req,
@@ -197,6 +203,7 @@ fn qwen_edit_worker_lane_gpu_smoke() {
             &mut |_| {},
         )
         .unwrap_or_else(|e| panic!("{model} alternate-reference generate: {e}"));
+    let alternate_frames = frames.lock().expect("preview frames").clone();
     let elapsed = started.elapsed();
 
     assert_eq!((out.width, out.height), (w, h), "output dims");
@@ -229,14 +236,21 @@ fn qwen_edit_worker_lane_gpu_smoke() {
     );
 
     // ---- sc-16962: the live preview sink actually produced frames ----
-    let frames = frames.lock().expect("preview frames").clone();
     assert_preview_strip(
-        &frames,
+        &plural_frames,
         steps as u32,
         w,
         h,
         &out_dir,
-        &format!("{model}_q4"),
+        &format!("{model}_q4_plural"),
+    );
+    assert_preview_strip(
+        &alternate_frames,
+        steps as u32,
+        w,
+        h,
+        &out_dir,
+        &format!("{model}_q4_alternate"),
     );
 }
 
