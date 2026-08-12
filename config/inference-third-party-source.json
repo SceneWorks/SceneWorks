@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 56285e04 is the SC-17087 Z-Image control memory-behavior merge on the epic inference feature branch, atop current-main sync 01085dde. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against 01085dde, every candidate path, source-area classification, normalized provenance marker, crate prefix, production include site, and disclosure remains unchanged; only the existing candle-gen-z-image lib.rs candidate source blob changed for the first-party control-route behavior registration. The 01085dde..56285e04 delta changes no NOTICE or LICENSE file and adds no production Rust crate or embedded artifact.",
-  "inferenceRevision": "56285e040a57f71c628f3ee15e983890a509cc27",
-  "auditDigest": "eb05e8cac82a503cfa5e8ab056abeb2f1a6abbe9d702714679b52e81e205f1a4",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. be7d9eb1 is the SC-18309 shared native latent-decoder seam and exact Qwen-Image/SDXL real-weight gate merge on the epic inference feature branch, atop SC-18804 merge cc413e1d. The exact scanner found 625 provenance candidates and 94 production-Rust crate prefixes. Against cc413e1d, the crate population, normalized provenance markers for existing candidates, production include sites, disclosures, NOTICE/LICENSE files, Cargo manifests, and embedded artifacts remain unchanged. Existing Z-Image common.rs becomes marker-bearing inside its already-classified architecture area, and the remaining candidate changes are source blob updates inside existing classified areas.",
+  "inferenceRevision": "be7d9eb1b04e8cae91c7356d9f562b5d23c8b84f",
+  "auditDigest": "f67c3dfad853650d5da97d75987daa3bd773ebe49b4af9f0c07cc016c0401bf6",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "56285e040a57f71c628f3ee15e983890a509cc27",
+    "revision": "be7d9eb1b04e8cae91c7356d9f562b5d23c8b84f",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 624,
-    "populationSha256": "4524b11f785ef040aa71a6df5ca559a002513aea2f8b4699150aa53a3a5ec5d5"
+    "matchedFiles": 625,
+    "populationSha256": "abd181be21fd7dd2cba55d3a7bd09eedef415be8b32748df57d7f526a0ea75c1"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "56285e040a57f71c628f3ee15e983890a509cc27",
+    "revision": "be7d9eb1b04e8cae91c7356d9f562b5d23c8b84f",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"

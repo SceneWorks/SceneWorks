@@ -1,11 +1,12 @@
 use super::{
     admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
-    model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
-    resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
-    Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, Settings, Value, WorkerError, WorkerResult,
+    candle_quant_for_resolved_tier, candle_resolved_tier_key, consume_gen_events, drive_gen_items,
+    fit_engine_image, load_reference_image, mlx_model, model_repo, pid_effective_dims,
+    pid_output_tier, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_pid_weights, resolve_seed, resolve_weights_dir, start_gen_stream, ApiClient,
+    CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -322,11 +323,9 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     // The dev edit is activation-bound — multi-reference adds latent tokens to the DiT stream — but the
     // candle engine query-row-chunks its joint attention (sc-6217/sc-7523), so a device OOM surfaces as a
     // load/generate error rather than silently corrupting; no Mac-style unified-memory pre-guard applies.
-    let (quant, quant_bits) = if is_dev {
-        resolve_quant(request, Some(&flux2_base))
-    } else {
-        (None, None)
-    };
+    let tier = candle_resolved_tier_key(request, &flux2_base, false);
+    let (quant, quant_bits) =
+        candle_quant_for_resolved_tier(request, tier, &flux2_base, is_dev, false);
     let mut strategy_spec =
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux2_base.clone()))
             .with_offload_policy(gen_core::OffloadPolicy::Sequential);
@@ -338,11 +337,6 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     };
     let strategy_spec = apply_candle_image_load_shape(memory_provider, strategy_spec);
     let mut generation_memory = gen_core::GenerationMemory::default();
-    let tier = match flux2_base.file_name().and_then(|name| name.to_str()) {
-        Some("q4") => "q4",
-        Some("q8") => "q8",
-        _ => "bf16",
-    };
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6c3bb5d98e9e338fbfa3e4ced26ab89c24e2e1162e6dd4f3c883567f69523dba",
-    "inferenceRevision": "56285e040a57f71c628f3ee15e983890a509cc27",
+    "sceneWorksRevision": "source-tree:285ea47387342921808243dda5b72b4d57290dbc369923361f2cc908b88bf494",
+    "inferenceRevision": "be7d9eb1b04e8cae91c7356d9f562b5d23c8b84f",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "e47cf96ed02797ec2057c6f3e19c8123a37048b9009a8dcaf29e96ca542df5bc"
+        "sha256": "56351516ecde7985051b1e149a44d732efdea4d6138c1fd39b0216357ad9a7a7"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -54,7 +54,7 @@
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "9184935806cc0976aa79698aafdf7285d85e22ae5d2445514e3b5e6746dee3c1"
+        "sha256": "e16b2e704fe86530beb73898e1d3ae061469bc55e57191632f87be66514d751e"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -62,7 +62,7 @@
       },
       "cargo": {
         "path": "Cargo.toml",
-        "sha256": "67b449309adbf4d758f2da68ff46c28a5cadda8094ce953a04eb3617c289077d"
+        "sha256": "ced23a6cabb6f089d4514d5b10ef550ed8e14c59a35032818c578cd4eb3f55b9"
       }
     }
   },
@@ -15381,7 +15381,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "806f760e6717d0baba6fc751c3155bed98898a308bfb3ad96da2772b5f36f76f",
+      "calibrationFingerprint": "02a4bade8e9df247f2e6f0ac029c1e27aa18c78df0d809da5f19b5e7927f1fb9",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -15453,7 +15453,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "cb964336717de228cac6c629d5ab7f565f1bc34211a3e0b8f046bc2ce8f5ea82",
+      "calibrationFingerprint": "e49e272ab8025a5db6c4d4f1334693e8515dbcd67e0fe46956ce4175bf4badfd",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -16161,7 +16161,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "51715f5fdc7a1c9bc5c410e9ea4d029e21deaf0502ba2d50cba1fdfb6902d55b",
+      "calibrationFingerprint": "09ec4a566deda681a4226da0d1923afab12d2d1eaf582dfa156b4cf04a4278b1",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -16233,7 +16233,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0a51bd16462f313978bb913cb607505aba7cc82fd91b01d29f4bd60f985b2c16",
+      "calibrationFingerprint": "b6bf0daead31be2bced75e6d71422d0c8c82bbc4c3d7a6e7f6ab6a30c2e1870e",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -16976,7 +16976,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "aad93b8539984ef78672b6221eff5db242ebc0d278845808f5c27fbd3aebc0dc",
+      "calibrationFingerprint": "9b566f9e7bc7319f02a3276bf7ec3d44f83ada0afc54a3d7645c5543bab47e79",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -17048,7 +17048,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f66d40ed54f93ae6dadc8bf7f793f9be4a2f6f4cc8e03d48848cc35d7be83c42",
+      "calibrationFingerprint": "915af72ebed390231382e0e8aa7f3636151d9c0cf96383e81ef8fbffa61921eb",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -17995,7 +17995,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "39384370d63c80a03697a3980491729998733f1b85cbd78f1cceb89b483a0e55",
+      "calibrationFingerprint": "71e50ea99bda12f3d169017e085315d28774519d60becd83452f2b75c6f7ec1e",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18060,7 +18060,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c5dff27d9fdd995c35a9aba7f79513f9358600eb06ef5d6e26f8399468423336",
+      "calibrationFingerprint": "ffb228973aac06871746e5b249400265720a512c81062527d3da9d57f74294b6",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18355,7 +18355,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "204a51c23c58a63c832b93e1ba31054c1a24b5736949025490b4827dc011db0c",
+      "calibrationFingerprint": "cb9bfd0be9bc9c2168a60427c817541d9dfdf1e4c35677515100be1aca2232f3",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18420,7 +18420,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "bd00e4c94ac9bd5a766786739e17fb02f173f83ae1fd518229c4c10b053fa923",
+      "calibrationFingerprint": "f842e048081927e16a542970db345eced657197c7f3949ef7e341add40145140",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18715,7 +18715,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "688211390e42e54eda986144e31e07489f4bfbdc59be7c7b1eea0403118236c1",
+      "calibrationFingerprint": "c61a05a0aaca0684dede50567f426c79bb21005ba687d95d802e9e5ea8fd1fdf",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18780,7 +18780,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6119a665ea80ef6648cd7b17392982ab669b7f908c5e5d652b51a3e03049ce24",
+      "calibrationFingerprint": "5535199b389b3c7795725cc03648e770622b1ee74a5557a1787b004bb8c9478d",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18832,7 +18832,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "a50402966e0f80f4dccc7bed479a7ccef5b21f5a8094d56d1a0b24f18abb7a3b",
+      "calibrationFingerprint": "de3c74df4e67834e119cb8f98c6a1f3e472fe6388afd951e04d98891bd8977f3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -18893,7 +18893,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "88ebfc811d7464300856fa983c4f42a6b7fb29fbe2f3b777c8f890697eb5771a",
+      "calibrationFingerprint": "82d01b15128f82efa28c9e7a9371a8fb95e4c842a6fdb969ad1fbe89726f80e8",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -18954,7 +18954,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "82087e62eba985ae9e21073fc700023ed0aad352d85c25110c8bf8a0d3d0bcb9",
+      "calibrationFingerprint": "fad0f7680f96909f092e7b32a97122d6ea47ea6cb00b9e2c7f97c9e8489fd676",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19015,7 +19015,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b6fcc3d1ac65d3d1a0f71c242cf884b4e29c7e8b9318a0cc644c4f66c81ad4f2",
+      "calibrationFingerprint": "226ee9863eafe117c942db9090de013e9f2130d10cd6e68bff56d95c4f61bae5",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19076,7 +19076,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d8c2925a79bac95b17e1ad932f294139a72ca4117c30892fb406ce43ee3ee53b",
+      "calibrationFingerprint": "9c5e3e460cbce0bc2f0540ab067757fc22a3fd9998833b11d432f49aafc9ff52",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19137,7 +19137,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "fa58385d3085195075717b35a2c2cf79458963b216cc5199503db3a7637bd7ed",
+      "calibrationFingerprint": "d97f1569a89017a162beaa5e861cbab3b1977016f3baad159db9153ba974d087",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19198,7 +19198,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "a6c2ca69bc6ed8f62af88f87fe00a266448e56c7d58f049b9e1d11b6ec45dc81",
+      "calibrationFingerprint": "a53b58488548c88283221a2cb81ae47194d0863fb8f3e11040164be519b88f3b",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -19259,7 +19259,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c00829b86d35bd275735e0b5f09170d87780b767ec1bc054e47cb15adfd32f40",
+      "calibrationFingerprint": "2208124780b82f4394739e4f730a311e59af105529aa160b9c04d849ea515437",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -19320,7 +19320,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "431e24d181d60161434dddfc07e7e8dbde7b634b9f02322ab72ab49071f2e0e9",
+      "calibrationFingerprint": "c05328148479c31a19983f3d0feee1c356030f72de5835b23946f71caa0d1df4",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -19381,7 +19381,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5a547c420d0243d71a96ec966f23e7bc47583fc95bf6766f2fcd6c95336abce9",
+      "calibrationFingerprint": "8a9b5a3df2a04813dfe939c838bc22b7726840dce82c39ead743b4fd9683d488",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -19442,7 +19442,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4d47d8c0526686d29defcd298ebd5457d191dac91818d5e218279dfecfb21c15",
+      "calibrationFingerprint": "dea1a5e8de1685f724f494e8f3916473d13b6af4c4012941d169cf44d85f660a",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -19503,7 +19503,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "41e7e0e976cfb384c795c789cdc857ea892837549c22fb92fb50afae4ca9709c",
+      "calibrationFingerprint": "371907ce807b2e69b4f96c9efd3c7d2210f188ac0abc2f529680d1aeddd915d3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -19564,7 +19564,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "851ec8855003b84f9cdcef348d7925070e67fae4ef3545d0753830094934a28d",
+      "calibrationFingerprint": "151bb1141e0f12eb96a021499f51017dc6222ce82ff0eef0cd17915c436579fe",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -19625,7 +19625,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8fb2af32203492fc8626b6b50a7fed46ac1e2b01b28343abb6801c04d6fa5f2c",
+      "calibrationFingerprint": "2fb398198b70cf45c755a3f4c037ab32a66060a15ae55d44ab1448059dc0dc15",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -19686,7 +19686,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "55d9eec024f0d5e4e3c6e9754b7f23fe6122164db7b0539be4867bc4077eb72a",
+      "calibrationFingerprint": "76d55acd19efa628a6d0ea4c131abc3622a0c19786f519f897997475eb90451b",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -19747,7 +19747,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f97d2157f2a255c91e5c2e691a86a880d3652a7e0f7f1d890ee0c7bda3234615",
+      "calibrationFingerprint": "80bf572f8089c8abb32e0746a7685d6ad465a364125c0014a8683248dbfc89fd",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -19808,7 +19808,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e7dc741bd2c677a87174b4b5c7d078cc82d232d5d61478907e758960ca8ceb3d",
+      "calibrationFingerprint": "540e741f249862d5cb2715702357e6320f0cf1492c63b766fc40086392aded3a",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -19869,7 +19869,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "373c5f0b3b7444766f8031e0d24304aa0771e77120829864ecb30be14dbc6753",
+      "calibrationFingerprint": "197acc2a11e6a87ac4202f2ac8e604cc180a9a5af9c0a1869c09759123406801",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -19930,7 +19930,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "dcccf4baf11c6e99101ec041db55954e505950078244bf3eb9527a23b4194a9e",
+      "calibrationFingerprint": "36f5ce90ec13ca7b8baeca105f41dcc3bb1d9635327151d9a7464dce58e26d9a",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -19991,7 +19991,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "40fe07d7b06f112d2051252b1f98a2645d832c8d8df5df6b1edd0c894a520a6f",
+      "calibrationFingerprint": "35c14d96e8921e3ceb8031ec714a7cfcd9c95c6fa555f41588ca41af64497c9b",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20052,7 +20052,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d46ef42717ea1aaa2a0166411af1b2c018d59984ba88a2d75b03543b5aaadf51",
+      "calibrationFingerprint": "fd09bb4c84412602c90f6dbcc8a66922ba1824571be5acbf34df7c4dee23c716",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20113,7 +20113,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d114985d1dab2ae38b733fae8dc9d0a16d0f3bb315c2f7fa63fc1f49fca77779",
+      "calibrationFingerprint": "0dc92e98b3df59ac4e38b8fcbcc542def8ef2fcd87ad9157a1d7290af58fb953",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20174,7 +20174,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "31fde5ae7007c31dff250f3cf6f030c5c92f9870577d5af310375c0333e40375",
+      "calibrationFingerprint": "0d0718cf154416586bac77ee99fb95b074dcd15af02814b4dc4c3df5267f7ea4",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20235,7 +20235,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9d0e7237f52e68c5155615efc50c162133e7ea7d77dff286068a66931953f103",
+      "calibrationFingerprint": "053024b4ed3d547ff99efae9885bdd9205cabf9d72becd87d3cb8a66a8739a2d",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20296,7 +20296,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1b69644c782d9f5b3b2ffe269f9ac222726b60f97def6e40cf061aa84608714b",
+      "calibrationFingerprint": "868d0c5ce646c27485987860641ba5cbe593f7c86f1da842572a241ecd1ae13c",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20357,7 +20357,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d292cc309aa33762f360dead2bf2decff28982b593bfd7995ce28286ef236446",
+      "calibrationFingerprint": "17ffb4f1067ed42ff2f8bc713bff7b5cea4a06df996390a0b7896fafb6035fa3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20418,7 +20418,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9a744fc1879bd4bba32661d4ee755bad125f1cde8743f45c29b15d26e6d09661",
+      "calibrationFingerprint": "42511ef38aa0351ca6f442fd37470c26563909b1b1686c32fb08fe32b4f011ce",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20477,7 +20477,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "bc06a8cd779c393c159202f4a4638fdacf98102840ad86a19c4a1f5cf1c52b29",
+      "calibrationFingerprint": "d6b3ddc24deffa0d93fbbca5af7959c33e0e1af1d7fde30133246e10d68607a0",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20527,7 +20527,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e88efd20257f67ac29ea44e7f11951a5422b5492a54d9da600ad9d3fd8d14ebd",
+      "calibrationFingerprint": "f9a6e87bc4f1891d8f238381d4381552648f88fbe955fbca3e251bdc484948b7",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20572,7 +20572,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "963b2b3d37a57b7d351ab6cd834a9edd0f7056fd00987689c832bac1a092228b",
+      "calibrationFingerprint": "0479231ca49fe802c3b2f0ae62400994fbff1ffe664dd2b165057e6e9b408fb5",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20624,7 +20624,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ab4e858cbba34bd34f281321644ff3969051fcccf46ffb0ac3428a3e5cecee77",
+      "calibrationFingerprint": "580fb4fe4a789c5b421e8b29974b6e91daa23ce5198cd42a8ba9c1688bb7737c",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20674,7 +20674,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "57f8ef71695630df6f4f08619d71414c8fdbd28fc06a0734f3d329f0d3504086",
+      "calibrationFingerprint": "16f831bd5b294ad61955f06b21f36c2476601eaf193ceba6577f9941bacc8e37",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -20724,7 +20724,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "55125a354bb6c8ac7b75e7bd83769f0e1044e7bf6949446e0ae3b099e37689e7",
+      "calibrationFingerprint": "247869a5f481ceb6c645ecb51b19a8bde687f558af457836c6ae4292fbc12dfd",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -20776,7 +20776,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4fdb911a06b3d2b8804652529fe812667e438020608eaf43aeadbd84a49dacd3",
+      "calibrationFingerprint": "0a99860df6b7e1b03313feb25c78e0809ed10c74fba3580b9b37c280730e8d28",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "rung4Survey": {
@@ -20828,7 +20828,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1d5c7ac9fa3d43fa6f10fd1a5a72def323cb3dae550da267fd0ecee137b9dabb",
+      "calibrationFingerprint": "39d4c2d5908b8e5b8ae053fcc8c4fd5f5c1d67860487e4caf2b2292597c6e591",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -20880,7 +20880,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4f46ea580c9564c32faecf074f099770dd8ed923192417eec4331e360dcf06d4",
+      "calibrationFingerprint": "9d0aab753cecbfda9a2b0d95cc46de3afbf87f7e5a4fdf6c5da1e831c1427278",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -20930,7 +20930,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e42d880fbe79be73d85a2ecf780867c368bd3830f64536377b072b54ea1b46a9",
+      "calibrationFingerprint": "3a4d195779750e62c047b9b654428c03302831991c9f75aa1f4f10f2425385d3",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -20980,7 +20980,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f68eb60d405caa164c0db5e47884680fcf9f2201078786ae3ff1f47e82817c5c",
+      "calibrationFingerprint": "3ee06168090d57e1174b0d3053bf91e178e6ba257dd613e961d1921f267f34a8",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -21032,7 +21032,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "36fa25a9350e232de95435dab861d93b6b004d7cb9f3e562c432b879a6bb290b",
+      "calibrationFingerprint": "b880f2e7f88735aa0feacdbad258febafe82d004cb05aeb3cf865ee4285e1306",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "rung4Survey": {
@@ -21084,7 +21084,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3f83175dd8ad0ceacf53b3a8d2a4eb9905fc30503ef07da5d977dbfa6cf732fa",
+      "calibrationFingerprint": "0c273645dec743c62e7d20a70d284d4642d2d33b3c09be4646de3b422fdb9c90",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -21136,7 +21136,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3c155b427f4b2bae0b04fabde030ee9d1a268286010b90e68c6fff38b74ff886",
+      "calibrationFingerprint": "f99fb30f2f755ae04a9dd8554cd06449b8ae19dc3f55e33215c430c699d19a43",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -22409,7 +22409,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "fc7c1168d0029f0f0ddbdb5988abac01a8f50ed31c5227a9a1ae10a84c9b25ac",
+      "calibrationFingerprint": "a94fda8f63442891f48690561a09ff050ec9bacef2b9a3d0bb5f0fa8e4f973d0",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22464,7 +22464,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6d20e98753030f420fbd845146f1f8a9dc4a62d05e7d577d308ee8e7c6db56d9",
+      "calibrationFingerprint": "a568f04650193200eda81c52cd57c58f7923dfb0969d6ab451ef560cebaba3e5",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22565,7 +22565,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7c5a4251fae8afb1ae814c6a0ddf05ecdc6856b3b21ac69ad3bc88b3e7f85c87",
+      "calibrationFingerprint": "81cc57e3c40688e4f3242154f4102806f88456705e090a4c6e4f63c842268a48",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22620,7 +22620,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "cfb536dde2f1d4baab3e985d11cce99e30cf7510009e26bb2c33d7c7158ccf88",
+      "calibrationFingerprint": "8ecfe89b8f1449b06d65d25ead8af42372e18246d4e74068e57d6c6b080d320a",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22721,7 +22721,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "901e594f3b12fa5eedb74bdae2605518ac2340181d387b747d648a65f4ff7162",
+      "calibrationFingerprint": "bc8ed9d8f0c5fcbee19265f49935714159554318f9d4d50d323a6a5da05ce944",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22776,7 +22776,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "16d6f69267fc4952319fa1655d617e4907e9423baba97c3721ccdc04e419eeea",
+      "calibrationFingerprint": "cef5e47e9284b7da0fdb24b979ca796852329e952aeed6e27fd896454f963a22",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -23450,7 +23450,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1d85e1e8516d4d977b56d1f9ef32c38c9f33f5d1c3c9cc9427c0db87689c5d80",
+      "calibrationFingerprint": "97b968e84befa182b60fe894fb08803652a846931682ae7dcdd0c99fee31b396",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23502,7 +23502,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1cb4d72c76d6da32288bbc015ce121df4796a633f788cab420c4d6ca623ff4f7",
+      "calibrationFingerprint": "c3099d03885dc352567cc81ba2111e5e15c1cc0031e1b10512ecc71daa729423",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23747,7 +23747,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9a358600bf8ceab0153f43457fe5bfbcf588151d28dbd5fcec369d6ddb2735ac",
+      "calibrationFingerprint": "a605ec103d8823637fbfbe50a0912f8d7ec775ec0724b80e89753ef84c8632e6",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23799,7 +23799,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "51c588d2972df1ab931b38963e9ee69f77a7d65190104df9124437920c6bb58a",
+      "calibrationFingerprint": "0aa4c72ca2a0ebef6c6f3e8033a08ed45d1489f5612cf1635de57484c179b690",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24044,7 +24044,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d8f96529ba195d6d27e569c4e6d214b63f2c1ff30621948ce84487b142c22101",
+      "calibrationFingerprint": "85a1a734d93d557af3de3c643b4203bc83a19fee54d5791013dcf4c0b59682ac",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24096,7 +24096,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9d25657b35fdf57689a98acbff18028bad07bc9bc2b60ecfc1264b4804c1da36",
+      "calibrationFingerprint": "02b6810a6783cc13df709e7d74f68b7d8d01712dbf0aab4022123a396501e984",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24341,7 +24341,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "753a277415e68de64bb167d63236c83e10d9604110dc8916ed104eb9f67fc262",
+      "calibrationFingerprint": "8467e925bc0e23c1e10144c6df134fff405c03a02020c797b4db8e0c20d4abd8",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24393,7 +24393,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5685a3794ac57b91d78ab88b114ef9a823f4c12d02ba1522afe62c3c5df6b9c1",
+      "calibrationFingerprint": "dcd89bf3847ac326e32f983860f134c487bad8a1c00bdad54eeab4fe5e342e90",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24638,7 +24638,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8d84a2b79adb8f8ad0ea716e47a5393cd74134e21479ef974926162d5d494645",
+      "calibrationFingerprint": "47193deb095b556fb861f890e394184fa31f99d5ded1eaa7299cf1bce0789a6d",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24690,7 +24690,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f0ca892ba454906b54ce1bf92c0c41f3160a49e2b674b310377265623406557e",
+      "calibrationFingerprint": "e4e51cce5488951810096a06705d3eebeb22b3d05c8c4d94a421c761a594d373",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24935,7 +24935,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "163b04cc4c4ba0ad213a1e5bed0da65e3bd4b323497a59fd12cd9aa47a80336f",
+      "calibrationFingerprint": "ff4feb8a363aa89b110a44a6938004afe61413ee5e271dfe2ec8286bcee37cd4",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24987,7 +24987,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "827d424c1d3391d8244c38874e6e6e3c48d7b03e49f0b5e4262785490cdca35f",
+      "calibrationFingerprint": "79d0a34322298ccbe1ae390bc2b7dff18e6a0310c295acad3f9c645753a59374",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25232,7 +25232,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1fa30611f5239b3107c4109af0839f8906e1f57276365bea90757ce46f5f0751",
+      "calibrationFingerprint": "6f75ffedafb53906890f0729470f9bcb6c751871d709bf9c1d58513f0ff47a10",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25284,7 +25284,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "454bf1c6e49fe560a5447e88987e0e51c4f409317277ab39e33413a304826c4e",
+      "calibrationFingerprint": "9a255cfbcdafcd2f92354fb5751fdeaaad66f22c4965d789fde6af8d58635846",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25529,7 +25529,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6a4885290f912f57298472b6be6e31264b66fa7609fe3e8e15ff29240b6b32b0",
+      "calibrationFingerprint": "c06e767476713449b0b5794c8f65fad715616f25851fbcc54a73789f6dede3ab",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25581,7 +25581,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e2955e5841054d15bcf6eb0e846f41747f637b691806b7a555e4e5dcd5f6f4e4",
+      "calibrationFingerprint": "1c0b646797e693550c5c2d042df63bfa7514e74ae58bdeb4924cdecb0419978d",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25826,7 +25826,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8777cf8a57dc80993daba260fc29292b1ebda6643ba35262b6932e0607006d48",
+      "calibrationFingerprint": "915aa8a6957dda7ec62e77b1d4bca2131b3bfe76a40ef3244cac2880c84e9b23",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25878,7 +25878,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "97fa39db593923dd9b8f8866928f934149b044feac267a8a712e9a3b48edd8bf",
+      "calibrationFingerprint": "545a40ceb8625777376ba2256b1b1f8be8f791b17f0e239b1a9bfb27987b81c3",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26123,7 +26123,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7717f1fbb13af33f9c5ce80032d36a52f8b1d09c1d8238cf0c88edab0ac7fc20",
+      "calibrationFingerprint": "2d5dc75db44dd1cacd615b52bb03a7941fbe472e9f57abc01ca1e652af492903",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26175,7 +26175,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "dba1aee67a6de96565b9997adf6b0d83372ba701e0969a49d7a6aa5338d6d87e",
+      "calibrationFingerprint": "cc135ee68e85ad9a870fab0ddffb0880240a12aa339d9d3117ce27139f466c30",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26420,7 +26420,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2bde91b6f45b19802b261ae87422f8460275895019fc37670e63200a25bc23cb",
+      "calibrationFingerprint": "b0b405c39189d3f7403b31848e3759d7667e952e824f3dccdf96680562e03ede",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26472,7 +26472,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b48f499a4c6a3f69fae80a6d7f0415fc460737c57c52d385adf0c4c1053c843f",
+      "calibrationFingerprint": "fd4b91c0525af096ec145f7afd47fedaf8a64f4fab184a9e7ec4d4c1d702daab",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26717,7 +26717,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9d541b3077d479e4ed4d1759c65ee251e1c90718de1adc451b1b070ddf289db0",
+      "calibrationFingerprint": "87884ce6a6c5c9d94201f4b66c7bfc270911565ce3ffd2dccc60ecb2b0a4e117",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26769,7 +26769,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5c2f7a34f28c470f238b9121bac8fea2c9a173076ee806f9423354fae1ad8765",
+      "calibrationFingerprint": "336f715e823855b8f748a863c28ac9e331cb481a2222027640dd6e715bf85106",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27014,7 +27014,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "50d57f94a1a1b377cefc34c23240d8fbf8019d660167a68b4a6b8b7f5bb25fe2",
+      "calibrationFingerprint": "abbfc021faddf6852981d37c369daa2a70ae5e00a084d4773a94ba5951de06dd",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27066,7 +27066,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0da8577b223b050dbca5e1e37a8563542b58199685c8d6ce0c88bcb3e82351d1",
+      "calibrationFingerprint": "160626a17155214579ebed4abbf1390b305528f8e7e16fcf0723b367afd1d93b",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27311,7 +27311,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5bbbb6285c0911088b73fe0f396f0ae5c33798d6fa44438dac8335e37cc8cedf",
+      "calibrationFingerprint": "dca5363621b3962095b5d11d89d800ee70dfb75894b8ac72f29f12cbf26c7cce",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27363,7 +27363,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f84af41acdcbe9d9d978043ae3fe055c338d3ea9da6f297f29f2a7cc8b1c47e3",
+      "calibrationFingerprint": "ee219d378b427cbf317bfb218a68fcc60fcae50e85453c2a4ca4260ebc40e30d",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27608,7 +27608,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "37eca0f693115f7c191fde3f1094e94516d480c6246a02e8918a7c64fd8af88a",
+      "calibrationFingerprint": "786294a4ac461ca638aa794e32136cb5228c30f4394d7ad72e947beb4c2809eb",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27660,7 +27660,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "24b0dd2cdf50b88a8883a86cc2ae933157d21d75a9f06e3071592a24694d4cf9",
+      "calibrationFingerprint": "5b8017182e04058af84a586feb43749719af75d9e876a504c0dfbe16f920c67b",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27905,7 +27905,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "334c00977556d9e58627e58d3d989895207c9ad1fd250e9750733f1b46b4e353",
+      "calibrationFingerprint": "0c2e06d509e8128e8b3ad4ebc777da8af737bc7c1cd745f9850fbb1c7c570ba3",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27957,7 +27957,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d22b0d37a983d212f210d095fcaaf18544bef2f3254e614dcf61f76ea3ad6622",
+      "calibrationFingerprint": "6276571552a27a3cc59437099b0b9ec0e2ab5841a58a987b2f81c17fa8a5a615",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28202,7 +28202,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0d0cb8409dc6d299dd987cc8384723708b43dc2443efe5d6a896e6feac541134",
+      "calibrationFingerprint": "89490659e04960bc0fd0be6ccf5ce50d8628bceb4cc805db56c5f528491a0b2e",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28254,7 +28254,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f79387b19da538b6c3cdd616cbdeac69d85c108a7e7836088d5f912ad3312a43",
+      "calibrationFingerprint": "6acc4474ec7061e59dbdd28969ee5662550bbce30cd7f2f208f9ab235d406ca6",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28499,7 +28499,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "10f6c9e9bff37933666e8256aadf949e93d76743539e6cddbe8701cca4fa5e35",
+      "calibrationFingerprint": "ff5433325dbe280e08c9e865afbc459fdf88f6ded27f5cd03eee194b4ea218e4",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28551,7 +28551,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f94b53edff3966497e7f01d537b9ea98075720fcbba4a9f60bd84382000d72d8",
+      "calibrationFingerprint": "51f9848230c214982d623afecb5e4a57f56fe18bd1d4ac03c87299b620ed447e",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {

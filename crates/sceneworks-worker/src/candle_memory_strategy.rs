@@ -44,7 +44,37 @@ pub(crate) struct CandleMemoryEvaluation {
     pub predicted_peak_gb: f64,
 }
 
-fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn declared_component_floors(engine_id: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
+    crate::inference_runtime::media_descriptor(engine_id)
+        .map(|descriptor| descriptor.capabilities.component_precision_floors)
+        .unwrap_or(&[])
+}
+
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+fn declared_component_floors(_: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
+    &[]
+}
+
+fn active_component_floors(
+    engine_id: &str,
+    selected: Option<Quant>,
+) -> &'static [gen_core::ComponentPrecisionFloor] {
+    let declared = declared_component_floors(engine_id);
+    match selected {
+        Some(selected)
+            if !declared.is_empty() && declared.iter().all(|floor| floor.applies_to(selected)) =>
+        {
+            declared
+        }
+        _ => &[],
+    }
+}
+
+fn numeric_tier(engine_id: &str, tier: &str) -> Option<MemoryNumericTier> {
     let quant = match tier {
         "q4" => Some(Quant::Q4),
         "q8" => Some(Quant::Q8),
@@ -54,7 +84,7 @@ fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
     Some(MemoryNumericTier {
         precision: Precision::Bf16,
         quant,
-        component_precision_floors: &[],
+        component_precision_floors: active_component_floors(engine_id, quant),
     })
 }
 
@@ -366,7 +396,7 @@ fn verified_candidates(
         let evidence_key = MemoryEvidenceKey {
             resolved_route: runtime_provider.to_owned(),
             backend: MemoryBackend::Candle,
-            tier: numeric_tier(tier).expect("validated numeric tier"),
+            tier: numeric_tier(runtime_provider, tier).expect("validated numeric tier"),
             mode: mode.mode.clone(),
             load_shape,
             overlay: (overlay != "none").then(|| overlay.to_owned()),
@@ -760,7 +790,7 @@ fn evaluate_shared_image_inner(
         return Ok(None);
     }
     let mode = request_mode(engine_id, request_mode_value);
-    let Some(tier) = numeric_tier(tier_key) else {
+    let Some(tier) = numeric_tier(engine_id, tier_key) else {
         return Ok(None);
     };
     let Some(budget) = budget else {
@@ -1135,6 +1165,71 @@ mod tests {
             assert_eq!(binding.mode, MemoryMode::Edit, "engine={engine_id}");
             assert_eq!(binding.calibration_key, "edit_image");
             assert_eq!(binding.scope_key, "edit");
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mage_numeric_tiers_bind_only_the_active_q4_precision_floors() {
+        for engine_id in [
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo",
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ] {
+            let declared = crate::inference_runtime::media_descriptor(engine_id)
+                .unwrap_or_else(|| panic!("missing registered Mage descriptor {engine_id}"))
+                .capabilities
+                .component_precision_floors;
+            assert!(!declared.is_empty(), "engine={engine_id}");
+            assert!(
+                declared.iter().all(|floor| floor.applies_to(Quant::Q4)),
+                "engine={engine_id}"
+            );
+            assert_eq!(
+                numeric_tier(engine_id, "q4")
+                    .expect("q4 tier")
+                    .component_precision_floors,
+                declared,
+                "engine={engine_id}"
+            );
+            for tier in ["q8", "bf16"] {
+                assert!(
+                    numeric_tier(engine_id, tier)
+                        .unwrap_or_else(|| panic!("missing {tier} tier"))
+                        .component_precision_floors
+                        .is_empty(),
+                    "engine={engine_id} tier={tier}"
+                );
+            }
+        }
+
+        for engine_id in [
+            "z_image",
+            "z_image_turbo",
+            "z_image_control",
+            "z_image_turbo_control",
+            "qwen_image",
+            "qwen_image_edit",
+            "flux1_schnell",
+            "flux1_dev",
+            "flux2_dev",
+            "flux2_klein_9b",
+        ] {
+            for tier in ["q4", "q8", "bf16"] {
+                assert!(
+                    numeric_tier(engine_id, tier)
+                        .unwrap_or_else(|| panic!("missing {tier} tier"))
+                        .component_precision_floors
+                        .is_empty(),
+                    "engine={engine_id} tier={tier}"
+                );
+            }
         }
     }
 
@@ -1777,7 +1872,7 @@ mod tests {
                 contract,
                 &manifest,
                 "q4",
-                numeric_tier("q4").expect("q4 tier"),
+                numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
                 &request_mode("z_image_turbo", "text_to_image"),
                 None,
                 geometry,
@@ -2093,7 +2188,7 @@ mod tests {
             key: MemoryEvidenceKey {
                 resolved_route: "z_image".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
-                tier: numeric_tier("q4").expect("q4 is a supported numeric tier"),
+                tier: numeric_tier("z_image", "q4").expect("q4 is a supported numeric tier"),
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: gen_core::MemoryMode::TextToImage,
                 overlay: Some("lora".to_owned()),

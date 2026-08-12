@@ -1,12 +1,12 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
     apply_candle_image_load_shape, candle_certified_artifact_path,
-    candle_certified_hf_artifact_path, pid_effective_dims, pid_output_tier, pose_entries,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    resolve_quant, run_candle_strict_control, trusted_control_weight_revision, ApiClient,
-    CancelFlag, CandleStrictControl, Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Image,
-    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Quant, Settings,
-    Value, WorkerError, WorkerResult,
+    candle_certified_hf_artifact_path, candle_quant_for_resolved_tier, candle_resolved_tier_key,
+    pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, run_candle_strict_control,
+    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Flux2Control,
+    Flux2ControlPaths, Flux2ControlRequest, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, PathBuf, Progress, Quant, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -406,9 +406,10 @@ pub(super) async fn generate_candle_flux2_control_stream(
     })?;
     let control = ensure_flux2_control_candle_weights(api, settings, job, request).await?;
 
-    // dev (32B) loads Q4 (manifest `mlx.quantize: 4` → `resolve_quant`); the control overlay quantizes
+    // The resolved base tier drives both load quant and memory receipt. The control overlay quantizes
     // in place. The control context is clean + constant across the denoise (encoded once).
-    let (quant, quant_bits) = resolve_quant(request, Some(&base));
+    let tier = candle_resolved_tier_key(request, &base, false);
+    let (quant, quant_bits) = candle_quant_for_resolved_tier(request, tier, &base, true, false);
     let steps = flux2_control_candle_steps(request);
     let guidance = flux2_control_candle_guidance(request);
     let control_scale = advanced::f32_clamped(
@@ -443,11 +444,6 @@ pub(super) async fn generate_candle_flux2_control_stream(
         use_pid,
         pid_output_tier(request),
     );
-    let tier = match base.file_name().and_then(|name| name.to_str()) {
-        Some("q4") => "q4",
-        Some("q8") => "q8",
-        _ => "bf16",
-    };
     let overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control);
     let mut strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
         .with_control(gen_core::WeightsSource::File(control.clone()))

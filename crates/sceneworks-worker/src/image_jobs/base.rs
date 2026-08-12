@@ -2919,6 +2919,11 @@ mod mage_artifact_certification_tests {
 
     #[test]
     fn mage_certification_binds_backbone_and_every_required_component() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
         let data = tempfile::tempdir().expect("temp data dir");
         let settings = settings(data.path());
         let manifest = mage_manifest("mage_flow_base");
@@ -8030,17 +8035,239 @@ mod krea_turbo_memory_route_tests {
     }
 }
 
-/// The `(load Quant, recipe bit count)` a resolved generation `tier` loads at (sc-10733) — used to
-/// correct the recorded quant + telemetry after a capability downtier rewrites the tier, so a
-/// downtiered job records the precision it ACTUALLY ran (parity with the MLX
-/// [`reconcile_resolved_tier_quant`]), not the requested one. On candle the load quant is advisory (the
-/// packed tier is auto-detected on disk), so this is safe to set to the downtiered tier.
+/// Resolve the Candle load quant + recipe bit count from the FINAL tier the disk resolver (or the
+/// capability clamp) selected. That tier is also handed to the shared memory evaluator, so the
+/// provider's `LoadSpec` and request scope cannot describe different numeric artifacts.
+///
+/// Dense-TE turnkeys keep their full-precision text encoder while still recording the packed DiT's
+/// resolved bits. Opaque/flat paths retain the request-derived behavior because there is no tier
+/// basename to make a stronger artifact claim.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn tier_to_quant(tier: &str) -> (Option<Quant>, Option<i64>) {
+fn candle_resolved_tier_key(
+    request: &ImageRequest,
+    weights_dir: &Path,
+    convrot_resolved: bool,
+) -> &'static str {
+    gate_tier_key(
+        convrot_resolved,
+        weights_dir,
+        &request.advanced,
+        &request.model_manifest_entry,
+        nvfp4_selected(request, nvfp4_host_eligible(), Some(weights_dir)),
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_quant_for_resolved_tier(
+    request: &ImageRequest,
+    tier: &str,
+    weights_dir: &Path,
+    supports_quant: bool,
+    force_dense: bool,
+) -> (Option<Quant>, Option<i64>) {
+    let resolved_bits = match tier {
+        "bf16" => None,
+        "q4" => Some(4),
+        "q8" => Some(8),
+        // Distinct identities such as NVFP4 and opaque modelPath roots keep the existing resolver,
+        // but against the FINAL directory so NVFP4 cannot survive a fallback to another artifact.
+        _ if !force_dense && supports_quant => return resolve_quant(request, Some(weights_dir)),
+        _ => return (None, None),
+    };
+    if is_dense_te_tier(request) {
+        return (None, resolved_bits);
+    }
+    if force_dense || !supports_quant {
+        return (None, None);
+    }
     match tier {
         "bf16" => (None, None),
         "q4" => (Some(Quant::Q4), Some(4)),
-        _ => (Some(Quant::Q8), Some(8)),
+        "q8" => (Some(Quant::Q8), Some(8)),
+        _ => unreachable!("resolved bits above accepts only bf16/q4/q8"),
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_resolved_tier_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    const MAGE_IDS: &[&str] = &[
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+    ];
+
+    fn request(bits: i64) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({
+                "model": "mage_flow_base",
+                "advanced": { "mlxQuantize": bits },
+                "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+            })
+            .as_object()
+            .expect("request object"),
+        )
+    }
+
+    fn seed_only_tier(root: &Path, tier: &str) {
+        let transformer = root.join(tier).join("transformer");
+        std::fs::create_dir_all(&transformer).expect("tier transformer dir");
+        std::fs::write(transformer.join("model.safetensors"), b"x")
+            .expect("tier presence marker");
+        let config = match tier {
+            "q4" => r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            "q8" => r#"{"quantization":{"bits":8,"group_size":64}}"#,
+            _ => "{}",
+        };
+        std::fs::write(transformer.join("config.json"), config).expect("tier config");
+    }
+
+    fn mage_spec(engine_id: &str, weights: &Path, quant: Option<Quant>) -> LoadSpec {
+        let mut spec = load_spec(weights.to_path_buf(), quant, Vec::new(), None);
+        spec = apply_candle_image_load_shape(engine_id, spec);
+        let descriptor = crate::inference_runtime::media_descriptor(engine_id)
+            .unwrap_or_else(|| panic!("missing Mage descriptor {engine_id}"));
+        descriptor.required_components.iter().fold(spec, |spec, id| {
+            spec.with_component(
+                *id,
+                WeightsSource::Dir(weights.join(format!("component-{id}"))),
+            )
+        })
+    }
+
+    #[test]
+    fn fallback_tier_drives_mage_spec_receipt_floors_and_provider_scope() {
+        // requested q4 -> resolved q8/bf16, and requested q8/bf16 -> resolved q4.
+        for (requested_bits, resolved_tier, expected_quant, expected_bits) in [
+            (4, "q8", Some(Quant::Q8), Some(8)),
+            (4, "bf16", None, None),
+            (8, "q4", Some(Quant::Q4), Some(4)),
+            (0, "q4", Some(Quant::Q4), Some(4)),
+        ] {
+            let temp = tempfile::tempdir().expect("temp tier root");
+            seed_only_tier(temp.path(), resolved_tier);
+            let request = request(requested_bits);
+            let resolved = standard_tier_subdir_gated(temp.path(), &request, false);
+            let tier = candle_resolved_tier_key(&request, &resolved, false);
+            assert_eq!(tier, resolved_tier);
+            let (resolved_quant, resolved_bits) =
+                candle_quant_for_resolved_tier(&request, tier, &resolved, true, false);
+            assert_eq!((resolved_quant, resolved_bits), (expected_quant, expected_bits));
+
+            // This is the pre-fix request-derived value: intentionally retain it only to prove the
+            // provider rejects a stale LoadSpec against the resolved receipt.
+            let stale_requested_quant = resolve_quant(&request, Some(&resolved)).0;
+            assert_ne!(stale_requested_quant, resolved_quant);
+
+            for &engine_id in MAGE_IDS {
+                let spec = mage_spec(engine_id, &resolved, resolved_quant);
+                assert_eq!(spec.quantize, expected_quant, "engine={engine_id} tier={tier}");
+                let edit = engine_id.contains("_edit");
+                let evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+                    engine_id,
+                    engine_id,
+                    &spec,
+                    false,
+                    &JsonObject::new(),
+                    tier,
+                    if edit { "edit_image" } else { "image_generation" },
+                    None,
+                    gen_core::MemoryGeometry {
+                        width: 1024,
+                        height: 1024,
+                        batch: 1,
+                        frames: 1,
+                        reference_count: u32::from(edit),
+                    },
+                    edit,
+                    false,
+                    false,
+                    Some(crate::vram_gate::VramBudget {
+                        free_gb: 64.0,
+                        total_gb: 64.0,
+                    }),
+                    Some(1.0),
+                    0,
+                    gen_core::MemoryCacheState::Cold,
+                )
+                .expect("shared Mage evaluation")
+                .expect("resident Mage selection");
+                assert_eq!(
+                    evaluation.context.selection.tier.quant,
+                    expected_quant,
+                    "engine={engine_id} tier={tier}"
+                );
+                let declared = crate::inference_runtime::media_descriptor(engine_id)
+                    .expect("Mage descriptor")
+                    .capabilities
+                    .component_precision_floors;
+                if tier == "q4" {
+                    assert_eq!(
+                        evaluation
+                            .context
+                            .selection
+                            .tier
+                            .component_precision_floors,
+                        declared,
+                        "engine={engine_id}"
+                    );
+                } else {
+                    assert!(
+                        evaluation
+                            .context
+                            .selection
+                            .tier
+                            .component_precision_floors
+                            .is_empty(),
+                        "engine={engine_id} tier={tier}"
+                    );
+                }
+
+                let registry = crate::inference_runtime::media();
+                let registration = registry
+                    .memory_strategy_registrations()
+                    .find(|registration| registration.provider_id == engine_id)
+                    .unwrap_or_else(|| panic!("missing Mage memory registration {engine_id}"));
+                let behavior = registry
+                    .memory_behavior_registrations()
+                    .find(|registration| registration.provider_id == engine_id)
+                    .unwrap_or_else(|| panic!("missing Mage memory behavior {engine_id}"));
+                let contract = (registration.contract)(&spec).expect("Mage memory contract");
+                assert_eq!(
+                    (registration.safety_check)(&spec, &contract, &evaluation.context),
+                    gen_core::MemorySafetyDecision::Accept,
+                    "engine={engine_id} tier={tier}"
+                );
+                assert!(
+                    (behavior.begin_request)(&spec, &contract, &evaluation.context)
+                        .expect("matched Mage begin_request")
+                        .is_some(),
+                    "engine={engine_id} tier={tier}"
+                );
+
+                let stale_spec = mage_spec(engine_id, &resolved, stale_requested_quant);
+                assert!(
+                    matches!(
+                        (registration.safety_check)(
+                            &stale_spec,
+                            &contract,
+                            &evaluation.context
+                        ),
+                        gen_core::MemorySafetyDecision::Reject { .. }
+                    ),
+                    "engine={engine_id} requested={requested_bits} resolved={tier}"
+                );
+                assert!(
+                    (behavior.begin_request)(&stale_spec, &contract, &evaluation.context).is_err(),
+                    "engine={engine_id} requested={requested_bits} resolved={tier}"
+                );
+            }
+        }
     }
 }
 
@@ -8227,35 +8454,8 @@ async fn generate_candle_stream(
         _ => {}
     }
 
-    // Descriptor-gated quant + adapters (sc-5126). Lens advertises Q4/Q8 (Q8 default) + LoRA/LoKr, so
-    // it resolves them like the MLX path; the sc-3675/sc-5096 families advertise neither and skip both
-    // (dense bf16/fp16, no adapters) — preserving their shipped behavior. The router only lets a quant
-    // request / LoRA reach this worker for a family that supports it (`image_request_candle_eligible`).
-    // `mut` so the sc-10733 downtier can correct the recorded precision to the tier it lands on.
-    let (mut quant, mut quant_bits) = if convrot.is_some() {
-        // INT8-ConvRot (sc-9300): the int8 DiT replaces the dense transformer wholesale — a bits-based
-        // load-time `Quant` is meaningless (and the candle-gen krea engine rejects a quant overlay on
-        // the ConvRot path). Force dense-None; the recipe records no `mlxQuantize` bits for this tier.
-        (None, None)
-    } else if is_anima_model(&request.model) {
-        // Anima off-Mac (sc-10676): the descriptor advertises Q4/Q8, but there is NO packed tier off-Mac
-        // — the `anima_quant` converter is macOS-only and the NC license bars publishing one, and the
-        // candle loader only CONSUMES an MLX-packed tier (it hard-rejects a quant request against the
-        // dense split_files/ DiT: "the DiT checkpoint is DENSE … load the dense tier"). So force dense
-        // bf16 here, IGNORING the manifest `mlx.quantize: 4` default that `resolve_quant` would otherwise
-        // apply — else every plain candle Anima job would fail the loader's packed-detect. The router
-        // keeps `candle_quant = false`, so a deliberate `advanced.mlxQuantize > 0` never reaches this lane
-        // (it defers rather than silently running dense); this arm handles the default-quant case the
-        // router doesn't strip. A dense DiT + LoRA/LoKr still folds (Quant None ⇒ no sc-10578 reject).
-        (None, None)
-    } else if model.supports_quant() {
-        // `weights_dir` is the tier subdir this lane is about to load (resolved above), so the NVFP4
-        // tier is picked only when the `nvfp4/` dir is what actually resolved (sc-11042) — never FP4
-        // against a q8 fallback.
-        resolve_quant(request, Some(&weights_dir))
-    } else {
-        (None, None)
-    };
+    // Adapters do not participate in tier identity. Quant is resolved only after every possible
+    // weights-directory rewrite below, so the final LoadSpec and memory receipt share one tier.
     let adapters = if convrot.is_some() {
         // ConvRot does not combine with LoRA/LoKr (the int8 DiT is not adapter-wired); skip adapters.
         Vec::new()
@@ -8380,8 +8580,6 @@ async fn generate_candle_stream(
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
     // sc-9092) — the same `model_repo` the MLX path records.
     let repo = model_repo(request, &model);
-    // `mut`: rebuilt with the corrected `quant_bits` if the sc-10733 downtier lands on a lower tier.
-    let mut raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     // Per-generation PiD decode (epic 7840): resolve the PiD checkpoint + Gemma for this model's latent
     // space when `advanced.usePid` is set and the snapshots are cached; otherwise keep the native VAE.
     // `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch). Every candle image
@@ -8445,18 +8643,11 @@ async fn generate_candle_stream(
     // names the tier by IDENTITY (never by bits — `Quant::Nvfp4.bits()` is 4, which would alias q4).
     // `nvfp4_selected` reads that same resolved `weights_dir`, so a `quantTier: "nvfp4"` label that fell
     // back to another tier's dir is sized/named as the tier that will actually load, not as nvfp4.
-    let nvfp4_sel = nvfp4_selected(request, nvfp4_host_eligible(), Some(&weights_dir));
     // sc-12425: a resolved ConvRot load is named by its tier IDENTITY (see [`gate_tier_key`]) — it used
     // to be handed to the bits-derived `requested_tier_key`, which aliased it to q8 and under-gated it.
     // The comment above already knew "its footprint is neither the bf16 nor the q8 tier"; now the gate
     // acts on it. Extracted so that mapping has a unit test; this fn cannot be exercised from one.
-    let mut tier = gate_tier_key(
-        convrot.is_some(),
-        &weights_dir,
-        &request.advanced,
-        &request.model_manifest_entry,
-        nvfp4_sel,
-    );
+    let mut tier = candle_resolved_tier_key(request, &weights_dir, convrot.is_some());
     let requested_tier = tier;
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
     // maintaining a second engine-id allowlist in the worker. The capability bit is the provider's
@@ -8614,14 +8805,6 @@ async fn generate_candle_stream(
                     );
                     weights_dir = dir;
                     tier = chosen;
-                    // Record the precision that ACTUALLY runs (parity with the MLX reconcile) so a
-                    // downtiered job's sidecar/telemetry never lies. Candle load quant is advisory (the
-                    // packed tier is auto-detected on disk), so this rewrite is safe.
-                    let (downtiered_quant, downtiered_bits) = tier_to_quant(chosen);
-                    quant = downtiered_quant;
-                    quant_bits = downtiered_bits;
-                    raw_settings =
-                        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
                 }
             }
             DowntierPick::Reject {
@@ -8695,6 +8878,18 @@ async fn generate_candle_stream(
             }
         }
     }
+    // Reconcile only after the capability clamp has made its final directory/tier decision. The same
+    // resolved value now drives recipe bits, LoadSpec.quantize, MemoryNumericTier, active component
+    // floors, and the provider begin-request check.
+    let (quant, quant_bits) = candle_quant_for_resolved_tier(
+        request,
+        tier,
+        &weights_dir,
+        model.supports_quant(),
+        convrot.is_some() || is_anima_model(&request.model),
+    );
+    let mut raw_settings =
+        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     let adapter_resident_bytes =
         candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes);
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
