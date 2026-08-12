@@ -25,6 +25,7 @@
 // engine-capability-facts coverage checks, whose whole subject is a guard that was never exercised.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -38,6 +39,7 @@ import {
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
 } from "../apps/web/src/data/previewSupportDerivation.js";
+import { validateMemoryContractFacts } from "./lib/memory-contract-reconciliation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
@@ -421,6 +423,15 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
     "audio",
   );
 
+  // SC-18460: a pin bump must not accept descriptor-only media dumps. The same generated files are
+  // the authoritative registry side of the memory-contract reconciliation gate, so require the
+  // complete two-backend inventory, unique providers/selectors, and digest-bound surfaces here.
+  // Audio facts remain a separate registry and deliberately carry no image-memory contracts.
+  validateMemoryContractFacts(
+    names.map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))),
+    sha,
+  );
+
   const stale = [];
   for (const [from, fileNames, label] of [
     [dir, names, ""],
@@ -712,14 +723,33 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     'pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];',
     "",
   ].join("\n");
-  const factsFile = (backend, revision, extra = {}) =>
-    JSON.stringify({
-      ...extra,
+  const factsFile = (backend, revision, extra = {}) => {
+    const surfaces = [
+      {
+        selector: { tier: "q4", offloadPolicy: "resident", loadShape: "deferred_materialization" },
+        implementedRungs: ["resident", "bounded_transformer_residency"],
+        structurallyNotApplicableRungs: [],
+        deferredMaterializationRungs: ["bounded_transformer_residency"],
+      },
+    ];
+    return JSON.stringify({
       backend,
       generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
       engines: [{ id: "x", modality: "image", supportsPreview: false }],
+      memoryContracts: [
+        {
+          id: `${backend}_x`,
+          composed: false,
+          selectorDigest: `sha256:${createHash("sha256")
+            .update(JSON.stringify(surfaces))
+            .digest("hex")}`,
+          surfaces,
+        },
+      ],
+      ...extra,
     });
-  const fixture = ({ audio = true, revision = SHA, swapped = false } = {}) => {
+  };
+  const fixture = ({ audio = true, revision = SHA, swapped = false, mutateMediaFacts = null } = {}) => {
     const root = mkdtempSync(join(tmpdir(), "bump-inference-facts-"));
     mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
     writeFileSync(
@@ -729,11 +759,15 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     const dir = join(root, "config/engine-capabilities");
     mkdirSync(dir, { recursive: true });
     for (const backend of ["candle", "mlx"]) {
+      const mediaFacts = JSON.parse(
+        factsFile(backend, SHA, swapped && backend === "candle" ? { registry: "audio" } : {}),
+      );
+      mutateMediaFacts?.(mediaFacts, backend);
       writeFileSync(
         join(dir, `capabilities.${backend}.json`),
         // `swapped` puts an AUDIO dump where a media one belongs — the realistic mistake, and the
         // one `backend` alone cannot detect, since both registries are `candle`.
-        factsFile(backend, SHA, swapped && backend === "candle" ? { registry: "audio" } : {}),
+        JSON.stringify(mediaFacts),
       );
     }
     if (audio) {
@@ -758,6 +792,31 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   };
 
   check("a complete facts tree verifies", verifyFacts() === null);
+  const missingContracts = verifyFacts({
+    mutateMediaFacts: (facts) => { facts.memoryContracts = []; },
+  });
+  check(
+    "a descriptor-only media dump is refused",
+    !!missingContracts && /no memoryContracts inventory/.test(missingContracts),
+  );
+  const duplicateContract = verifyFacts({
+    mutateMediaFacts: (facts, backend) => {
+      if (backend === "mlx") facts.memoryContracts.push(structuredClone(facts.memoryContracts[0]));
+    },
+  });
+  check(
+    "duplicate memory-contract providers are refused during a pin bump",
+    !!duplicateContract && /duplicate mlx memory-contract provider/.test(duplicateContract),
+  );
+  const unboundDigest = verifyFacts({
+    mutateMediaFacts: (facts, backend) => {
+      if (backend === "mlx") facts.memoryContracts[0].selectorDigest = `sha256:${"f".repeat(64)}`;
+    },
+  });
+  check(
+    "a selector digest that does not bind the dumped surfaces is refused",
+    !!unboundDigest && /selectorDigest does not bind/.test(unboundDigest),
+  );
   // THE regression this exists for. Before sc-17593 this exact tree — every media backend dumped,
   // the audio registry dumped nowhere — passed, because `candle` in SCENEWORKS_BACKENDS is satisfied
   // by the MEDIA dump alone. The check must name the audio lane, not merely fail.

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/memory-contract-reconciliation-waivers.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "inferenceRevision", "waivers"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "inferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "waivers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/waiver" }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "not": { "const": "*" } }
+      ]
+    },
+    "waiver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leg",
+        "direction",
+        "backend",
+        "provider",
+        "modelId",
+        "familyStory",
+        "mode",
+        "tier",
+        "overlay",
+        "rung",
+        "selectorDigest",
+        "ownerStory",
+        "reason"
+      ],
+      "properties": {
+        "leg": {
+          "enum": ["engine_manifest", "manifest_route", "plan_closure_engine", "survey_engine"]
+        },
+        "direction": {
+          "enum": [
+            "engine_to_manifest",
+            "manifest_to_route",
+            "plan_to_engine",
+            "closure_to_engine",
+            "survey_to_engine"
+          ]
+        },
+        "backend": { "$ref": "#/$defs/nullableString" },
+        "provider": { "$ref": "#/$defs/nullableString" },
+        "modelId": { "$ref": "#/$defs/nullableString" },
+        "familyStory": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 1 }
+          ]
+        },
+        "mode": { "$ref": "#/$defs/nullableString" },
+        "tier": { "$ref": "#/$defs/nullableString" },
+        "overlay": { "$ref": "#/$defs/nullableString" },
+        "rung": { "$ref": "#/$defs/nullableString" },
+        "selectorDigest": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          ]
+        },
+        "ownerStory": { "type": "string", "pattern": "^sc-[0-9]+$" },
+        "reason": { "type": "string", "minLength": 12 }
+      }
+    }
+  }
+}

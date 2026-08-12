@@ -35,6 +35,60 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
 
+async function memoryContractSource(name) {
+  return JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS[name]}`, import.meta.url), "utf8"),
+  );
+}
+
+async function surveyWaiverFixture({ removeFamilyStories = [], add = [] } = {}) {
+  const ledger = await memoryContractSource("memoryContractWaivers");
+  const removed = new Set(removeFamilyStories);
+  ledger.waivers = ledger.waivers.filter(
+    (waiver) => !(waiver.leg === "survey_engine" && removed.has(waiver.familyStory)),
+  );
+  if (add.length > 0) {
+    const facts = await memoryContractSource("engineCapabilitiesMlx");
+    const contracts = new Map(facts.memoryContracts.map((contract) => [contract.id, contract]));
+    for (const { provider, familyStory } of add) {
+      const contract = contracts.get(provider);
+      assert.ok(contract, `fixture provider ${provider} must have generated MLX contract facts`);
+      ledger.waivers.push({
+        leg: "survey_engine",
+        direction: "survey_to_engine",
+        backend: "mlx",
+        provider,
+        modelId: null,
+        familyStory,
+        mode: null,
+        tier: null,
+        overlay: null,
+        rung: "bounded_transformer_residency",
+        selectorDigest: contract.selectorDigest,
+        ownerStory: "sc-18461",
+        reason: "Synthetic survey mutation keeps the reconciliation fixture exact.",
+      });
+    }
+  }
+  return JSON.stringify(ledger);
+}
+
+async function memoryContractPinOverrides(pin) {
+  const [mlx, candle, waivers] = await Promise.all([
+    memoryContractSource("engineCapabilitiesMlx"),
+    memoryContractSource("engineCapabilitiesCandle"),
+    memoryContractSource("memoryContractWaivers"),
+  ]);
+  mlx.generatedFrom.inferenceRevision = pin;
+  candle.generatedFrom.inferenceRevision = pin;
+  waivers.inferenceRevision = pin;
+  return {
+    engineCapabilitiesMlx: JSON.stringify(mlx),
+    engineCapabilitiesCandle: JSON.stringify(candle),
+    memoryContractWaivers: JSON.stringify(waivers),
+  };
+}
+
 // Line-ending and comment normalisation now lives in `scripts/lib/source-revision.mjs` and is unit
 // tested there; these tests cover the same rules end to end, through the real generator.
 test("a comment-only manifest edit produces no generated matrix change", async () => {
@@ -122,6 +176,8 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "calibrationEvidence",
     "calibrationPlan",
     "cargo",
+    "engineCapabilitiesCandle",
+    "engineCapabilitiesMlx",
     "engines",
     "imageRouting",
     // sc-17774: `inferenceCompatibility` left with the flux2-only artifact audit; the per-provider
@@ -129,6 +185,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "inferenceClosures",
     "instantId",
     "manifest",
+    "memoryContractWaivers",
     "memoryStrategy",
     "mlxFitGate",
     "routingCandle",
@@ -1849,7 +1906,12 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
     verdict.strategyParameters = { transformerWindowSize: 1 };
     const matrix = await buildMatrix({
       publish: false,
-      sourceOverrides: { rung4Survey: JSON.stringify(survey) },
+      sourceOverrides: {
+        rung4Survey: JSON.stringify(survey),
+        memoryContractWaivers: await surveyWaiverFixture({
+          removeFamilyStories: [Number(group)],
+        }),
+      },
     });
     const of = (rung) =>
       matrix.cells.filter(
@@ -2239,7 +2301,15 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
   const matrix = await buildMatrix({
     publish: false,
-    sourceOverrides: { rung4Survey: JSON.stringify(stated) },
+    sourceOverrides: {
+      rung4Survey: JSON.stringify(stated),
+      memoryContractWaivers: await surveyWaiverFixture({
+        add: [
+          { provider: "qwen_image", familyStory: 15511 },
+          { provider: "qwen_image_edit", familyStory: 15511 },
+        ],
+      }),
+    },
   });
   const cells = matrix.cells.filter(
     (cell) =>
@@ -2635,6 +2705,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       `$1${pin}$2`,
     );
   const movedPin = "0".repeat(40);
+  const movedMemoryContractSources = await memoryContractPinOverrides(movedPin);
   const withClosures = (mutate) => {
     const next = structuredClone(closures);
     next.inferenceRevision = movedPin;
@@ -2649,6 +2720,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
       inferenceClosures: withClosures(() => {}),
+      ...movedMemoryContractSources,
     },
   });
   assert.equal(
@@ -2666,6 +2738,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       inferenceClosures: withClosures((providers) => {
         providers["mlx:z_image_turbo"].digest = "f".repeat(64);
       }),
+      ...movedMemoryContractSources,
     },
   });
   assert.equal(
@@ -2683,6 +2756,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       inferenceClosures: withClosures((providers) => {
         providers["mlx:qwen_image"].digest = "e".repeat(64);
       }),
+      ...movedMemoryContractSources,
     },
   });
   assert.equal(

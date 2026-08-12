@@ -13,6 +13,10 @@ import {
   evidenceSemantics,
   validateBundle as validateCalibrationBundle,
 } from "./memory-calibration-harness.mjs";
+import {
+  reconcileMemoryContracts,
+  routeEligibilityFromRust,
+} from "./lib/memory-contract-reconciliation.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
@@ -2120,6 +2124,9 @@ export const SOURCE_PATHS = Object.freeze({
   calibrationPlan: "config/memory-calibration-plan.json",
   inferenceClosures: "config/inference-provider-closures.json",
   rung4Survey: "config/rung4-applicability-survey.json",
+  engineCapabilitiesMlx: "config/engine-capabilities/capabilities.mlx.json",
+  engineCapabilitiesCandle: "config/engine-capabilities/capabilities.candle.json",
+  memoryContractWaivers: "config/memory-contract-reconciliation-waivers.json",
   cargo: "Cargo.toml",
 });
 
@@ -2281,6 +2288,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   }
 
   const cells = [];
+  const reconciliationCells = [];
   for (const modelSummary of models) {
     const model = manifestById.get(modelSummary.id);
     const route = routes.get(model.id);
@@ -2481,6 +2489,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                   structural: status.structural ?? [],
                 },
               };
+              reconciliationCells.push(cell);
               // Mutation seam used by the inventory regression test. The CLI never supplies a filter;
               // every production build emits the full catalog and validates it below before writing.
               if (!cellFilter || cellFilter(cell)) cells.push(cell);
@@ -2491,6 +2500,24 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     }
   }
   cells.sort((left, right) => left.id.localeCompare(right.id));
+  reconciliationCells.sort((left, right) => left.id.localeCompare(right.id));
+  const memoryContractReconciliation = reconcileMemoryContracts({
+    pin,
+    engineFacts: [
+      JSON.parse(bodies.engineCapabilitiesMlx),
+      JSON.parse(bodies.engineCapabilitiesCandle),
+    ],
+    manifest,
+    cells: reconciliationCells,
+    calibrationPlan,
+    closures: JSON.parse(bodies.inferenceClosures),
+    survey: JSON.parse(bodies.rung4Survey),
+    routeEligibility: routeEligibilityFromRust({
+      imageRouting: bodies.imageRouting,
+      mlxFitGate: bodies.mlxFitGate,
+    }),
+    waiverLedger: JSON.parse(bodies.memoryContractWaivers),
+  });
   const calibrationRuns = calibrationBundle.records.map((record) => {
     const cell = cells.find(
       (candidate) =>
@@ -2730,6 +2757,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
         0,
       ),
+      memoryContractReconciliation,
       rung4Survey: {
         story: 15969,
         surveyedFamilyBackends: rung4SurveyRows.length,

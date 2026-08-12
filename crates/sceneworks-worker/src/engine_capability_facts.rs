@@ -118,6 +118,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 /// Every backend SceneWorks can link a **media** registry for, and therefore every backend stage 2
 /// requires a checked-in facts file for (sc-17119).
 ///
@@ -361,6 +363,41 @@ pub struct EngineCapabilityFacts {
     /// family-wide unioning would advertise shapes the selected loader cannot validate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<ImportedProviderFact>,
+    /// Every memory-strategy registration in this backend, including platform-composed routes.
+    /// Omitted only by pure descriptor fixtures; real registry dumps always populate it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_contracts: Vec<MemoryContractFact>,
+}
+
+/// Finite registry-load selector owned by the pinned inference provider.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContractSelectorFact {
+    pub tier: String,
+    pub offload_policy: String,
+    pub load_shape: String,
+}
+
+/// One weights-free contract result at an exact selector.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContractSurfaceFact {
+    pub selector: MemoryContractSelectorFact,
+    pub implemented_rungs: Vec<String>,
+    pub structurally_not_applicable_rungs: Vec<String>,
+    pub deferred_materialization_rungs: Vec<String>,
+}
+
+/// Exhaustive, generated memory-contract surface for one registry provider.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContractFact {
+    pub id: String,
+    pub composed: bool,
+    /// SHA-256 over the canonical JSON surface array. Reconciliation waivers bind this exact value,
+    /// so a provider contract change makes the old waiver stale rather than silently inheriting it.
+    pub selector_digest: String,
+    pub surfaces: Vec<MemoryContractSurfaceFact>,
 }
 
 impl EngineCapabilityFacts {
@@ -454,6 +491,7 @@ pub fn facts_from_descriptors(
             },
             engines,
             imports: Vec::new(),
+            memory_contracts: Vec::new(),
         });
     }
     Ok(out)
@@ -736,17 +774,176 @@ const AUDIO_DUMPER_INVOCATION: &str = "cargo run -p sceneworks-worker --bin \
                                        dump-engine-capabilities [--no-default-features --features \
                                        backend-candle]";
 
+fn memory_strategy_label(strategy: gen_core::MemoryStrategy) -> &'static str {
+    match strategy {
+        gen_core::MemoryStrategy::Resident => "resident",
+        gen_core::MemoryStrategy::StagedResidency => "staged_residency",
+        gen_core::MemoryStrategy::BoundedDecode => "bounded_decode",
+        gen_core::MemoryStrategy::BoundedAttention => "bounded_attention",
+        gen_core::MemoryStrategy::BoundedTransformerResidency => "bounded_transformer_residency",
+    }
+}
+
+fn memory_selector_fact(
+    selector: gen_core::MemoryContractSurfaceSelector,
+) -> MemoryContractSelectorFact {
+    let tier = match selector.tier {
+        gen_core::MemoryContractSurfaceTier::Bf16 => "bf16",
+        gen_core::MemoryContractSurfaceTier::Q4 => "q4",
+        gen_core::MemoryContractSurfaceTier::Q8 => "q8",
+        gen_core::MemoryContractSurfaceTier::Nvfp4 => "nvfp4",
+    };
+    let offload_policy = match selector.offload_policy {
+        gen_core::OffloadPolicy::Resident => "resident",
+        gen_core::OffloadPolicy::Sequential => "sequential",
+    };
+    let load_shape = match selector.load_shape {
+        gen_core::LoadShape::EagerMaterialization => "eager_materialization",
+        gen_core::LoadShape::DeferredMaterialization => "deferred_materialization",
+    };
+    MemoryContractSelectorFact {
+        tier: tier.to_owned(),
+        offload_policy: offload_policy.to_owned(),
+        load_shape: load_shape.to_owned(),
+    }
+}
+
+fn memory_surface_fact(surface: &gen_core::MemoryContractSurface) -> MemoryContractSurfaceFact {
+    let mut implemented_rungs = Vec::new();
+    let mut structurally_not_applicable_rungs = Vec::new();
+    let mut deferred_materialization_rungs = Vec::new();
+    for capability in &surface.contract.strategies {
+        match &capability.support {
+            gen_core::MemoryStrategySupport::Implemented => {
+                implemented_rungs.push(memory_strategy_label(capability.strategy).to_owned());
+                if surface
+                    .contract
+                    .requires(capability.strategy)
+                    .any(|prerequisite| {
+                        matches!(
+                            prerequisite,
+                            gen_core::MemoryStrategyPrerequisite::LoadShape(
+                                gen_core::LoadShape::DeferredMaterialization
+                            )
+                        )
+                    })
+                {
+                    deferred_materialization_rungs
+                        .push(memory_strategy_label(capability.strategy).to_owned());
+                }
+            }
+            gen_core::MemoryStrategySupport::StructurallyNotApplicable { .. } => {
+                structurally_not_applicable_rungs
+                    .push(memory_strategy_label(capability.strategy).to_owned());
+            }
+            gen_core::MemoryStrategySupport::Missing => {}
+        }
+    }
+    implemented_rungs.sort();
+    structurally_not_applicable_rungs.sort();
+    deferred_materialization_rungs.sort();
+    MemoryContractSurfaceFact {
+        selector: memory_selector_fact(surface.selector),
+        implemented_rungs,
+        structurally_not_applicable_rungs,
+        deferred_materialization_rungs,
+    }
+}
+
+/// Convert the pinned registry's complete provider-owned memory surfaces into backend facts.
+///
+/// The registry call fails when even one `MemoryRegistration` lacks its paired finite surface, so
+/// a partial dump cannot masquerade as complete coverage.
+pub fn memory_contract_facts_from_registry(
+    registry: &gen_core::ProviderRegistry,
+) -> Result<BTreeMap<String, Vec<MemoryContractFact>>, String> {
+    let mut grouped: BTreeMap<String, BTreeMap<String, (bool, Vec<MemoryContractSurfaceFact>)>> =
+        BTreeMap::new();
+    for surface in registry
+        .memory_contract_surfaces()
+        .map_err(|error| error.to_string())?
+    {
+        let backend = surface.contract.backend.backend_id().to_owned();
+        let provider = surface.contract.provider_id.clone();
+        let entry = grouped
+            .entry(backend)
+            .or_default()
+            .entry(provider)
+            .or_insert_with(|| (surface.composed, Vec::new()));
+        if entry.0 != surface.composed {
+            return Err(format!(
+                "memory-contract provider '{}' disagrees whether it is platform-composed",
+                surface.contract.provider_id
+            ));
+        }
+        entry.1.push(memory_surface_fact(&surface));
+    }
+
+    let mut out = BTreeMap::new();
+    for (backend, providers) in grouped {
+        let mut facts = Vec::with_capacity(providers.len());
+        for (id, (composed, mut surfaces)) in providers {
+            surfaces.sort_by(|left, right| {
+                let key = |surface: &MemoryContractSurfaceFact| {
+                    format!(
+                        "{}:{}:{}",
+                        surface.selector.tier,
+                        surface.selector.offload_policy,
+                        surface.selector.load_shape
+                    )
+                };
+                key(left).cmp(&key(right))
+            });
+            let canonical = serde_json::to_vec(&surfaces).map_err(|error| {
+                format!("{id}: memory-contract surfaces do not serialize: {error}")
+            })?;
+            let selector_digest = format!("sha256:{:x}", Sha256::digest(canonical));
+            facts.push(MemoryContractFact {
+                id,
+                composed,
+                selector_digest,
+                surfaces,
+            });
+        }
+        facts.sort_by(|left, right| left.id.cmp(&right.id));
+        out.insert(backend, facts);
+    }
+    Ok(out)
+}
+
 /// Walk the linked provider registry weights-free and group it per backend.
 ///
 /// Reads only each registration's `descriptor` closure — no model load, no weights on disk — the
 /// same introspection `mlx-gen-catalog` and [`crate::engines::registry_capabilities`] do.
 pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, String> {
     let registry = crate::inference_runtime::media();
-    facts_from_registry(
+    let mut facts = facts_from_registry(
         registry,
         crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
         dumper_invocation(),
-    )
+    )?;
+    let contract_registry = crate::inference_runtime::memory_contract_surface_registry()
+        .map_err(|error| error.to_string())?;
+    let mut memory_contracts = memory_contract_facts_from_registry(&contract_registry)?;
+    for entry in &mut facts {
+        entry.memory_contracts = memory_contracts.remove(&entry.backend).ok_or_else(|| {
+            format!(
+                "{} descriptor facts have no memory-contract surface inventory",
+                entry.backend
+            )
+        })?;
+    }
+    if !memory_contracts.is_empty() {
+        return Err(format!(
+            "memory-contract surfaces named backends with no descriptor facts: {}",
+            memory_contracts
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(facts)
 }
 
 /// Walk the linked **audio** provider registry weights-free and group it per backend (sc-17593).
@@ -857,6 +1054,63 @@ pub fn dump_audio_to(root: &Path) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_memory_contract(
+        spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<gen_core::MemoryProviderContract> {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "fixture_contract",
+            gen_core::MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.load_shape = spec.load_shape;
+        contract
+            .strategies
+            .iter_mut()
+            .find(|capability| {
+                capability.strategy == gen_core::MemoryStrategy::BoundedTransformerResidency
+            })
+            .expect("compatibility contract carries all rungs")
+            .support = gen_core::MemoryStrategySupport::Implemented;
+        Ok(contract)
+    }
+
+    const FIXTURE_MEMORY_REGISTRATION: gen_core::MemoryRegistration =
+        gen_core::MemoryRegistration {
+            provider_id: "fixture_contract",
+            contract: fixture_memory_contract,
+            safety_check: gen_core::default_registered_memory_strategy_safety_check,
+        };
+
+    #[test]
+    fn memory_contract_facts_are_exhaustive_sorted_and_digest_bound() {
+        let registry = gen_core::ProviderRegistryBuilder::new()
+            .register_composed_memory_strategy(FIXTURE_MEMORY_REGISTRATION)
+            .register_memory_contract_fixture(gen_core::MemoryContractFixtureRegistration {
+                provider_id: "fixture_contract",
+                contract: fixture_memory_contract,
+                surface_specs: gen_core::mlx_memory_contract_surface_specs,
+            })
+            .build()
+            .expect("fixture registry");
+        let facts = memory_contract_facts_from_registry(&registry).expect("contract facts");
+        let providers = &facts["mlx"];
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "fixture_contract");
+        assert!(providers[0].composed);
+        assert_eq!(providers[0].surfaces.len(), 12);
+        assert!(providers[0].selector_digest.starts_with("sha256:"));
+        assert!(providers[0].surfaces.iter().all(|surface| surface
+            .implemented_rungs
+            .contains(&"bounded_transformer_residency".to_owned())));
+        assert!(providers[0].surfaces.iter().all(|surface| surface
+            .deferred_materialization_rungs
+            .contains(&"bounded_transformer_residency".to_owned())));
+    }
 
     fn descriptor(
         id: &'static str,
