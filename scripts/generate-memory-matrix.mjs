@@ -193,6 +193,34 @@ export const VIDEO_FAMILY_STORIES = Object.freeze({
 });
 
 /**
+ * The two ownership registries must be DISJOINT (sc-18815 review).
+ *
+ * Contamination in ONE direction already fails loudly: an image family group added to
+ * `VIDEO_FAMILY_STORIES` makes `familyStory` answer with a single video survey story for a lane that
+ * owes two per-backend owners, and the conformance suite reds hard.
+ *
+ * The other direction is silent, and nothing else catches it. `familyStory` consults
+ * `VIDEO_FAMILY_STORIES` FIRST, so a VIDEO family name added to `FAMILY_STORIES` is never read — dead
+ * ownership metadata that looks filed, answers nothing, and keeps looking filed while the real answer
+ * comes from the other registry.
+ */
+export function assertOwnershipRegistriesAreDisjoint(
+  imageFamilies = FAMILY_STORIES,
+  videoFamilies = VIDEO_FAMILY_STORIES,
+) {
+  for (const group of Object.keys(videoFamilies)) {
+    if (Object.hasOwn(imageFamilies, group)) {
+      throw new Error(
+        `memory-matrix: family group ${group} is declared in BOTH FAMILY_STORIES and VIDEO_FAMILY_STORIES — familyStory resolves it from VIDEO_FAMILY_STORIES, so the FAMILY_STORIES row is dead code; delete one`,
+      );
+    }
+  }
+}
+
+// At module scope, so neither registry can be loaded in a drifted state by any consumer.
+assertOwnershipRegistriesAreDisjoint();
+
+/**
  * Families that are IN the model universe but whose rung-4 verdict has not been written yet, with the
  * story that owes it (sc-18815).
  *
@@ -868,6 +896,54 @@ function parseEngineRoutes(source) {
 }
 
 /**
+ * The MLX video-route resolver that owns each video family, keyed by family group.
+ *
+ * One declaration, two consumers: `parseVideoRoutes` iterates it to read the arms, and
+ * `videoRouteArmMissing` uses it to name the function that owes a missing one. Restating the list in
+ * two places would let the diagnostic point at the wrong file the moment a resolver is renamed.
+ *
+ * `bernini` (video) sits in IMAGE family 15528 — one engine, one block stack, two catalog entries —
+ * so its key is that group's number. It is the only numeric key, and the only video family whose
+ * candle route is mirrored from its MLX arm rather than read from `candle_video_engine_id`.
+ */
+const VIDEO_ROUTE_RESOLVERS = new Map([
+  ["wan-video", { body: "videoRouteWan", fn: "wan_engine_id" }],
+  ["ltx-video", { body: "videoRouteLtx", fn: "ltx_engine_id" }],
+  ["svd", { body: "videoRouteSvd", fn: "svd_engine_id" }],
+  [15528, { body: "videoRouteBernini", fn: "bernini_engine_id" }],
+  ["scail2", { body: "videoRouteScail2", fn: "scail2_engine_id" }],
+  ["krea-realtime", { body: "videoRouteKreaRealtime", fn: "krea_realtime_engine_id" }],
+]);
+
+/** The `*_engine_id` function that should have supplied `modelId`'s provider on `backend`. */
+function videoRouteResolverName(modelId, backend) {
+  // Bernini has no arm in `candle_video_engine_id` BY DESIGN: `resolve_candle_video_route` matches it
+  // off the model id first, so its candle provider is mirrored from the MLX one. A missing candle
+  // provider there is therefore a missing `bernini_engine_id` arm, and pointing at the candle file
+  // would send a reader to the one place that is correct to be silent.
+  const mirroredFromMlx = modelId === "bernini";
+  if (backend !== "mlx" && !mirroredFromMlx) return "candle_video_engine_id";
+  const resolver = VIDEO_ROUTE_RESOLVERS.get(familyGroup(modelId));
+  // A video family with no row here is itself the defect — say which one, rather than name nothing.
+  return (
+    resolver?.fn ??
+    `the MLX *_engine_id resolver for family ${familyLabel(familyGroup(modelId))}, which VIDEO_ROUTE_RESOLVERS does not declare`
+  );
+}
+
+function videoRouteArmMissing(modelId, backend, resolved) {
+  const served = Object.entries(resolved).map(([lane, engine]) => `${lane}=${engine}`);
+  return (
+    `${modelId}: the routing catalog routes ${backend}, but no ${backend} provider resolved — ` +
+    `expected an arm in ${videoRouteResolverName(modelId, backend)}` +
+    (served.length ? ` (resolved only ${served.join(", ")})` : "") +
+    ". A cell must not be stamped with the other backend's provider, which would bind its " +
+    "calibration evidence, plan row and closure digest to a provider that never ran it, so " +
+    "generation stops here (sc-18815)."
+  );
+}
+
+/**
  * Resolve one catalog entry's route, whichever modality it belongs to.
  *
  * The two lanes are shaped differently and the difference is real, not incidental: the image lane has
@@ -879,21 +955,41 @@ function parseEngineRoutes(source) {
  * Throws on an entry with no route at all. An unrouted entry is not a `Missing` cell, it is an entry
  * the generator cannot describe, and silently dropping one is exactly the failure this story exists
  * to remove.
+ *
+ * Throws, too, on an entry the routing catalog routes on a backend that NO `*_engine_id` arm serves
+ * (sc-18815 review). This used to be the quiet path and it was the wrong one to be quiet: deleting
+ * LTX's MLX arm from `ltx.rs` left `engineFor("mlx")` returning `null`, the scalar fell back to
+ * `video.mlx ?? video.candle`, and every MLX cell was stamped `ltx_2_3_distilled` — CANDLE's provider
+ * on an MLX cell, which is the exact substitution this resolver exists to make impossible. Generation
+ * still succeeded; the only thing that caught it was JSON-schema validation two lanes downstream,
+ * reporting `None is not of type 'string'` and naming neither the resolver nor the cause. So: fail
+ * here, name the resolver that owes the arm, and drop the cross-backend scalar fallback entirely so
+ * the wrong provider cannot be synthesised even if some future caller skips the check.
  */
-function resolveRoute(model, imageRoutes, videoRoutes) {
+function resolveRoute(model, imageRoutes, videoRoutes, backends) {
   const image = imageRoutes.get(model.id);
   if (image) {
     return { ...image, engineFor: () => image.engine };
   }
   const video = videoRoutes.get(model.id);
   if (video) {
+    const engineOn = (backend) => {
+      const engine = video[backend];
+      if (engine) return engine;
+      throw new Error(videoRouteArmMissing(model.id, backend, video));
+    };
+    // Eager, over the backends the CATALOG routes: the failure has to land at build time with the
+    // entry named, not lazily at whichever cell happened to be emitted first.
+    for (const backend of backends) engineOn(backend);
     const engines = sortedUnique(Object.values(video));
     return {
-      // The scalar is only meaningful when the backends agree; `engineFor` is the authority.
-      engine: engines.length === 1 ? engines[0] : (video.mlx ?? video.candle),
+      // The scalar is the provider on the entry's FIRST ROUTED backend. It deliberately does NOT
+      // fall back across backends; the only non-routed case is an entry the catalog routes nowhere
+      // (`UNROUTED_CATALOG_ENTRIES`), which emits no cells and whose backends agree by definition.
+      engine: video[backends[0]] ?? (engines.length === 1 ? engines[0] : null),
       repo: null,
       kind: "video",
-      engineFor: (backend) => video[backend] ?? null,
+      engineFor: engineOn,
     };
   }
   throw new Error(`${model.id}: no resolved route/provider`);
@@ -988,6 +1084,22 @@ function parseVideoEngineIdUnion(enginesBody) {
 }
 
 /**
+ * Ids whose MLX provider may come from `engines.rs#video_engine_ids` ALONE (sc-18815 review).
+ *
+ * `wan_2_2_vace_fun_14b` is the real case: its MLX dispatch is the native VACE arm, which carries no
+ * id string, so there is no `*_engine_id` arm to read and the union is the only source.
+ *
+ * The allowlist exists because the fallback was written for exactly that entry but keyed on
+ * `declared.length === 1`, which is a property thousands of ids could satisfy. `mochi_1` already took
+ * it — acquiring an MLX provider derived from `mochi.rs`, a file this generator neither reads nor
+ * fingerprints, so the provider was outside the staleness tripwire. Inert today (mochi has no
+ * manifest entry and so is outside the universe), but it silently downgraded the "two independent
+ * declarations must agree" invariant to single-source for whichever ids happened to hit it. Now a new
+ * one must be named here, with the reason, before it can.
+ */
+export const UNION_ONLY_MLX_ROUTES = new Set(["wan_2_2_vace_fun_14b"]);
+
+/**
  * Per-backend video providers, derived from the worker's own route resolvers.
  *
  * The image lane resolves ONE provider per catalog id, because `MODEL_TABLE` is one table consulted
@@ -1002,18 +1114,11 @@ function parseVideoEngineIdUnion(enginesBody) {
  * `ReplacePersonScail2` dispatch) while the catalog routes them MLX-only — the catalog wins, per this
  * epic's stated backend authority.
  */
-export function parseVideoRoutes(bodies) {
+export function parseVideoRoutes(bodies, unionOnlyMlxRoutes = UNION_ONLY_MLX_ROUTES) {
   const union = parseVideoEngineIdUnion(bodies.engines);
   const mlx = new Map();
-  for (const [body, fnName] of [
-    [bodies.videoRouteWan, "wan_engine_id"],
-    [bodies.videoRouteLtx, "ltx_engine_id"],
-    [bodies.videoRouteSvd, "svd_engine_id"],
-    [bodies.videoRouteBernini, "bernini_engine_id"],
-    [bodies.videoRouteScail2, "scail2_engine_id"],
-    [bodies.videoRouteKreaRealtime, "krea_realtime_engine_id"],
-  ]) {
-    for (const [id, engine] of parseVideoEngineIds(body, fnName)) mlx.set(id, engine);
+  for (const { body, fn } of VIDEO_ROUTE_RESOLVERS.values()) {
+    for (const [id, engine] of parseVideoEngineIds(bodies[body], fn)) mlx.set(id, engine);
   }
   const candle = parseVideoEngineIds(bodies.videoRouteCandle, "candle_video_engine_id");
   // The candle lane routes Bernini off the model id in `resolve_candle_video_route`, BEFORE the
@@ -1031,7 +1136,9 @@ export function parseVideoRoutes(bodies) {
     if (declared) {
       // `wan_2_2_vace_fun_14b`'s MLX arm is the native VACE dispatch, which carries no id string, so
       // the union is its only source. Everything else must AGREE with the union.
-      if (!byBackend.mlx && declared.length === 1) byBackend.mlx = declared[0];
+      if (!byBackend.mlx && declared.length === 1 && unionOnlyMlxRoutes.has(id)) {
+        byBackend.mlx = declared[0];
+      }
       for (const [backend, engine] of Object.entries(byBackend)) {
         if (!declared.includes(engine)) {
           throw new Error(
@@ -1171,8 +1278,10 @@ function staticContractCoversProvider(contract, provider) {
 function providerFor(model, backend, overlay, route) {
   // Per-backend (sc-18815): the image lane's `engineFor` returns the one table route on either
   // backend, so this is unchanged for it, while a video entry gets the provider that backend
-  // actually loads instead of whichever one happened to be listed first.
-  const engine = route.engineFor(backend) ?? route.engine;
+  // actually loads instead of whichever one happened to be listed first. No `?? route.engine`
+  // fallback: `engineFor` throws on a backend it cannot serve, and falling through to the scalar is
+  // how a candle provider reached an MLX cell in the first place.
+  const engine = route.engineFor(backend);
   if (overlay !== "control") return engine;
   return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine;
 }
@@ -1724,7 +1833,7 @@ function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, 
   return backend === "mlx"
     // The MLX provider id specifically: `engine_supports_sequential` is a claim about the MLX
     // registry, and a video entry's candle provider is a different id (sc-18815).
-    ? sequentialEngines.has(route.engineFor("mlx") ?? route.engine)
+    ? sequentialEngines.has(route.engineFor("mlx"))
     : declaredModel.candle?.supportsSequentialOffload === true ||
         declaredModel.candle?.sequentialPeakGb !== undefined ||
         declaredModel.candle?.turboFit !== undefined;
@@ -2786,8 +2895,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
 
   const models = entries
     .map((model) => {
-      const route = resolveRoute(model, routes, videoRoutes);
       const backends = backendScopes(model, routedBackends);
+      const route = resolveRoute(model, routes, videoRoutes, backends);
       return {
         id: model.id,
         name: model.name,
@@ -2802,8 +2911,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         family: model.family ?? null,
         // Video providers are per-backend (LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on
         // candle), so the single-valued route the image lane publishes cannot describe them. Publish
-        // the resolved provider per backend and keep the scalar as the MLX-or-only one.
-        resolvedRoute: route.engineFor(backends[0] ?? "mlx") ?? route.engine,
+        // the resolved provider per backend and keep the scalar as the first-routed-backend one.
+        // `resolvedRoutes` can no longer contain `null`: `engineFor` throws on a routed backend no
+        // `*_engine_id` arm serves, so the failure names the resolver here instead of surfacing two
+        // lanes later as a schema violation (sc-18815 review).
+        resolvedRoute: route.engine,
         resolvedRoutes: Object.fromEntries(
           backends.map((backend) => [backend, route.engineFor(backend)]),
         ),
@@ -2862,7 +2974,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const cells = [];
   for (const modelSummary of models) {
     const model = manifestById.get(modelSummary.id);
-    const route = resolveRoute(model, routes, videoRoutes);
+    const route = resolveRoute(model, routes, videoRoutes, modelSummary.backends);
     for (const backend of modelSummary.backends) {
       // SC-15812: resolved HERE, inside the per-backend loop, so a cell names the story that owns
       // its (model, backend) pair rather than whichever backend happened to be listed first.

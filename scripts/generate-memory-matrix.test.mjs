@@ -28,10 +28,12 @@ import {
   familyStory,
   parseVideoEngineIds,
   parseVideoRoutes,
+  assertOwnershipRegistriesAreDisjoint,
   assertUnroutedEntriesAreDeclared,
   assertVideoOwnership,
   assertRung4SurveyCoversEveryFamily,
   PENDING_RUNG4_SURVEYS,
+  UNION_ONLY_MLX_ROUTES,
   UNROUTED_CATALOG_ENTRIES,
   VIDEO_FAMILY_STORIES,
   mlxRequiredHostBytes,
@@ -3742,6 +3744,86 @@ test("the two worker declarations of a video route must agree (sc-18815)", async
   );
 });
 
+test("a routed backend with no *_engine_id arm fails HERE, naming the resolver (sc-18815)", async () => {
+  // The review mutation. Deleting `ltx_2_3` from `ltx_engine_id`'s arm used to let generation SUCCEED:
+  // `resolvedRoutes.mlx` went `null`, the scalar fell back to `video.mlx ?? video.candle`, and all 180
+  // MLX cells were stamped `ltx_2_3_distilled` — CANDLE's provider on an MLX cell, which is the exact
+  // substitution this resolver exists to prevent. The only thing that noticed was JSON-schema
+  // validation two lanes downstream, reporting `None is not of type 'string'` and naming neither the
+  // resolver nor the cause. It has to fail at the resolver, with the owing function named.
+  const ltx = await readFile(new URL(`../${SOURCE_PATHS.videoRouteLtx}`, import.meta.url), "utf8");
+  const withoutMlxArm = ltx.replace(
+    'matches!(model, "ltx_2_3" | "ltx_2_3_eros")',
+    'matches!(model, "ltx_2_3_eros")',
+  );
+  assert.notEqual(withoutMlxArm, ltx, "the mutation must actually change ltx.rs");
+
+  await assert.rejects(
+    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteLtx: withoutMlxArm } }),
+    /ltx_2_3: the routing catalog routes mlx, but no mlx provider resolved — expected an arm in ltx_engine_id/,
+  );
+
+  // The named resolver is per BACKEND, not one generic complaint: the same entry losing its candle
+  // arm must point at `candle_video_engine_id` instead.
+  const candle = await readFile(new URL(`../${SOURCE_PATHS.videoRouteCandle}`, import.meta.url), "utf8");
+  const withoutCandleArm = candle.replace(
+    '"ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled")',
+    '"ltx_2_3_eros" => Some("ltx_2_3_distilled")',
+  );
+  assert.notEqual(withoutCandleArm, candle, "the mutation must actually change candle.rs");
+  await assert.rejects(
+    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteCandle: withoutCandleArm } }),
+    /ltx_2_3: the routing catalog routes candle, but no candle provider resolved — expected an arm in candle_video_engine_id/,
+  );
+});
+
+test("the union-only MLX fallback is an allowlist, not a shape (sc-18815)", async () => {
+  // `engines.rs#video_engine_ids` is the ONLY source for `wan_2_2_vace_fun_14b` (its MLX dispatch is
+  // the native VACE arm, which carries no id string). The fallback was written for that one entry but
+  // keyed on `declared.length === 1`, which is a SHAPE thousands of ids can satisfy — and `mochi_1`
+  // demonstrably took it, acquiring an MLX provider derived from `mochi.rs`, a file this generator
+  // neither reads nor fingerprints. Inert (mochi has no manifest entry) but it downgraded the
+  // "two independent declarations must agree" invariant to single-source for whoever hit it.
+  const bodies = Object.fromEntries(
+    await Promise.all(
+      Object.entries(SOURCE_PATHS).map(async ([name, relative]) => [
+        name,
+        await readFile(new URL(`../${relative}`, import.meta.url), "utf8"),
+      ]),
+    ),
+  );
+  assert.deepEqual([...UNION_ONLY_MLX_ROUTES], ["wan_2_2_vace_fun_14b"]);
+
+  const routes = parseVideoRoutes(bodies);
+  assert.equal(routes.get("wan_2_2_vace_fun_14b").mlx, "wan2_2_vace_fun_14b");
+  // `mochi_1` has a candle arm and no MLX one. Its MLX route must stay absent rather than be
+  // synthesised from the union alone.
+  assert.deepEqual(routes.get("mochi_1"), { candle: "mochi_1" });
+
+  // The allowlist is load-bearing in BOTH directions: empty it and VACE loses the only source it
+  // has, widen it and mochi acquires the single-source route the guard exists to withhold.
+  assert.equal(parseVideoRoutes(bodies, new Set()).get("wan_2_2_vace_fun_14b"), undefined);
+  assert.equal(
+    parseVideoRoutes(bodies, new Set([...UNION_ONLY_MLX_ROUTES, "mochi_1"])).get("mochi_1").mlx,
+    "mochi_1",
+  );
+});
+
+test("the two ownership registries are disjoint, in the silent direction too (sc-18815)", () => {
+  // `familyStory` consults `VIDEO_FAMILY_STORIES` FIRST. An IMAGE group added to the video registry
+  // reds most of this suite; a VIDEO name added to the image registry is silent dead code nothing
+  // else catches, so that direction needs its own assertion.
+  assertOwnershipRegistriesAreDisjoint();
+  assert.throws(
+    () =>
+      assertOwnershipRegistriesAreDisjoint(
+        { ...FAMILY_STORIES, svd: { mlx: 1, candle: 2 } },
+        VIDEO_FAMILY_STORIES,
+      ),
+    /family group svd is declared in BOTH FAMILY_STORIES and VIDEO_FAMILY_STORIES/,
+  );
+});
+
 test("an entry the routing catalog routes nowhere is NAMED, not silently empty (sc-18815)", async () => {
   // `wan_2_2_vace_fun_14b`: manifest entry + real MLX engine, ZERO `VIDEO_MODEL_CAPS` rows. It
   // resolves to no backend and therefore no cells — and "emits nothing" is indistinguishable from
@@ -3819,6 +3901,12 @@ test("video cells name no per-entry story, and their family owner is the real on
   // `bernini` is NOT in `VIDEO_FAMILY_STORIES`: same engine and same block stack as `bernini_image`,
   // so it stays in image family 15528 and takes that family's per-backend owners. Anything else
   // would survey one architecture twice and count the family twice.
+  //
+  // Both spellings, because the group key and the model id are different strings and only one of them
+  // is the shape a mistaken entry would take. `familyGroup("bernini")` is `15528`, so the group-key
+  // assertion alone is near-vacuous — it never fires on the actual error, which is someone adding a
+  // literal `bernini:` row alongside the other video family NAMES (sc-18815 review).
+  assert.ok(!Object.hasOwn(VIDEO_FAMILY_STORIES, "bernini"));
   assert.ok(!Object.hasOwn(VIDEO_FAMILY_STORIES, familyGroup("bernini")));
   assert.equal(familyGroup("bernini"), familyGroup("bernini_image"));
   const bernini = matrix.models.find((model) => model.id === "bernini");
