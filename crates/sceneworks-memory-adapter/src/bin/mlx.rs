@@ -7213,11 +7213,43 @@ mod ltx_tests {
                 constrained.writable_frame_cap
             );
         }
+
+        // The third outcome, which CI found and this test did not originally model: below the
+        // full-output ACCUMULATOR floor (`3.3 GB + 40 B/voxel`, 13.05 GiB at the cap geometry) no
+        // tiling helps — the accumulators hold the assembled video — so the engine refuses outright
+        // before any render. A hosted macOS runner lands here at ~6 GiB of safe budget. Pinned at a
+        // fixed budget so the refusal is asserted on every host, not only on a small one.
+        const BELOW_THE_ACCUMULATOR_FLOOR_GIB: f64 = 8.0;
+        let accumulators_gib = (3.3e9 + 40.0 * 297.0 * 704.0 * 1280.0) / GIB;
+        assert!(
+            accumulators_gib > BELOW_THE_ACCUMULATOR_FLOOR_GIB * 0.85,
+            "this budget must sit below the {accumulators_gib:.2} GiB accumulator floor or the \
+             refusal below would be proving something else"
+        );
+        let refused = LtxDecodePlan::resolve_with_budget(
+            validate_ltx_geometry(1280, 704, 297).unwrap(),
+            BELOW_THE_ACCUMULATOR_FLOOR_GIB,
+        )
+        .expect_err("under the accumulator floor the decode must be refused, not tiled");
+        assert!(refused.contains("just for the output buffers"), "{refused}");
+        assert!(
+            refused.contains("refuses 1280x704 x 297 frames before any render"),
+            "{refused}"
+        );
     }
 
     /// The live host, stated as its own claim so the fixed-budget test above cannot be mistaken for
-    /// a statement about this machine. Host-conditional by necessity — it is the only assertion here
-    /// that is about a particular box — and every host-independent claim is asserted elsewhere.
+    /// a statement about this machine.
+    ///
+    /// The cap geometry has THREE outcomes, not two, and which one a host gets is a total function
+    /// of its budget. Exactly one arm below fires on any machine, so this is host-adaptive rather
+    /// than host-conditional — nothing is skipped anywhere:
+    ///
+    /// * the full-output accumulators alone (`3.3 GB + 40 B/voxel`) exceed the budget → **refused**
+    ///   before any render. A hosted CI runner lands here: ~13 GB of buffers against a ~6 GB safe
+    ///   budget. Tiling cannot help, because the accumulators hold the assembled video.
+    /// * a single pass (`3.3 GB + 340 B/voxel`) fits → **single-pass**. This Mac lands here.
+    /// * in between → **tiled**, or refused if not even the smallest tile fits.
     #[test]
     fn the_ltx_arm_resolves_the_cap_geometry_against_this_hosts_live_budget() {
         const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -7228,16 +7260,31 @@ mod ltx_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let budget_gib = get_memory_limit() as f64 / GIB * 0.85;
-        let live = LtxDecodePlan::resolve(validate_ltx_geometry(1280, 704, 297).unwrap()).unwrap();
+        let live = LtxDecodePlan::resolve(validate_ltx_geometry(1280, 704, 297).unwrap());
         drop(guard);
         let voxels = 297.0 * 704.0 * 1280.0;
+        let accumulators_gib = (3.3e9 + 40.0 * voxels) / GIB;
         let single_pass_gib = (3.3e9 + 340.0 * voxels) / GIB;
-        assert_eq!(
-            live.tiling.is_none(),
-            single_pass_gib <= budget_gib,
-            "at the write cap the live rung must follow this host's memory budget: single-pass \
-             {single_pass_gib:.2} GiB vs budget {budget_gib:.2} GiB"
+        let where_we_are = format!(
+            "accumulators {accumulators_gib:.2} GiB, single-pass {single_pass_gib:.2} GiB, this \
+             host's safe budget {budget_gib:.2} GiB"
         );
+        if accumulators_gib >= budget_gib {
+            let error = live.expect_err("the accumulators alone do not fit — this must be refused");
+            assert!(
+                error.contains("just for the output buffers"),
+                "{where_we_are}: {error}"
+            );
+        } else if single_pass_gib <= budget_gib {
+            let plan = live.unwrap_or_else(|error| panic!("{where_we_are}: {error}"));
+            assert!(plan.tiling.is_none(), "{where_we_are}");
+            assert_eq!(plan.rung(), "staged_residency");
+        } else {
+            assert!(
+                live.map_or(true, |plan| plan.tiling.is_some()),
+                "{where_we_are}: a decode over budget must not resolve single-pass"
+            );
+        }
     }
 
     /// AC3, and the reason the video arm is safe to add: EVERY image arm still refuses a

@@ -980,6 +980,14 @@ at 0.90 MP, and smaller hosts tile earlier via the memory bound.** "The 0.90 MP 
 frames on every host" is FALSE and this repository's own CI falsifies it — the hosted `macos-26`
 runner tiles `768x512 x 97`, **585 frames below that bucket's 682 cap**, purely for memory.
 
+There are in fact **three** outcomes at a given geometry, not two, and the third is only visible on a
+small host: below the full-output **accumulator floor** (`3.3 GB + 40 B/voxel`) no tiling helps —
+the accumulators hold the assembled video — so `budgeted_plan` **refuses before any render**. That
+runner reports `~13 GB just for the output buffers, over this machine's ~6 GB safe budget` at
+1280x704 f297. All three outcomes are now pinned at fixed budgets in
+`the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary`, and the live host's own outcome
+is asserted as a total function of its budget rather than assumed.
+
 Predicted from the committed cost model: single-pass decode climbs to **94.3 GB** at 1280x704 f297
 (`3.3 GB + 340 B/voxel × 267,632,640`). One lattice step above, at f305, the decode must tile, and its
 cost is `3.3 GB + 40 B/voxel × 274,841,600 = 14.3 GB` of unavoidable full-output accumulators plus
