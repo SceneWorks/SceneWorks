@@ -401,7 +401,7 @@ Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE
 `SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
 suffix.
 
-### Adapter environment — six families, one per provider arm
+### Adapter environment — seven families, one per provider arm
 
 The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
 where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
@@ -448,6 +448,19 @@ SCENEWORKS_KREA_CONTROL_OVERLAY_REVISION=<exact overlay revision>
 SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx         # fixed; validated against FLUX2_REPOSITORY
 SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
+
+# memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
+SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
+SCENEWORKS_LTX_REVISION=<exact artifact revision>
+SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_LTX_TEXT_ENCODER_ROOT=/abs/path/.../snapshots/<rev>/gemma
+# The Gemma-3-12B co-requisite is a HARD load-time requirement of the pinned provider
+# (`resolve_gemma_dir`; sc-13664 removed the env/HF-cache fallbacks), rides `LoadSpec::text_encoder`,
+# and is snapshot-validated against the SAME repository and revision as the tier root — a mismatched
+# TE silently changes the measured conditioning peak. Both roots must therefore resolve under one
+# revision. On this host q4/q8 originally materialised under the pre-bump snapshot `254989c3…` while
+# the manifest pins `01df27d3…`; `hf download --revision 01df27d3… --include 'q8/*' --include 'q4/*'`
+# re-links them at the manifest revision for **zero bytes**, because the blobs are shared (sc-18810).
 
 # memory-mlx-adapter — any lane, optional
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
@@ -800,6 +813,70 @@ needs **no reduced-geometry caveat and no ≥192 GB Mac**, and three-tier covera
 decode skipped, without cache accounting, once. Re-measure at the geometry you actually intend to
 sweep, with audio on, before treating any margin as spendable. Budget wall clock too: the
 max-envelope bf16 row took **14.1 minutes**, and `nax-worker` caps at 240 minutes per dispatch.
+
+### sc-18810 re-measured it through the committed apparatus — three of those claims did not survive
+
+Every number below comes from `docs/generated/ltx-mlx-geometry-sweep-sc-18810.json`, captured through
+the sc-18808 MLX arm and `scripts/memory-calibration-harness.mjs` on the **production full-A/V path**
+(`video_mode` unset, audio track decoded — the row above used `no_audio`), q8, inference pin
+`b965641e`. Replicates on four geometries give a measured noise floor rather than an assumed one:
+decode is byte-identical across repeats, denoise varies by 0.001%, and the text phase by 0.33%.
+
+**1. The peak is not one curve — it is the max of three, and only the phases are fittable.** The
+shipped structure already does this (`KreaTurboPhasePeaks::peak_gb`), and it is load-bearing rather
+than incidental. Fitting the *overall* peak with any single form leaves a held-out error of
+**≥10.3 GiB** (94× the noise floor) for all five candidate forms, because a max of linear pieces is
+not linear. Fitting each phase separately lands at **0.02–0.13 GiB**. Add the temporal term
+*per phase*; never to the aggregate.
+
+**2. The phase coefficients are physical constants, and two independent sources agree with them.**
+
+| phase | best form | coefficients (q8) | held-out max residual |
+| --- | --- | --- | --- |
+| text | `fixedGb + perMpxGb·mpx` (no temporal term) | 32.92 + 0.68·mpx | 0.30 GiB (2.8× noise) |
+| denoise | `fixedGb + perLatentTokenGb·T_lat·(W/32)·(H/32)` | 20.52 + 0.000986/token | **0.13 GiB** |
+| decode | `fixedGb + perMpxGb·mpx + perMpxFrameGb·(mpx·frames)` | 2.52 + 0.12·mpx + 0.2998·mpx·frames | **0.019 GiB** |
+
+`fixedGb` 20.52 GiB for denoise is the 20.61 GB q8 transformer; 32.92 GiB for text is the 32.73 GB
+staged text encoder. `perMpxFrameGb` 0.2998 is **322 B per output voxel**, against the engine's own
+committed single-pass decode model of `3.3 GB + 340 B/voxel` — fitted at ~2.5 GB / ~287 B/voxel and
+documented as rounded **up** for headroom (`mlx-gen-ltx/src/pipeline.rs:218-228`). `perLatentTokenGb`
+0.000986 is **1.009 MiB/token**, which reproduces the withdrawn `0.997–1.032 MiB/token` above — as a
+**denoise-phase** relation, not an overall-peak one. The additive `perFrameGb` form is 15–350× worse
+on held-out points and should not be adopted.
+
+**3. 🔴 fps is NOT a memory axis.** Measured at identical `{768x512, 241 frames}`, fps 30 vs 24 — a
+25% difference in audio-latent length: conditioning **identical to the byte**, decode identical to
+within 400 B, denoise +0.075%. The joint audio denoise is real but its memory cost is ~0.07% of peak,
+far under the replicate noise floor. `GeometryEnvelope`'s missing fps axis is not a correctness gap
+for memory.
+
+**4. 🔴 `recommendedMaxWorkingSetSize` does not bound active + cache.** Measured directly here:
+`recommendedMaxWorkingSetSize` = 115,448,725,504 B = **107.52 GiB**, `maxBufferLength` = 80.64 GiB,
+`hw.memsize` = 128 GiB, MLX's own `get_memory_limit()` = 130,567,005,798 B = **121.60 GiB**
+(0.95 × `hw.memsize`). q8 at 640x640 x 177 co-existed at 24.30 GiB active **+ 90.68 GiB allocator
+cache = 114.98 GiB**, i.e. 7.46 GiB *above* the 107.52 GiB ceiling, on a render that completed and was
+bit-identical on warm repeat. MLX's cache is elastic and released under pressure. Log it — but a
+feasibility ceiling is not made of active+cache, and the cache series is unfittable (held-out error
+≥20 GiB for every form).
+
+**5. 🔴 Peak memory is NON-MONOTONIC in frames, and the worst geometry is the write cap.** Rung 2
+engages on a machine-INDEPENDENT bound: `VaeTiling::LTX.writable_frame_cap(h,w) = i32::MAX/(8·h·w)`
+(`gen-core/src/tiling.rs:166`, `full_res_channels: 8`) = 682 / 682 / 655 / **297** / **297** over the
+five declared resolutions. So only the two 0.90 MP buckets reach it inside the 449-frame envelope,
+and they reach it at **298 output frames** — roughly 55 frames before the memory bound would bind on
+this host. Single-pass decode cost climbs to ~94 GB at 1280x704 f297 and **collapses to ~19 GB at
+f305** once tiling engages. The most expensive geometry in the declared envelope is the cap, not the
+maximum, and a curve fitted across that boundary fits through a capability change.
+
+**6. 🔴 What actually bounds this host is FREE DISK, via swap.** Because the allocator cache grows
+past physical memory, large single-pass decodes push the box into swap. Measured: 704x1280 x 177
+(159,498,240 output voxels) completed; 768x512 x 449 (176,553,984 voxels) was **killed by a signal**
+with free disk falling 81 → 16 GiB, and 768x512 x 361 (141,950,976 voxels) was killed later in the
+same session at lower free space. The safe ceiling therefore *moves with free disk* and degraded
+across one session as APFS local snapshots pinned the churn. Check `df -h /System/Volumes/Data`
+before AND during, and treat any single-pass decode above ~150M output voxels as needing tens of GiB
+of headroom. This is a HOST verdict, not a model verdict.
 
 ## 7. Ingest, stamping, and a new lane
 
