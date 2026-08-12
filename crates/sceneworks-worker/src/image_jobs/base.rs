@@ -2856,6 +2856,11 @@ mod mage_artifact_certification_tests {
 
     #[test]
     fn mage_certification_binds_backbone_and_every_required_component() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
         let data = tempfile::tempdir().expect("temp data dir");
         let settings = settings(data.path());
         let manifest = mage_manifest("mage_flow_base");
