@@ -5200,6 +5200,58 @@ fn safetensors_bytes(directory: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+/// Does this run prove sc-10976's load→use→drop actually happened?
+///
+/// sc-18808 asked a different question — `overall_peak < text_encoder + transformer` — and that
+/// question **does not survive the declared envelope**. It infers "the two giants never co-resided"
+/// from an aggregate that ACTIVATIONS dominate at scale, so it is only sound while activations are
+/// small next to the weights. It was calibrated at one geometry, 768x512 x 97 frames, where the peak
+/// (35.56 GB) sat 17.8 GB under the 53.35 GB co-staged bound.
+///
+/// sc-18810 broke it with a real capture: q8 at **704x1280 x 177 frames** peaked at 54,153,098,156
+/// active bytes, 0.8 GB ABOVE that bound, and the arm refused a perfectly good run. The peak was the
+/// **decode** phase, not co-resident weights — this sweep's own measured decode relation
+/// (~2.75 GB + 322 B per output voxel, against the engine's own committed `3.3e9 + 340 B/voxel`
+/// model at `mlx-gen-ltx/src/pipeline.rs:218-228`) predicts 54,108,433,280 for that geometry's
+/// 159,498,240 output voxels, i.e. within 0.08% of what was measured.
+///
+/// The right witness is a PHASE BOUNDARY reading, not a peak, because a boundary reading contains
+/// the resident weights and almost nothing else. `denoise_entry` is sampled at
+/// `Progress::Step { current: 1 }` — after the text encoder is dropped and `clear_cache()`d and
+/// after the AvDiT is built. Across every sc-18810 capture it sits at 20.72-20.80 GB against a
+/// 20.61 GB transformer, flat in geometry over a 3.3x latent-token range. Were the Gemma encoder
+/// still resident it could not be below 53.3 GB.
+///
+/// Two-sided on purpose: the upper bound catches the regression the old check was aiming at, and the
+/// lower bound catches a progress hook that fires BEFORE the transformer materializes, which would
+/// otherwise make the upper bound pass vacuously.
+fn ltx_staging_is_proven(
+    denoise_entry: AllocatorState,
+    costaged_bytes: u64,
+    text_encoder_bytes: u64,
+    transformer_bytes: u64,
+) -> Result<(), String> {
+    if denoise_entry.active >= costaged_bytes {
+        return Err(format!(
+            "LTX-2.3 held {} active bytes entering the first denoise step, at or above the \
+             {costaged_bytes} bytes the staged text encoder ({text_encoder_bytes}) and transformer \
+             ({transformer_bytes}) occupy together — the text encoder was not dropped before the \
+             AvDiT materialized, so the staged-residency claim this record makes is not supported \
+             by the run",
+            denoise_entry.active
+        ));
+    }
+    if denoise_entry.active < transformer_bytes {
+        return Err(format!(
+            "LTX-2.3 held only {} active bytes entering the first denoise step, below the \
+             {transformer_bytes}-byte transformer — the denoise boundary was sampled before the \
+             AvDiT materialized, so the staged-residency bound above it proves nothing",
+            denoise_entry.active
+        ));
+    }
+    Ok(())
+}
+
 /// The eight required scenarios for a gated LTX receipt.
 ///
 /// NOT `protocol::not_run_scenarios(blocker)`. That helper marks all eight `not_run`, which would
@@ -5371,19 +5423,14 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
 
-    // THE STAGED-RESIDENCY PROOF, and the reason the record may claim rung 1 at all. If sc-10976's
-    // load->use->drop regressed and the Gemma text encoder stayed resident into the DiT phase, the
-    // peak would have to cover both giants at once. It does not have to be smaller by a hair: on this
-    // artifact the two sum to tens of GB more than the observed peak.
+    // THE STAGED-RESIDENCY PROOF, and the reason the record may claim rung 1 at all.
     let costaged_bytes = text_encoder_bytes.saturating_add(transformer_bytes);
-    if overall.active >= costaged_bytes {
-        return Err(format!(
-            "LTX-2.3 peaked at {} active bytes, at or above the {costaged_bytes} bytes the staged \
-             text encoder ({text_encoder_bytes}) and transformer ({transformer_bytes}) occupy \
-             together — the staged-residency claim this record makes is not supported by the run",
-            overall.active
-        ));
-    }
+    ltx_staging_is_proven(
+        denoise_entry,
+        costaged_bytes,
+        text_encoder_bytes,
+        transformer_bytes,
+    )?;
     // The second handoff: the DiT is dropped and the cache cleared before the VAE decode, so the
     // allocator at the decode boundary must hold less than it did entering the denoise.
     if decode_entry.active >= denoise_entry.active {
@@ -6859,6 +6906,55 @@ mod ltx_tests {
             json!(["resident", "staged_residency"])
         );
         assert_eq!(strategy["parameters"], json!({}));
+    }
+
+    /// sc-18810: the staged-residency witness must be a PHASE BOUNDARY reading, not a peak. The
+    /// numbers here are the real ones from this story's captures — the first row is the geometry
+    /// that broke sc-18808's `overall_peak < text_encoder + transformer` form.
+    #[test]
+    fn the_staging_proof_survives_a_peak_above_the_costaged_bound() {
+        const TEXT_ENCODER: u64 = 32_733_043_614;
+        const TRANSFORMER: u64 = 20_614_103_249;
+        const COSTAGED: u64 = TEXT_ENCODER + TRANSFORMER; // 53,347,146,863
+        let entering_denoise = |active: u64| AllocatorState { active, cache: 0 };
+
+        // q8 704x1280 x 177: measured overall peak 54,153,098,156 — ABOVE the co-staged bound — while
+        // the denoise boundary held 20.7 GB, i.e. the transformer and nothing else. The peak is the
+        // decode phase's output buffers. This run is valid and must be accepted.
+        assert!(
+            ltx_staging_is_proven(
+                entering_denoise(20_765_156_098),
+                COSTAGED,
+                TEXT_ENCODER,
+                TRANSFORMER
+            )
+            .is_ok(),
+            "a decode-dominated peak above the co-staged bound is not a staging regression"
+        );
+
+        // The regression the check exists for: the text encoder still resident when the AvDiT is up.
+        let regressed = ltx_staging_is_proven(
+            entering_denoise(COSTAGED + 1),
+            COSTAGED,
+            TEXT_ENCODER,
+            TRANSFORMER,
+        )
+        .expect_err("a co-resident text encoder must be refused");
+        assert!(
+            regressed.contains("was not dropped before the AvDiT"),
+            "{regressed}"
+        );
+
+        // The vacuity guard: a boundary sampled before the transformer materializes would make the
+        // upper bound pass while proving nothing.
+        let too_early = ltx_staging_is_proven(
+            entering_denoise(TRANSFORMER - 1),
+            COSTAGED,
+            TEXT_ENCODER,
+            TRANSFORMER,
+        )
+        .expect_err("a boundary sampled before the AvDiT exists must be refused");
+        assert!(too_early.contains("proves nothing"), "{too_early}");
     }
 
     /// sc-18810: WHERE rung 2 engages, derived from the engine's own bound rather than from the
