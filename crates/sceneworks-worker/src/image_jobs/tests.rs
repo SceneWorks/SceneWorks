@@ -2108,6 +2108,25 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
             .contains("route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request))"),
         "the resolved candle route must supply the adapter label"
     );
+    let pose_reject = between(
+        run_job,
+        "CandleImageRoute::PoseReject => {",
+        "CandleImageRoute::PoseControlBaseMissing => {",
+    );
+    assert!(
+        pose_reject.contains("return Err(WorkerError::InvalidPayload"),
+        "PoseReject must terminate dispatch with a typed payload error"
+    );
+    let pose_reject_dispatch = run_job
+        .find("CandleImageRoute::PoseReject => {")
+        .expect("PoseReject dispatch arm");
+    let stub_fallback = run_job
+        .find("if !handled {\n        if request.hires_fix.enabled")
+        .expect("procedural-stub fallback");
+    assert!(
+        pose_reject_dispatch < stub_fallback,
+        "PoseReject dispatch must execute before the procedural-stub fallback"
+    );
 
     let base = include_str!("base.rs");
     let mlx_stream = between(
@@ -9395,6 +9414,40 @@ fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_
         Some(CandleImageRoute::Flux2Control),
         "the real Character Studio pose payload must keep its skeleton control"
     );
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        let supported_control = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "pose the subject",
+            "mode": mode, "referenceAssetId": "identity", "count": 1,
+            "advanced": {
+                "modelPath": model_path.clone(),
+                "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+            }
+        }));
+        assert_eq!(
+            resolve_candle_image_route(&supported_control, &settings),
+            Some(CandleImageRoute::Flux2Control),
+            "FLUX.2 non-edit pose mode {mode} remains a control request"
+        );
+    }
+
+    let flux_edit_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "edit with pose",
+        "mode": "edit_image", "sourceAssetId": "source", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&flux_edit_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "valid pose + edit_image must reject explicitly, never return None to the stub"
+    );
 
     for poses in [Value::Null, json!([])] {
         let plain_character = request(json!({
@@ -9453,6 +9506,41 @@ fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_
     assert_eq!(
         resolve_candle_image_route(&malformed_qwen, &settings),
         Some(CandleImageRoute::PoseReject)
+    );
+
+    for (mode, references) in [
+        ("edit_image", json!({ "sourceAssetId": "source" })),
+        ("text_to_image", json!({})),
+        ("reference", json!({ "referenceAssetId": "identity" })),
+        (
+            "style_variations",
+            json!({ "referenceAssetId": "identity" }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": "qwen_image_edit_2511_lightning", "mode": mode,
+            "advanced": { "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }] }
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(references.as_object().expect("reference object").clone());
+        let unsupported_pose = request(payload);
+        assert_eq!(
+            resolve_candle_image_route(&unsupported_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "Qwen pose mode {mode} must reject explicitly, never return None to the stub"
+        );
+    }
+    let ambiguous_identity_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetIds": ["one", "two"],
+        "advanced": { "poses": [{}] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&ambiguous_identity_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "the exact Qwen pose recipe accepts one identity, not a silently truncated array"
     );
 }
 

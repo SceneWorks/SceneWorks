@@ -528,6 +528,29 @@ fn qwen_edit_pose_carrier_is_strict_and_flux2_pose_stays_on_control() {
         Some(CandleImageLane::Flux2Control),
         "the edit lane must not swallow FLUX.2 pose controls"
     );
+    assert_eq!(
+        image_job_candle_lane(&image_edit_job(json!({
+            "model": "flux2_dev", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "poses": [{}] }
+        }))),
+        None,
+        "FLUX.2 edit plus pose has no scheduler lane and must fail closed"
+    );
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "flux2_dev", "mode": mode, "referenceAssetId": "identity",
+                "advanced": { "poses": [{}] }
+            }))),
+            Some(CandleImageLane::Flux2Control),
+            "FLUX.2 non-edit pose mode {mode} remains on control"
+        );
+    }
     for poses in [Value::Null, json!([])] {
         assert_eq!(
             image_job_candle_lane(&image_generate_job(json!({
@@ -548,6 +571,21 @@ fn qwen_edit_pose_carrier_is_strict_and_flux2_pose_stays_on_control() {
                 "advanced": { "poses": malformed }
             }))),
             None
+        );
+    }
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "qwen_image_edit_2511_lightning", "mode": mode,
+                "referenceAssetId": "identity", "advanced": { "poses": [{}] }
+            }))),
+            None,
+            "Qwen pose mode {mode} is not an advertised scheduler lane"
         );
     }
 }

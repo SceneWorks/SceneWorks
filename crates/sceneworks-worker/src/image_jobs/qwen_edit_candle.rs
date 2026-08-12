@@ -136,7 +136,7 @@ fn is_qwen_edit_lightning(model: &str) -> bool {
 }
 
 /// True when this is a candle-eligible Qwen edit/reference job with at least one ordered reference.
-fn qwen_edit_candle_mode(request: &ImageRequest) -> bool {
+pub(super) fn qwen_edit_candle_mode(request: &ImageRequest) -> bool {
     if !matches!(request.mode.as_str(), "edit_image" | "character_image") {
         return false;
     }

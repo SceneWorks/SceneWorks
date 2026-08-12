@@ -840,10 +840,11 @@ fn resolve_candle_image_route(
             | "qwen_image_edit_2509"
             | "qwen_image_edit_2511"
             | "qwen_image_edit_2511_lightning"
-    ) && candle_conditioned_pose_carrier_is_malformed(request)
+    ) && candle_conditioned_pose_requires_reject(request)
     {
-        // Defense in depth for direct worker calls: the scheduler rejects these malformed carriers,
-        // and the worker must reject too rather than letting typed parsing erase them before T2I.
+        // Defense in depth for direct worker calls: the scheduler rejects malformed pose carriers
+        // and valid pose sets paired with unsupported conditioned modes. The worker must reject the
+        // same shapes rather than letting typed parsing erase them or falling through to the stub.
         Some(CandleImageRoute::PoseReject)
     } else if flux2_control_candle_available(request, settings) {
         // Character Studio FLUX.2 pose payloads also carry a reference image. The pose/control lane
@@ -973,14 +974,33 @@ fn resolve_candle_image_route(
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_conditioned_pose_carrier_is_malformed(request: &ImageRequest) -> bool {
-    match request.advanced.get("poses") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(poses)) => {
-            poses.len() > sceneworks_core::image_request::MAX_JOB_POSES
-                || poses.iter().any(|pose| !pose.is_object())
+fn candle_conditioned_pose_requires_reject(request: &ImageRequest) -> bool {
+    let pose_count = match request.advanced.get("poses") {
+        None | Some(Value::Null) => return false,
+        Some(Value::Array(poses))
+            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.iter().all(Value::is_object) =>
+        {
+            poses.len()
         }
-        Some(_) => true,
+        Some(_) => return true,
+    };
+    if pose_count == 0 {
+        return false;
+    }
+    match request.model.as_str() {
+        // FLUX.2 pose ControlNet serves every non-edit mode; instruction edit plus a pose has no
+        // composition contract and must reject rather than fall through after both specialists say no.
+        "flux2_dev" => request.mode == "edit_image",
+        // Qwen Edit's exact pose recipe is Character Studio with one identity reference; every other
+        // valid pose-bearing mode/reference shape is unsupported and must likewise reject explicitly.
+        "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning" => {
+            !qwen_edit_candle::qwen_edit_candle_mode(request)
+        }
+        _ => false,
     }
 }
 
