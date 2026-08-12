@@ -3,8 +3,8 @@
 
 use gen_core::{
     LoadShape, MemoryBackendRealization, MemoryCalibrationIdentity, MemoryLifecycleCapabilities,
-    MemoryParameterRanges, MemoryPhase, MemoryStrategyCapability, MemoryStrategySupport, Precision,
-    Quant, VaeTiling,
+    MemoryParameterRanges, MemoryPhase, MemoryStrategyCapability, MemoryStrategySupport,
+    MemoryWindowMaterialization, Precision, Quant, VaeTiling,
 };
 use sceneworks_core::video_request::{
     single_pass_decode_frame_cap, vae_full_res_channels, video_admission, VideoAdmission,
@@ -33,15 +33,30 @@ fn fixture_contract(
     conditioning_gib: u64,
     rungs: &[MemoryStrategy],
 ) -> MemoryProviderContract {
-    let mut contract = MemoryProviderContract::compatibility_default(
-        "video_admission_fixture",
+    fixture_contract_with_realization(
+        base_gib,
+        conditioning_gib,
+        rungs,
         MemoryBackendRealization::MlxMetal {
             bounded_wired_residency: false,
             lazy_or_mmap_materialization: true,
             explicit_evaluation_and_synchronization: false,
             cache_eviction: true,
         },
-    );
+    )
+}
+
+/// [`fixture_contract`] on a caller-chosen backend realization, so the candle lane can be graded
+/// against a provider whose `backend_id()` actually says `candle` — which is what
+/// `memory_strategy::candidate_exclusion` compares `RequestScope.backend` against.
+fn fixture_contract_with_realization(
+    base_gib: u64,
+    conditioning_gib: u64,
+    rungs: &[MemoryStrategy],
+    realization: MemoryBackendRealization,
+) -> MemoryProviderContract {
+    let mut contract =
+        MemoryProviderContract::compatibility_default("video_admission_fixture", realization);
     contract.asset_facts.base_bytes = base_gib * GIB;
     contract.asset_facts.conditioning_bytes = conditioning_gib * GIB;
     contract.asset_facts.transformer_bytes = (base_gib - conditioning_gib) * GIB;
@@ -153,39 +168,117 @@ fn geometry(frames: u32, role: VideoGeometryRole) -> VideoAdmissionGeometry {
 // copied. A pin bump that moves one must be RED here, not silently wrong in the gate.
 // --------------------------------------------------------------------------------------------
 
+/// The number of `type: "video"` entries in the shipped `builtin.models.jsonc`, mirroring
+/// `sceneworks-core`'s `EXPECTED_SHIPPED_VIDEO_COUNT` and `pinned_engine_geometry`'s
+/// `EXPECTED_VIDEO_IDS`. Adding a video model without updating it trips
+/// [`core_transcribes_the_pinned_vae_write_bounds`].
+const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 10;
+
+/// Every video model id in the shipped manifest. The ONE list the transcription pin is driven
+/// from, so a newly shipped family cannot be transcribed in core and left unpinned here.
+///
+/// `pinned_engine_geometry` has the identical helper but is `#[cfg]`-gated to the lanes that link
+/// an engine bundle (macOS or `backend-candle`); this module compiles on all three, so it reads
+/// the same manifest bytes rather than depending on that module.
+fn shipped_video_model_ids() -> Vec<String> {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present in BUILTIN_MANIFESTS");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+            .expect("builtin.models.jsonc parses as JSON");
+    let ids: Vec<String> = manifest
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .expect("builtin.models.jsonc has a models array")
+        .iter()
+        .filter(|model| model.get("type").and_then(serde_json::Value::as_str) == Some("video"))
+        .map(|model| {
+            model
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .expect("every shipped video model declares an id")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        ids.len(),
+        EXPECTED_SHIPPED_VIDEO_COUNT,
+        "a video model was added/removed in builtin.models.jsonc — update \
+         EXPECTED_SHIPPED_VIDEO_COUNT and map the new id to the VaeTiling its decoder actually \
+         runs in `expected_vae_tiling` (sc-18814); do not let it go unpinned: {ids:?}"
+    );
+    ids
+}
+
+/// The `gen_core::VaeTiling` a shipped video family's decoder actually runs, or `None` for a
+/// family `sceneworks-core` deliberately does not model.
+///
+/// **An unmapped id panics**, the same posture — and for the same reason — as
+/// `pinned_engine_geometry::expected_max_pixels` (sc-12409): adding a video model is a deliberate
+/// act that must derive its write bound from its own engine, never inherit one by default. The
+/// panic is safe HERE and would not be inside `vae_full_res_channels` itself, which is reached for
+/// arbitrary community model ids in production.
+///
+/// The assignments cite the decode path each engine takes; see `vae_full_res_channels`' doc for
+/// the citations and for what these tests do NOT pin (sc-19117).
+fn expected_vae_tiling(id: &str) -> Option<VaeTiling> {
+    match id {
+        "ltx_2_3" | "ltx_2_3_eros" => Some(VaeTiling::LTX),
+        // The dense TI2V-5B is welded to the z48 vae22 (`mlx-gen-wan/src/pipeline.rs:235`).
+        "wan_2_2" => Some(VaeTiling::WAN22),
+        // The A14B grid and every Wan-derived renderer decode through the Wan2.1 z16 VAE.
+        "wan_2_2_t2v_14b"
+        | "wan_2_2_i2v_14b"
+        | "wan_2_2_vace_fun_14b"
+        | "bernini"
+        | "scail2_14b"
+        | "krea_realtime_14b" => Some(VaeTiling::WAN),
+        // SVD's bound is `candle-gen-svd`'s PRIVATE `SVD_VAE_TILING` with no MLX sibling to pin a
+        // second value against, so core reports it unmodelled rather than guessing.
+        "svd" => None,
+        other => panic!(
+            "shipped video model {other:?} is not mapped to a pinned VaeTiling — read the \
+             VaeTiling its decoder passes to `budgeted_plan` out of that engine's crate and add \
+             it to `expected_vae_tiling`; do not blanket-apply a default (sc-18814)"
+        ),
+    }
+}
+
 #[test]
 fn core_transcribes_the_pinned_vae_write_bounds() {
-    // The channel counts, per family, against the real gen-core constants.
-    assert_eq!(
-        vae_full_res_channels("ltx_2_3"),
-        Some(VaeTiling::LTX.full_res_channels as u32)
-    );
-    assert_eq!(
-        vae_full_res_channels("ltx_2_3_eros"),
-        Some(VaeTiling::LTX.full_res_channels as u32)
-    );
-    // The dense TI2V-5B is welded to the z48 vae22 (`mlx-gen-wan/src/pipeline.rs:235`).
-    assert_eq!(
-        vae_full_res_channels("wan_2_2"),
-        Some(VaeTiling::WAN22.full_res_channels as u32)
-    );
-    // The A14B grid and every Wan-derived renderer decode through the Wan2.1 z16 VAE.
-    for model in [
-        "wan_2_2_t2v_14b",
-        "wan_2_2_i2v_14b",
-        "wan_2_2_vace_fun_14b",
-        "bernini",
-        "scail2_14b",
-        "krea_realtime_14b",
-    ] {
-        assert_eq!(
-            vae_full_res_channels(model),
-            Some(VaeTiling::WAN.full_res_channels as u32),
-            "{model} decodes through the Wan z16 VAE"
-        );
+    let mut modelled = 0_usize;
+    let mut unmodelled = 0_usize;
+    for model in shipped_video_model_ids() {
+        match expected_vae_tiling(&model) {
+            Some(vae) => {
+                assert_eq!(
+                    vae_full_res_channels(&model),
+                    Some(vae.full_res_channels as u32),
+                    "{model}: core's transcribed channel count must equal the pinned \
+                     gen_core::VaeTiling constant its decoder runs"
+                );
+                modelled += 1;
+            }
+            None => {
+                assert_eq!(
+                    vae_full_res_channels(&model),
+                    None,
+                    "{model} is deliberately unmodelled; core must report None rather than a \
+                     number nothing can pin"
+                );
+                unmodelled += 1;
+            }
+        }
     }
-    // The three constants are genuinely different, so the loop above is not comparing one value
-    // against itself.
+    // Both arms are genuinely exercised, so neither is vacuous.
+    assert_eq!(modelled + unmodelled, EXPECTED_SHIPPED_VIDEO_COUNT);
+    assert!(modelled > 0 && unmodelled > 0);
+
+    // The three constants are genuinely different, so the per-family loop above is not comparing
+    // one value against itself.
     assert_ne!(
         VaeTiling::LTX.full_res_channels,
         VaeTiling::WAN22.full_res_channels
@@ -412,18 +505,58 @@ fn a_selected_optimized_rung_reaches_the_generation_request() {
     assert!(outcome.refusal.is_none());
 }
 
+/// A request above the single-pass cap grades the **cap geometry too**, through the real selector.
+///
+/// The name says what is actually checked. It deliberately does NOT claim the cap *binds* the
+/// selection: with today's `floor_phase_peaks` the peak is geometry-blind — the same
+/// weights+headroom floor for every geometry — so the two graded geometries cannot land on
+/// different rungs no matter how the fixture is shaped, and a test named for the cap binding would
+/// pass identically with the cap geometry never graded at all (sc-18814 review).
+///
+/// What IS provable here, and is: both geometries reach `select_strategy`, the second is the
+/// 297-frame cap, and the request runs. The rung-level consequence of the cap is proved where it
+/// can be — `sceneworks-core`'s `grading_only_the_request_would_have_understated_the_rung` and
+/// `video_admission_selects_the_deepest_rung_the_graded_set_requires`, which drive the selector
+/// seam directly. sc-18829's per-phase fit is what makes the peak geometry-dependent; this test's
+/// `assert_ne!` on the two peaks is the tripwire that says so.
 #[test]
-fn the_cap_geometry_can_bind_the_selection_for_a_request_above_it() {
-    let generator = fixture_generator(Some(fixture_contract(
-        20,
-        4,
-        &[MemoryStrategy::StagedResidency],
-    )));
+fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let mut selector = LadderVideoSelector::new(
+        VideoRequestIdentity {
+            route: "video_admission_fixture",
+            lane: VideoLane::Mlx,
+            tier: tier(),
+            expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+        },
+        &contract,
+        budget(40.0),
+        18 * GIB,
+    );
     // f305 at 1280x704 is past LTX's 297-frame single-pass cap, so both geometries are graded.
-    // Both land on the same rung here; what matters is that the second geometry was offered at
-    // all, which `video_admission`'s own tests assert changes the answer when it differs.
-    let outcome = admit_video_generation(&generator, inputs(305, budget(40.0), 18 * GIB));
-    assert!(outcome.memory.is_some_and(|memory| memory.stage_residency));
+    let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+    assert!(
+        matches!(verdict, VideoAdmission::Admitted { .. }),
+        "{verdict:?}"
+    );
+    assert_eq!(selector.selections.len(), 2, "{:?}", selector.selections);
+    assert_eq!(selector.selections[0].0.frames, 305);
+    assert_eq!(selector.selections[0].0.role, VideoGeometryRole::Requested);
+    assert_eq!(selector.selections[1].0.frames, 297);
+    assert_eq!(
+        selector.selections[1].0.role,
+        VideoGeometryRole::SinglePassDecodeCap
+    );
+
+    // And the reason the two cannot yet differ, as a live assertion rather than a comment, so it
+    // goes RED the moment sc-18829 makes the peak geometry-dependent.
+    assert_eq!(
+        selector.selections[0].1.strategy, selector.selections[1].1.strategy,
+        "`floor_phase_peaks` takes no geometry, so two graded geometries necessarily select the \
+         same rung — which is precisely why this test cannot assert that the cap BINDS. When \
+         sc-18829's per-phase fit makes this RED, re-derive the test to assert the binding rung \
+         and re-run M21 (see the `peak_bytes()` comment in video_admission.rs)"
+    );
 }
 
 /// The non-regression guard: inside the estimate-margin band the ladder still selects, but it must
@@ -448,6 +581,98 @@ fn a_refusal_inside_the_estimate_margin_band_is_suppressed() {
     assert!(message.starts_with("ltx_2_3: "), "{message}");
     assert!(message.contains("1280x704 x 241 frames"), "{message}");
     assert!(refused.memory.is_none());
+}
+
+/// **The suppression is SCOPED to the shape it claims, and this is the test that says so.**
+///
+/// The guard exists to swallow one specific refusal: the estimate margin applied to a peak that IS
+/// the weights+headroom floor. Comparing only "does the floor fit the budget" is correct today —
+/// `floor_phase_peaks` makes every peak be that floor — and becomes a **planted OOM** the moment
+/// sc-18829 lands a fitted per-phase peak: this epic's own measured LTX figures are ~94.3 GB at
+/// decode against a ~38 GB weights floor, so on a host that fits 38 but not 94.3, an unscoped
+/// guard would suppress a genuine all-rungs-reject and run the job resident into an OOM.
+///
+/// Driven at the pure predicate because the peak cannot yet be made to exceed the floor through
+/// the real selector — that is the whole hazard. The numbers are the epic's measured ones so the
+/// case under test is the real future one, not an invented shape.
+#[test]
+fn a_rejection_whose_peak_exceeds_the_floor_beyond_the_margin_is_not_suppressed() {
+    const MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
+    // ~38 GB weights+headroom resident floor (20 GiB weights + 18 GiB headroom).
+    let floor_bytes = 38 * GIB;
+    let floor_gb = crate::memory_strategy::peak_bytes_to_gb(floor_bytes);
+    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(
+        crate::memory_strategy::widened_peak_bytes(floor_bytes, MARGIN),
+    );
+    // A host that comfortably holds the floor but not the fitted decode peak.
+    let host_gb = 100.0;
+    assert!(floor_gb < host_gb, "{floor_gb} vs {host_gb}");
+
+    // sc-18829's shape: the rejected peak is the fitted DECODE peak, far above the floor.
+    let fitted_decode_reject_gb = 94.3 * (1.0 + MARGIN);
+    assert!(
+        fitted_decode_reject_gb > host_gb,
+        "the fixture must be a genuine rejection on this host: {fitted_decode_reject_gb} vs \
+         {host_gb}"
+    );
+    assert!(
+        !refusal_is_a_margin_artifact(fitted_decode_reject_gb, floor_bytes, MARGIN, Some(host_gb),),
+        "a rejection whose peak exceeds the weights floor by more than the margin is REAL and \
+         must survive — suppressing it runs the job into an OOM"
+    );
+
+    // Today's shape, on the identical floor/host/margin: the rejected peak IS the widened floor,
+    // so the suppression still applies. Without this the assertion above could be satisfied by a
+    // guard that never suppresses anything.
+    assert!(
+        refusal_is_a_margin_artifact(widened_floor_gb, floor_bytes, MARGIN, Some(host_gb)),
+        "a rejection at exactly the widened floor is the margin artifact this guard exists for"
+    );
+    // And the boundary is where the doc says it is: one ULP past the widened floor survives.
+    assert!(
+        !refusal_is_a_margin_artifact(
+            widened_floor_gb + f64::EPSILON * widened_floor_gb,
+            floor_bytes,
+            MARGIN,
+            Some(host_gb),
+        ),
+        "the scope check is `<= widened floor`, so anything above it is out of scope"
+    );
+}
+
+/// The second conjunct — the non-regression condition proper — is independent of the first.
+#[test]
+fn a_floor_that_does_not_fit_is_never_suppressed_and_no_budget_never_suppresses() {
+    const MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
+    let floor_bytes = 38 * GIB;
+    let floor_gb = crate::memory_strategy::peak_bytes_to_gb(floor_bytes);
+    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(
+        crate::memory_strategy::widened_peak_bytes(floor_bytes, MARGIN),
+    );
+
+    // In scope (the peak IS the floor) but the floor itself does not fit: a real refusal the
+    // pre-existing load gate would also have made.
+    assert!(!refusal_is_a_margin_artifact(
+        widened_floor_gb,
+        floor_bytes,
+        MARGIN,
+        Some(floor_gb - 1.0),
+    ));
+    // Exactly at the floor still fits — the comparison is `<=`, matching `mlx_fit_gate`'s.
+    assert!(refusal_is_a_margin_artifact(
+        widened_floor_gb,
+        floor_bytes,
+        MARGIN,
+        Some(floor_gb),
+    ));
+    // No budget signal: never suppress. `select_strategy` cannot even produce a `Reject` without
+    // one, so this is the never-block-without-evidence posture applied in the safe direction.
+    assert!(!refusal_is_a_margin_artifact(
+        widened_floor_gb,
+        floor_bytes,
+        MARGIN,
+        None,
+    ));
 }
 
 /// `estimate_evidence` gained a `backend` parameter for this story. The image lane must still
@@ -552,6 +777,99 @@ fn the_gen_core_geometry_carries_the_real_frame_count() {
         video_memory_geometry(geometry(0, VideoGeometryRole::Requested)).frames,
         1
     );
+}
+
+/// A CANDLE-lane request drives `LadderVideoSelector::select` end to end through core's gate.
+///
+/// The gap this closes: every other selection test above runs `VideoLane::Mlx`, so the candle half
+/// of `memory_strategy::candidate_exclusion`'s `request.backend == contract.backend.backend_id()`
+/// agreement (`memory_strategy.rs:446-457`) was never exercised — `LadderVideoSelector` puts
+/// `lane.as_key()` on one side and the loaded provider's realization on the other, and nothing
+/// checked they line up on candle. Also the only test that grades against
+/// `CANDLE_ESTIMATE_MARGIN` rather than the MLX one.
+///
+/// Both directions are asserted: a candle lane against a candle contract SELECTS, and the same
+/// candle lane against the MLX contract every other test uses is excluded — so the agreement is
+/// shown to be load-bearing rather than incidentally satisfied.
+#[test]
+fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
+    let candle_contract = fixture_contract_with_realization(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+        MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: true,
+            block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    // 20 GiB weights + 18 GiB headroom = 38 GiB resident, widened by the 4% CANDLE estimate margin
+    // to 39.52. Staged drops co-residency to max(4, 16) = 16, i.e. 34 GiB -> 35.36 widened. A 38 GiB
+    // host therefore refuses resident and admits staged.
+    let mut selector = LadderVideoSelector::new(
+        VideoRequestIdentity {
+            route: "video_admission_fixture",
+            lane: VideoLane::Candle,
+            tier: tier(),
+            expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+        },
+        &candle_contract,
+        budget(38.0),
+        18 * GIB,
+    );
+    // `ltx_2_3` is candle-routed, so core's gate reaches the selector rather than short-circuiting.
+    let verdict = video_admission("ltx_2_3", VideoLane::Candle, 1280, 704, 241, &mut selector);
+    let VideoAdmission::Admitted { rung, .. } = verdict else {
+        panic!("expected a candle-lane admission, got {verdict:?}");
+    };
+    assert_eq!(rung, StrategyRung::StagedResidency);
+    assert_eq!(selector.selections.len(), 1);
+    // The evidence really did key to candle, not to the MLX default.
+    assert_eq!(
+        LadderVideoSelector::new(
+            VideoRequestIdentity {
+                route: "video_admission_fixture",
+                lane: VideoLane::Candle,
+                tier: tier(),
+                expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+            },
+            &candle_contract,
+            budget(38.0),
+            18 * GIB,
+        )
+        .backend(),
+        gen_core::MemoryBackend::Candle
+    );
+
+    // The SAME candle-lane request against an MLX-realization contract is excluded by the shared
+    // `candidate_exclusion` backend agreement, so nothing is selected. That is what makes the
+    // assertion above about the agreement holding rather than about 38 GiB being roomy.
+    let mlx_contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let mut mismatched = LadderVideoSelector::new(
+        VideoRequestIdentity {
+            route: "video_admission_fixture",
+            lane: VideoLane::Candle,
+            tier: tier(),
+            expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+        },
+        &mlx_contract,
+        budget(38.0),
+        18 * GIB,
+    );
+    assert_eq!(
+        video_admission(
+            "ltx_2_3",
+            VideoLane::Candle,
+            1280,
+            704,
+            241,
+            &mut mismatched
+        ),
+        VideoAdmission::Undecidable,
+        "a candle-lane request must not grade against an MLX provider's contract"
+    );
+    assert!(mismatched.selections.is_empty());
 }
 
 /// M16's target. The lane the gate runs on decides which backend its evidence keys to; collapsing

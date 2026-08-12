@@ -128,7 +128,17 @@ pub(crate) enum VideoBindingPhase {
 /// **Today every field carries the same weights+headroom floor** — that floor has no phase
 /// resolution, and inventing one would be new prediction math this story must not add. sc-18829
 /// replaces [`floor_phase_peaks`] with a fitted affine evaluation per phase at the request
-/// geometry; [`Self::peak_bytes`] and everything downstream of it are unchanged by that.
+/// geometry, and [`Self::peak_bytes`]'s own boundary does not move.
+///
+/// **Two things downstream DO move with it, and are flagged here rather than left for the next
+/// author to discover.** Neither is a prediction; both are consumers of the fact that a peak is
+/// currently a floor:
+///
+/// * [`refusal_is_a_margin_artifact`] compares the rejected peak against the resident floor.
+///   That comparison is a no-op scope check while the peaks ARE the floor and starts biting the
+///   moment they exceed it — which is the point, but it means the guard's behaviour changes.
+/// * The M21 equivalence at the `peak_bytes()` call site (see the comment there) stops holding, so
+///   that mutation must be re-run in the PR that lands the fitted evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PhasePeaks {
     pub(crate) conditioning_bytes: u64,
@@ -249,6 +259,14 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             // gen-core's evidence type forces one. sc-18829 changes what the three phase values
             // ARE without moving this boundary.
             let phase_peaks = floor_phase_peaks(self.contract, &engaged, self.headroom_bytes);
+            // MUTATION M21 (`peak_bytes()` → any single phase field, e.g. `conditioning_bytes`) is
+            // an EQUIVALENT mutant *today* and deliberately has no test shaped to match it: while
+            // `floor_phase_peaks` is phase-uniform, every field equals the max by construction. It
+            // becomes killable the moment sc-18829 makes the three phases differ — the first fitted
+            // per-phase evaluation where decode exceeds conditioning turns this line into a real
+            // choice. `the_floor_is_phase_uniform_and_its_peak_is_the_unchanged_scalar` pins the
+            // uniformity this equivalence rests on, so that test must change in the same PR that
+            // breaks it, and M21 must be re-run there.
             let predicted_peak_bytes = phase_peaks.peak_bytes();
             let evidence = crate::mlx_fit_gate::estimate_evidence(
                 self.contract,
@@ -362,11 +380,29 @@ pub(crate) struct VideoAdmissionOutcome {
 /// runs today.
 ///
 /// The story's success criterion is explicit that no video job which succeeds today may regress,
-/// so a refusal is emitted only when the **unwidened** resident floor also exceeds the budget —
-/// the same weights+headroom-vs-budget comparison `mlx_fit_gate::fit_decision` already applies to
-/// this load. Inside the margin band the ladder still does its real job: it selects a lower rung.
-/// Whether the image-derived margins should govern video at all is epic 18093's settled question,
-/// reopened for this lane by activity-18996 and owned by sc-18829 — not re-decided here.
+/// so a refusal inside that band is suppressed — see [`refusal_is_a_margin_artifact`], which
+/// bounds the suppression to exactly the shape described here rather than to every rejection.
+/// Inside the band the ladder still does its real job: it selects a lower rung. Whether the
+/// image-derived margins should govern video at all is epic 18093's settled question, reopened for
+/// this lane by activity-18996 and owned by sc-18829 — not re-decided here.
+///
+/// # ⚠️ This gate is STRUCTURALLY UNREACHABLE at the pinned inference revision (sc-19109)
+///
+/// The early return below is not a rare fallback — it is the only path any video job takes today.
+/// **No video generator overrides `Generator::memory_strategy_contract()` at pin `b965641e`**:
+/// zero occurrences in `mlx-gen-{ltx,wan,svd,mochi,scail2,krea-realtime,seedvr2}` or in any
+/// `candle-gen` video crate, and `mlx-gen-bernini`'s hits are a free `pub fn`
+/// (`memory_strategy.rs:222`) plus `register_memory_contract_fixture` (`lib.rs:54,66`) — neither of
+/// which is the trait method. Every video provider therefore inherits gen-core's default `None`
+/// (`generator.rs:37`), so `admit_video_generation` returns [`VideoAdmissionOutcome::default()`]
+/// for **every** video job on **both** lanes.
+///
+/// So this module produces no rung selection, no floor, and no refusal in production yet. The
+/// wiring is correct and at the right funnel — it simply has nothing to grade until the video
+/// providers publish a contract, which is an inference-side change plus a pin bump owned by
+/// **sc-19109**. Do NOT paper over it with a `compatibility_default`-style synthetic contract: a
+/// resident-only stand-in could only manufacture refusals, never the fitted per-phase prediction
+/// this seam exists to carry.
 pub(crate) fn admit_video_generation(
     generator: &dyn gen_core::Generator,
     request: VideoAdmissionInputs<'_>,
@@ -420,28 +456,42 @@ pub(crate) fn admit_video_generation(
                 refusal: None,
             }
         }
-        sceneworks_core::video_request::VideoAdmission::Refused { message, .. } => {
+        sceneworks_core::video_request::VideoAdmission::Refused {
+            message, needed_gb, ..
+        } => {
             let resident_floor_bytes = crate::mlx_fit_gate::estimate_floor_weights_bytes(
                 contract,
                 &contract.engaged_composition(MemoryStrategy::Resident),
             )
             .saturating_add(request.headroom_bytes);
-            let unwidened_floor_fits =
-                request
-                    .budget
-                    .and_then(Budget::effective_gb)
-                    .is_some_and(|available_gb| {
-                        (resident_floor_bytes as f64 / crate::fit_gate::BYTES_PER_GIB)
-                            <= available_gb
-                    });
-            if unwidened_floor_fits {
+            // MUTATION ME (`needed_gb` → any constant at or below the widened floor, e.g. `0.0`)
+            // SURVIVES today, and is an EQUIVALENT mutant for the same reason as M21 rather than a
+            // hole in the tests. `estimate_floor_weights_bytes` is monotonically NON-INCREASING in
+            // the engaged set — `StagedResidency` turns `conditioning + heavy` into
+            // `max(conditioning, heavy)`, `BoundedTransformerResidency` subtracts, and a bounded
+            // auxiliary component is only ever filtered OUT (`mlx_fit_gate.rs:1541-1567`) — so
+            // `Resident`, which engages nothing, has the LARGEST floor of any rung. `Reject`'s
+            // `needed_gb` is the minimum widened peak over eligible rungs
+            // (`memory_strategy.rs:722-727`), hence `needed_gb <= widened_resident_floor` is a
+            // tautology while every peak IS a floor. The predicate itself is fully covered in both
+            // directions (MA/MB/MC/MD); what cannot be exercised end-to-end today is a peak ABOVE
+            // the floor, which is precisely the state sc-18829 creates. Re-run ME there.
+            if refusal_is_a_margin_artifact(
+                needed_gb,
+                resident_floor_bytes,
+                crate::memory_strategy::estimate_margin(contract.backend.backend_kind()),
+                request.budget.and_then(Budget::effective_gb),
+            ) {
                 tracing::info!(
                     event = "video_memory_strategy_refusal_suppressed",
                     route = request.route,
                     backend = request.lane.as_key(),
                     frames = request.frames,
-                    "ladder rejected inside the estimate-margin band; the unwidened resident floor \
-                     still fits, so the pre-existing load gate keeps owning refusal (sc-18814)"
+                    needed_gb,
+                    resident_floor_bytes,
+                    "ladder rejected inside the estimate-margin band on a peak that IS the \
+                     weights+headroom floor; the unwidened floor still fits, so the pre-existing \
+                     load gate keeps owning refusal (sc-18814)"
                 );
                 return VideoAdmissionOutcome::default();
             }
@@ -451,6 +501,48 @@ pub(crate) fn admit_video_generation(
             }
         }
     }
+}
+
+/// Whether a ladder rejection may be suppressed as a pure **estimate-margin artifact** on a
+/// **floor-shaped peak** — the only refusal `admit_video_generation`'s non-regression guard is
+/// entitled to swallow.
+///
+/// Both conjuncts are load-bearing and neither implies the other:
+///
+/// 1. **`needed_gb` must not exceed the widened resident floor.** This is the scope check, and it
+///    is the whole reason this function exists rather than the budget comparison alone. Today
+///    [`floor_phase_peaks`] makes every rung's peak BE that rung's weights+headroom floor, and the
+///    resident floor is the largest of them, so this holds for every rejection the ladder can
+///    currently produce — the guard is a no-op scope-wise and today's behaviour is unchanged.
+///    **sc-18829 changes that**: it replaces `floor_phase_peaks` with a fitted affine per-phase
+///    evaluation, and this epic's own measured LTX numbers are ~94.3 GB at decode against a ~38 GB
+///    weights floor. A guard that compared only the floor to the budget would then suppress a
+///    genuine all-rungs-reject on a host that fits 38 GB but not 94.3, return
+///    [`VideoAdmissionOutcome::default()`], and run the job resident into an OOM. Comparing the
+///    REJECTED peak keeps the suppression attached to the claim its name makes.
+/// 2. **The unwidened resident floor must fit.** This is the non-regression condition proper: it
+///    is the same weights+headroom-vs-budget comparison `mlx_fit_gate::fit_decision` already
+///    applies to this load, so a job the pre-load gate admits today is never newly refused here.
+///
+/// No budget signal ⇒ `false`: with nothing to compare against, the ladder cannot have rejected on
+/// a margin (`select_strategy` returns `Unverified`, not `Reject`), and suppressing on no evidence
+/// would be the inverse of the house never-block-without-evidence posture.
+fn refusal_is_a_margin_artifact(
+    needed_gb: f64,
+    resident_floor_bytes: u64,
+    estimate_margin: f64,
+    available_gb: Option<f64>,
+) -> bool {
+    let Some(available_gb) = available_gb else {
+        return false;
+    };
+    // Widen with the SAME integer-byte helper `select_strategy` widened the candidate with, so the
+    // two sides of the comparison are produced by one conversion rather than two roundings.
+    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(
+        crate::memory_strategy::widened_peak_bytes(resident_floor_bytes, estimate_margin),
+    );
+    let floor_gb = crate::memory_strategy::peak_bytes_to_gb(resident_floor_bytes);
+    needed_gb <= widened_floor_gb && floor_gb <= available_gb
 }
 
 /// Everything `admit_video_generation` needs that is not on the generator.

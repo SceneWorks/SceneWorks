@@ -1804,13 +1804,11 @@ pub(super) async fn generate_video_using(
     let admission_budget = crate::video_admission::live_video_budget(settings).await;
     // The catalog model id, read straight off the payload rather than by re-parsing the whole
     // request into a throwaway `VideoRequest` (F-118, the same reason `advanced` arrives by
-    // reference). Absent ⇒ the same default `VideoRequest::from_payload` applies.
-    let admission_model_id = job
-        .payload
-        .get("model")
-        .and_then(|value| value.as_str())
-        .unwrap_or("ltx_2_3")
-        .to_owned();
+    // reference). Read through the SAME function `VideoRequest::from_payload` resolves `model`
+    // with, so the two cannot diverge: a bare `.unwrap_or("ltx_2_3")` kept a present-but-empty
+    // `model` as `""` while the parse resolved it to `ltx_2_3`, and the two ids grade different
+    // families through `video_admission_surface`.
+    let admission_model_id = sceneworks_core::video_request::payload_model_id(&job.payload);
 
     let cancel = CancelFlag::new();
     let stall_timeout = video_stall_timeout();
@@ -1838,12 +1836,21 @@ pub(super) async fn generate_video_using(
                 e.i2v,
             )
         });
-        let admission_tier = crate::mlx_fit_gate::spec_numeric_tier(engine_id, &spec);
-        let admission_headroom_bytes = crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &spec);
+        // The admission tier/headroom read the model DIRECTORY (`spec_component_bytes` sums the
+        // snapshot's safetensors and asks the registry for a footprint), so they are filesystem
+        // work and must not run on a reactor thread. The clone is cheap (`LoadSpec` is `Clone`;
+        // `spec` itself moves into the loader) and lets both derivations happen inside `run`, which
+        // executes on the generator cache thread — the same position the image lane derives its
+        // own from, inside the blocking closure.
+        let admission_spec = spec.clone();
         let admission_geometry = (input.width, input.height, input.frames);
         tokio::spawn(async move {
             let run = move |generator: &dyn Generator| {
                 let mut input = input;
+                let admission_tier =
+                    crate::mlx_fit_gate::spec_numeric_tier(engine_id, &admission_spec);
+                let admission_headroom_bytes =
+                    crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
                 let outcome = crate::video_admission::admit_video_generation(
                     generator,
                     crate::video_admission::VideoAdmissionInputs {
