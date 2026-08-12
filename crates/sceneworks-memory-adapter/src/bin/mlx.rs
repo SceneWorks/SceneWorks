@@ -436,7 +436,15 @@ mod tests {
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
         // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
         // contract provider is not a dispatchable lane.
-        for provider in ["flux2_klein_9b", "flux2_dev_edit", "sana"] {
+        // `ltx_2_3` left this class when sc-18808 landed the video arm; `ltx_2_3_distilled` (the
+        // CANDLE LTX engine id) and `ltx_2_3_eros` stay — neither is a dispatchable MLX lane.
+        for provider in [
+            "flux2_klein_9b",
+            "flux2_dev_edit",
+            "sana",
+            "ltx_2_3_distilled",
+            "ltx_2_3_eros",
+        ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request).expect_err("unimplemented provider must not dispatch");
             assert_eq!(
@@ -475,6 +483,8 @@ mod tests {
             "sdxl",
             "krea_2_turbo_control",
             "flux2_dev",
+            // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
+            "ltx_2_3",
         ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
@@ -490,6 +500,7 @@ mod tests {
         assert_eq!(SDXL_PROVIDER, "sdxl");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
+        assert_eq!(LTX_PROVIDER, "ltx_2_3");
     }
 
     #[test]
