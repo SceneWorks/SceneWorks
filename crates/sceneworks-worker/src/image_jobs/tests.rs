@@ -9360,15 +9360,100 @@ fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_cl
         "character_image",
         "style_variations",
     ] {
-        let dev_unsupported = request(json!({
+        let dev_conditioned = request(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
             "mode": mode, "referenceAssetId": "asset_1", "count": 1
         }));
         assert!(
-            !flux2_edit_candle_mode(&dev_unsupported),
-            "flux2_dev must remain edit_image-only; mode={mode}"
+            flux2_edit_candle_mode(&dev_conditioned),
+            "flux2_dev conditioned mode must reach the edit provider; mode={mode}"
         );
     }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_edit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let model_path = root.path().to_string_lossy().to_string();
+
+    let flux_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+        "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert!(flux2_control_candle_available(&flux_pose, &settings));
+    assert!(!flux2_edit_candle_available(&flux_pose, &settings));
+    assert_eq!(
+        resolve_candle_image_route(&flux_pose, &settings),
+        Some(CandleImageRoute::Flux2Control),
+        "the real Character Studio pose payload must keep its skeleton control"
+    );
+
+    for poses in [Value::Null, json!([])] {
+        let plain_character = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": poses }
+        }));
+        assert!(flux2_edit_candle_available(&plain_character, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&plain_character, &settings),
+            Some(CandleImageRoute::Flux2Edit)
+        );
+    }
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        let malformed_pose = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": malformed }
+        }));
+        assert!(!flux2_edit_candle_available(&malformed_pose, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&malformed_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "direct worker routing must reject a malformed carrier after typed parsing"
+        );
+    }
+
+    let qwen_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "prompt": "keep the person", "mode": "character_image",
+        "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path,
+            "poses": [
+                { "keypoints": [[0.5, 0.2, 1.0]] },
+                { "keypoints": [[0.2, 0.5, 1.0]] }
+            ]
+        }
+    }));
+    assert!(qwen_edit_candle_available(&qwen_pose, &settings));
+    let route = resolve_candle_image_route(&qwen_pose, &settings);
+    assert_eq!(route, Some(CandleImageRoute::QwenEdit));
+    assert_eq!(
+        route
+            .expect("Qwen pose route")
+            .image_count(&qwen_pose, &settings),
+        2,
+        "Qwen pose plans must reserve one streamed result per pose"
+    );
+
+    let malformed_qwen = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetId": "identity",
+        "advanced": { "poses": false }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&malformed_qwen, &settings),
+        Some(CandleImageRoute::PoseReject)
+    );
 }
 
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control

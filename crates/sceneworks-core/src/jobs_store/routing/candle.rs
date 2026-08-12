@@ -4,6 +4,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
+use crate::image_request::MAX_JOB_POSES;
 use crate::jobs_store::routing::catalog::{
     imported_image_request_family_eligible, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS,
     CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
@@ -762,7 +763,7 @@ pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
         4,
     )
     .is_some()
-        && !conditioned_edit_has_unsupported_carrier(payload, false, false)
+        && !conditioned_edit_has_unsupported_carrier(payload, false, false, false)
         && !conditioned_true_cfg_is_malformed(payload)
 }
 
@@ -772,8 +773,10 @@ fn flux2_dev_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 
 /// Qwen-Image-Edit candle-routing conditions (sc-5487, sc-18476). The candle `QwenEdit` provider
 /// serves instruction edit plus ordered singular/plural reference and character/angle workflows on
-/// the non-lightning Qwen-Image-Edit family. It rejects masks, controls, phases, poses, malformed CFG,
-/// and conflicting reference carriers rather than dropping them. Mirrors the worker's
+/// the Qwen-Image-Edit family. Character Studio pose sets are supported only with exactly one identity
+/// reference: each pose skeleton is appended as the second ordered edit reference. Masks, controls,
+/// phases, malformed pose sets/CFG, and conflicting reference carriers are rejected rather than
+/// dropped. Mirrors the worker's
 /// `qwen_edit_candle_available` gate (minus local weight resolution); macOS keeps the corresponding
 /// MLX `qwen_image_edit` path, including its pre-existing best-effort pose grouping.
 pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
@@ -781,9 +784,35 @@ pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if !matches!(mode, Some("edit_image" | "character_image")) {
         return false;
     }
-    conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
-        && !conditioned_edit_has_unsupported_carrier(payload, true, false)
+    let Some(reference_count) = conditioned_reference_count(payload, mode == Some("edit_image"), 5)
+    else {
+        return false;
+    };
+    let Some(pose_count) = strict_candle_pose_count(payload) else {
+        return false;
+    };
+    (pose_count == 0 || (mode == Some("character_image") && reference_count == 1))
+        && !conditioned_edit_has_unsupported_carrier(payload, true, false, true)
         && !conditioned_true_cfg_is_malformed(payload)
+}
+
+/// Strict Character Studio pose carrier shared by the newly conditioned Candle routes.
+/// Missing/null/empty means no pose set; a supplied set must contain only objects and stay within the
+/// API-wide pose bound. Workers parse those same objects with the production whole-body renderer.
+fn strict_candle_pose_count(payload: &Map<String, Value>) -> Option<usize> {
+    match payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+    {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Array(poses))
+            if poses.len() <= MAX_JOB_POSES && poses.iter().all(Value::is_object) =>
+        {
+            Some(poses.len())
+        }
+        Some(_) => None,
+    }
 }
 
 /// SenseNova-U1's registered Candle generator accepts structural Reference/MultiReference
@@ -795,7 +824,7 @@ pub(crate) fn sensenova_edit_candle_eligible(payload: &Map<String, Value>) -> bo
         return false;
     }
     conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
-        && !conditioned_edit_has_unsupported_carrier(payload, false, true)
+        && !conditioned_edit_has_unsupported_carrier(payload, false, true, false)
         && !conditioned_true_cfg_is_malformed(payload)
 }
 
@@ -809,6 +838,7 @@ fn conditioned_edit_has_unsupported_carrier(
     payload: &Map<String, Value>,
     allow_loras: bool,
     reject_strength: bool,
+    allow_poses: bool,
 ) -> bool {
     (!allow_loras && has_nonempty_or_malformed_array(payload, "loras"))
         || ["controls", "controlnets"]
@@ -817,9 +847,8 @@ fn conditioned_edit_has_unsupported_carrier(
         || ["maskAssetId"]
             .iter()
             .any(|key| has_nonempty_or_malformed_string(payload, key))
-        || ["poses", "phases"]
-            .iter()
-            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        || (!allow_poses && has_nonempty_or_malformed_nested_array(payload, "advanced", "poses"))
+        || has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
         || [
             "controlMode",
             "controlImage",
@@ -1274,7 +1303,7 @@ pub(crate) fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) ->
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    has_nonempty_nested_array(payload, "advanced", "poses")
+    strict_candle_pose_count(payload).is_some_and(|count| count > 0)
 }
 
 /// Krea 2 pose-ControlNet candle-routing conditions (sc-8464, epic 8459). The candle `Krea2Control`

@@ -231,6 +231,24 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         (reference("sana_sprint_1600m"), CandleImageLane::SanaImg2Img),
         (pose("flux_dev"), CandleImageLane::Flux1Control),
         (pose("flux2_dev"), CandleImageLane::Flux2Control),
+        (
+            json!({
+                "model": "flux2_dev",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": [{ "keypoints": [] }] }
+            }),
+            CandleImageLane::Flux2Control,
+        ),
+        (
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": [{ "keypoints": [] }] }
+            }),
+            CandleImageLane::QwenEdit,
+        ),
         (pose("krea_2_turbo"), CandleImageLane::KreaControl),
         (reference("krea_2_turbo"), CandleImageLane::KreaImg2Img),
         (reference("krea_2_raw"), CandleImageLane::KreaImg2Img),
@@ -441,6 +459,97 @@ fn conditioned_routes_fail_closed_on_conflicts_malformed_references_and_cfg() {
         }))),
         Some(CandleImageLane::KolorsEdit)
     );
+}
+
+#[test]
+fn qwen_edit_pose_carrier_is_strict_and_flux2_pose_stays_on_control() {
+    let qwen = |poses: Value| {
+        image_generate_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "character_image",
+            "referenceAssetId": "identity_1",
+            "advanced": { "poses": poses }
+        }))
+    };
+    for poses in [Value::Null, json!([])] {
+        assert_eq!(
+            image_job_candle_lane(&qwen(poses)),
+            Some(CandleImageLane::QwenEdit)
+        );
+    }
+    assert_eq!(
+        image_job_candle_lane(&qwen(json!([
+            { "keypoints": [] },
+            { "keypoints": [[0.1, 0.2, 0.9]] }
+        ]))),
+        Some(CandleImageLane::QwenEdit)
+    );
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        assert_eq!(image_job_candle_lane(&qwen(malformed)), None);
+    }
+    assert_eq!(
+        image_job_candle_lane(&qwen(Value::Array(
+            (0..=crate::image_request::MAX_JOB_POSES)
+                .map(|_| json!({}))
+                .collect()
+        ))),
+        None,
+        "oversize pose sets must fail closed"
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_generate_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "character_image",
+            "referenceAssetIds": ["identity_1", "identity_2"],
+            "advanced": { "poses": [{}] }
+        }))),
+        None,
+        "the pose recipe has exactly [identity, skeleton] and cannot drop extra identities"
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_edit_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "edit_image",
+            "sourceAssetId": "source_1",
+            "advanced": { "poses": [{}] }
+        }))),
+        None,
+        "pose sets are a Character Studio shape, never instruction edit"
+    );
+
+    let flux_character_pose = image_generate_job(json!({
+        "model": "flux2_dev",
+        "mode": "character_image",
+        "referenceAssetId": "identity_1",
+        "advanced": { "poses": [{ "keypoints": [] }] }
+    }));
+    assert_eq!(
+        image_job_candle_lane(&flux_character_pose),
+        Some(CandleImageLane::Flux2Control),
+        "the edit lane must not swallow FLUX.2 pose controls"
+    );
+    for poses in [Value::Null, json!([])] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "flux2_dev",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": poses }
+            }))),
+            Some(CandleImageLane::Flux2Edit)
+        );
+    }
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "flux2_dev",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": malformed }
+            }))),
+            None
+        );
+    }
 }
 
 #[test]

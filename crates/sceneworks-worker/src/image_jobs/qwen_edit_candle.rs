@@ -4,12 +4,12 @@ use super::{
     apply_candle_qwen_load_shape, apply_request_scoped_candle_residency,
     candle_conditioned_edit_work, consume_gen_events, drive_gen_items, gate_tier_key,
     gate_with_evict_reclaim, installed_tier_keys, load_reference_image, load_spec,
-    nvfp4_host_eligible, nvfp4_selected, read_safetensors_header, requested_receipt_variant,
-    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with,
-    standard_tier_subdir, start_gen_stream, tier_key_from_resolved_dir, vram_reject_tail_for_tier,
-    AdapterKind, AdapterSpec, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, QwenEdit, QwenEditPaths, QwenEditRequest, Settings, Value, WorkerError,
-    WorkerResult,
+    nvfp4_host_eligible, nvfp4_selected, parse_poses, read_safetensors_header,
+    requested_receipt_variant, resolve_adapters, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32_with, resolve_seed, standard_tier_subdir, start_gen_stream,
+    tier_key_from_resolved_dir, vram_reject_tail_for_tier, AdapterKind, AdapterSpec, ApiClient,
+    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PoseInput, QwenEdit,
+    QwenEditPaths, QwenEditRequest, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use serde_json::json;
@@ -80,11 +80,11 @@ fn qwen_user_adapter_resident_bytes(adapters: &[AdapterSpec], tier: &str) -> Wor
 // `resolve_app_managed_model_dir`/`resolve_seed`/`start_gen_stream`/`drive_gen_items`/
 // `consume_gen_events`/`non_empty`/`gen_core`/… all in scope).
 //
-// Qwen-Image-Edit is a dual-latent reference concat (NOT strength-img2img + mask): the source is the
-// reference, the prompt is the instruction. So this lane handles `edit_image` + `sourceAssetId` (no
-// sub-modes / inpaint / outpaint — that masked shape is the SDXL edit lane's). The provider
-// condition-resizes the reference internally (~384²), so — unlike the FLUX.2 lane — the source is NOT
-// pre-fit to the render size.
+// Qwen-Image-Edit is a dual-latent reference concat (NOT strength-img2img + mask): the images are
+// references and the prompt is the instruction. This lane handles instruction/character edits and
+// Character Studio pose sets as `[identity, skeleton]`. Inpaint/outpaint remain the SDXL edit lane's
+// masked shape. The provider condition-resizes references internally (~384²), so — unlike the FLUX.2
+// lane — they are not pre-fit to the render size.
 
 /// Qwen-Image-Edit denoise steps default (the production, non-distilled variants).
 const QWEN_EDIT_CANDLE_DEFAULT_STEPS: u32 = 30;
@@ -137,38 +137,98 @@ fn is_qwen_edit_lightning(model: &str) -> bool {
 
 /// True when this is a candle-eligible Qwen edit/reference job with at least one ordered reference.
 fn qwen_edit_candle_mode(request: &ImageRequest) -> bool {
-    matches!(request.mode.as_str(), "edit_image" | "character_image")
-        && !qwen_edit_candle_reference_ids(request).is_empty()
+    if !matches!(request.mode.as_str(), "edit_image" | "character_image") {
+        return false;
+    }
+    let references = qwen_edit_candle_reference_ids(request);
+    let Some(pose_count) = qwen_edit_candle_pose_count(request) else {
+        return false;
+    };
+    !references.is_empty()
+        && (pose_count == 0 || (request.mode == "character_image" && references.len() == 1))
+}
+
+/// Strict mirror of the scheduler's optional Qwen Edit pose carrier. Missing/null/empty selects the
+/// ordinary edit path; a supplied set is object-only and bounded by the shared request contract.
+pub(super) fn qwen_edit_candle_pose_count(request: &ImageRequest) -> Option<usize> {
+    match request.advanced.get("poses") {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Array(poses))
+            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.iter().all(Value::is_object) =>
+        {
+            Some(poses.len())
+        }
+        Some(_) => None,
+    }
+}
+
+/// Work contract for Qwen Edit. Pose sets render once per pose at one shared seed, matching the
+/// established MLX Character Studio recipe; ordinary edits retain angle-set/count behavior.
+fn qwen_edit_candle_work(request: &ImageRequest) -> Vec<(i64, String)> {
+    match qwen_edit_candle_pose_count(request) {
+        Some(count) if count > 0 => {
+            let seed = resolve_seed(request, 0);
+            (0..count).map(|_| (seed, request.prompt.clone())).collect()
+        }
+        _ => candle_conditioned_edit_work(request),
+    }
+}
+
+/// Build the exact ordered pose conditioning set consumed by Qwen Edit: identity first (the VL
+/// prompt reference), skeleton second (the dual-latent geometry reference).
+fn qwen_edit_candle_pose_references(
+    identity: &Image,
+    pose: &PoseInput,
+    width: u32,
+    height: u32,
+) -> Vec<Image> {
+    let skeleton = crate::openpose_skeleton::draw_wholebody(
+        width,
+        height,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        crate::openpose_skeleton::body_stickwidth(width, height),
+    );
+    vec![
+        identity.clone(),
+        Image {
+            width,
+            height,
+            pixels: skeleton.into_raw(),
+        },
+    ]
 }
 
 const QWEN_EDIT_CANDLE_MAX_REFERENCES: usize = 5;
 
 fn qwen_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if !request.reference_asset_ids.is_empty() {
-        return request
-            .reference_asset_ids
-            .iter()
-            .take(QWEN_EDIT_CANDLE_MAX_REFERENCES)
-            .cloned()
-            .collect();
-    }
-    if let Some(id) = request
+    let singular = request
         .reference_asset_id
         .as_deref()
         .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
+        .filter(|id| !id.is_empty());
+    let source = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let plural_supplied = !request.reference_asset_ids.is_empty();
+    let active = usize::from(plural_supplied)
+        + usize::from(singular.is_some())
+        + usize::from(source.is_some());
+    if active != 1 || request.reference_asset_ids.len() > QWEN_EDIT_CANDLE_MAX_REFERENCES {
+        return Vec::new();
+    }
+    if plural_supplied {
+        return request.reference_asset_ids.clone();
+    }
+    if let Some(id) = singular {
         return vec![id.to_owned()];
     }
     if request.mode == "edit_image" {
-        if let Some(id) = request
-            .source_asset_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            return vec![id.to_owned()];
-        }
+        return source.map(|id| vec![id.to_owned()]).unwrap_or_default();
     }
     Vec::new()
 }
@@ -547,7 +607,14 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let user_adapters = resolve_adapters(request, settings)?;
     adapters.extend(user_adapters.iter().cloned());
     let adapter_count = adapters.len();
-    let reference_count = references.len();
+    let pose_inputs = qwen_edit_candle_pose_count(request)
+        .filter(|count| *count > 0)
+        .map(|_| parse_poses(request));
+    let reference_count = if pose_inputs.is_some() {
+        2
+    } else {
+        references.len()
+    };
     let mut raw_settings =
         qwen_edit_candle_raw_settings(request, &repo, &qwen_base, steps, guidance, reference_count);
     // Record the Lightning recipe for telemetry / A-B parity (matches the MLX `distillLora` key format).
@@ -561,8 +628,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         );
     }
 
-    // Per-image work items: (seed, prompt) — `request.count` edits of the same source.
-    let work = candle_conditioned_edit_work(request);
+    // Per-image work items: ordinary count/angle edits or one shared-seed edit per pose.
+    let work = qwen_edit_candle_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
 
@@ -793,7 +860,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -822,7 +889,16 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         // `crate::candle_preview_wiring_tests` reads this source and fails on both.
                         preview,
                     };
-                    let result = model.generate(&req, &references, &mut *on_progress);
+                    let pose_references = pose_inputs.as_ref().map(|poses| {
+                        qwen_edit_candle_pose_references(
+                            &references[0],
+                            &poses[index],
+                            width,
+                            height,
+                        )
+                    });
+                    let active_references = pose_references.as_deref().unwrap_or(&references);
+                    let result = model.generate(&req, active_references, &mut *on_progress);
                     let out = match result {
                         Ok(out) => out,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
@@ -887,6 +963,115 @@ mod qwen_edit_tier_reconcile_tests {
             vec!["first".to_owned(), "second".to_owned()]
         );
         assert_eq!(qwen_edit_candle_guidance(&request), 6.0);
+    }
+
+    #[test]
+    fn pose_recipe_is_strict_shared_seed_and_identity_then_skeleton() {
+        let value = json!({
+            "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+            "mode": "character_image", "referenceAssetId": "identity", "seed": 42,
+            "width": 64, "height": 64, "prompt": "keep the person",
+            "advanced": {
+                "poses": [
+                    { "keypoints": [[0.5, 0.2, 1.0], [0.5, 0.35, 1.0]] },
+                    { "keypoints": [[0.2, 0.5, 1.0], [0.8, 0.5, 1.0]] }
+                ]
+            }
+        });
+        let request = ImageRequest::from_payload(value.as_object().expect("image request object"));
+        assert_eq!(qwen_edit_candle_pose_count(&request), Some(2));
+        assert!(qwen_edit_candle_mode(&request));
+        assert_eq!(
+            qwen_edit_candle_work(&request),
+            vec![
+                (42, "keep the person".to_owned()),
+                (42, "keep the person".to_owned())
+            ],
+            "one output per pose must share the identity seed"
+        );
+
+        let poses = parse_poses(&request);
+        let identity = Image {
+            width: 64,
+            height: 64,
+            pixels: vec![7; 64 * 64 * 3],
+        };
+        let references = qwen_edit_candle_pose_references(&identity, &poses[0], 64, 64);
+        assert_eq!(references.len(), 2);
+        assert_eq!(
+            references[0].pixels, identity.pixels,
+            "identity stays first"
+        );
+        assert_eq!((references[1].width, references[1].height), (64, 64));
+        assert_ne!(
+            references[1].pixels, identity.pixels,
+            "the rendered skeleton must be the second, distinct reference"
+        );
+    }
+
+    #[test]
+    fn pose_recipe_rejects_malformed_oversize_and_ambiguous_shapes() {
+        let make = |mode: &str, references: Value, poses: Value| {
+            let value = json!({
+                "projectId": "p", "model": "qwen_image_edit_2511_lightning", "mode": mode,
+                "advanced": { "poses": poses }
+            });
+            let mut payload = value.as_object().expect("image request object").clone();
+            payload.extend(references.as_object().expect("reference object").clone());
+            ImageRequest::from_payload(&payload)
+        };
+        for poses in [Value::Null, json!([])] {
+            let request = make(
+                "character_image",
+                json!({ "referenceAssetId": "identity" }),
+                poses,
+            );
+            assert_eq!(qwen_edit_candle_pose_count(&request), Some(0));
+            assert!(qwen_edit_candle_mode(&request));
+        }
+        for poses in [json!({}), json!(false), json!([{}, null])] {
+            let request = make(
+                "character_image",
+                json!({ "referenceAssetId": "identity" }),
+                poses,
+            );
+            assert_eq!(qwen_edit_candle_pose_count(&request), None);
+            assert!(!qwen_edit_candle_mode(&request));
+        }
+        let oversize = make(
+            "character_image",
+            json!({ "referenceAssetId": "identity" }),
+            Value::Array(
+                (0..=sceneworks_core::image_request::MAX_JOB_POSES)
+                    .map(|_| json!({}))
+                    .collect(),
+            ),
+        );
+        assert_eq!(qwen_edit_candle_pose_count(&oversize), None);
+        assert!(!qwen_edit_candle_mode(&oversize));
+
+        let plural = make(
+            "character_image",
+            json!({ "referenceAssetIds": ["identity", "extra"] }),
+            json!([{}]),
+        );
+        assert!(!qwen_edit_candle_mode(&plural));
+        let conflicting = make(
+            "character_image",
+            json!({
+                "referenceAssetIds": ["identity"],
+                "referenceAssetId": "other"
+            }),
+            json!([{}]),
+        );
+        assert!(qwen_edit_candle_reference_ids(&conflicting).is_empty());
+        assert!(!qwen_edit_candle_mode(&conflicting));
+        let edit = make(
+            "edit_image",
+            json!({ "sourceAssetId": "source" }),
+            json!([{}]),
+        );
+        assert!(!qwen_edit_candle_mode(&edit));
     }
 
     fn write_adapter(path: &Path, key: &str, network_type: Option<&str>) {

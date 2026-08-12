@@ -81,7 +81,20 @@ pub(super) fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
             request.mode.as_str(),
             "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
         );
-    supported_mode && !flux2_edit_candle_reference_ids(request).is_empty()
+    supported_mode
+        && flux2_edit_candle_pose_carrier_is_absent_or_empty(request)
+        && !flux2_edit_candle_reference_ids(request).is_empty()
+}
+
+/// The FLUX.2 edit provider consumes references but no pose controls. Missing/null/empty preserves
+/// ordinary character/reference edits; any non-empty or malformed pose carrier must stay off this
+/// lane so the control route can consume it or the worker can reject it explicitly.
+fn flux2_edit_candle_pose_carrier_is_absent_or_empty(request: &ImageRequest) -> bool {
+    match request.advanced.get("poses") {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(poses)) => poses.is_empty(),
+        Some(_) => false,
+    }
 }
 
 /// Resolve the FLUX.2 base snapshot through the **shared** [`resolve_weights_dir`] — the same resolver

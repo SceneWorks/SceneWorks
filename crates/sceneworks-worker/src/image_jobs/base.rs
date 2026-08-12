@@ -739,6 +739,12 @@ impl CandleImageRoute {
             | CandleImageRoute::Flux1Control
             | CandleImageRoute::KreaControl => pose_entries(request).len() as u32,
             CandleImageRoute::InstantId => instantid_image_count(request, settings),
+            CandleImageRoute::QwenEdit
+                if qwen_edit_candle::qwen_edit_candle_pose_count(request)
+                    .is_some_and(|count| count > 0) =>
+            {
+                qwen_edit_candle::qwen_edit_candle_pose_count(request).unwrap_or_default() as u32
+            }
             CandleImageRoute::Flux2Edit
             | CandleImageRoute::QwenEdit
             | CandleImageRoute::SenseNovaEdit
@@ -827,6 +833,22 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::InstantId)
     } else if sdxl_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SdxlEdit)
+    } else if matches!(
+        request.model.as_str(),
+        "flux2_dev"
+            | "qwen_image_edit"
+            | "qwen_image_edit_2509"
+            | "qwen_image_edit_2511"
+            | "qwen_image_edit_2511_lightning"
+    ) && candle_conditioned_pose_carrier_is_malformed(request)
+    {
+        // Defense in depth for direct worker calls: the scheduler rejects these malformed carriers,
+        // and the worker must reject too rather than letting typed parsing erase them before T2I.
+        Some(CandleImageRoute::PoseReject)
+    } else if flux2_control_candle_available(request, settings) {
+        // Character Studio FLUX.2 pose payloads also carry a reference image. The pose/control lane
+        // must win before reference edit so the skeleton is never silently dropped.
+        Some(CandleImageRoute::Flux2Control)
     } else if flux2_edit_candle_available(request, settings) {
         Some(CandleImageRoute::Flux2Edit)
     } else if qwen_edit_candle_available(request, settings) {
@@ -861,8 +883,6 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::KolorsEdit)
     } else if zimage_control_available(request, settings) {
         Some(CandleImageRoute::ZimageControl)
-    } else if flux2_control_candle_available(request, settings) {
-        Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
     } else if krea_control_candle_available(request, settings) {
@@ -949,6 +969,18 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::CandleTxt2Img)
     } else {
         None
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_conditioned_pose_carrier_is_malformed(request: &ImageRequest) -> bool {
+    match request.advanced.get("poses") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(poses)) => {
+            poses.len() > sceneworks_core::image_request::MAX_JOB_POSES
+                || poses.iter().any(|pose| !pose.is_object())
+        }
+        Some(_) => true,
     }
 }
 
