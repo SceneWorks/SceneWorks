@@ -8501,7 +8501,8 @@ fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
 ///
 /// **No `refs/main` is written, and that is the point.** A pinned install has none, so
 /// `resolve_huggingface_snapshot_dir` falls to its "snapshot with the most files" heuristic — which
-/// picks the PRE-BUMP dir here (gemma 2 + q4 7 + q8 7 files vs bf16's 7). That is the real machine on
+/// picks the PRE-BUMP dir here — 19 files (q4 7 + q8 7 + gemma 5) vs the bumped snapshot's 7
+/// (`bf16/` alone), counted the way `snapshot_file_count` does. That is the real machine on
 /// which a single-snapshot `bf16/` probe is permanently false: the selected snapshot never gains the
 /// tier, so the probe cannot ever become true no matter how many times the tier is fetched.
 #[cfg(target_os = "macos")]
@@ -9146,6 +9147,72 @@ fn resolve_ltx_eros_gemma_prefers_local_sibling() {
     // An incomplete sibling does not win (falls through to the absent bundle → None).
     std::fs::remove_file(gemma.join("model-00001-of-00002.safetensors")).unwrap();
     assert!(resolve_ltx_eros_gemma_dir(&settings, &eros).is_none());
+}
+
+/// sc-18809: the eros gemma RESOLVER's bundle fallback must share ONE predicate with its probe.
+/// Widening `ensure_ltx_bundle_gemma_present` to the cross-revision `bundled_ltx_gemma_dir` scan while
+/// this resolver kept a single-snapshot `huggingface_snapshot_dir(..).join("gemma")` check left the
+/// probe STRICTLY MORE PERMISSIVE than the resolver — an inversion that is fatal exactly here: the
+/// probe reports gemma present and skips the fetch, then the resolver returns `None`, and the eros job
+/// dead-ends on the provider's required-`LoadSpec::text_encoder` error instead of self-healing by
+/// fetching as it did before this story.
+///
+/// The fixture moves the split-revision hub's `gemma/` onto the BUMPED snapshot, so the snapshot
+/// `resolve_huggingface_snapshot_dir` selects (pre-bump, q4 7 + q8 7 = 14 files) has no `gemma/` at
+/// all while the sibling (bf16 7 + gemma 5 = 12) holds the only complete one. Under the single-snapshot
+/// form this resolves `None`; under the shared predicate it reaches the sibling revision.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_ltx_eros_gemma_reaches_a_sibling_revision() {
+    let hub_guard = ltx_split_revision_hub("eros_gemma");
+    let hub = hub_guard.path();
+    let snapshots = hub
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots");
+    let pre_bump = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
+    let bumped = snapshots.join(LTX_BUNDLE_REVISION);
+    // Move gemma OFF the most-files snapshot onto the sibling: the selected snapshot keeps 14 files
+    // (q4 + q8) against the sibling's 12 (bf16 + gemma), so the SELECTION is unchanged and the only
+    // complete `gemma/` is one revision over.
+    std::fs::rename(pre_bump.join("gemma"), bumped.join("gemma")).unwrap();
+
+    let data_guard = tempfile::Builder::new()
+        .prefix("sw_eros_gemma_sibling_")
+        .tempdir()
+        .expect("temp dir");
+    let eros = data_guard
+        .path()
+        .join("models")
+        .join("mlx")
+        .join("ltx_2_3_eros");
+    std::fs::create_dir_all(&eros).unwrap();
+    let settings = Settings {
+        data_dir: data_guard.path().to_path_buf(),
+        ..offline_settings()
+    };
+
+    let (selected, resolved) = ltx_with_env(hub, || {
+        (
+            crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO),
+            resolve_ltx_eros_gemma_dir(&settings, &eros),
+        )
+    });
+    assert_eq!(
+        selected.as_deref(),
+        Some(pre_bump.as_path()),
+        "fixture premise: the most-files heuristic must still select the gemma-LESS snapshot, or \
+         this test stops discriminating"
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(bumped.join("gemma").as_path()),
+        "the eros resolver must see the gemma its own probe already sees — a single-snapshot bundle \
+         fallback returns `None` here while `ensure_ltx_bundle_gemma_present` reports it present, so \
+         the job dead-ends on the required-`LoadSpec::text_encoder` error"
+    );
 }
 
 /// sc-8827 (F-025): the LTX Gemma-encoder dir rides `LoadSpec::text_encoder` (via

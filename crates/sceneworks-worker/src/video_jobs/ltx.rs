@@ -347,8 +347,10 @@ pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf>
 /// first, then the fetched [`LTX_BUNDLE_REPO`] snapshot's `gemma/`. Resolution order: an operator
 /// `$LTX_GEMMA_DIR` override (existence-checked, [`ltx_gemma_env_override`]) — threaded onto the spec
 /// because the MLX provider dropped its own env read (sc-13664) — then the complete `<parent>/gemma`
-/// sibling, then the bundle snapshot's `gemma/`. `None` only when nothing complete is on disk (the
-/// provider then surfaces its required-`LoadSpec::text_encoder` error) — a partial dir never wins.
+/// sibling, then the bundle snapshot's `gemma/` **and its sibling revisions'** (sc-18809: the same
+/// cross-revision predicate [`ensure_ltx_bundle_gemma_present`] probes with, so the probe can never be
+/// more permissive than this resolver). `None` only when nothing complete is on disk (the provider
+/// then surfaces its required-`LoadSpec::text_encoder` error) — a partial dir never wins.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<PathBuf> {
     if let Some(env_dir) = ltx_gemma_env_override() {
@@ -360,8 +362,15 @@ pub(super) fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) 
             return Some(sibling);
         }
     }
-    let bundle_gemma = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma");
-    ltx_gemma_dir_is_complete(&bundle_gemma).then_some(bundle_gemma)
+    // The SAME sibling-revision scan [`ensure_ltx_bundle_gemma_present`] probes with: it takes a tier
+    // dir and reads its parent snapshot, so `root.join("gemma")` asks it about `root` itself, then the
+    // siblings. A single-snapshot check here would be STRICTLY NARROWER than that probe — on a
+    // split-revision install the probe would report gemma present, skip the fetch, and this resolver
+    // would then return `None`, dead-ending the job on the provider's required-`LoadSpec::text_encoder`
+    // error (sc-18809). Probe and resolver share one predicate.
+    bundled_ltx_gemma_dir(
+        &huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma"),
+    )
 }
 
 /// The amoral 4-bit Gemma prompt-enhancer snapshot the OPT-IN `useUncensoredEnhancer` path loads
