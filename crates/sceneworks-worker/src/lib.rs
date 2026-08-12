@@ -1,3 +1,11 @@
+// sc-18691 PROOF BRANCH ONLY -- DO NOT MERGE.
+// This deliberate break exists to prove that a weights-only workflow_dispatch of
+// windows-candle.yml provisions successfully while the candle compile chain fails.
+// It breaks `cargo test -p sceneworks-worker`, `cargo check -p sceneworks-rust-api`,
+// `cargo clippy -p sceneworks-worker` and the dump-engine-capabilities run, while
+// leaving `cargo fetch --locked` intact.
+compile_error!("sc-18691: deliberate compile break proving provisioning is independent of the compile chain");
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::IpAddr;
