@@ -380,8 +380,15 @@ jobs:
       # NO lane, so reverting the sc-18104 dispatch-refusal fix merged green. Twin of
       # windows-candle.yml's memory-candle-adapter test step; pinned by
       # scripts/platform-review-contracts.test.mjs.
-      - name: Test the MLX memory adapter (memory-mlx-adapter)
-        run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter
+      #
+      # NO `--bin` SELECTOR (sc-18808 review). `--bin memory-mlx-adapter` selects that one target and
+      # therefore EXCLUDES the crate's lib test target, which is where the shared protocol guards
+      # live — `still_geometry_guard_refuses_every_non_still_axis_and_reproduces_the_pinned_wording`
+      # ran in zero lanes under the old selector, compiled by clippy --all-targets and executed by
+      # nothing. Without the selector this runs the lib tests AND both bins whose required-features
+      # are satisfied (`memory-candle-adapter` needs `candle`, so it stays out).
+      - name: Test the MLX memory adapter (lib + memory-mlx-adapter)
+        run: cargo test -p sceneworks-memory-adapter --features mlx
       # The whole workspace suite MINUS the one test that needs matrix-unit silicon.
       # `nax_16bit_sdpa_is_correct` runs on `nax-worker` below and nowhere else; the
       # contract test in scripts/platform-review-contracts.test.mjs pins both halves so

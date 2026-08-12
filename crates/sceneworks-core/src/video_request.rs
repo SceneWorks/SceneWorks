@@ -2443,6 +2443,57 @@ mod tests {
         assert_eq!(ltx_frame_count(150), 153);
     }
 
+    /// Every (duration, fps) pair the shipped `ltx_2_3` limits can reach, and the frame count this
+    /// ladder produces for it — `limits.durations` x `limits.fps` in
+    /// `config/manifests/builtin.models.jsonc`.
+    ///
+    /// sc-18808 mirrors this exact table into the MLX memory-calibration adapter
+    /// (`crates/sceneworks-memory-adapter/src/bin/mlx.rs`,
+    /// `ltx_frame_ladder_port_matches_the_transcribed_shipped_ladder`), which PORTS `ltx_frame_count`
+    /// rather than calling it — that crate deliberately carries two dependencies and cannot take
+    /// `sceneworks-core`'s bundled SQLite and image codecs. The adapter derives its accepted frame
+    /// envelope `[97, 449]` from the ends of this table, so a silent change to the ladder here would
+    /// move what a real-weight video capture will admit.
+    ///
+    /// Neither `ltx_frame_count_snaps_to_8k_plus_1` above nor anything else in this crate pinned a
+    /// single one of these pairs, so before this test a ladder change reds in NO crate. This one
+    /// does, and `sceneworks-core` is a workspace default member, so a plain `cargo test` catches
+    /// it. If it reds, the adapter's copy and its `[97, 449]` envelope must move with it.
+    #[test]
+    fn ltx_frame_count_matches_the_sc_18808_calibration_ladder() {
+        for (duration, fps, expected) in [
+            (4, 24, 97),
+            (4, 25, 97),
+            (4, 30, 121),
+            (6, 24, 145),
+            (6, 25, 153),
+            (6, 30, 177),
+            (8, 24, 193),
+            (8, 25, 201),
+            (8, 30, 241),
+            (10, 24, 241),
+            (10, 25, 249),
+            (10, 30, 297),
+            (12, 24, 289),
+            (12, 25, 297),
+            (12, 30, 361),
+            (15, 24, 361),
+            (15, 25, 377),
+            (15, 30, 449),
+        ] {
+            assert_eq!(
+                ltx_frame_count(duration * fps),
+                expected,
+                "{duration}s at {fps}fps"
+            );
+            // Every reachable count is on the 1 + 8k lattice the LTX VAE requires.
+            assert_eq!(expected % 8, 1, "{duration}s at {fps}fps");
+        }
+        // The ends the adapter derives its `[97, 449]` envelope from.
+        assert_eq!(ltx_frame_count(4 * 24), 97);
+        assert_eq!(ltx_frame_count(15 * 30), 449);
+    }
+
     #[test]
     fn wan_frame_count_floors_to_4n_plus_1_min_5() {
         // Exact 1+4k values >= 5 are unchanged.

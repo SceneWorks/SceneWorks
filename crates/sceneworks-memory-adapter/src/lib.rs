@@ -268,16 +268,6 @@ pub fn target_geometry(request: &Value) -> Result<(u32, u32), String> {
     Ok((dimension("width")?, dimension("height")?))
 }
 
-/// The overlay this calibration target declares (`planned.target.overlay`) — `"none"`, `"lora"`,
-/// `"control"`, `"identity"` (sc-16069).
-///
-/// An adapter MUST derive its `overlay` scenario verdict from this rather than hardcoding one. The
-/// candle adapter used to emit `not_applicable` with the fixed reason "ordinary Krea Turbo
-/// text-to-image calibration has no overlay" on every run, which is a statement about the adapter's
-/// one code path, not about the target it was handed — so a target that declared an overlay would
-/// still have produced a `not_applicable` record that reads as considered coverage. Reading the target
-/// makes the verdict true by construction, and lets an adapter refuse a target it cannot execute
-/// instead of quietly excusing it.
 /// Refuse a non-still geometry before an IMAGE provider arm does environment or weight work.
 ///
 /// The frames axis is a **per-arm** contract, not a global one (sc-18808). Every arm in this crate
@@ -313,6 +303,16 @@ pub fn validate_still_geometry(request: &Value, calibration_label: &str) -> Resu
     Ok(())
 }
 
+/// The overlay this calibration target declares (`planned.target.overlay`) — `"none"`, `"lora"`,
+/// `"control"`, `"identity"` (sc-16069).
+///
+/// An adapter MUST derive its `overlay` scenario verdict from this rather than hardcoding one. The
+/// candle adapter used to emit `not_applicable` with the fixed reason "ordinary Krea Turbo
+/// text-to-image calibration has no overlay" on every run, which is a statement about the adapter's
+/// one code path, not about the target it was handed — so a target that declared an overlay would
+/// still have produced a `not_applicable` record that reads as considered coverage. Reading the target
+/// makes the verdict true by construction, and lets an adapter refuse a target it cannot execute
+/// instead of quietly excusing it.
 pub fn target_overlay(request: &Value) -> Result<String, String> {
     planned(request)?
         .pointer("/target/overlay")

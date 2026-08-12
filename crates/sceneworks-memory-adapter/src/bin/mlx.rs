@@ -123,9 +123,21 @@ const LTX_SEED: u64 = 18808;
 /// temporal depth — not raw frame count — is the physically motivated regressor for a frames-aware
 /// phase curve (sc-18810), so the arm reports it alongside the raw count.
 const LTX_TEMPORAL_SCALE: u32 = 8;
-/// `limits.requiresDimensionsMultipleOf` for `ltx_2_3` in `config/manifests/builtin.models.jsonc`,
-/// which mirrors the engine's `SIZE_MULTIPLE = 2 * SPATIAL_SCALE` (stage 1 renders at half
-/// resolution, so a dimension must divide by twice the 32x VAE compression).
+/// The four constants below are copies of the `limits` block of the `ltx_2_3` entry in
+/// **`config/manifests/builtin.models.jsonc`**, which is their source of truth.
+///
+/// This crate carries two dependencies on purpose and cannot reach `sceneworks-core`'s JSONC reader
+/// to consult the manifest at test time, so the binding lives on the node side instead: `npm run
+/// check` runs `the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits` in
+/// `scripts/platform-review-contracts.test.mjs`, which parses the manifest, parses these four
+/// declarations out of this file, and re-derives [`LTX_FRAME_ENVELOPE`] from the manifest's own
+/// durations x fps. Edit the manifest limits without editing these and that gate reds (sc-18808
+/// review). If you rename a constant, rename it there too — the gate asserts each match rather than
+/// skipping what it cannot find.
+///
+/// `limits.requiresDimensionsMultipleOf`, which mirrors the engine's
+/// `SIZE_MULTIPLE = 2 * SPATIAL_SCALE` (stage 1 renders at half resolution, so a dimension must
+/// divide by twice the 32x VAE compression).
 const LTX_DIMENSION_MULTIPLE: u32 = 64;
 /// `limits.resolutions`, verbatim.
 const LTX_RESOLUTIONS: [(u32, u32); 5] =
@@ -138,9 +150,16 @@ const MIB: u64 = 1024 * 1024;
 /// Port of `sceneworks_core::video_request::ltx_frame_count` — frames snap to the NEAREST `8k + 1`,
 /// minimum 9, ties to the lower. Duplicated rather than depended on: `sceneworks-core` pulls a
 /// bundled SQLite, an image codec stack and a trash binding into what is otherwise a calibration-only
-/// binary with two dependencies. The duplication is bounded by
-/// `ltx_frame_ladder_matches_the_shipped_video_request_ladder`, which pins the value this port
-/// produces at all 18 shipped (duration, fps) pairs.
+/// binary with two dependencies.
+///
+/// Because it is a port and NOT a call, the binding to the shipped ladder is by transcription, and
+/// it takes TWO tests to close: `ltx_frame_ladder_port_matches_the_transcribed_shipped_ladder` here
+/// pins the 18 shipped (duration, fps) pairs against this port, and
+/// `ltx_frame_count_matches_the_sc_18808_calibration_ladder` in
+/// `crates/sceneworks-core/src/video_request.rs` pins the SAME 18 pairs against
+/// `ltx_frame_count` itself. `sceneworks-core` is a workspace default member, so a change to the
+/// shipped ladder reds under a plain `cargo test`; without that half, a drift would silently move
+/// what this arm accepts and neither crate would notice (sc-18808 review).
 const fn ltx_snapped_frame_count(raw_frames: u32) -> u32 {
     let frame_count = if raw_frames < 9 { 9 } else { raw_frames };
     let lower = frame_count - ((frame_count - 1) % 8);
@@ -5703,7 +5722,9 @@ mod flux2_tests {
         assert!((rms - 0.2 / 6.0_f64.sqrt()).abs() < 1e-9);
     }
 
-    fn weights_free_spec(quant: Option<Quant>) -> LoadSpec {
+    /// `pub(super)` so the sibling `ltx_tests` module can pin its own provider's contract
+    /// shape through the SAME weights-free spec these FLUX.2 pins use (sc-18808 review).
+    pub(super) fn weights_free_spec(quant: Option<Quant>) -> LoadSpec {
         let mut spec = LoadSpec::new(WeightsSource::Dir("/nonexistent".into()))
             .with_offload_policy(OffloadPolicy::Resident)
             .with_load_shape(LoadShape::EagerMaterialization);
@@ -6461,6 +6482,45 @@ mod qwen_evidence_tests {
 mod ltx_tests {
     use super::*;
 
+    /// The premise the ENTIRE `mlx:ltx_2_3` receipt rests on: `mlx-gen-ltx` registers no
+    /// `MemoryStrategyContract` at the pin.
+    ///
+    /// That single fact is why the arm's receipt is `status: gated` rather than `runtime_complete`
+    /// (see `run_ltx`), why `LTX_CALIBRATION_FINGERPRINT` is adapter-owned rather than read back
+    /// from a provider, and why `exact_fit` / `unknown_budget` / `stale_evidence` are reported as
+    /// unexecuted instead of passing. `run_ltx` DOES fail closed if the premise ever stops holding —
+    /// but that branch sits after env resolution, snapshot validation and `provider_registry()`, so
+    /// it is reachable only inside a real-weight capture, which no CI lane performs. Without this
+    /// test a pin bump that registers an LTX contract leaves every lane green and surfaces only the
+    /// next time someone burns a capture on a Mac.
+    ///
+    /// `Registry::memory_strategy_contract` returns `Ok(None)` without touching weights when nothing
+    /// is registered, so the premise is pinnable weights-free — exactly as every sibling arm pins its
+    /// own contract shape (`the_pinned_flux2_t2i_contract_is_direct_resident_only_and_plan_exact`,
+    /// `pinned_base_contract_exposes_the_exact_declared_full_ladder`,
+    /// `pinned_sdxl_contract_exposes_only_the_three_implemented_rungs`).
+    #[test]
+    fn the_pinned_ltx_provider_registers_no_memory_strategy_contract() {
+        let registry = mlx_gen_ltx::provider_registry().unwrap();
+        // q8 is the tier the shipped plan captures; the contract lookup is tier-independent, but
+        // asking under the captured tier keeps the premise and the capture on the same spec.
+        for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
+            let contract = registry
+                .memory_strategy_contract(LTX_PROVIDER, &flux2_tests::weights_free_spec(quant))
+                .expect("reading an unregistered contract must not error");
+            assert!(
+                contract.is_none(),
+                "the pinned mlx-gen-ltx crate now registers a MemoryStrategyContract for \
+                 {LTX_PROVIDER} at quant {quant:?}. The `mlx:ltx_2_3` receipt is `status: gated` \
+                 SOLELY because it did not: with a contract there is a provider calibration \
+                 identity to read instead of the adapter-owned {LTX_CALIBRATION_FINGERPRINT:?}, and \
+                 exact_fit/unknown_budget/stale_evidence become executable rather than unexecuted. \
+                 Upgrade `run_ltx` to read the contract and re-derive the receipt status before \
+                 relaxing this assertion — do not simply delete it (sc-18808)."
+            );
+        }
+    }
+
     /// A minimal, otherwise-valid LTX target. Every field the arm reads before it touches the
     /// environment or the weights is present, so a test that mutates exactly one axis is testing
     /// that axis.
@@ -6488,12 +6548,18 @@ mod ltx_tests {
         })
     }
 
-    /// The port of the shipped LTX frame ladder must agree with
-    /// `sceneworks_core::video_request::ltx_frame_count` at every point the declared limits can
-    /// reach. These 18 values ARE the envelope, so an unnoticed drift here would silently widen or
-    /// narrow what this arm accepts.
+    /// The port of the shipped LTX frame ladder must reproduce these 18 transcribed values, one per
+    /// point the declared limits can reach. These 18 values ARE the envelope, so an unnoticed drift
+    /// would silently widen or narrow what this arm accepts.
+    ///
+    /// This is a TRANSCRIPTION check, not a call into `sceneworks_core::video_request::ltx_frame_count`
+    /// — this crate deliberately does not depend on `sceneworks-core` (see `ltx_snapped_frame_count`).
+    /// The other half of the binding is `ltx_frame_count_matches_the_sc_18808_calibration_ladder` in
+    /// `crates/sceneworks-core/src/video_request.rs`, which pins the same 18 pairs against the shipped
+    /// function in a default member. Keep the two tables identical; changing one alone is the drift
+    /// both exist to catch (sc-18808 review).
     #[test]
-    fn ltx_frame_ladder_matches_the_shipped_video_request_ladder() {
+    fn ltx_frame_ladder_port_matches_the_transcribed_shipped_ladder() {
         for (duration, fps, expected) in [
             (4, 24, 97),
             (4, 25, 97),

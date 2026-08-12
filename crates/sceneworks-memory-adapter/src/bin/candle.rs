@@ -15,8 +15,14 @@ use std::process::Command;
 
 const KREA_ID: &str = "krea_2_turbo";
 const KREA_PLAIN_EXECUTION_PATH: &str = "the Candle Krea base-only text-to-image path";
+/// The label the Krea arm refuses a non-still geometry under (sc-18808); see
+/// [`still_calibration_label`].
+const KREA_STILL_CALIBRATION: &str = "Candle Krea base calibration";
 const QWEN_ID: &str = "qwen_image";
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the Candle Qwen-Image base-only text-to-image path";
+/// The label the Qwen arm refuses a non-still geometry under (sc-18808); see
+/// [`still_calibration_label`].
+const QWEN_STILL_CALIBRATION: &str = "Candle Qwen base calibration";
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 
@@ -547,6 +553,29 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
     }
 }
 
+/// The calibration label this Candle target refuses a non-still geometry under (sc-18808).
+///
+/// BOTH Candle arms are image arms, and both carried the same latent defect the MLX image arms did:
+/// they read only `width`/`height` through [`protocol::target_geometry`] and then wrote `frames: 1`
+/// straight into `MemoryGeometry`. A plan row declaring `frames: 2` would therefore have rendered ONE
+/// frame and emitted a well-formed record whose geometry envelope claimed a single frame it was never
+/// asked for — the exact defect class this apparatus exists to make impossible.
+///
+/// No Candle plan row declares a non-unit frames axis today (all 154 rows are `frames: 1`), so this
+/// is not a live exposure. It is added anyway because epic 18803 IS the video lane and
+/// `ltx_2_3_distilled` is a Candle engine id: the shape becomes reachable, and a refusal is the only
+/// thing that keeps the record honest when it does. Mirrors [`plain_execution_path`] so a provider
+/// this adapter does not implement is rejected by the same sentence in both.
+fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
+    match planned_provider(request)? {
+        QWEN_ID => Ok(QWEN_STILL_CALIBRATION),
+        KREA_ID => Ok(KREA_STILL_CALIBRATION),
+        provider => Err(format!(
+            "Candle five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+
 /// The numeric tier this case plans to measure, read from the plan rather than assumed.
 ///
 /// sc-17097: this used to be hardcoded `q4`, which silently capped the Candle lane at one tier — the
@@ -765,6 +794,7 @@ fn run_five_rung_reference_loaded(
     revision: &str,
 ) -> Result<Value, String> {
     protocol::validate_plain_overlay_target(request, execution_path)?;
+    protocol::validate_still_geometry(request, still_calibration_label(request)?)?;
     let contract = generator
         .memory_strategy_contract()
         .ok_or_else(|| format!("loaded {provider_id} has no memory-strategy contract"))?;
@@ -1037,6 +1067,9 @@ fn run_five_rung_reference_loaded(
 fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
     let execution_path = plain_execution_path(request)?;
     protocol::validate_plain_overlay_target(request, execution_path)?;
+    // Before `load_five_rung_generator`, for the same reason the overlay check is duplicated here:
+    // a geometry this arm cannot honour must be refused before it costs a real weight load.
+    protocol::validate_still_geometry(request, still_calibration_label(request)?)?;
     let (provider_id, execution_path, repository, revision, generator, mut vram) =
         load_five_rung_generator(request)?;
     run_five_rung_reference_loaded(
@@ -1107,6 +1140,10 @@ fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
         per_rung_request["planned"] = item.clone();
         let execution_path = plain_execution_path(&per_rung_request)?;
         protocol::validate_plain_overlay_target(&per_rung_request, execution_path)?;
+        protocol::validate_still_geometry(
+            &per_rung_request,
+            still_calibration_label(&per_rung_request)?,
+        )?;
     }
 
     let mut first_request = request.clone();
@@ -1154,6 +1191,9 @@ fn run(request: &Value) -> Result<Value, String> {
     let provider = planned_provider(request)?;
     let execution_path = plain_execution_path(request)?;
     protocol::validate_plain_overlay_target(request, execution_path)?;
+    // Both dispatch targets below are image arms; refuse a non-still geometry here, before either of
+    // them resolves an environment variable or touches a weight snapshot (sc-18808).
+    protocol::validate_still_geometry(request, still_calibration_label(request)?)?;
     let is_five_rung_reference = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
@@ -1687,5 +1727,88 @@ mod tests {
         let error =
             update_warmed_retention_baseline(&mut baseline, 12 * GIB + 64 * MIB + 1).unwrap_err();
         assert!(error.contains("above the warmed resident baseline"));
+    }
+
+    /// A single planned case at `frames`, minimal enough that the geometry guard is the FIRST thing
+    /// that can reject it — no weight root, no environment, no fixture.
+    fn still_planned_case(provider: &str, rung: &str, frames: u64) -> Value {
+        json!({
+            "backend": "candle",
+            "target": {
+                "provider": provider,
+                "modelId": provider,
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": frames }
+            },
+            "loadShape": "deferred_materialization",
+            "strategy": { "rung": rung, "parameters": {} },
+            "calibrationFingerprint": "unused",
+            "fixture": "fresh-five-rung-unused"
+        })
+    }
+
+    /// The canonical five-rung batch shape `run_five_rung_batch` requires, at `frames`.
+    fn still_batch_request(provider: &str, frames: u64) -> Value {
+        let planned: Vec<Value> = [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+        ]
+        .into_iter()
+        .map(|rung| still_planned_case(provider, rung, frames))
+        .collect();
+        json!({ "action": "run_batch", "planned": planned })
+    }
+
+    /// sc-18808 — the Candle twin of the MLX adapter's
+    /// `every_image_arm_still_refuses_a_multi_frame_geometry`.
+    ///
+    /// BOTH Candle arms hardcoded `frames: 1` into `MemoryGeometry` while reading only
+    /// `width`/`height` from the plan, so a plan row declaring any other frame count would have
+    /// rendered ONE frame and emitted a record claiming a geometry it was never asked for. Both
+    /// reachable entry points — `run` (the dispatcher in front of the five-rung path AND the inline
+    /// Krea arm) and `run_five_rung_batch` (reached straight from `main`, so `run`'s guard never sees
+    /// it) — must refuse with the exact pinned wording, before any environment or weight work.
+    #[test]
+    fn every_candle_arm_still_refuses_a_multi_frame_geometry() {
+        for (provider, label) in [
+            (QWEN_ID, QWEN_STILL_CALIBRATION),
+            (KREA_ID, KREA_STILL_CALIBRATION),
+        ] {
+            for frames in [0_u64, 2, 97] {
+                let expected = format!("{label} requires geometry.frames == 1, got {frames}");
+                let request = json!({
+                    "action": "run",
+                    "planned": still_planned_case(provider, "resident", frames)
+                });
+                assert_eq!(
+                    run(&request).expect_err("the Candle dispatcher must refuse a video geometry"),
+                    expected,
+                    "run: {provider} at frames={frames}"
+                );
+                assert_eq!(
+                    run_five_rung_batch(&still_batch_request(provider, frames))
+                        .expect_err("the Candle batch arm must refuse a video geometry"),
+                    expected,
+                    "run_batch: {provider} at frames={frames}"
+                );
+            }
+        }
+    }
+
+    /// And the guard is the frames axis rather than a blanket rejection: the same still geometry
+    /// passes it on both Candle labels, so the refusals above cannot be an unconditional error.
+    #[test]
+    fn the_candle_still_geometry_guard_is_not_a_blanket_refusal() {
+        for provider in [QWEN_ID, KREA_ID] {
+            let request = json!({ "planned": still_planned_case(provider, "resident", 1) });
+            let label = still_calibration_label(&request).unwrap();
+            protocol::validate_still_geometry(&request, label)
+                .unwrap_or_else(|error| panic!("{provider}: {error}"));
+        }
     }
 }

@@ -352,13 +352,19 @@ jobs:
       # `MemoryStrategyParameters` literal here went stale against the inference contract with
       # nothing to catch it). Keep both the production typecheck and the binary's CUDA-only unit
       # tests here: the batching contamination guard cannot be compiled or exercised on macOS.
-      - name: Check and test the candle memory adapter (memory-candle-adapter)
+      #
+      # The TEST step carries no `--bin` selector (sc-18808 review). `--bin memory-candle-adapter`
+      # selects that one target and EXCLUDES the crate's lib test target — the shared protocol guards
+      # (e.g. `still_geometry_guard_refuses_every_non_still_axis_and_reproduces_the_pinned_wording`)
+      # ran in zero lanes on either platform. The CHECK step above it keeps its selector on purpose:
+      # it is the production-typecheck half and the lib compiles on every platform anyway.
+      - name: Check and test the candle memory adapter (lib + memory-candle-adapter)
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-          cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+          cargo test -p sceneworks-memory-adapter --features candle
       - name: Validate five-rung reference inputs
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
