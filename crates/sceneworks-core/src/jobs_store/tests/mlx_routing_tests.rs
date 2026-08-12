@@ -163,6 +163,10 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
                 "{model} must preserve supported MLX Q{bits} selection"
             );
         }
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "advanced": { "mlxQuantize": " 4 " } }))
+        ));
         for empty_carriers in [
             json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
             json!({
@@ -182,7 +186,8 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
                     "controlScale": null,
                     "controlWeights": null,
                     "convRot": null,
-                    "quantTier": null
+                    "quantTier": null,
+                    "mlxQuantize": null
                 }
             }),
         ] {
@@ -218,6 +223,11 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             json!({ "referenceAssetId": "reference-1", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
             json!({ "referenceAssetId": "reference-1", "advanced": { "convRot": true } }),
             json!({ "referenceAssetId": "reference-1", "advanced": { "quantTier": "nvfp4" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": {} } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": true } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": 4.5 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": "q4" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": [] } }),
             json!({ "referenceAssetId": "reference-1", "advanced": 7 }),
         ] {
             assert!(

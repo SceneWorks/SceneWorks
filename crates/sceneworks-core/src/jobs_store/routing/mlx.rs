@@ -592,7 +592,28 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
         ]
         .iter()
         .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        && !sana_has_malformed_quant_carrier(payload)
         && !has_nonempty_or_malformed_array(payload, "loras")
+}
+
+/// Mirror the worker's `quant_int` request contract without treating an invalid explicit override as
+/// absence. Missing/null means "use the manifest default"; an integer or trimmed integer string is a
+/// valid explicit tier selection. Every other shape must fail closed instead of silently selecting Q4.
+fn sana_has_malformed_quant_carrier(payload: &Map<String, Value>) -> bool {
+    let Some(value) = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"))
+    else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
+        .is_none()
 }
 
 /// Anima base / aesthetic / turbo (epic 10512 / sc-10523) MLX-eligibility. The native `mlx-gen-anima`
