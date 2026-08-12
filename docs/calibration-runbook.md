@@ -305,10 +305,28 @@ Two things follow, and both are now enforced rather than remembered:
   dominating revision, mirroring `bundled_ltx_gemma_dir`'s sc-14377 fix for the co-requisite TE.
   Without that a bf16 request silently renders at whatever tier sits in the selected snapshot.
 
-Inventory after provisioning, following symlinks (`du -shL`), all four rows now pinned to
+Inventory after provisioning, following symlinks (`du -shL`), all four manifest rows now pinned to
 `01df27d3…`: `gemma/` 26.4 GB, `q4/` 20.5 GB, `q8/` 29.7 GB, `bf16/` 47.1 GB. Blob-level dedup means
 the bump itself re-downloads nothing — the cache is keyed by LFS digest and `01df27d3…` only *added*
 `bf16/`.
+
+🔴 **Record WHICH snapshot each tier landed in, not just that it landed.** "Provisioned at the
+manifest revision" and "provisioned" are different claims, and this host is the worked example of the
+gap. Actual layout, `models--SceneWorks--ltx-2.3-mlx/snapshots/`, with no `refs/main`:
+
+| snapshot | holds | files |
+| --- | --- | --- |
+| `254989c3…` (pre-bump) | `gemma/` `q4/` `q8/` | **39** ← selected |
+| `01df27d3…` (the manifest pin) | `gemma/` `bf16/` | 27 |
+
+So `q4` and `q8` are on disk at the **old** revision, not the manifest's. Because blobs are shared by
+LFS digest the bytes are identical either way, and `hf download` at the new pin would only re-link
+them — this is bookkeeping, not a re-fetch. But it is exactly the layout that breaks a naive presence
+check: with no `refs/main`, `resolve_huggingface_snapshot_dir` falls to "most files" and selects the
+39-file **pre-bump** snapshot, which has no `bf16/` and never will. Any probe that looks only there is
+permanently false — see `ensure_ltx_{q8,bf16}_present`, which sc-18809 had to move onto the same
+cross-revision scan as the resolver for precisely this reason. When you write "tier X is provisioned"
+into a handoff, name the snapshot.
 
 ⚠ **This step answers "which tiers exist", NOT "which tiers are usable" — do not let it become the
 latter.** In that same worked example, `find … -name .sceneworks-model-revision` over the entire
@@ -706,41 +724,82 @@ cargo test -p mlx-gen-ltx --release --test sequential_residency_real_weights -- 
 # with LTX_MODEL_DIR=<snapshot>/<tier> and LTX_GEMMA_DIR=<snapshot>/gemma
 ```
 
-It brackets a real staged `generate` in `reset_peak_memory()` / `get_peak_memory()`. Its geometry is
-hardcoded at 256×256×9; the larger rows below were taken with the same instrumentation and the
-geometry lifted onto env vars. Confirm the run was not skipped — an `#[ignore]`d test that returns
-early still reports `ok`, so require the printed line and a non-trivial wall time.
+It brackets a real staged `generate` in `reset_peak_memory()` / `get_peak_memory()`. Confirm the run
+was not skipped — an `#[ignore]`d test that returns early still reports `ok`, so require the printed
+line and a non-trivial wall time.
 
-| tier | geometry | frames | stage-2 latent tokens | DiT weights | **staged peak** | wall |
-| --- | --- | --- | --- | --- | --- | --- |
-| q4 | 256×256 | 9 | 128 | 10.57 GiB | 33.10 GiB | 15.6 s |
-| bf16 | 256×256 | 9 | 128 | 35.37 GiB | 36.89 GiB | 13.6 s |
-| bf16 | 768×512 | 145 | 7 296 | 35.37 GiB | 43.87 GiB | 90.6 s |
-| bf16 | **1280×704** | **449** | **50 160** | 35.37 GiB | **87.07 GiB** | 847.8 s |
+🔴 **Read the reproducibility column before you use any of these numbers.** The command above
+reproduces the **first two rows only**. That test's geometry is *hardcoded* at 256×256×9 — verified at
+inference pin `b965641e` and byte-identical at inference `HEAD` (`1ee44388`), with a clean working
+tree. The two larger rows were captured by hand-editing that geometry onto env vars locally; **that
+edit was never committed and no longer exists anywhere**, so those rows cannot be re-run from any
+revision of either repo as written.
 
-**Verdict: bf16 is measurable across the WHOLE declared envelope on this host.** The last row is the
-manifest maximum — the largest `limits.resolutions` entry at `hardMaxDuration` 15 s × the fastest
-declared 30 fps, so 450 raw frames snapped to 449 by LTX's `8k + 1` stride. It completed, returned all
-449 frames, and peaked **20.45 GiB (19%) under** the 107.52 GiB ceiling. Nothing in the envelope is
-out of reach, so no reduced-geometry caveat and no ≥192 GB Mac is needed for this lane.
+| tier | geometry | frames | stage-2 latent tokens | DiT weights | **staged peak** | wall | reproducible? |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| q4 | 256×256 | 9 | 128 | 10.57 GiB | 33.10 GiB | 15.6 s | ✅ via the command above |
+| bf16 | 256×256 | 9 | 128 | 35.37 GiB | 36.89 GiB | 13.6 s | ✅ via the command above |
+| bf16 | 768×512 | 145 | 7 296 | 35.37 GiB | 43.87 GiB | 90.6 s | ❌ one-off, uncommitted instrumentation |
+| bf16 | **1280×704** | **449** | **50 160** | 35.37 GiB | **87.07 GiB** | 847.8 s | ❌ one-off, uncommitted instrumentation |
 
-Two things fell out that the sweep should use rather than re-derive:
+Lifting the geometry onto env vars in the committed inference test is **sc-18856**; until that lands,
+treat the bottom two rows as **anecdote with a number attached** — good enough to have retired a scope
+risk, not good enough to fit a curve on.
 
-- **Peak is near-perfectly linear in stage-2 latent token count**, `T_lat · (H/32) · (W/32)` with
+**Verdict: bf16 ran to completion at the manifest maximum on this host, and the reason the planning
+arithmetic said it could not is structural.** The last row is that maximum — the largest
+`limits.resolutions` entry at `hardMaxDuration` 15 s × the fastest declared 30 fps, so 450 raw frames
+snapped to 449 by LTX's `8k + 1` stride. It completed and returned all 449 frames.
+
+Separate the two claims, because they are not equally earned:
+
+- **The structural finding is solid**: the weights floor is `max(TE, DiT)`, not `TE + DiT`, because
+  sc-10976 stages and drops the text phase before the AvDiT materializes. This is visible in the
+  *reproducible* rows alone (36.89 GiB staged vs a 69.20 GiB co-residence estimate) and it does not
+  depend on the two one-off captures at all.
+- 🔴 **The "19% headroom" figure is NOT yet earned.** It reads `87.07` against the 107.52 GiB ceiling,
+  and every one of the caveats below cuts in the same direction — the true production peak is
+  *higher* than 87.07, by an unmeasured amount. Do not plan against 20 GiB of slack.
+
+⚠ **Caveats that bound what this table can be used for.** All four apply to every row:
+
+1. **All four rows ran `video_mode: "no_audio"`.** Per inference `mlx-gen-ltx/src/model.rs`, that
+   gate (`if Self::no_audio(req)`) skips `decode_audio_track` — the audio VAE *and* the vocoder — which
+   a **default** production LTX job runs. The table measures a non-default path, and the omitted decode
+   sits at the 449-frame tail where memory is already highest.
+2. **`get_peak_memory()` is MLX *active* memory and excludes the allocator cache**, but the 107.52 GiB
+   `recommendedMaxWorkingSetSize` ceiling bounds active **+** cache. `clear_cache()` only runs at phase
+   boundaries, so cache growth *inside* the 449-frame decode is unaccounted for on the very row that
+   defines the envelope. `get_cache_memory()` was not logged.
+3. **n = 1, at the maximum envelope.** One sample, no variance, no re-run — on the row carrying the
+   entire feasibility claim.
+4. **Captured on an otherwise-idle host**, with nothing else resident. A real worker shares the box
+   with the API process, the OS, and anything else the user is running; none of that is accounted for.
+
+Two things fell out that the sweep should **re-measure before building on**, not consume:
+
+- **Peak looks linear in stage-2 latent token count**, `T_lat · (H/32) · (W/32)` with
   `T_lat = 1 + (frames − 1)/8`. Across the three bf16 rows the marginal cost is 0.997 then
   1.032 MiB/token, and `36.89 GiB + 1.0 MiB × tokens` predicts the max-envelope peak as 85.87 GiB
   against 87.07 GiB measured — 1.4% error over a **392×** token range. Neither raw frame count nor
-  area alone can do that; the product is the regressor.
+  area alone can do that; the product is the right regressor *shape*.
+  🔴 **But two of the three points are the non-reproducible rows, so this is a hypothesis with n = 3,
+  not a fit.** sc-18810 must **re-measure these points itself** once sc-18856 commits the geometry
+  knob, and fit on its own captures — do not inherit `1.0 MiB/token`, `85.87 GiB`, or the 1.4% error
+  as settled inputs.
 - **Which phase is the floor flips with tier.** For q4 the text phase dominates (peak 33.10 GiB with a
   10.57 GiB DiT); for bf16 the DiT does (35.37 GiB). A model that assumes one or the other is wrong
-  for half the tiers of the same lane.
+  for half the tiers of the same lane. This one rests entirely on the two **reproducible** rows.
 
-**(tier, geometry) pairs a sweep may assume on this host**, stated explicitly so the next story does
-not re-litigate it: **q4, q8 and bf16 are each measurable at every `limits` combination** — the five
-declared resolutions (0.41–0.90 MP) crossed with durations 4–15 s and fps 24/25/30, i.e. 96–449
-frames. bf16 is the worst case and it clears with 19% to spare; q8 (20.6 GiB DiT) and q4 (10.6 GiB)
-sit strictly below it in the DiT phase. Budget wall clock, not memory: the max-envelope bf16 row took
-**14.1 minutes**, and `nax-worker` caps at 240 minutes per dispatch.
+**What a sweep may assume on this host.** bf16 completed at the maximum `limits` combination — the
+five declared resolutions (0.41–0.90 MP) crossed with durations 4–15 s and fps 24/25/30, i.e. 96–449
+frames — and q8 (20.6 GiB DiT) and q4 (10.6 GiB) sit strictly below it in the DiT phase. So the lane
+needs **no reduced-geometry caveat and no ≥192 GB Mac**, and three-tier coverage is in scope.
+
+🔴 **What it may NOT assume: a specific headroom number.** The measured 87.07 GiB was taken with audio
+decode skipped, without cache accounting, once. Re-measure at the geometry you actually intend to
+sweep, with audio on, before treating any margin as spendable. Budget wall clock too: the
+max-envelope bf16 row took **14.1 minutes**, and `nax-worker` caps at 240 minutes per dispatch.
 
 ## 7. Ingest, stamping, and a new lane
 

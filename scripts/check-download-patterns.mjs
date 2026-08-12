@@ -22,11 +22,23 @@
 //
 // WHY IT IS NOT IN CI
 // -------------------
-// It talks to the Hugging Face API — one request per repo (~53 today). That is too
-// slow and too flaky a dependency for the parity lane, which must stay hermetic and
-// fast. It is a deliberate manual pre-flight, in the spirit of the sc-12283 sweep that
-// gated the worker change: at the time of writing, all 217 patterns across all 53
-// repos matched, which is what made hard-failing safe to ship.
+// It talks to the Hugging Face API. As of sc-18809 the unit of work is one request per
+// `repo@revision` rather than per repo, because each entry is now resolved at its OWN
+// pin (see `repoFiles`). Measured against the current catalog that is **96 requests**
+// covering 392 patterns across 282 download entries — 83 revision-qualified keys plus
+// 13 unrevisioned repos read at their default branch.
+//
+// Note the request count did NOT go up when the revision qualification landed: no repo
+// in the catalog is currently declared at two different revisions, so `repo@revision`
+// is still injective over `repo` (96 → 96). Re-measure rather than assume if that ever
+// changes — two tiers of one repo pinned apart would add exactly one request each.
+// (The stale "~53 repos / 217 patterns" this comment used to quote was the sc-12283
+// sweep's snapshot, and the catalog has since roughly doubled on both axes.)
+//
+// It is still too slow and too flaky a dependency for the parity lane, which must stay
+// hermetic and fast. It is a deliberate manual pre-flight, in the spirit of that
+// sc-12283 sweep: at the time it shipped, every declared pattern matched, which is what
+// made hard-failing safe.
 //
 // Covers builtin.models.jsonc `downloads[].files` AND builtin.loras.jsonc
 // `source.file` / `source.files` — the LoRA download path gained the same hard-fail in

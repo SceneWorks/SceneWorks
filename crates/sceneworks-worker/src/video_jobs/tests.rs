@@ -8408,8 +8408,10 @@ fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
         .prefix("sw_ltx_revs_")
         .tempdir()
         .expect("temp dir");
-    // The real shape: `<repo>/snapshots/<rev>/<tier>`. `old` sorts before `new`, so a plain
-    // sorted-first scan would pick `old` — the assertions below pin that it does not.
+    // The real shape: `<repo>/snapshots/<rev>/<tier>`. Note the names: `new` (`01df27d3…`) sorts
+    // BEFORE `old` (`254989c3…`) lexically, so plain sorted order and `[selected] ++ sorted(siblings)`
+    // agree on every case below — which is exactly why the `selected`-first half of the invariant
+    // needs its own fixture, at the end of this test, where the two orders disagree.
     let snapshots = cache_guard.path().join("snapshots");
     let old = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
     let new = snapshots.join("01df27d308466533aa09d251e3aebdcc627d07eb");
@@ -8446,6 +8448,33 @@ fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
         ltx_bundle_subdir_across_revisions(&old, &["bf16", "q8", "q4"]).as_deref(),
         Some(old.join("q8").as_path())
     );
+    // `selected` FIRST, discriminated. Every case above is blind to it: `01df27d3…` sorts before
+    // `254989c3…`, so `[selected] ++ sorted(siblings)` and plain `sorted(all)` return the same path
+    // whichever is selected, and deleting the `vec![selected]` seed would leave them all green. Here
+    // the selected snapshot is the lexically LATER dir and BOTH hold a complete `q4`, so the two
+    // orders finally disagree: selected-first ⇒ `zz…`, sorted ⇒ `aa…`. This is the fixture that
+    // actually pins the documented invariant (`ltx.rs`: "`selected` itself is always tried first").
+    let tie_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_tie_")
+        .tempdir()
+        .expect("temp dir");
+    let tie_snapshots = tie_guard.path().join("snapshots");
+    let sorts_first = tie_snapshots.join("aa11111111111111111111111111111111111111");
+    let sorts_last = tie_snapshots.join("zz99999999999999999999999999999999999999");
+    write_complete_ltx_dir(&sorts_first.join("q4"));
+    write_complete_ltx_dir(&sorts_last.join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&sorts_last, &["q4", "q8"]).as_deref(),
+        Some(sorts_last.join("q4").as_path()),
+        "the SELECTED snapshot must win a tie, even when a sibling sorts ahead of it — a plain \
+         sorted scan would hand back the `aa…` sibling here"
+    );
+    // The mirror image, so the assertion above cannot pass by accidentally always returning `sorts_last`.
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&sorts_first, &["q4", "q8"]).as_deref(),
+        Some(sorts_first.join("q4").as_path()),
+    );
+
     // A root that is NOT under a `snapshots/` dir keeps the old single-dir behaviour (legacy local
     // conversions must not start scanning whatever sits beside them).
     let flat_guard = tempfile::Builder::new()
@@ -8461,6 +8490,263 @@ fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
         )
         .as_deref(),
         Some(flat_guard.path().join("selected").join("q4").as_path())
+    );
+}
+
+/// A split-revision `SceneWorks/ltx-2.3-mlx` HF cache, in exactly the shape sc-18809's revision bump
+/// produces on a machine installed BEFORE it: the pre-bump `254989c3…` snapshot keeps `gemma/`,
+/// `q4/` and `q8/`, while the bumped `01df27d3…` one holds only the newly published `bf16/`. Returns
+/// the hub dir to point `$HF_HUB_CACHE` at. Goes through `safe_repo_dir_name` so the fixture cannot
+/// drift from the slug the real resolver computes.
+///
+/// **No `refs/main` is written, and that is the point.** A pinned install has none, so
+/// `resolve_huggingface_snapshot_dir` falls to its "snapshot with the most files" heuristic — which
+/// picks the PRE-BUMP dir here (gemma 2 + q4 7 + q8 7 files vs bf16's 7). That is the real machine on
+/// which a single-snapshot `bf16/` probe is permanently false: the selected snapshot never gains the
+/// tier, so the probe cannot ever become true no matter how many times the tier is fetched.
+#[cfg(target_os = "macos")]
+fn ltx_split_revision_hub(tag: &str) -> tempfile::TempDir {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+    let hub_guard = tempfile::Builder::new()
+        .prefix(&format!("sw_ltx_hub_{tag}_"))
+        .tempdir()
+        .expect("temp dir");
+    let snapshots = hub_guard
+        .path()
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO)
+                .expect("the LTX bundle repo slug")
+        ))
+        .join("snapshots");
+    let pre_bump = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
+    write_complete_ltx_dir(&pre_bump.join("q4"));
+    write_complete_ltx_dir(&pre_bump.join("q8"));
+    write_complete_gemma_dir(&pre_bump.join("gemma"));
+    write_complete_ltx_dir(&snapshots.join(LTX_BUNDLE_REVISION).join("bf16"));
+    hub_guard
+}
+
+/// The env pins that make an LTX bundle resolution hermetic: the fixture hub wins over the dev box's
+/// real cache (`huggingface_hub_cache_dir` reads all three of these BEFORE `data_dir`), and the
+/// operator dir overrides are cleared so they cannot short-circuit the HF resolution under test.
+#[cfg(target_os = "macos")]
+fn ltx_hermetic_env(hub: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "HF_HUB_CACHE",
+            hub.to_str().expect("utf-8 fixture hub").to_owned(),
+        ),
+        ("HUGGINGFACE_HUB_CACHE", String::new()),
+        ("HF_HOME", String::new()),
+        ("SCENEWORKS_MLX_LTX_DIR", String::new()),
+        ("SCENEWORKS_MLX_LTX_EROS_DIR", String::new()),
+        ("LTX_GEMMA_DIR", String::new()),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn ltx_with_env<T>(hub: &Path, body: impl FnOnce() -> T) -> T {
+    let owned = ltx_hermetic_env(hub);
+    let borrowed: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    temp_env_vars(&borrowed, body)
+}
+
+/// sc-18809 / issue 6: the ONE line that makes `resolve_ltx_model_dir` cross-revision
+/// (`ltx_bundle_subdir_across_revisions`, `ltx.rs`) had no hermetic coverage — only `#[ignore]`d
+/// real-weights smokes, which skip and still report `ok`. Reverting it to `ltx_bundle_subdir` left the
+/// whole suite GREEN while restoring the silent bf16 → q8 downgrade this story exists to remove.
+///
+/// This drives the real resolver over a split-revision fixture cache. Under the fix a bf16 request
+/// resolves the bumped snapshot's `bf16/`; under the revert it resolves the pre-bump snapshot's `q8/`
+/// — a tier the user did not pick, at a quality they did not ask for, with no error anywhere.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_ltx_model_dir_reaches_bf16_in_a_sibling_revision() {
+    let hub_guard = ltx_split_revision_hub("resolve");
+    let hub = hub_guard.path();
+    let data_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_data_")
+        .tempdir()
+        .expect("temp dir");
+    // `offline_settings` so a regression that somehow reaches a download fails locally, not on the hub.
+    let settings = Settings {
+        data_dir: data_guard.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let ltx = |adv: Value| {
+        request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+    };
+    let snapshots = hub
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots");
+
+    let (bf16, q8, default) = ltx_with_env(hub, || {
+        (
+            resolve_ltx_model_dir(&settings, &ltx(json!({ "mlxQuantize": 0 }))),
+            resolve_ltx_model_dir(&settings, &ltx(json!({ "mlxQuantize": 8 }))),
+            resolve_ltx_model_dir(&settings, &ltx(json!({}))),
+        )
+    });
+
+    assert_eq!(
+        bf16.expect("a bf16 request must resolve").as_path(),
+        snapshots.join(LTX_BUNDLE_REVISION).join("bf16"),
+        "bf16 lives ONLY in the bumped snapshot, which is not the one \
+         `resolve_huggingface_snapshot_dir` selects — resolving to the pre-bump `q8/` here is the \
+         silent downgrade sc-18809 fixed"
+    );
+    // The tiers that DO live in the selected snapshot still resolve there — the scan widens the
+    // search, it does not reorder it.
+    let pre_bump = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
+    assert_eq!(
+        q8.expect("a q8 request must resolve").as_path(),
+        pre_bump.join("q8")
+    );
+    assert_eq!(
+        default.expect("a default request must resolve").as_path(),
+        pre_bump.join("q4"),
+        "and the default order still never reaches for the dense tier"
+    );
+}
+
+/// sc-18809 / issue 1: the presence probes are the SIBLING seam of the resolver fix above, and they
+/// were missed. `ensure_ltx_{q8,bf16}_present` probed a single snapshot
+/// (`ltx_dir_is_complete(&root.join("bf16"))`), which on the split-revision install this very story
+/// CREATES is permanently false — see [`ltx_split_revision_hub`] for why the selected snapshot can
+/// never gain the tier. Every bf16 job then re-entered `ensure_hf_files_cached`, doing a
+/// `HuggingFaceSnapshot::resolve` plus a HEAD per file for weights already on disk: no bytes moved,
+/// but the render HARD-FAILS offline or during a hub outage, forever.
+///
+/// **How this discriminates.** `offline_settings` pins `huggingface_base_url` at a closed port, so an
+/// attempted fetch cannot succeed — a probe that returns `Ok(())` proves no fetch was made, and the
+/// negative control at the end proves that `Ok(())` is not vacuous by showing the same call going red
+/// when the tier really is absent everywhere.
+#[cfg(target_os = "macos")]
+#[test]
+fn ensure_ltx_tier_present_skips_the_fetch_for_a_tier_in_a_sibling_revision() {
+    let hub_guard = ltx_split_revision_hub("ensure");
+    let hub = hub_guard.path();
+    let data_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_ensure_data_")
+        .tempdir()
+        .expect("temp dir");
+    let settings = Settings {
+        data_dir: data_guard.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let job: JobSnapshot = serde_json::from_value(json!({
+        "id": "job-ltx-tier-1",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": "p",
+        "projectName": "P",
+        "payload": { "model": "ltx_2_3" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "error": null,
+        "etaSeconds": null,
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-08-11T00:00:00Z",
+        "updatedAt": "2026-08-11T00:00:00Z"
+    }))
+    .expect("job snapshot");
+    let ltx = |adv: Value| {
+        request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+    };
+    // A generic fn, not a closure: the two `ensure_*` calls are distinct `impl Future` opaque types,
+    // and a closure parameter would unify to whichever one it saw first.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds")
+            .block_on(future)
+    }
+    let api = ApiClient::new(&settings);
+
+    // bf16 is in the BUMPED snapshot, q8 in the SELECTED one; both must be seen as present.
+    let (bf16, q8) = ltx_with_env(hub, || {
+        (
+            block_on(ensure_ltx_bf16_present(
+                &api,
+                &settings,
+                &job,
+                &ltx(json!({ "mlxQuantize": 0 })),
+            )),
+            block_on(ensure_ltx_q8_present(
+                &api,
+                &settings,
+                &job,
+                &ltx(json!({ "mlxQuantize": 8 })),
+            )),
+        )
+    });
+    assert!(
+        bf16.is_ok(),
+        "bf16 is complete in a sibling revision — probing it must not dial the hub, or a fully \
+         provisioned tier stops rendering offline: {:?}",
+        bf16.err().map(|error| error.to_string())
+    );
+    assert!(
+        q8.is_ok(),
+        "q8 is complete in the selected revision: {:?}",
+        q8.err().map(|error| error.to_string())
+    );
+
+    // Negative control: with `bf16/` absent from EVERY revision the same call must attempt the fetch
+    // and go red against the closed port. Without this the assertions above would still pass if the
+    // probe had been "gutted" into an unconditional `return Ok(())`.
+    let bare_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_hub_bare_")
+        .tempdir()
+        .expect("temp dir");
+    let bare_hub = bare_guard.path();
+    let bare_snapshot = bare_hub
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots")
+        .join("254989c3ca7ee691187647f350b112c0c448789d");
+    write_complete_gemma_dir(&bare_snapshot.join("gemma"));
+    let missing = ltx_with_env(bare_hub, || {
+        block_on(ensure_ltx_bf16_present(
+            &api,
+            &settings,
+            &job,
+            &ltx(json!({ "mlxQuantize": 0 })),
+        ))
+    });
+    assert!(
+        missing.is_err(),
+        "a genuinely absent bf16 tier MUST still be fetched — an `Ok` here would mean the probe \
+         short-circuits everything and the assertions above prove nothing"
     );
 }
 
