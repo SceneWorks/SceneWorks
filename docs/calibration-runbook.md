@@ -298,7 +298,29 @@ Two things follow, and both are now enforced rather than remembered:
   glob against the repo's *default branch*, so it passed this entry for weeks. As of sc-18809 it
   fetches `/api/models/<repo>/revision/<rev>` per entry and prints the revision it checked
   (`ltx_2_3/bf16  SceneWorks/ltx-2.3-mlx@254989c3ca7e  bf16/*`). Run it before quoting a tier as
-  fetchable. It is still a manual pre-flight, not CI — it talks to the HF API (see its header).
+  fetchable.
+
+  As of sc-18854 this is **enforced on every PR**, without putting the HF API on a required lane.
+  The check is split in two: `--write` is a networked RECORDER that transcribes one file listing per
+  `repo@revision` key into `config/download-pattern-evidence.json`, and `--check` is a hermetic GATE
+  that re-derives the claims from the manifests and grades them against those committed listings
+  with no network at all. `npm run check` runs the gate, so it reaches check.yml's `parity-scaffold`
+  and the required `parity` aggregator.
+
+  **So the workflow when you touch a `downloads[]` entry or a LoRA `source` is: re-record, then
+  commit the evidence with your manifest change.**
+
+  ```
+  npm run record:download-patterns   # networked; rewrites config/download-pattern-evidence.json
+  npm run check:download-patterns:offline   # what CI runs; no network
+  ```
+
+  Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
+  `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to
+  run. The recorder never evaluates a pattern — it only transcribes — so you cannot record your way
+  out of a real zero-match. 83 of the 96 keys are pinned to immutable 40-hex revisions, whose
+  listings cannot go stale; the 13 unrevisioned ones read a moving default branch and each records
+  the `resolvedSha` it actually read, so drift shows up in the diff.
 - **A tier that lands at a different revision is a resolution problem too.** The cache then holds two
   `snapshots/<rev>/` dirs with the tiers split across them, and `huggingface_snapshot_dir` selects
   exactly one. `ltx_bundle_subdir_across_revisions` (sc-18809) scans siblings with tier preference

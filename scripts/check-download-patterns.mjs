@@ -79,6 +79,12 @@
 // auth; a token is picked up from $HF_TOKEN / $HUGGING_FACE_HUB_TOKEN if set, so a
 // repo that is later gated still resolves. Note the metadata API answers 200 for a
 // GATED repo, so a green run does not prove a repo is fetchable without a token.
+//
+// The LIVE modes deliberately ignore `KNOWN_ZERO_MATCHES` and report the raw truth, so
+// `--write` currently exits 1 on the tracked lipdub gap (sc-18917). Policy lives in the
+// gate; the pre-flight is for a human who wants the unfiltered picture. Do not "fix" that
+// exit code by teaching the recorder about waivers — a recorder that knows which failures
+// are acceptable is one step from a recorder that records them as passing.
 
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
