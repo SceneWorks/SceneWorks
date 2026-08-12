@@ -5089,6 +5089,36 @@ fn safetensors_bytes(directory: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+/// The eight required scenarios for a gated LTX receipt.
+///
+/// NOT `protocol::not_run_scenarios(blocker)`. That helper marks all eight `not_run`, which would
+/// report loadability as unexecuted — but loadability is the one scenario that has nothing to do
+/// with the missing memory-strategy seam, and it demonstrably RAN: the real tier provider plus its
+/// Gemma co-requisite loaded from the snapshot-validated roots, and every measurement in the
+/// fragment came out of that load. A gated receipt understating what it executed is the same class
+/// of dishonesty as a complete one overstating it. `overlay` is emitted `not_run` here and then
+/// replaced by `settle_plain_overlay_scenario`, which derives the verdict from the declared target
+/// rather than letting this arm assert it.
+fn ltx_scenarios(blocker: &str) -> Value {
+    Value::Array(
+        [
+            "exact_fit",
+            "unknown_budget",
+            "stale_evidence",
+            "warm_repeat",
+            "cancel",
+            "error",
+        ]
+        .into_iter()
+        .map(|name| json!({ "name": name, "result": "not_run", "reason": blocker }))
+        .chain([
+            json!({ "name": "loadability", "result": "passed" }),
+            json!({ "name": "overlay", "result": "not_run", "reason": blocker }),
+        ])
+        .collect(),
+    )
+}
+
 /// The `mlx:ltx_2_3` arm (sc-18808) — the first arm in this adapter that drives a VIDEO job.
 ///
 /// It is deliberately `gated`, not `runtime_complete`. `runtime_complete` requires `exact_fit`,
@@ -5291,6 +5321,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         "repeat determinism and its negative mutation are attested in observedMemory, quality and ",
         "diagnostics instead"
     );
+    let scenarios = ltx_scenarios(blocker);
     let mut fragment = json!({
         "status": "gated",
         "strategy": strategy,
@@ -5301,7 +5332,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
             "variant": tier,
         },
         "sweep": ltx_complete_sweep(request)?,
-        "scenarios": protocol::not_run_scenarios(blocker),
+        "scenarios": scenarios,
         "predictedPeakBytes": null,
         "observedMemory": {
             "conditioning": conditioning.json(),
@@ -6802,6 +6833,44 @@ mod ltx_tests {
         assert!(video_max_mean_rms_abs(&left, &left[..2])
             .unwrap_err()
             .contains("frame-count mismatch"));
+    }
+
+    /// A gated receipt must not understate what it executed. Loadability has nothing to do with the
+    /// missing memory-strategy seam and genuinely runs, so it must NOT come back `not_run` — while
+    /// the six that truly have no seam must, each carrying the stated reason.
+    #[test]
+    fn the_ltx_receipt_reports_loadability_as_executed_and_the_rest_as_blocked() {
+        let scenarios = ltx_scenarios("the pinned provider registers no contract");
+        let by_name: std::collections::BTreeMap<&str, &Value> = scenarios
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|scenario| (scenario["name"].as_str().unwrap(), scenario))
+            .collect();
+        assert_eq!(
+            by_name.len(),
+            8,
+            "all eight required scenarios, uniquely named"
+        );
+        assert_eq!(
+            by_name["loadability"],
+            &json!({ "name": "loadability", "result": "passed" })
+        );
+        for name in [
+            "exact_fit",
+            "unknown_budget",
+            "stale_evidence",
+            "warm_repeat",
+            "cancel",
+            "error",
+            "overlay",
+        ] {
+            assert_eq!(by_name[name]["result"], "not_run", "{name}");
+            assert_eq!(
+                by_name[name]["reason"], "the pinned provider registers no contract",
+                "{name} must carry the stated reason, not an empty refusal"
+            );
+        }
     }
 
     /// The staged-residency bound is a real inequality over real byte counts, not a comment.
