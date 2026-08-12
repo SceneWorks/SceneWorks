@@ -1,10 +1,11 @@
 {
-  "_comment": "sc-18810 two-dimensional geometry sweep for mlx:ltx_2_3. Standalone, like the sc-18808 plan: generate-memory-matrix.mjs still resolves its coordinate universe from manifest.models.filter(m => m.type === \"image\"), so a video row in config/memory-calibration-plan.json matches no coordinate and reds the check gate (sc-18817 folds these in after sc-18815). DESIGN: two spatial-latent levels (768x512 and 512x768 are 24x16=384 latent cells; 1280x704 and 704x1280 are 40x22=880) crossed with three frame levels (121/241/449 -> T_lat 16/31/57) at a HELD-CONSTANT fps of 30, so the additive perFrame form, the perMpxFrame cross term and the latent-token regressor are separable rather than collinear. fps 30 is held because it is the only declared cadence whose duration ladder reaches the envelope maximum 449 (15 s x 30); every (frames, fps) pair here is a real declared durations x fps cell, not an off-lattice probe. HELD-OUT points (_role) are never fitted: a third area (640x640, 400 latent cells), two transposed aspect ratios, and one fps probe that re-renders an identical {w,h,frames} at 24 fps to measure the audio-latent axis GeometryEnvelope cannot express. Drive with: node scripts/memory-calibration-harness.mjs run --config docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json --backend mlx --provider <name> --fresh-per-case --provider-command '[\"<target>/release/memory-mlx-adapter\"]' --sceneworks-repo <repo> --inference-repo <inference-at-pin> --resume <out.json> --output <out.json>, with --output OUTSIDE the repo.",
+  "_comment": "sc-18810 two-dimensional geometry sweep for mlx:ltx_2_3. Standalone, like the sc-18808 plan: generate-memory-matrix.mjs still resolves its coordinate universe from manifest.models.filter(m => m.type === \"image\"), so a video row in config/memory-calibration-plan.json matches no coordinate and reds the check gate (sc-18817 folds these in after sc-18815).\n\nDESIGN. Two spatial-latent levels (768x512 and 512x768 are 24x16 = 384 latent cells; 1280x704 and 704x1280 are 40x22 = 880) crossed with three frame levels per level, at a HELD-CONSTANT fps of 30. Crossing two AREAS is what makes the candidate forms separable at all: with one area the `mpx` column is proportional to the intercept, so BOTH the additive `perFrame` and the `perMpxFrame` cross designs are singular and neither coefficient is identifiable (pinned by scripts/fit-ltx-temporal-form.test.mjs). fps 30 is held because it is the only declared cadence whose duration ladder reaches the envelope maximum 449 (15 s x 30); every (frames, fps) pair here except the two noted below is a real declared durations x fps cell.\n\nRUNGS ARE NOT UNIFORM ACROSS THE ENVELOPE, which is why `rung` differs per entry. The LTX VAE decode auto-selects tiling, and the bound that binds first is machine-INDEPENDENT: `VaeTiling::LTX.writable_frame_cap(h, w) = i32::MAX / (8*h*w)` (gen-core/src/tiling.rs:166, full_res_channels 8) is 682 / 682 / 655 / 297 / 297 over the five declared resolutions, so only the two 0.90 MP buckets can reach it inside the 449-frame envelope, and they reach it at 298 output frames. Above it `budgeted_plan` tiles on every host. The `fit` and `held_out` points are therefore all rung-1 single-pass decodes, and the `rung2_boundary` points are rung 2 -- fitting one curve across that break would fit through a capability change.\n\nROLES. `fit` trains the candidate forms. `held_out` is never fitted: a third area (640x640, 400 latent cells) and both transposed aspect ratios. `held_out_fps_probe` re-renders an identical {w,h,frames} at 24 fps to measure the audio-latent axis GeometryEnvelope cannot express (LTX denoises audio latents jointly every step with length compute_audio_frames(frames, fps)). `rung2_boundary` brackets the tiling boundary at 1280x704: f297 is the cap exactly (a declared 10 s x 30 fps cell, single-pass) and f305 is one lattice step above it (off the declared duration ladder but on the engine's 1+8k lattice and inside the declared envelope), plus the envelope maximum f449 at every tier.\n\nDrive with: node scripts/memory-calibration-harness.mjs run --config docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json --backend mlx --provider <name> --fresh-per-case --provider-command '[\"<target>/release/memory-mlx-adapter\"]' --sceneworks-repo <repo> --inference-repo <inference-at-pin> --resume <out.json> --output <out.json>, with --output OUTSIDE the repo, and SCENEWORKS_LTX_{REPOSITORY,REVISION,ROOT,TEXT_ENCODER_ROOT} set.",
   "providers": [
     {
       "name": "mlx-ltx-2-3-q8-768x512-f121-fps30",
       "_role": "fit",
       "_latentTokens": 6144,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -39,6 +40,7 @@
       "name": "mlx-ltx-2-3-q8-640x640-f177-fps30",
       "_role": "held_out",
       "_latentTokens": 9200,
+      "_writableFrameCap": 655,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -73,6 +75,7 @@
       "name": "mlx-ltx-2-3-q8-768x512-f241-fps30",
       "_role": "fit",
       "_latentTokens": 11904,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -107,6 +110,7 @@
       "name": "mlx-ltx-2-3-q8-768x512-f241-fps24",
       "_role": "held_out_fps_probe",
       "_latentTokens": 11904,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -141,6 +145,7 @@
       "name": "mlx-ltx-2-3-q8-1280x704-f121-fps30",
       "_role": "fit",
       "_latentTokens": 14080,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -175,6 +180,7 @@
       "name": "mlx-ltx-2-3-q8-512x768-f361-fps30",
       "_role": "held_out",
       "_latentTokens": 17664,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -209,6 +215,7 @@
       "name": "mlx-ltx-2-3-q8-704x1280-f177-fps30",
       "_role": "held_out",
       "_latentTokens": 20240,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -243,6 +250,7 @@
       "name": "mlx-ltx-2-3-q8-768x512-f449-fps30",
       "_role": "fit",
       "_latentTokens": 21888,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -277,6 +285,7 @@
       "name": "mlx-ltx-2-3-q8-1280x704-f241-fps30",
       "_role": "fit",
       "_latentTokens": 27280,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -308,9 +317,81 @@
       ]
     },
     {
-      "name": "mlx-ltx-2-3-q8-1280x704-f449-fps30",
+      "name": "mlx-ltx-2-3-q8-1280x704-f297-fps30",
       "_role": "fit",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f297-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f305-fps30",
+      "_role": "rung2_boundary",
+      "_latentTokens": 34320,
+      "_writableFrameCap": 297,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 305
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f305-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f449-fps30",
+      "_role": "rung2_boundary",
       "_latentTokens": 50160,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -327,10 +408,11 @@
           "frames": 449
         }
       },
-      "rung": "staged_residency",
+      "rung": "bounded_decode",
       "engagedRungs": [
         "resident",
-        "staged_residency"
+        "staged_residency",
+        "bounded_decode"
       ],
       "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
       "fixture": "ltx-2-3-mlx-q8-1280x704-f449-fps30-seed18808",
@@ -345,6 +427,7 @@
       "name": "mlx-ltx-2-3-q4-768x512-f121-fps30",
       "_role": "fit",
       "_latentTokens": 6144,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -379,6 +462,7 @@
       "name": "mlx-ltx-2-3-q4-640x640-f177-fps30",
       "_role": "held_out",
       "_latentTokens": 9200,
+      "_writableFrameCap": 655,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -413,6 +497,7 @@
       "name": "mlx-ltx-2-3-q4-768x512-f241-fps30",
       "_role": "fit",
       "_latentTokens": 11904,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -444,43 +529,10 @@
       ]
     },
     {
-      "name": "mlx-ltx-2-3-q4-768x512-f241-fps24",
-      "_role": "held_out_fps_probe",
-      "_latentTokens": 11904,
-      "evidenceScope": "authoritative",
-      "backend": "mlx",
-      "loadShape": "eager_materialization",
-      "target": {
-        "provider": "ltx_2_3",
-        "modelId": "ltx_2_3",
-        "tier": "q4",
-        "mode": "text_to_video",
-        "overlay": "none",
-        "geometry": {
-          "width": 768,
-          "height": 512,
-          "batch": 1,
-          "frames": 241
-        }
-      },
-      "rung": "staged_residency",
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
-      "fixture": "ltx-2-3-mlx-q4-768x512-f241-fps24-seed18808",
-      "cases": [
-        {
-          "parameters": {},
-          "expectedResult": "passed"
-        }
-      ]
-    },
-    {
       "name": "mlx-ltx-2-3-q4-1280x704-f121-fps30",
       "_role": "fit",
       "_latentTokens": 14080,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -515,6 +567,7 @@
       "name": "mlx-ltx-2-3-q4-512x768-f361-fps30",
       "_role": "held_out",
       "_latentTokens": 17664,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -549,6 +602,7 @@
       "name": "mlx-ltx-2-3-q4-704x1280-f177-fps30",
       "_role": "held_out",
       "_latentTokens": 20240,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -583,6 +637,7 @@
       "name": "mlx-ltx-2-3-q4-768x512-f449-fps30",
       "_role": "fit",
       "_latentTokens": 21888,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -617,6 +672,7 @@
       "name": "mlx-ltx-2-3-q4-1280x704-f241-fps30",
       "_role": "fit",
       "_latentTokens": 27280,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -648,9 +704,45 @@
       ]
     },
     {
-      "name": "mlx-ltx-2-3-q4-1280x704-f449-fps30",
+      "name": "mlx-ltx-2-3-q4-1280x704-f297-fps30",
       "_role": "fit",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f297-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f449-fps30",
+      "_role": "rung2_boundary",
       "_latentTokens": 50160,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -667,10 +759,11 @@
           "frames": 449
         }
       },
-      "rung": "staged_residency",
+      "rung": "bounded_decode",
       "engagedRungs": [
         "resident",
-        "staged_residency"
+        "staged_residency",
+        "bounded_decode"
       ],
       "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
       "fixture": "ltx-2-3-mlx-q4-1280x704-f449-fps30-seed18808",
@@ -685,6 +778,7 @@
       "name": "mlx-ltx-2-3-bf16-768x512-f121-fps30",
       "_role": "fit",
       "_latentTokens": 6144,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -719,6 +813,7 @@
       "name": "mlx-ltx-2-3-bf16-640x640-f177-fps30",
       "_role": "held_out",
       "_latentTokens": 9200,
+      "_writableFrameCap": 655,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -753,6 +848,7 @@
       "name": "mlx-ltx-2-3-bf16-768x512-f241-fps30",
       "_role": "fit",
       "_latentTokens": 11904,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -784,43 +880,10 @@
       ]
     },
     {
-      "name": "mlx-ltx-2-3-bf16-768x512-f241-fps24",
-      "_role": "held_out_fps_probe",
-      "_latentTokens": 11904,
-      "evidenceScope": "authoritative",
-      "backend": "mlx",
-      "loadShape": "eager_materialization",
-      "target": {
-        "provider": "ltx_2_3",
-        "modelId": "ltx_2_3",
-        "tier": "bf16",
-        "mode": "text_to_video",
-        "overlay": "none",
-        "geometry": {
-          "width": 768,
-          "height": 512,
-          "batch": 1,
-          "frames": 241
-        }
-      },
-      "rung": "staged_residency",
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
-      "fixture": "ltx-2-3-mlx-bf16-768x512-f241-fps24-seed18808",
-      "cases": [
-        {
-          "parameters": {},
-          "expectedResult": "passed"
-        }
-      ]
-    },
-    {
       "name": "mlx-ltx-2-3-bf16-1280x704-f121-fps30",
       "_role": "fit",
       "_latentTokens": 14080,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -855,6 +918,7 @@
       "name": "mlx-ltx-2-3-bf16-512x768-f361-fps30",
       "_role": "held_out",
       "_latentTokens": 17664,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -889,6 +953,7 @@
       "name": "mlx-ltx-2-3-bf16-704x1280-f177-fps30",
       "_role": "held_out",
       "_latentTokens": 20240,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -923,6 +988,7 @@
       "name": "mlx-ltx-2-3-bf16-768x512-f449-fps30",
       "_role": "fit",
       "_latentTokens": 21888,
+      "_writableFrameCap": 682,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -957,6 +1023,7 @@
       "name": "mlx-ltx-2-3-bf16-1280x704-f241-fps30",
       "_role": "fit",
       "_latentTokens": 27280,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -988,9 +1055,45 @@
       ]
     },
     {
-      "name": "mlx-ltx-2-3-bf16-1280x704-f449-fps30",
+      "name": "mlx-ltx-2-3-bf16-1280x704-f297-fps30",
       "_role": "fit",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f297-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f449-fps30",
+      "_role": "rung2_boundary",
       "_latentTokens": 50160,
+      "_writableFrameCap": 297,
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -1007,10 +1110,11 @@
           "frames": 449
         }
       },
-      "rung": "staged_residency",
+      "rung": "bounded_decode",
       "engagedRungs": [
         "resident",
-        "staged_residency"
+        "staged_residency",
+        "bounded_decode"
       ],
       "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
       "fixture": "ltx-2-3-mlx-bf16-1280x704-f449-fps30-seed18808",

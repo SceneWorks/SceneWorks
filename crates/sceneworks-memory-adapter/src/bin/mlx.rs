@@ -6,7 +6,7 @@ use mlx_gen::gen_core::{
     MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
     MemorySelection, MemoryStrategy, MemoryStrategyParameters, TransformerComponent,
 };
-use mlx_gen::tiling::{SpatialTiling, TilingConfig};
+use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
     Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadShape,
     LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
@@ -4971,6 +4971,87 @@ fn ltx_load_spec(
     Ok((repository, revision, root, text_encoder, spec))
 }
 
+/// What the engine's OWN decode-tiling selector decides for this exact geometry.
+///
+/// sc-18808 recorded `bounded_decode` as "implemented but not engaged", true at the single
+/// 768x512x97 geometry it captured — and the arm then hardcoded `staged_residency` for every
+/// geometry. That is only safe while the sweep stays small. `budgeted_plan` engages tiling on TWO
+/// independent bounds and the machine-independent one binds first for LTX:
+///
+/// * the **write bound** — `VaeTiling::LTX.writable_frame_cap(h, w) = i32::MAX / (8 * h * w)`
+///   (`gen-core/src/tiling.rs:166`, `:65`, `full_res_channels: 8`). At the 0.90 MP buckets
+///   (1280x704 / 704x1280) that is **297 output frames**; at the 0.39-0.41 MP buckets it is 682 /
+///   655, above the declared 449-frame envelope maximum. It is a correctness bound, not a memory
+///   one, so it does not move with the host.
+/// * the **memory bound** — single-pass `3.3 GB + 340 B/voxel` against `get_memory_limit() * 0.85`
+///   (`mlx-gen-ltx/src/pipeline.rs:218-256`, `:264-269`).
+///
+/// So asking the selector is the only honest way to know which rung a capture engaged, and a record
+/// that claims `staged_residency` through a tiled decode is a false attestation. This calls the
+/// production entry point rather than re-deriving either bound, so the arm cannot drift from the
+/// engine it is measuring.
+#[derive(Clone, Copy, Debug)]
+struct LtxDecodePlan {
+    tiling: Option<TilingConfig>,
+    writable_frame_cap: i64,
+}
+
+impl LtxDecodePlan {
+    fn resolve(geometry: LtxGeometry) -> Result<Self, String> {
+        let (height, width, frames) = (
+            i32::try_from(geometry.height).map_err(|_| "LTX height must fit i32".to_owned())?,
+            i32::try_from(geometry.width).map_err(|_| "LTX width must fit i32".to_owned())?,
+            i32::try_from(geometry.frames).map_err(|_| "LTX frames must fit i32".to_owned())?,
+        );
+        // Argument order mirrors the production call site (`pipeline.rs:168`), which passes
+        // (out_h, out_w, out_f) — NOT the (out_w, out_h, out_f) spelling one of that crate's own
+        // sweep tests uses. At a non-square bucket the two disagree, so this is load-bearing.
+        let tiling = mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
+            .map_err(|error| {
+                format!(
+                    "the pinned MLX LTX-2.3 decode budget refuses {}x{} x {} frames before any \
+                     render: {error}",
+                    geometry.width, geometry.height, geometry.frames
+                )
+            })?;
+        Ok(Self {
+            tiling,
+            writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
+        })
+    }
+
+    fn rung(self) -> &'static str {
+        if self.tiling.is_some() {
+            "bounded_decode"
+        } else {
+            "staged_residency"
+        }
+    }
+
+    fn engaged_rungs(self) -> Vec<&'static str> {
+        let mut rungs = vec!["resident", "staged_residency"];
+        if self.tiling.is_some() {
+            rungs.push("bounded_decode");
+        }
+        rungs
+    }
+
+    /// The selected spatial tile edge in OUTPUT pixels, or 0 when that axis is not tiled. Reported
+    /// so a rung-2 record says which plan produced its decode peak, not merely that one was chosen.
+    fn spatial_tile_px(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.spatial)
+            .map_or(0, |spatial| u64::from(spatial.tile_px.max(0) as u32))
+    }
+
+    /// The selected temporal tile length in OUTPUT frames, or 0 when that axis is not tiled.
+    fn temporal_tile_frames(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.temporal)
+            .map_or(0, |temporal| u64::from(temporal.tile_frames.max(0) as u32))
+    }
+}
+
 /// The rung this arm can honestly attest, verified against the plan rather than copied from it.
 ///
 /// MLX LTX has no selectable residency seam: `supports_sequential_offload: false` is honest about the
@@ -4978,27 +5059,38 @@ fn ltx_load_spec(
 /// ~26 GB Gemma text encoder and the AvDiT INSIDE `generate` — TE built, used, dropped and
 /// `clear_cache()`d before the DiT materializes, DiT dropped and cleared before the VAE decode. That
 /// is staged residency, unconditionally and undeclared. `resident` is therefore not a reachable state
-/// for this provider, and `bounded_decode` is not engaged at small geometry
-/// (`auto_tiling_budgeted_ltx` returns `None` and the decode runs single-pass), so the arm accepts
-/// exactly one rung and refuses the rest by name.
-fn ltx_attested_strategy(request: &Value) -> Result<Value, String> {
+/// for this provider.
+///
+/// `bounded_decode` IS reachable, but it is not selectable — `decode_to_frames` auto-selects it from
+/// the geometry (sc-18810). The plan therefore declares which rung it expects and this fails closed
+/// when the engine disagrees, rather than stamping whichever rung the plan asked for.
+fn ltx_attested_strategy(request: &Value, decode: LtxDecodePlan) -> Result<Value, String> {
     let rung = protocol::planned_rung(request)?;
-    if rung != "staged_residency" {
+    let measured = decode.rung();
+    if rung != measured {
         return Err(format!(
-            "the pinned MLX LTX-2.3 provider stages its text encoder and transformer unconditionally \
-             and exposes no residency seam, so staged_residency is the only capturable rung; rung \
-             {rung:?} is not capturable"
+            "the pinned MLX LTX-2.3 provider exposes no residency seam and auto-selects its decode \
+             tiling from the geometry, so its rung is a FUNCTION of the request: this geometry \
+             engages {measured:?} (writable frame cap {}, tiling {}), and the plan declared \
+             {rung:?}",
+            decode.writable_frame_cap,
+            if decode.tiling.is_some() {
+                "selected"
+            } else {
+                "single-pass"
+            }
         ));
     }
     let parameters = protocol::strategy_parameters(request)?;
     if !parameters.is_empty() {
         return Err(format!(
-            "staged_residency takes no strategy parameters, got {parameters:?}"
+            "the MLX LTX-2.3 decode tiling is auto-selected from the geometry, so no rung on this \
+             arm takes strategy parameters; got {parameters:?}"
         ));
     }
     let strategy = json!({
-        "rung": "staged_residency",
-        "engagedRungs": ["resident", "staged_residency"],
+        "rung": measured,
+        "engagedRungs": decode.engaged_rungs(),
         "parameters": parameters,
     });
     let planned_strategy = protocol::planned(request)?
@@ -5152,7 +5244,8 @@ fn ltx_scenarios(blocker: &str) -> Value {
 fn run_ltx(request: &Value) -> Result<Value, String> {
     let geometry = validate_ltx_target(request)?;
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
-    let strategy = ltx_attested_strategy(request)?;
+    let decode_plan = LtxDecodePlan::resolve(geometry)?;
+    let strategy = ltx_attested_strategy(request, decode_plan)?;
     let load_shape = planned_load_shape(request)?;
     if load_shape != LoadShape::EagerMaterialization {
         return Err(
@@ -5400,8 +5493,16 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("warmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
                 ("renderedFrames", "count", u64::from(geometry.frames)),
                 ("latentTemporalDepth", "count", u64::from(geometry.latent_frames)),
+                ("latentTokens", "count", u64::from(geometry.latent_frames) * u64::from(geometry.width / 32) * u64::from(geometry.height / 32)),
                 ("outputFps", "count", u64::from(fps)),
                 ("audioTrackDecoded", "count", u64::from(has_audio)),
+                // The rung-2 engagement boundary, read from the engine's own selector at this exact
+                // geometry rather than inferred from the measured decode peak (sc-18810).
+                ("decodeTilingEngaged", "count", u64::from(decode_plan.tiling.is_some())),
+                ("decodeWritableFrameCap", "count", decode_plan.writable_frame_cap.max(0) as u64),
+                ("decodeTileSpatialPx", "count", decode_plan.spatial_tile_px()),
+                ("decodeTileFrames", "count", decode_plan.temporal_tile_frames()),
+                ("mlxMemoryLimitBytes", "bytes", get_memory_limit() as u64),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
@@ -6694,7 +6795,7 @@ mod ltx_tests {
             (
                 "/planned/strategy/rung",
                 json!("resident"),
-                "staged_residency is the only capturable rung",
+                "this geometry engages \"staged_residency\"",
             ),
             (
                 "/planned/loadShape",
@@ -6739,22 +6840,103 @@ mod ltx_tests {
     fn the_ltx_arm_refuses_a_parameterized_staged_residency_row() {
         let mut request = ltx_request_json(768, 512, 97);
         request["planned"]["strategy"]["parameters"] = json!({ "decodeTileEdge": 512 });
-        let error = ltx_attested_strategy(&request)
-            .expect_err("staged residency has no strategy parameters at the pin");
-        assert!(error.contains("takes no strategy parameters"), "{error}");
+        let decode = LtxDecodePlan::resolve(validate_ltx_target(&request).unwrap()).unwrap();
+        let error = ltx_attested_strategy(&request, decode)
+            .expect_err("no rung on this arm takes strategy parameters at the pin");
+        assert!(error.contains("takes strategy parameters"), "{error}");
     }
 
     /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would
     /// have to be an explicit edit here.
     #[test]
     fn the_ltx_arm_attests_exactly_resident_plus_staged_residency() {
-        let strategy = ltx_attested_strategy(&ltx_request_json(768, 512, 97)).unwrap();
+        let request = ltx_request_json(768, 512, 97);
+        let decode = LtxDecodePlan::resolve(validate_ltx_target(&request).unwrap()).unwrap();
+        let strategy = ltx_attested_strategy(&request, decode).unwrap();
         assert_eq!(strategy["rung"], "staged_residency");
         assert_eq!(
             strategy["engagedRungs"],
             json!(["resident", "staged_residency"])
         );
         assert_eq!(strategy["parameters"], json!({}));
+    }
+
+    /// sc-18810: WHERE rung 2 engages, derived from the engine's own bound rather than from the
+    /// measured decode peak. `writable_frame_cap = i32::MAX / (8 * h * w)` is pure arithmetic over
+    /// `VaeTiling::LTX` and does not move with the host, so it is asserted exactly. The memory bound
+    /// (`3.3 GB + 340 B/voxel` vs `get_memory_limit() * 0.85`) DOES move with the host, which is
+    /// precisely why the boundary is attributed to the write bound and not to a machine.
+    #[test]
+    fn the_ltx_decode_tiling_boundary_is_the_machine_independent_write_bound() {
+        let caps = LTX_RESOLUTIONS.map(|(width, height)| {
+            (
+                (width, height),
+                VaeTiling::LTX.writable_frame_cap(height as i32, width as i32),
+            )
+        });
+        assert_eq!(
+            caps,
+            [
+                ((768, 512), 682),
+                ((512, 768), 682),
+                ((640, 640), 655),
+                ((1280, 704), 297),
+                ((704, 1280), 297),
+            ]
+        );
+        let (_, envelope_maximum) = LTX_FRAME_ENVELOPE;
+        for ((width, height), cap) in caps {
+            // Only the two 0.90 MP buckets can reach their cap inside the declared envelope. The
+            // others cannot tile at ANY declared geometry, on any host, for this reason.
+            let reachable = cap < i64::from(envelope_maximum);
+            assert_eq!(
+                reachable,
+                (width, height) == (1280, 704) || (width, height) == (704, 1280),
+                "{width}x{height} cap {cap} against envelope maximum {envelope_maximum}"
+            );
+        }
+    }
+
+    /// The companion behavioural half: the arm's rung FOLLOWS the engine across that boundary, in
+    /// both directions, and a plan that declares the other side fails closed before any weight work.
+    #[test]
+    fn the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary() {
+        // 297 is the cap itself (a declared 10 s x 30 fps cell) and 305 is the next lattice step
+        // above it. Above the cap `budgeted_plan` tiles unconditionally, so this direction holds on
+        // every host.
+        let tiled = LtxDecodePlan::resolve(validate_ltx_geometry(1280, 704, 305).unwrap()).unwrap();
+        assert!(tiled.tiling.is_some(), "305 frames is over the 297 cap");
+        assert_eq!(tiled.rung(), "bounded_decode");
+        assert_eq!(
+            tiled.engaged_rungs(),
+            ["resident", "staged_residency", "bounded_decode"]
+        );
+        assert!(
+            tiled.spatial_tile_px() > 0 || tiled.temporal_tile_frames() > 0,
+            "a selected tiling must name at least one tiled axis"
+        );
+
+        // The single-pass direction is host-conditional: a small enough machine tiles at 297 for
+        // MEMORY. Assert it only where the memory bound provably does not bind, so the test states
+        // which claim it is making instead of silently depending on this Mac.
+        let single =
+            LtxDecodePlan::resolve(validate_ltx_geometry(1280, 704, 297).unwrap()).unwrap();
+        let voxels = 297.0 * 704.0 * 1280.0;
+        let single_pass_gib = (3.3e9 + 340.0 * voxels) / (1024.0 * 1024.0 * 1024.0);
+        if single_pass_gib <= get_memory_limit() as f64 / (1024.0 * 1024.0 * 1024.0) * 0.85 {
+            assert!(
+                single.tiling.is_none(),
+                "at the cap and inside the memory budget the decode must stay single-pass"
+            );
+            assert_eq!(single.rung(), "staged_residency");
+            let mut request = ltx_request_json(1280, 704, 297);
+            request["planned"]["strategy"]["rung"] = json!("bounded_decode");
+            request["planned"]["strategy"]["engagedRungs"] =
+                json!(["resident", "staged_residency", "bounded_decode"]);
+            let error = ltx_attested_strategy(&request, single)
+                .expect_err("a plan may not claim a rung the geometry does not engage");
+            assert!(error.contains("is a FUNCTION of the request"), "{error}");
+        }
     }
 
     /// AC3, and the reason the video arm is safe to add: EVERY image arm still refuses a
