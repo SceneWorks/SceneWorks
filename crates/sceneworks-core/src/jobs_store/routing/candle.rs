@@ -17,7 +17,7 @@ use crate::jobs_store::routing::mlx::{
 use crate::jobs_store::routing::{
     has_nonempty_array, has_nonempty_nested_array, has_nonempty_or_malformed_array,
     has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    has_nonempty_string_array,
+    has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier,
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
@@ -848,6 +848,16 @@ fn sana_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
         || ["poses", "phases"]
             .iter()
             .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        || [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
         || sana_has_unsupported_quant_carrier(payload)
 }
 

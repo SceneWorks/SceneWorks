@@ -565,7 +565,18 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
                 "loras": [],
                 "sourceAssetId": " ",
                 "maskAssetId": null,
-                "advanced": { "strength": 0.5, "poses": [], "phases": null, "mlxQuantize": 0 }
+                "advanced": {
+                    "strength": 0.5,
+                    "poses": [],
+                    "phases": null,
+                    "controlMode": null,
+                    "controlImage": null,
+                    "controlScale": null,
+                    "controlWeights": null,
+                    "convRot": null,
+                    "quantTier": null,
+                    "mlxQuantize": 0
+                }
             }),
         ] {
             assert!(
@@ -578,6 +589,12 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
             json!({ "prompt": "p", "maskAssetId": "a" }),
             json!({ "prompt": "p", "loras": [{ "path": "x", "weight": 0.8 }] }),
             json!({ "prompt": "p", "advanced": { "mlxQuantize": 4 } }),
+            json!({ "prompt": "p", "advanced": { "controlMode": "canny" } }),
+            json!({ "prompt": "p", "advanced": { "controlImage": "control-1" } }),
+            json!({ "prompt": "p", "advanced": { "controlScale": 0.9 } }),
+            json!({ "prompt": "p", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
+            json!({ "prompt": "p", "advanced": { "convRot": true } }),
+            json!({ "prompt": "p", "advanced": { "quantTier": "nvfp4" } }),
         ] {
             assert!(
                 !image_request_candle_eligible(model, &object(payload.clone())),
@@ -607,6 +624,12 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
             json!({ "model": model, "referenceAssetId": "a", "advanced": { "poses": 7 } }),
             json!({ "model": model, "referenceAssetId": "a", "advanced": { "phases": {} } }),
             json!({ "model": model, "referenceAssetId": "a", "advanced": { "mlxQuantize": {} } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlMode": "canny" } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlImage": "control-1" } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlScale": 0.9 } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "convRot": true } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "quantTier": "nvfp4" } }),
             json!({ "model": model, "referenceAssetId": "a", "advanced": 7 }),
         ] {
             assert_eq!(

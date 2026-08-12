@@ -274,3 +274,21 @@ pub(super) fn has_nonempty_or_malformed_nested_array(
         Some(_) => true,
     }
 }
+
+/// True when an optional nested carrier is present with any non-null value. A malformed parent
+/// object also fails closed. These carriers are emitted only when their feature is active, so an
+/// empty string/object or wrong scalar is malformed rather than an alternate representation of
+/// "not supplied"; callers must not silently ignore it.
+pub(super) fn has_nonnull_or_malformed_nested_carrier(
+    payload: &Map<String, Value>,
+    object_key: &str,
+    carrier_key: &str,
+) -> bool {
+    match payload.get(object_key) {
+        None | Some(Value::Null) => false,
+        Some(Value::Object(object)) => object
+            .get(carrier_key)
+            .is_some_and(|value| !value.is_null()),
+        Some(_) => true,
+    }
+}

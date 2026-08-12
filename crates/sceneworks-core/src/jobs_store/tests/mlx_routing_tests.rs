@@ -152,6 +152,17 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             model,
             &object(json!({ "referenceAssetId": "reference-1", "advanced": { "strength": 0.5 } }))
         ));
+        for bits in [4, 8] {
+            assert!(
+                image_request_mlx_eligible(
+                    model,
+                    &object(
+                        json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": bits } })
+                    )
+                ),
+                "{model} must preserve supported MLX Q{bits} selection"
+            );
+        }
         for empty_carriers in [
             json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
             json!({
@@ -162,7 +173,17 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
                 "loras": [],
                 "sourceAssetId": " ",
                 "maskAssetId": null,
-                "advanced": { "strength": 0.5, "poses": [], "phases": null }
+                "advanced": {
+                    "strength": 0.5,
+                    "poses": [],
+                    "phases": null,
+                    "controlMode": null,
+                    "controlImage": null,
+                    "controlScale": null,
+                    "controlWeights": null,
+                    "convRot": null,
+                    "quantTier": null
+                }
             }),
         ] {
             assert!(
@@ -191,6 +212,12 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             json!({ "referenceAssetId": "reference-1", "maskAssetId": {} }),
             json!({ "referenceAssetId": "reference-1", "advanced": { "poses": 7 } }),
             json!({ "referenceAssetId": "reference-1", "advanced": { "phases": {} } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlMode": "canny" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlImage": "control-1" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlScale": 0.9 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "convRot": true } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "quantTier": "nvfp4" } }),
             json!({ "referenceAssetId": "reference-1", "advanced": 7 }),
         ] {
             assert!(

@@ -11,7 +11,7 @@ use crate::jobs_store::routing::catalog::{
 use crate::jobs_store::routing::{
     has_nonempty_array, has_nonempty_nested_array, has_nonempty_or_malformed_array,
     has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    has_nonempty_string_array, SENSENOVA_MODEL_IDS,
+    has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier, SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -582,6 +582,16 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
         && !has_nonempty_or_malformed_string(payload, "maskAssetId")
         && !has_nonempty_or_malformed_nested_array(payload, "advanced", "poses")
         && !has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
+        && ![
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
         && !has_nonempty_or_malformed_array(payload, "loras")
 }
 
