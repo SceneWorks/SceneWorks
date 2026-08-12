@@ -1952,7 +1952,6 @@ mod tests {
 
     fn stub_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "sc3724_stub",
             family: "test",
             backend: "stub",

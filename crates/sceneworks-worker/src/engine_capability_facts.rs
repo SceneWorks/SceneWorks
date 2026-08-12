@@ -313,7 +313,7 @@ pub struct EngineFact {
     pub denoiser_output_latent_space: Option<LatentSpaceFact>,
     /// Alternate decoder choices derived from the provider's typed latent contract. Empty is omitted
     /// so the existing Candle/audio facts remain byte-stable when only MLX adds this capability.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decoder_options: Vec<DecoderOptionFact>,
 }
 
@@ -691,7 +691,7 @@ mod tests {
         modality: gen_core::Modality,
     ) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE),
+            denoiser_output_latent_space: None,
             id,
             family: id,
             backend,
@@ -730,11 +730,15 @@ mod tests {
 
     #[test]
     fn groups_by_backend_and_sorts_engines_by_id() {
+        let mut candle_krea = descriptor("krea_2_turbo", "candle", true);
+        candle_krea.denoiser_output_latent_space = Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE);
+        let mut mlx_krea = descriptor("krea_2_turbo", "mlx", true);
+        mlx_krea.denoiser_output_latent_space = Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE);
         let facts = facts_from_descriptors(
             &[
                 descriptor("z_image_turbo", "candle", false),
-                descriptor("krea_2_turbo", "candle", true),
-                descriptor("krea_2_turbo", "mlx", true),
+                candle_krea,
+                mlx_krea,
             ],
             "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "dump",

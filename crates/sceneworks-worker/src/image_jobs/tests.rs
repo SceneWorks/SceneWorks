@@ -85,7 +85,6 @@ impl HiresProbeGenerator {
     fn new() -> Self {
         Self {
             descriptor: gen_core::ModelDescriptor {
-                denoiser_output_latent_space: None,
                 id: "hires_probe",
                 family: "test",
                 backend: "test",
@@ -14835,6 +14834,19 @@ fn imported_krea_decoder_selection_binds_exact_donor_without_fallback() {
     assert!(
         matches!(selected.components.get("vae"), Some(WeightsSource::File(path)) if path == &donor),
         "selected decoder must survive as the exact LoadSpec VAE component"
+    );
+    assert!(
+        selected.prepared_file_pin_for(&donor).unwrap().is_some(),
+        "the selected donor must retain its app-confined prepared identity"
+    );
+    selected
+        .validate_prepared_file_pins()
+        .expect("the unchanged exact donor validates");
+
+    std::fs::write(&donor, b"mutated donor after selection").unwrap();
+    assert!(
+        selected.validate_prepared_file_pins().is_err(),
+        "mutating the donor after request selection must invalidate the prepared load"
     );
 }
 
