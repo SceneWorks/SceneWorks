@@ -17,6 +17,7 @@ import {
   backendScopes,
   buildMatrix,
   buildStoryBackendScope,
+  catalogFamilyBackends,
   isImplemented,
   isPublishableCell,
   plannedCellIds,
@@ -2166,6 +2167,84 @@ test("a survey verdict that reaches no cell is rejected, not silently carried", 
   };
   await assert.rejects(
     buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    /the verdict reaches no cell/,
+  );
+});
+
+test("a verdict may run ahead of the model universe, but no further than the routing catalog (sc-18813)", async () => {
+  // The two-state coverage check cannot express the ORDER epic 18803 chose. Admitting video to the
+  // model universe (sc-18815) destructures a survey verdict for every rung-4 cell it creates, so the
+  // verdict has to exist by then; landing the verdict first — sc-18813, so the survey is reviewable
+  // on its own — hits the survey -> catalog arm, because the universe is still image-only. That is
+  // not a structural circle: sc-18815 could have gone first had it carried the verdict too, and once
+  // `ltx_2_3` is in `advertised` the strict arm covers it with no gate change at all. The third
+  // state buys the slicing. So a verdict is allowed to run AHEAD of admission — bounded by what the
+  // routing catalog actually routes, and by nothing else.
+  const [manifestBody, routingCatalog, routingCandle, routingMlx] = await Promise.all([
+    readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+    readFile(
+      new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
+  ]);
+  const manifestModels = JSON.parse(stripJsoncComments(manifestBody)).models;
+  const routed = catalogFamilyBackends(
+    manifestModels,
+    routedLanes({ routingCatalog, routingCandle, routingMlx }),
+  );
+
+  // `VIDEO_MODEL_CAPS` routes both LTX entries on both lanes, so both verdicts are inside the fence.
+  assert.ok(routed.has("18813:mlx"));
+  assert.ok(routed.has("18813:candle"));
+  // A lane the catalog does not route is NOT.
+  assert.ok(!routed.has("18813:cuda"));
+  // That line alone does not pin the ORACLE, only the gate's existence: `routedLanes` emits nothing
+  // but "mlx" and "candle", so `:cuda` is absent under EVERY implementation — including one that
+  // ignored the routing map and admitted any lane of any group `familyGroup` knows. Nor does real
+  // data discriminate, because no shipped family group is routed on exactly one lane. A synthetic
+  // routing map is the only case that separates the two: `ltx_2_3` routes mlx, `ltx_2_3_eros` routes
+  // nothing, so a fence that CONSULTS the map admits mlx and refuses candle, while a fence that
+  // assumed "every lane" admits both.
+  const synthetic = catalogFamilyBackends(manifestModels, new Map([["ltx_2_3", new Set(["mlx"])]]));
+  assert.ok(synthetic.has("18813:mlx"), "the routed lane is admitted");
+  assert.ok(
+    !synthetic.has("18813:candle"),
+    "the fence is the routing oracle, not the family key: an unrouted lane of a routed family stays out",
+  );
+
+  // Tolerated, and honestly so: the verdict reaches no cell, so it appears in no published row and
+  // inflates no summary. Its reach starts when sc-18815 admits the modality.
+  const survey = await surveyFixture();
+  assert.ok(survey.families["18813"], "the shipped survey carries the ltx-video verdict");
+  const matrix = await buildMatrix({ publish: false });
+  assert.ok(matrix.rung4SurveyRows.every((row) => row.familyStory !== 18813));
+  assert.ok(matrix.cells.every((cell) => !cell.modelId.startsWith("ltx_")));
+  assert.equal(matrix.summary.rung4Survey.surveyedFamilyBackends, matrix.rung4SurveyRows.length);
+
+  // And a group the catalog maps nothing to is still rejected, so the third state is a fence rather
+  // than a hole. `familyGroup` throws on an unknown id, which is what keeps the fence closed.
+  const orphan = await surveyFixture();
+  orphan.families["99999"] = {
+    name: "fixture: a family the catalog knows nothing about",
+    backends: {
+      mlx: {
+        structuralApplicability: "partial",
+        implementation: "none",
+        summary: "fixture",
+        blockStacks: [],
+        evidence: [{ source: "fixture", reason: "fixture" }],
+        requestPeak: { finding: "unmeasured", reason: "fixture" },
+        findings: [],
+      },
+    },
+  };
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(orphan) } }),
     /the verdict reaches no cell/,
   );
 });
