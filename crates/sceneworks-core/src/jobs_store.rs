@@ -37,8 +37,8 @@ pub(crate) use routing::mlx::*;
 pub use routing::catalog::{
     candle_routed_image_models, imported_image_model_lora_advertisement,
     imported_image_request_provider_eligible, imported_provider_routes, is_builtin_image_model,
-    mac_capabilities, model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL,
-    MLX_ROUTED_TRAINING_KERNELS,
+    mac_capabilities, model_mac_support, ImportedProviderSurface, MacCapabilities,
+    MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,

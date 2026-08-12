@@ -67,6 +67,14 @@ const MAGE_FINETUNED_DEFAULT_STEPS: u32 = 30;
 #[cfg(target_os = "macos")]
 const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+struct PreparedMageFinetunedTransformer {
+    directory: PathBuf,
+    config: gen_core::PinnedWeightsFile,
+    weights: gen_core::PinnedWeightsFile,
+}
+
 /// Resolve the fine-tuned Mage-Flow transformer directory for `request`, or `None` when this is not
 /// a fine-tuned-Mage job. `Some(dir)` only when ALL hold:
 ///   - the model's declared `family` is `mage-flow` (the route-by-family token),
@@ -85,7 +93,7 @@ const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 fn resolve_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
-) -> WorkerResult<Option<PathBuf>> {
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
     if request
         .model_manifest_entry
         .get("family")
@@ -118,7 +126,24 @@ fn resolve_mage_finetuned_transformer(
         raw_path,
         "Fine-tuned Mage-Flow checkpoint",
     )?;
-    Ok(sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path).then_some(path))
+    if !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path) {
+        return Ok(None);
+    }
+    let config = crate::paths::pin_app_managed_model_file(
+        settings,
+        &path.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
+        "Fine-tuned Mage-Flow config",
+    )?;
+    let weights = crate::paths::pin_app_managed_model_file(
+        settings,
+        &path.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+        "Fine-tuned Mage-Flow weights",
+    )?;
+    Ok(Some(PreparedMageFinetunedTransformer {
+        directory: path,
+        config,
+        weights,
+    }))
 }
 
 /// Resolve the installed base's shared `text_encoder` + `vae` component dirs, staged onto the
@@ -284,12 +309,17 @@ async fn generate_mage_finetuned_stream(
     let total = work.len();
 
     let mut spec = components.into_iter().fold(
-        LoadSpec::new(WeightsSource::Dir(transformer)),
+        LoadSpec::new(WeightsSource::Dir(transformer.directory)),
         |spec, (id, source)| spec.with_component(id, source),
     );
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        [transformer.config, transformer.weights],
+        "Fine-tuned Mage-Flow source preparation failed",
+    )?;
     let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
 
     let (cancel, rx, blocking) = start_cached_gen_stream(

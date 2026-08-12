@@ -1538,13 +1538,7 @@ async fn generate_krea_imported_stream(
     let negative_prompt = (!request.negative_prompt.trim().is_empty())
         .then(|| request.negative_prompt.clone());
 
-    let engine_id = if phases.is_some() {
-        "krea_2_raw"
-    } else if is_edit {
-        "krea_2_turbo_edit"
-    } else {
-        "krea_2_turbo"
-    };
+    let engine_id = descriptor.id;
     let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(base_dir.clone()),

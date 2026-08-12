@@ -94,7 +94,7 @@ pub(crate) struct ExecutionPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheWeightsSource {
-    Dir(PathBuf, Fingerprint),
+    Dir(PathBuf, Fingerprint, Vec<PinnedWeightsFile>),
     File(PathBuf, Box<CacheFileIdentity>),
 }
 
@@ -271,7 +271,16 @@ fn log_warm_policy_mismatch(
 impl CacheWeightsSource {
     fn from_spec(spec: &LoadSpec, source: &WeightsSource) -> gen_core::Result<Self> {
         Ok(match source {
-            WeightsSource::Dir(path) => Self::Dir(path.clone(), Fingerprint::of(path)),
+            WeightsSource::Dir(path) => {
+                let absolute = std::path::absolute(path)?;
+                let prepared_members = spec
+                    .prepared_file_pins()
+                    .iter()
+                    .filter(|(member, _)| member.starts_with(&absolute))
+                    .map(|(_, pin)| pin.clone())
+                    .collect();
+                Self::Dir(path.clone(), Fingerprint::of(path), prepared_members)
+            }
             WeightsSource::File(path) => Self::File(
                 path.clone(),
                 Box::new(match spec.prepared_file_pin_for(path)? {
@@ -1905,6 +1914,41 @@ mod tests {
             .expect("new request prepares the new source identity");
         let key_v2 = LoadIdentity::try_from_load_spec("provider", &new_spec).expect("cold key v2");
         assert_ne!(key_v1, key_v2, "the replacement is a cold cache identity");
+    }
+
+    #[test]
+    fn prepared_directory_members_participate_in_cache_identity() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let transformer = root.path().join("transformer");
+        std::fs::create_dir(&transformer).expect("create transformer dir");
+        let config = transformer.join("config.json");
+        let weights = transformer.join("diffusion_pytorch_model.safetensors");
+        std::fs::write(&config, b"{\"kind\":\"mage\"}").expect("write config");
+        std::fs::write(&weights, b"weights-v1").expect("write weights");
+
+        let make_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.clone()));
+            spec.prepare_with_file_pins([
+                PinnedWeightsFile::pin(&config).expect("pin config"),
+                PinnedWeightsFile::pin(&weights).expect("pin weights"),
+            ])
+            .expect("prepare directory members");
+            spec
+        };
+        let key_v1 = LoadIdentity::try_from_load_spec("mage_flow_base", &make_spec())
+            .expect("first directory identity");
+        match &key_v1.weights {
+            CacheWeightsSource::Dir(_, _, members) => assert_eq!(members.len(), 2),
+            other => panic!("expected prepared directory identity, got {other:?}"),
+        }
+
+        std::fs::write(&weights, b"weights-v2").expect("replace child in place");
+        let key_v2 = LoadIdentity::try_from_load_spec("mage_flow_base", &make_spec())
+            .expect("replacement directory identity");
+        assert_ne!(
+            key_v1, key_v2,
+            "a child-file replacement must invalidate a warm directory generator"
+        );
     }
 
     // -------------------------------------------------------------------------

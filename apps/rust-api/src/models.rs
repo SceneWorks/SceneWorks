@@ -4320,58 +4320,107 @@ fn apply_imported_provider_surface_for_lanes(
     })
     .filter(|route| route.source == source)
     .collect::<Vec<_>>();
-    if routes.is_empty() {
-        return;
-    }
+    project_imported_operation_surface(object, &routes);
+}
 
+/// Replace family-wide defaults with the operations exposed by this exact source/backend route set.
+/// Imported rows are initially enriched by `apply_model_manifest_defaults`, so merely adding provider
+/// capabilities leaves unsupported sibling operations visible. This projection is intentionally
+/// subtractive for every route-owned field while preserving unrelated author metadata.
+fn project_imported_operation_surface(
+    object: &mut JsonObject,
+    routes: &[&sceneworks_core::jobs_store::ImportedProviderSurface],
+) {
     let generates_reference = routes.iter().any(|route| {
-        route.operation == "generate" && route.conditioning.iter().any(|kind| kind == "reference")
+        route.operation == "generate"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "reference" | "multi_reference"))
     });
     let pose = routes.iter().any(|route| {
         route.operation == "pose" && route.conditioning.iter().any(|kind| kind == "control")
     });
     let edit = routes.iter().any(|route| route.operation == "edit");
+    let edit_multi_reference = routes.iter().any(|route| {
+        route.operation == "edit"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| kind == "multi_reference")
+    });
     let multi_phase = routes.iter().any(|route| route.operation == "multi_phase");
+    let generates = routes.iter().any(|route| {
+        matches!(
+            route.operation.as_str(),
+            "generate" | "pose" | "multi_phase"
+        )
+    });
 
-    if generates_reference || pose {
-        let ui = object.entry("ui".to_owned()).or_insert_with(|| json!({}));
-        if let Some(ui) = ui.as_object_mut() {
-            if generates_reference {
-                ui.insert("img2img".to_owned(), Value::Bool(true));
-            }
-            if pose {
-                ui.insert("poseLibrary".to_owned(), Value::Bool(true));
-                ui.insert("poseControlScale".to_owned(), Value::Bool(true));
-                ui.insert("controlModes".to_owned(), json!(["pose"]));
-            }
+    let capabilities = object
+        .entry("capabilities".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !capabilities.is_array() {
+        *capabilities = Value::Array(Vec::new());
+    }
+    if let Some(capabilities) = capabilities.as_array_mut() {
+        capabilities.retain(|value| {
+            !matches!(
+                value.as_str(),
+                Some("text_to_image" | "edit_image" | "image_to_image" | "character_image")
+            )
+        });
+        if generates {
+            capabilities.push(Value::String("text_to_image".to_owned()));
+        }
+        if edit {
+            capabilities.push(Value::String("edit_image".to_owned()));
         }
     }
-    if edit {
-        let capabilities = object
-            .entry("capabilities".to_owned())
-            .or_insert_with(|| json!(["text_to_image"]));
-        if let Some(capabilities) = capabilities.as_array_mut() {
-            if !capabilities.iter().any(|value| value == "edit_image") {
-                capabilities.push(Value::String("edit_image".to_owned()));
-            }
+
+    let ui = object.entry("ui".to_owned()).or_insert_with(|| json!({}));
+    if !ui.is_object() {
+        *ui = json!({});
+    }
+    if let Some(ui) = ui.as_object_mut() {
+        if generates_reference {
+            ui.insert("img2img".to_owned(), Value::Bool(true));
+        } else {
+            ui.remove("img2img");
+            ui.remove("img2imgStrength");
+        }
+        if pose {
+            ui.insert("poseLibrary".to_owned(), Value::Bool(true));
+            ui.insert("poseControlScale".to_owned(), Value::Bool(true));
+            ui.insert("controlModes".to_owned(), json!(["pose"]));
+        } else {
+            ui.remove("poseLibrary");
+            ui.remove("poseControlScale");
+            ui.remove("controlModes");
+        }
+        if !edit_multi_reference {
+            ui.remove("editReferences");
         }
     }
-    if multi_phase {
-        let compatibility = object
-            .entry("loraCompatibility".to_owned())
-            .or_insert_with(|| json!({}));
-        if let Some(compatibility) = compatibility.as_object_mut() {
+
+    let compatibility = object
+        .entry("loraCompatibility".to_owned())
+        .or_insert_with(|| json!({}));
+    if let Some(compatibility) = compatibility.as_object_mut() {
+        if let Some(types) = compatibility.get_mut("types").and_then(Value::as_array_mut) {
+            types.retain(|value| value.as_str() != Some("acceleration"));
+        }
+        if multi_phase {
             let types = compatibility
                 .entry("types".to_owned())
                 .or_insert_with(|| Value::Array(Vec::new()));
             if let Some(types) = types.as_array_mut() {
-                if !types.iter().any(|value| value == "acceleration") {
-                    types.push(Value::String("acceleration".to_owned()));
-                }
+                types.push(Value::String("acceleration".to_owned()));
             }
         }
     }
 
+    object.remove("runtimeQuantTiers");
     let mut runtime_quant_tiers = Vec::new();
     for tier in ["q4", "q8"] {
         if routes.iter().any(|route| {
@@ -8030,6 +8079,28 @@ mod variant_delete_tests {
 mod imported_lora_advertisement_tests {
     use super::*;
 
+    fn route(
+        operation: &str,
+        conditioning: &[&str],
+    ) -> sceneworks_core::jobs_store::ImportedProviderSurface {
+        sceneworks_core::jobs_store::ImportedProviderSurface {
+            family: "fixture".to_owned(),
+            source: "fixture".to_owned(),
+            operation: operation.to_owned(),
+            provider_id: "fixture_provider".to_owned(),
+            conditioning: conditioning
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            supports_lora: true,
+            supports_lokr: false,
+            supported_quants: vec!["q4".to_owned(), "q8".to_owned()],
+            supports_kv_cache: false,
+            supports_sequential_offload: false,
+            registry_cached: true,
+        }
+    }
+
     fn entry(id: &str, family: &str) -> JsonObject {
         let source = match family {
             "krea_2" => "transformer_file",
@@ -8145,11 +8216,57 @@ mod imported_lora_advertisement_tests {
 
         let mut wrong_shape = entry("wrong_shape", "krea_2");
         wrong_shape.insert("importSourceShape".to_owned(), json!("fused_checkpoint"));
-        let before = wrong_shape.clone();
+        apply_model_manifest_defaults(&mut wrong_shape, "image", Some("krea_2"));
         apply_imported_provider_surface_for_lanes(&mut wrong_shape, true, true);
-        assert_eq!(wrong_shape.get("ui"), before.get("ui"));
+        assert!(wrong_shape["capabilities"]
+            .as_array()
+            .is_some_and(|values| values
+                .iter()
+                .all(|value| { !matches!(value.as_str(), Some("text_to_image" | "edit_image")) })));
+        assert!(wrong_shape["ui"].get("img2img").is_none());
+        assert!(wrong_shape["ui"].get("editReferences").is_none());
         assert!(wrong_shape.get("runtimeQuantTiers").is_none());
         assert_eq!(wrong_shape["macSupport"]["supported"], json!(false));
+    }
+
+    #[test]
+    fn exact_route_projection_withdraws_family_siblings_before_adding_supported_operations() {
+        let mut candle_sdxl = entry("community_xl", "sdxl");
+        apply_model_manifest_defaults(&mut candle_sdxl, "image", Some("sdxl"));
+        let generate = route("generate", &[]);
+        project_imported_operation_surface(&mut candle_sdxl, &[&generate]);
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "text_to_image"));
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|value| value != "edit_image"));
+        assert!(candle_sdxl["ui"].get("img2img").is_none());
+
+        let mut krea = entry("user_krea", "krea_2");
+        apply_model_manifest_defaults(&mut krea, "image", Some("krea_2"));
+        let edit = route("edit", &["reference", "multi_reference"]);
+        let pose = route("pose", &["control"]);
+        let multi_phase = route("multi_phase", &[]);
+        let generate = route("generate", &["reference"]);
+        project_imported_operation_surface(&mut krea, &[&generate, &edit, &pose, &multi_phase]);
+        assert_eq!(krea["ui"]["img2img"], json!(true));
+        assert_eq!(krea["ui"]["poseLibrary"], json!(true));
+        assert!(krea["ui"].get("editReferences").is_some());
+        assert!(krea["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "edit_image"));
+        assert!(krea["loraCompatibility"]["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "acceleration"));
     }
 
     #[test]

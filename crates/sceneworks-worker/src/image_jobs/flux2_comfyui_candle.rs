@@ -346,6 +346,16 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "flux2",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .ok_or_else(|| {
+        WorkerError::Engine(
+            "this runtime has no registered ComfyUI FLUX.2 generate route".to_owned(),
+        )
+    })?;
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
@@ -374,7 +384,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
 
     let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
-        "flux2_dev",
+        descriptor.id,
         0,
         spec,
         "ComfyUI FLUX.2-dev load failed".to_owned(),

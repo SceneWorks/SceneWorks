@@ -16308,11 +16308,24 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
         "projectId": "p", "model": "finetune_9f3c0a11",
         "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
     }));
+    let prepared = resolve_mage_finetuned_transformer(&finetune, &settings)
+        .expect("resolve ok")
+        .expect("a complete fine-tuned checkpoint resolves");
     assert_eq!(
-        resolve_mage_finetuned_transformer(&finetune, &settings)
-            .expect("resolve ok")
-            .expect("a complete fine-tuned checkpoint resolves"),
+        prepared.directory,
         std::fs::canonicalize(&checkpoint).unwrap_or(checkpoint.clone())
+    );
+    assert_eq!(
+        prepared.config.loader_path(),
+        prepared
+            .directory
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE)
+    );
+    assert_eq!(
+        prepared.weights.loader_path(),
+        prepared
+            .directory
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE)
     );
 
     // A BUILTIN Mage id keeps loading from its own per-tier snapshot through the generic lane.

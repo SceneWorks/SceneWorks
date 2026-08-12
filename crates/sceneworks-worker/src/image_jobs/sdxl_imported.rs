@@ -497,7 +497,7 @@ async fn generate_sdxl_imported_stream(
     raw_settings.insert("guidanceScale".to_owned(), json!(guidance));
     raw_settings.insert(
         "engine".to_owned(),
-        Value::String(SDXL_IMPORTED_ENGINE.to_owned()),
+        Value::String(descriptor.id.to_owned()),
     );
     raw_settings.insert(
         "importedCheckpoint".to_owned(),
@@ -534,7 +534,7 @@ async fn generate_sdxl_imported_stream(
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
     #[cfg(target_os = "macos")]
-    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, "sdxl")?;
+    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
     #[cfg(target_os = "macos")]
     let spec = spec.with_component(
         "ldm_tokenizer",
@@ -547,7 +547,7 @@ async fn generate_sdxl_imported_stream(
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        "sdxl",
+        descriptor.id,
         adapter_count,
         spec,
         "SDXL imported checkpoint load failed".to_owned(),

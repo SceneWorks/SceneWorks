@@ -231,6 +231,16 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "z-image",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .ok_or_else(|| {
+        WorkerError::Engine(
+            "this runtime has no registered ComfyUI Z-Image generate route".to_owned(),
+        )
+    })?;
     let adapter_count = paths.adapters.specs.len();
     let spec = prepare_zimage_comfyui_load_spec(paths)?;
     // The tokenizer snapshot is structural; all weight files are priced from finalized tokens.
@@ -264,7 +274,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
 
     let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
-        "z_image_turbo",
+        descriptor.id,
         0,
         spec,
         "ComfyUI Z-Image load failed".to_owned(),
