@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+    "sceneWorksRevision": "source-tree:84340a4fa0938f20bea5acdcf055fb115d3d3a2b94a71bc4fc2ab0957a0cfb01",
     "inferenceRevision": "b965641e388f4db646e4c60ab3f75219737e2cc8",
     "sources": {
       "manifest": {
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "f66e636e69336293e0480de062a35f8d159ea84252113da4e04e80b34008c688"
+        "sha256": "3a2d299e46100dcce6efc12b2c7d0ac4566cc2e29419e32e750c428a8781ebf9"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -103,7 +103,7 @@
     "memoryCharacterization": {
       "asserts": "the rung's PEAKS are known across the geometry envelope",
       "geometrySensitive": true,
-      "binding": "scripts/generate-memory-matrix.mjs#memoryCharacterization — distinct measured geometries, because `fixedGb + perMpxGb * megapixels` has two coefficients and one point cannot determine a slope"
+      "binding": "scripts/generate-memory-matrix.mjs#memoryCharacterization — the RANK of the measured design matrix, because `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames` takes as many independent geometries as the lane has coefficients: two on the image lane, and three once a temporal term is carried, where three frame counts at one area are still singular"
     }
   },
   "conformanceStates": [
@@ -139,11 +139,11 @@
     },
     {
       "status": "point",
-      "definition": "Exactly one measured geometry. The peak is known AT that geometry and the slope is undeterminable, so nothing is known about the rest of the envelope."
+      "definition": "Measured, but not enough to determine the curve — one geometry, or several that are linearly dependent (two resolutions of one area; several frame counts at one area). The peak is known AT those geometries and the slopes are undeterminable, so nothing is known about the rest of the envelope."
     },
     {
       "status": "fitted",
-      "definition": "Two or more distinct measured geometries — sufficient to determine the affine curve, which is not a claim that a fit has been performed. `coveredPixelBound` is the largest measured area."
+      "definition": "Measured geometries of full design rank — sufficient to determine the affine curve, which is not a claim that a fit has been performed. `coveredPixelBound` is the largest measured area; `coveredFrameBound`, present only on cells carrying a temporal geometry, is the largest measured frame count."
     }
   ],
   "evidenceDimensions": [

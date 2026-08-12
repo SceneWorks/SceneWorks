@@ -740,9 +740,11 @@ export function calibrationBinding(record, cell) {
 //                              membership is the right binding, because whether a rung executes
 //                              does not depend on the resolution it executed at.
 //   `memoryCharacterization` — the rung's PEAKS are known across the envelope. Geometry-sensitive
-//                              by construction: `fixedGb + perMpxGb * megapixels`
-//                              (`vram_gate.rs#krea_phase_curve`) has two coefficients, so one
-//                              point cannot determine a slope.
+//                              by construction: the curve `vram_gate.rs#krea_phase_curve` evaluates
+//                              is `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames`, so it takes
+//                              as many independent measured geometries as the lane has
+//                              coefficients — two on the image lane, three once the temporal term
+//                              is carried.
 //
 // Collapsing both into `state` is what let a single 768x768 capture read as certifying a cell whose
 // envelope reaches 2048x2048. `point` is the honest middle state the five-value vocabulary could not
@@ -752,20 +754,83 @@ export function calibrationBinding(record, cell) {
 //
 // `fitted` asserts the evidence is SUFFICIENT to determine the affine curve, not that a fit has been
 // performed. `coveredPixelBound` is the largest measured area, so a consumer can tell how far the
-// determinable curve reaches without re-deriving it from `measuredGeometries`; it is null below two
-// points because there is no curve to bound.
+// determinable curve reaches without re-deriving it from `measuredGeometries`; it is null unless the
+// curve is determinable, because otherwise there is no curve to bound.
+//
+// ## sc-18812: the temporal axis
+//
+// A geometry is `WxH` (one output frame) or `WxHxfF` for F output frames. COUNTING measured
+// geometries is no longer enough, for two separate reasons, and both bite:
+//
+//   1. Collapsing the temporal axis. Two records at `768x512xf121` and `768x512xf241` are two
+//      measurements of a video cell but ONE area, and the pre-sc-18812 key would have deduped them
+//      to a single `768x512` and reported `point` — hiding real temporal coverage.
+//   2. Counting without rank. Three temporal geometries at ONE area cannot determine
+//      `{fixed, perMpx, perMpxFrame}`: with one area the area and cross columns are proportional
+//      and the design is singular. sc-18810 found exactly this — crossing TWO areas is what makes
+//      the candidate forms identifiable at all — so `fitted` is decided by the RANK of the design
+//      matrix, not by a count. This also fixes a latent image-lane defect: `768x512` and `512x768`
+//      are two geometries carrying one area, and counting called that `fitted`.
+//
+// `coveredFrameBound` is emitted only on cells that carry a temporal geometry, mirroring how
+// `geometryEnvelope` gains `durations`/`fps` only for video. Image cells therefore keep the exact
+// shape they published before this change.
+function parseMeasuredGeometry(geometry) {
+  const match = /^([1-9][0-9]*)x([1-9][0-9]*)(?:xf([1-9][0-9]*))?$/.exec(geometry ?? "");
+  if (!match) return null;
+  return { pixels: Number(match[1]) * Number(match[2]), frames: Number(match[3] ?? 1) };
+}
+
+// Exact rank of the design matrix for the applicable curve form. Integer arithmetic throughout —
+// `pixels` and `pixels * frames` are exact integers, and a float elimination could call a singular
+// design full-rank on rounding alone, which is the one error this must not make.
+function designRank(points, temporal) {
+  const areas = new Set(points.map((point) => point.pixels));
+  if (!temporal) return areas.size >= 2 ? 2 : Math.min(points.length, 1);
+  const voxels = new Set(points.map((point) => point.pixels * point.frames));
+  // Columns `[1, pixels, pixels*frames]`. Rank 3 iff some three rows have a non-zero determinant.
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      for (let k = j + 1; k < points.length; k += 1) {
+        const row = (point) => [1n, BigInt(point.pixels), BigInt(point.pixels * point.frames)];
+        const [a, b, c] = [row(points[i]), row(points[j]), row(points[k])];
+        const determinant =
+          a[0] * (b[1] * c[2] - b[2] * c[1]) -
+          a[1] * (b[0] * c[2] - b[2] * c[0]) +
+          a[2] * (b[0] * c[1] - b[1] * c[0]);
+        if (determinant !== 0n) return 3;
+      }
+    }
+  }
+  return areas.size >= 2 || voxels.size >= 2 ? 2 : Math.min(points.length, 1);
+}
+
+// The `measuredGeometries` key for one calibration record's target geometry. `frames <= 1` emits
+// the historical `WxH` form unchanged, so admitting the temporal axis moves no image cell.
+export function measuredGeometryKey({ width, height, frames }) {
+  return frames > 1 ? `${width}x${height}xf${frames}` : `${width}x${height}`;
+}
+
 export function memoryCharacterization(geometries) {
   const measured = sortedUnique(
-    geometries.filter((geometry) => /^[1-9][0-9]*x[1-9][0-9]*$/.test(geometry ?? "")),
+    geometries.filter((geometry) => parseMeasuredGeometry(geometry) !== null),
   );
-  const areas = measured.map((geometry) => {
-    const [width, height] = geometry.split("x").map(Number);
-    return width * height;
-  });
+  const points = measured.map(parseMeasuredGeometry);
+  const temporal = points.some((point) => point.frames > 1);
+  const coefficients = temporal ? 3 : 2;
+  const determinable = designRank(points, temporal) >= coefficients;
+  const status = measured.length === 0 ? "unmeasured" : determinable ? "fitted" : "point";
   return {
-    status: measured.length === 0 ? "unmeasured" : measured.length === 1 ? "point" : "fitted",
+    status,
     measuredGeometries: measured,
-    coveredPixelBound: areas.length > 1 ? Math.max(...areas) : null,
+    coveredPixelBound: status === "fitted" ? Math.max(...points.map((point) => point.pixels)) : null,
+    ...(temporal
+      ? {
+          coveredFrameBound: status === "fitted"
+            ? Math.max(...points.map((point) => point.frames))
+            : null,
+        }
+      : {}),
   };
 }
 
@@ -3104,9 +3169,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               // exists to prevent. Promotion to `Verified` is stricter and does require `current`.
               const characterization = memoryCharacterization([
                 ...(status.historicalVerification ?? []).map((row) => row.geometry),
-                ...eligibleRuns.map(
-                  (record) => `${record.target.geometry.width}x${record.target.geometry.height}`,
-                ),
+                // sc-18812: the temporal axis is carried into the key, so two records that differ
+                // only in frame count are two measured geometries rather than one. The `xfN`
+                // suffix is emitted ONLY above one frame, which is what keeps every image cell's
+                // published `measuredGeometries` byte-identical to what it was before.
+                ...eligibleRuns.map((record) => measuredGeometryKey(record.target.geometry)),
               ]);
               // SC-16060. The producer the vocabulary never had: `Verified` was a listed state with
               // nothing able to emit it, so the guard in `validateMatrix` was unreachable and a test
@@ -3369,9 +3436,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         asserts: "the rung's PEAKS are known across the geometry envelope",
         geometrySensitive: true,
         binding:
-          "scripts/generate-memory-matrix.mjs#memoryCharacterization — distinct measured " +
-          "geometries, because `fixedGb + perMpxGb * megapixels` has two coefficients and one " +
-          "point cannot determine a slope",
+          "scripts/generate-memory-matrix.mjs#memoryCharacterization — the RANK of the measured " +
+          "design matrix, because `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames` takes as " +
+          "many independent geometries as the lane has coefficients: two on the image lane, and " +
+          "three once a temporal term is carried, where three frame counts at one area are still " +
+          "singular",
       },
     },
     conformanceStates: [
@@ -3407,15 +3476,18 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       {
         status: "point",
         definition:
-          "Exactly one measured geometry. The peak is known AT that geometry and the slope is " +
-          "undeterminable, so nothing is known about the rest of the envelope.",
+          "Measured, but not enough to determine the curve — one geometry, or several that are " +
+          "linearly dependent (two resolutions of one area; several frame counts at one area). " +
+          "The peak is known AT those geometries and the slopes are undeterminable, so nothing " +
+          "is known about the rest of the envelope.",
       },
       {
         status: "fitted",
         definition:
-          "Two or more distinct measured geometries — sufficient to determine the affine curve, " +
+          "Measured geometries of full design rank — sufficient to determine the affine curve, " +
           "which is not a claim that a fit has been performed. `coveredPixelBound` is the largest " +
-          "measured area.",
+          "measured area; `coveredFrameBound`, present only on cells carrying a temporal geometry, " +
+          "is the largest measured frame count.",
       },
     ],
     evidenceDimensions: [

@@ -1633,8 +1633,114 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
     }
 
 
+def _committed_phase_curves(manifest: dict) -> dict:
+    """Every ``(tier, rung, phase)`` phase curve committed to the builtin manifest.
+
+    Keyed by a readable coordinate so a failure names the curve rather than an index.
+    """
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    curves = {}
+    for tier, rungs in krea["candle"]["turboFit"]["phaseCurvesByTier"].items():
+        for rung, phases in rungs.items():
+            for phase, curve in phases.items():
+                curves[f"{tier}.{rung}.{phase}"] = curve
+    return curves
+
+
+def test_image_lane_phase_curves_carry_no_temporal_coefficient():
+    """sc-18812: the whole shipped image lane is still two-coefficient, all 36 curves of it.
+
+    This is the precondition that keeps
+    ``test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points`` honest. That test
+    reads ``perMpxGb`` and compares it against a measured two-point delta, which is a COMPLETE
+    account of the curve only while no temporal term exists. Add ``perMpxFrameGb`` to any of these
+    curves and the slope comparison would keep passing while describing a different function.
+
+    The existing literal-dict assertion above covers bf16's 12 curves; this covers all 36, which is
+    what "no image curve moved" actually requires.
+    """
+    curves = _committed_phase_curves(_load_builtin_models_manifest())
+    assert len(curves) == 36, (
+        f"3 tiers x 4 rungs x 3 phases expected, found {len(curves)} - a changed population "
+        "means this guard is covering something other than what it claims"
+    )
+    for label, curve in curves.items():
+        assert set(curve) == {"fixedGb", "perMpxGb"}, (
+            f"{label} declares {sorted(curve)}; the image lane must stay two-coefficient so its "
+            "fitted slope remains the whole geometry response"
+        )
+
+
+def test_schema_admits_the_temporal_coefficient_additively():
+    """sc-18812: the temporal term is OPTIONAL, bounded, and does not disturb existing manifests.
+
+    Three claims, each with its own direction:
+
+    1. The unmodified shipped manifest still validates. That is the migration claim.
+    2. A curve that ADDS ``perMpxFrameGb`` validates - so the change is genuinely additive and a
+       video curve can ship without a schema bump.
+    3. A negative or wrong-typed ``perMpxFrameGb`` is REJECTED, and so is a curve that drops
+       ``perMpxGb`` in favour of it - the term extends the area form, it does not replace it.
+       (Replacing it is what ``latent_tokens``/``output_voxels`` would have required, which is
+       precisely why sc-18812 adopted ``cross`` instead.)
+    """
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    krea_index = next(
+        index
+        for index, model in enumerate(manifest["models"])
+        if model["id"] == "krea_2_turbo"
+    )
+    assert not list(validator.iter_errors(manifest)), "the shipped manifest must still validate"
+
+    def curve_of(candidate):
+        return candidate["models"][krea_index]["candle"]["turboFit"]["phaseCurvesByTier"]["q8"][
+            "threeStage"
+        ]["decode"]
+
+    def mutated(mutate):
+        candidate = copy.deepcopy(manifest)
+        mutate(candidate)
+        return list(validator.iter_errors(candidate))
+
+    assert not mutated(
+        lambda candidate: curve_of(candidate).update({"perMpxFrameGb": 0.2998482076533136})
+    ), "adding the temporal coefficient must not require a schema bump"
+    assert not mutated(
+        lambda candidate: candidate["models"][krea_index]["candle"]["turboFit"].update(
+            {"maxMeasuredVoxels": 1024 * 1024 * 100}
+        )
+    ), "declaring the temporal envelope bound must validate"
+
+    for label, mutate in (
+        ("negative temporal coefficient", lambda c: curve_of(c).update({"perMpxFrameGb": -0.1})),
+        ("non-numeric temporal coefficient", lambda c: curve_of(c).update({"perMpxFrameGb": "0.3"})),
+        (
+            "temporal coefficient REPLACING the area term",
+            lambda c: curve_of(c).clear() or curve_of(c).update(
+                {"fixedGb": 2.5, "perMpxFrameGb": 0.3}
+            ),
+        ),
+        ("misspelled temporal coefficient", lambda c: curve_of(c).update({"perMpxFrame": 0.3})),
+        (
+            "zero temporal envelope bound",
+            lambda c: c["models"][krea_index]["candle"]["turboFit"].update(
+                {"maxMeasuredVoxels": 0}
+            ),
+        ),
+    ):
+        assert mutated(mutate), f"{label} must be rejected by the schema"
+
+
 def test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points():
-    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them."""
+    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them.
+
+    sc-18812 precondition: this reads ``perMpxGb`` as the whole geometry response, which holds
+    only while no curve carries a temporal term. ``test_image_lane_phase_curves_carry_no_temporal
+    _coefficient`` is what enforces that, and it must stay green for this comparison to mean
+    anything.
+    """
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     curves = krea["candle"]["turboFit"]["phaseCurvesByTier"]

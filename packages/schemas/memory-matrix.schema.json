@@ -1088,7 +1088,7 @@
               "coveredPixelBound"
             ],
             "additionalProperties": false,
-            "description": "SC-16060. The geometry-sensitive claim, kept separate from `state` so that one measured geometry cannot read as certifying a whole envelope. `coveredPixelBound` is null unless `status` is `fitted`.",
+            "description": "SC-16060. The geometry-sensitive claim, kept separate from `state` so that one measured geometry cannot read as certifying a whole envelope. `coveredPixelBound` is null unless `status` is `fitted`. sc-18812: a measured geometry may carry a temporal axis as `WxHxfF`; the `WxH` form means one output frame and is what every image cell publishes.",
             "properties": {
               "status": {
                 "enum": [
@@ -1102,7 +1102,7 @@
                 "uniqueItems": true,
                 "items": {
                   "type": "string",
-                  "pattern": "^[1-9][0-9]*x[1-9][0-9]*$"
+                  "pattern": "^[1-9][0-9]*x[1-9][0-9]*(xf[1-9][0-9]*)?$"
                 }
               },
               "coveredPixelBound": {
@@ -1111,6 +1111,14 @@
                   "null"
                 ],
                 "exclusiveMinimum": 0
+              },
+              "coveredFrameBound": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "exclusiveMinimum": 0,
+                "description": "sc-18812. Largest measured output frame count, null unless `status` is `fitted`. Present ONLY on cells carrying a temporal measured geometry, mirroring how `geometryEnvelope` gains `durations`/`fps` only for video - so image cells keep the shape they published before the temporal axis existed. Read it against the cell's own `geometryEnvelope`: a gap between the two is the part of the temporal envelope the curve does not reach, and the worst case in that gap is NOT at the envelope's maximum. Peak memory is non-monotonic in frames, because the VAE switches to tiled decode on a constant-voxel surface (`i32::MAX / full_res_channels`, 297 output frames at 0.90 MP for LTX) where single-pass decode has already climbed to its maximum."
               }
             }
           }

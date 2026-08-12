@@ -36,6 +36,8 @@ import {
   UNION_ONLY_MLX_ROUTES,
   UNROUTED_CATALOG_ENTRIES,
   VIDEO_FAMILY_STORIES,
+  measuredGeometryKey,
+  memoryCharacterization,
   mlxRequiredHostBytes,
   observedPeakBytes,
   modelStory,
@@ -4056,4 +4058,82 @@ test("a video cell's geometry envelope carries its temporal axis (sc-18815)", as
       assert.ok(!(key in cell.geometryEnvelope), `${cell.id}: image envelope gained ${key}`);
     }
   }
+});
+
+// ── sc-18812: the temporal axis reaches the characterization ───────────────────────────────────
+
+test("the measured-geometry key carries frames, and only above one (sc-18812)", () => {
+  // The `WxH` form has to survive verbatim: it is what all 208 published cells already carry, and
+  // the migration claim is that admitting a temporal axis moves none of them.
+  assert.equal(measuredGeometryKey({ width: 1024, height: 1024, frames: 1 }), "1024x1024");
+  assert.equal(measuredGeometryKey({ width: 768, height: 768, frames: 0 }), "768x768");
+  assert.equal(measuredGeometryKey({ width: 768, height: 512, frames: 241 }), "768x512xf241");
+});
+
+test("frames DISTINGUISH two measured geometries rather than collapsing (sc-18812)", () => {
+  // The seam this story was written against: two records that differ only temporally used to key
+  // to one `768x512` string, so a cell with real temporal coverage reported `point`.
+  const characterization = memoryCharacterization(["768x512xf121", "768x512xf241"]);
+  assert.deepEqual(characterization.measuredGeometries, ["768x512xf121", "768x512xf241"]);
+});
+
+test("temporal geometries at ONE area cannot determine the curve (sc-18812)", () => {
+  // Three points, three frame counts, and still singular: with one area the `mpx` and `mpx*frames`
+  // columns are proportional. sc-18810 established this the expensive way — crossing two areas is
+  // what makes the candidate forms identifiable at all — so counting geometries is the wrong test.
+  const characterization = memoryCharacterization([
+    "768x512xf121",
+    "768x512xf241",
+    "768x512xf361",
+  ]);
+  assert.equal(characterization.status, "point");
+  assert.equal(characterization.coveredPixelBound, null);
+  assert.equal(characterization.coveredFrameBound, null);
+});
+
+test("two areas crossed with two frame counts ARE determinable (sc-18812)", () => {
+  const characterization = memoryCharacterization([
+    "768x512xf121",
+    "768x512xf241",
+    "1280x704xf121",
+  ]);
+  assert.equal(characterization.status, "fitted");
+  assert.equal(characterization.coveredPixelBound, 1280 * 704);
+  assert.equal(characterization.coveredFrameBound, 241);
+});
+
+test("`coveredFrameBound` appears only where a temporal geometry does (sc-18812)", () => {
+  // Mirrors `geometryEnvelope`'s durations/fps convention. An image cell that gained a null
+  // temporal bound would be the generator inventing an axis its records never carried.
+  assert.ok(!("coveredFrameBound" in memoryCharacterization(["768x768", "1024x1024"])));
+  assert.ok(!("coveredFrameBound" in memoryCharacterization([])));
+  assert.ok("coveredFrameBound" in memoryCharacterization(["768x512xf121", "1280x704xf241"]));
+});
+
+test("two resolutions of ONE area do not determine the image curve either (sc-18812)", () => {
+  // A latent defect the rank rule fixes on the way past: `768x512` and `512x768` are two distinct
+  // geometry strings carrying one area, and counting called that `fitted`. It publishes no cell
+  // today — verified by the regenerated artifact being byte-identical — but it would have been the
+  // first thing a portrait/landscape video sweep hit.
+  assert.equal(memoryCharacterization(["768x512", "512x768"]).status, "point");
+  assert.equal(memoryCharacterization(["768x512", "512x768"]).coveredPixelBound, null);
+  assert.equal(memoryCharacterization(["768x512", "1280x704"]).status, "fitted");
+});
+
+test("admitting the temporal axis moves no published image cell (sc-18812)", async () => {
+  // The migration guard, over the REAL published population rather than a fixture. Every shipped
+  // cell must still key its geometries in the two-number form and carry no temporal bound.
+  const matrix = await buildMatrix({ publish: false });
+  let measured = 0;
+  for (const cell of matrix.cells) {
+    assert.ok(
+      !("coveredFrameBound" in cell.memoryCharacterization),
+      `${cell.id}: an image cell gained a temporal bound`,
+    );
+    for (const geometry of cell.memoryCharacterization.measuredGeometries) {
+      assert.match(geometry, /^[1-9][0-9]*x[1-9][0-9]*$/, `${cell.id}: ${geometry}`);
+      measured += 1;
+    }
+  }
+  assert.ok(measured > 0, "the guard must have graded real measured geometries");
 });

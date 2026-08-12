@@ -316,6 +316,48 @@ fn krea_turbo_manifest_key(strategy: gen_core::MemoryStrategy) -> &'static str {
     }
 }
 
+/// The geometry a phase curve is evaluated at (sc-18812).
+///
+/// `frames` is the temporal axis the image lane never had. It is a separate type rather than a
+/// second `u32` argument because the two axes are not interchangeable and a transposed call site
+/// would otherwise compile: `pixels` is an AREA (already multiplied out) while `frames` is a count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CurveGeometry {
+    pub pixels: u64,
+    pub frames: u32,
+}
+
+impl CurveGeometry {
+    /// The still-image geometry every pre-sc-18812 call site meant. One output frame.
+    pub(crate) fn still(pixels: u64) -> Self {
+        Self { pixels, frames: 1 }
+    }
+}
+
+/// Which phase carries the peak of a phase triple at one geometry (sc-18812).
+///
+/// Typed because the binding phase FLIPS inside a single model's envelope — on measured q8 LTX,
+/// decode overtakes text between 11,904 and 14,080 latent tokens — so "which phase binds" is a
+/// per-geometry question, not a per-model constant. sc-18829 needs to ask it of a geometry it has
+/// no record for, which is exactly what a curve can answer and a record cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BindingPhase {
+    Text,
+    Denoise,
+    Decode,
+}
+
+impl BindingPhase {
+    /// The phase index (0 text, 1 denoise, 2 decode) the sc-18097 comparison seam is written in.
+    pub(crate) fn index(self) -> u8 {
+        match self {
+            Self::Text => 0,
+            Self::Denoise => 1,
+            Self::Decode => 2,
+        }
+    }
+}
+
 /// Per-phase prediction for one Krea Turbo rung at the requested geometry.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct KreaTurboPhasePeaks {
@@ -327,6 +369,28 @@ pub(crate) struct KreaTurboPhasePeaks {
 impl KreaTurboPhasePeaks {
     pub(crate) fn peak_gb(self) -> f64 {
         self.text_gb.max(self.denoise_gb).max(self.decode_gb)
+    }
+
+    /// The phase carrying the peak. Ties resolve to the LATER phase deterministically, mirroring
+    /// the MLX gate's `binding_phase` (sc-18096).
+    ///
+    /// This is why sc-18810 put the temporal term on each phase curve rather than on the
+    /// aggregate: `peak_gb` is a `max` over three curves, and a max of linear pieces is not
+    /// linear. Fitting one temporal coefficient to the aggregate missed it by >= 10.26 GiB on
+    /// held-out geometries — about 94x the measured noise floor — while the same forms fitted per
+    /// phase landed inside 0.30 GiB. Keeping the curves per phase is what makes both `peak_gb` and
+    /// this question answerable at an unmeasured geometry.
+    pub(crate) fn binding_phase(self) -> BindingPhase {
+        let mut phase = BindingPhase::Text;
+        let mut peak = self.text_gb;
+        if self.denoise_gb >= peak {
+            phase = BindingPhase::Denoise;
+            peak = self.denoise_gb;
+        }
+        if self.decode_gb >= peak {
+            phase = BindingPhase::Decode;
+        }
+        phase
     }
 }
 
@@ -490,10 +554,22 @@ impl KreaRuntimeEvidenceContext {
     }
 }
 
-/// Read a measured phase curve `fixedGb + perMpxGb * megapixels`. The manifest stores fixed weight /
-/// allocator residency separately from the geometry-dependent activation slope. Invalid or
-/// incomplete evidence fails closed to `None`; callers retain the established sequential gate
-/// instead of inventing a fit.
+/// Read a measured phase curve `fixedGb + perMpxGb * megapixels + perMpxFrameGb * megapixels *
+/// frames`. The manifest stores fixed weight / allocator residency separately from the
+/// geometry-dependent activation slopes. Invalid or incomplete evidence fails closed to `None`;
+/// callers retain the established sequential gate instead of inventing a fit.
+///
+/// ## The temporal term (sc-18812, form chosen by sc-18810)
+///
+/// `perMpxFrameGb` is OPTIONAL and absent on every committed image curve. Absent is read as
+/// `0.0`, and the sum is deliberately written so that the absent case reduces to the pre-sc-18812
+/// expression **bit for bit** — the area term keeps its original association
+/// (`per_mpx * pixels as f64 / 1_000_000.0`, not `per_mpx * (pixels as f64 / 1_000_000.0)`, which
+/// is a DIFFERENT f64 in general), and `x + 0.0 == x` exactly for every finite `x`. That identity
+/// is pinned bitwise over the real committed curves, not asserted against a default.
+///
+/// A PRESENT but unreadable `perMpxFrameGb` still fails closed. Only true absence is zero;
+/// a malformed value must not silently degrade a video curve into an image curve.
 ///
 /// SC-16514 recovered the q8/bf16 768² captures from SC-15205 activity 15272 and SC-15206 activity
 /// 15314 into `turboFit.evidenceRecords`. Every tier now carries 768² and 1024² phase cells, and every
@@ -505,13 +581,31 @@ impl KreaRuntimeEvidenceContext {
 /// decrease; the manifest names each such pair. `maxMeasuredPixels` remains 1024² because larger
 /// attention shapes have not been validated, so the curve is fitted within that bound rather than
 /// extrapolated beyond it.
-fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
+fn krea_phase_curve(phase: &JsonObject, geometry: CurveGeometry) -> Option<f64> {
     let fixed = phase.get("fixedGb").and_then(json_f64)?;
     let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
-    if !fixed.is_finite() || !per_mpx.is_finite() || fixed < 0.0 || per_mpx < 0.0 {
+    let per_mpx_frame = match phase.get("perMpxFrameGb") {
+        None => 0.0,
+        Some(value) => json_f64(value)?,
+    };
+    if !fixed.is_finite()
+        || !per_mpx.is_finite()
+        || !per_mpx_frame.is_finite()
+        || fixed < 0.0
+        || per_mpx < 0.0
+        || per_mpx_frame < 0.0
+    {
         return None;
     }
-    Some(fixed + per_mpx * pixels as f64 / 1_000_000.0)
+    // A zero-frame request is not a still image, it is a nonsense geometry. Fail closed rather
+    // than silently pricing it as the intercept.
+    if geometry.frames == 0 {
+        return None;
+    }
+    let area_term = per_mpx * geometry.pixels as f64 / 1_000_000.0;
+    let temporal_term =
+        per_mpx_frame * geometry.pixels as f64 / 1_000_000.0 * f64::from(geometry.frames);
+    Some(fixed + area_term + temporal_term)
 }
 
 /// The typed materialization shape the shipped Krea Turbo curves were measured under (sc-17097).
@@ -526,12 +620,42 @@ pub(crate) fn krea_turbo_load_shape(turbo_fit: &Value) -> Option<gen_core::LoadS
     }
 }
 
+/// The largest output VOXEL count (pixels x frames) a fit block's curves were measured across
+/// (sc-18812). Absent is read as `pixels`, i.e. one output frame — which is what every image-lane
+/// fit is, so omitting the key refuses exactly the multi-frame requests that lane never measured.
+///
+/// ## Why voxels and not a frame count
+///
+/// 1. Voxels are the regressor `perMpxFrameGb` multiplies, so this bounds the extrapolation of
+///    the term it governs rather than a loosely correlated proxy.
+/// 2. **The tiling discontinuity is itself a constant-voxel surface.** At the pinned revision
+///    `VaeTiling::writable_frame_cap(out_h, out_w)` is `MAX_WRITABLE_ELEMS / (full_res_channels *
+///    out_h * out_w)` with `MAX_WRITABLE_ELEMS = i32::MAX`, so a single pass is legal exactly
+///    while `out_voxels <= i32::MAX / full_res_channels` — 268,435,455 for LTX's 8 full-res
+///    channels. That one surface is the 297-output-frame cap quoted at 0.90 MP and 682 at
+///    0.39 MP. A scalar frame bound would admit a small-area request and refuse an
+///    identically-priced large-area one, which is the wrong shape of guard.
+///
+/// The bound is not politeness about unvalidated territory — past it the affine form is KNOWN
+/// wrong. Single-pass decode climbs to ~94.3 GB at the cap and tiled decode drops it to ~63.8 GB
+/// on this 128 GiB host; no affine curve represents that step, so the fit is refused across it
+/// rather than extrapolated through it. Note the cap is only ONE-SIDED machine-independent: no
+/// host exceeds it single-pass, but a smaller host tiles EARLIER via the memory bound, and tiled
+/// cost RISES with host memory because the selector keeps the largest tile that fits.
+fn max_measured_voxels(fit: &Value, pixels: u64) -> Option<u64> {
+    match fit.get("maxMeasuredVoxels") {
+        None => Some(pixels),
+        Some(value) => value.as_u64().filter(|max| *max >= 1),
+    }
+}
+
 fn krea_rung_phase_peaks(
     manifest_entry: &JsonObject,
     tier: &str,
     strategy: gen_core::MemoryStrategy,
     width: u32,
     height: u32,
+    frames: u32,
 ) -> Option<KreaTurboPhasePeaks> {
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
@@ -539,15 +663,23 @@ fn krea_rung_phase_peaks(
     if pixels > max_measured_pixels {
         return None;
     }
+    // `frames == 0` needs no check here: `pixels * 0` clears any bound, and `krea_phase_curve`
+    // refuses the geometry outright a few lines later. A second check would be a guard no test
+    // could kill.
+    let voxels = pixels.checked_mul(u64::from(frames))?;
+    if voxels > max_measured_voxels(turbo_fit, pixels)? {
+        return None;
+    }
     let rung = turbo_fit
         .get("phaseCurvesByTier")?
         .get(tier)?
         .get(krea_turbo_manifest_key(strategy))?
         .as_object()?;
+    let geometry = CurveGeometry { pixels, frames };
     let phase = |name: &str| {
         rung.get(name)
             .and_then(Value::as_object)
-            .and_then(|curve| krea_phase_curve(curve, pixels))
+            .and_then(|curve| krea_phase_curve(curve, geometry))
     };
     Some(KreaTurboPhasePeaks {
         text_gb: phase("text")?,
@@ -572,17 +704,12 @@ fn krea_record_phase_peaks(record: &Value, manifest_rung: &str) -> Option<KreaTu
 /// Ties resolve to the LATER phase deterministically, mirroring the MLX gate's `binding_phase`
 /// (sc-18096); the comparison below only ever contrasts two triples produced by the same per-phase
 /// curves, so tie handling cannot manufacture a flip on its own.
+///
+/// sc-18812 moved the rule onto [`KreaTurboPhasePeaks::binding_phase`] so that the same question
+/// can be asked of a CURVE-predicted triple at an arbitrary geometry, not only of a recorded one.
+/// This wrapper keeps the index vocabulary the sc-18097 comparison seam below is written in.
 fn krea_binding_phase(peaks: KreaTurboPhasePeaks) -> u8 {
-    let mut phase = 0_u8;
-    let mut peak = peaks.text_gb;
-    if peaks.denoise_gb >= peak {
-        phase = 1;
-        peak = peaks.denoise_gb;
-    }
-    if peaks.decode_gb >= peak {
-        phase = 2;
-    }
-    phase
+    peaks.binding_phase().index()
 }
 
 fn krea_rung_parameters(
@@ -623,6 +750,13 @@ fn krea_rung_parameters(
             .then_some(gen_core::TransformerComponent::Dit),
     })
 }
+
+/// Krea Turbo is a text-to-IMAGE route: every request and every measured record on it produces one
+/// output frame. Named rather than repeated as a literal `1` so the curve evaluation and the
+/// `MemoryGeometry` it is graded against cannot drift apart — sc-18810 found four of six MLX
+/// capture arms hardcoding `frames: 1` into their admission context while reading only width and
+/// height, which is exactly how a geometry gets attested that was never asked for.
+const KREA_LANE_FRAMES: u32 = 1;
 
 /// Select the least-cost measured Krea Turbo fit rung for this tier, geometry, and live budget.
 /// `allow_streamed_blocks` is false when the job carries load-time adapters: the provider preserves
@@ -668,7 +802,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         width,
         height,
         batch: 1,
-        frames: 1,
+        frames: KREA_LANE_FRAMES,
         reference_count: 0,
     };
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
@@ -1039,7 +1173,14 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     let mut selections = vec![resident_selection];
     let mut measured = Vec::new();
     for strategy in optimized_strategies {
-        let phases = krea_rung_phase_peaks(manifest_entry, tier, strategy, width, height)?;
+        let phases = krea_rung_phase_peaks(
+            manifest_entry,
+            tier,
+            strategy,
+            width,
+            height,
+            geometry.frames,
+        )?;
         let phase_peak_gb = phases.peak_gb();
         let needed_gb = phase_peak_gb + HEADROOM_GB;
         let parameters = krea_rung_parameters(turbo_fit, strategy)?;
@@ -1093,17 +1234,22 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     for (strategy, phases, _, selection) in &measured {
         let manifest_rung = krea_turbo_manifest_key(*strategy);
         let record_is_eligible = |record: &Value, record_width: u32, record_height: u32| {
-            let Some(anchor_phases) =
-                krea_rung_phase_peaks(manifest_entry, tier, *strategy, record_width, record_height)
-            else {
-                return false;
-            };
             let anchor_geometry = MemoryGeometry {
                 width: record_width,
                 height: record_height,
                 batch: 1,
-                frames: 1,
+                frames: KREA_LANE_FRAMES,
                 reference_count: 0,
+            };
+            let Some(anchor_phases) = krea_rung_phase_peaks(
+                manifest_entry,
+                tier,
+                *strategy,
+                record_width,
+                record_height,
+                anchor_geometry.frames,
+            ) else {
+                return false;
             };
             // The FULL measured-eligibility predicate, not just `Verified` conformance: it
             // additionally requires the record's measured composition to agree with the loaded
@@ -2133,6 +2279,504 @@ mod tests {
         manifest
     }
 
+    /// Every `(tier, rung, phase)` curve object actually committed to the builtin manifest, paired
+    /// with a label naming its coordinate. Read from the SHIPPED file, so a curve added or removed
+    /// downstream is covered without anybody remembering to extend the pin.
+    fn committed_phase_curves() -> Vec<(String, JsonObject)> {
+        let manifest = builtin_krea_turbo_manifest();
+        let tiers = manifest["candle"]["turboFit"]["phaseCurvesByTier"]
+            .as_object()
+            .expect("phaseCurvesByTier")
+            .clone();
+        let mut curves = Vec::new();
+        for (tier, rungs) in tiers {
+            for (rung, phases) in rungs.as_object().expect("rung map") {
+                for (phase, curve) in phases.as_object().expect("phase map") {
+                    curves.push((
+                        format!("{tier}.{rung}.{phase}"),
+                        curve.as_object().expect("curve object").clone(),
+                    ));
+                }
+            }
+        }
+        curves.sort_by(|left, right| left.0.cmp(&right.0));
+        curves
+    }
+
+    /// sc-18812 MIGRATION PIN. The temporal term is additive, so every curve that omits
+    /// `perMpxFrameGb` must evaluate to the SAME f64 it did before the term existed — not "within
+    /// a tolerance", the same bit pattern.
+    ///
+    /// This is graded over the real committed coefficients rather than a fixture, and the expected
+    /// value is spelled here as the pre-sc-18812 expression **with its original association**.
+    /// That association is the whole point: `per_mpx * pixels as f64 / 1_000_000.0` and
+    /// `per_mpx * (pixels as f64 / 1_000_000.0)` are different f64s in general, so a rewrite that
+    /// factored out a `mpx` local while "obviously" preserving the formula would silently move
+    /// every shipped image prediction. Asserting a DEFAULT here would prove nothing; asserting the
+    /// arithmetic over real values is what makes it load-bearing.
+    #[test]
+    fn committed_image_curves_evaluate_bit_identically_to_the_two_coefficient_form() {
+        let curves = committed_phase_curves();
+        assert_eq!(
+            curves.len(),
+            36,
+            "3 tiers x 4 rungs x 3 phases of shipped curves must all be graded; \
+             a changed population means this pin is covering something else"
+        );
+        for (label, curve) in &curves {
+            assert!(
+                !curve.contains_key("perMpxFrameGb"),
+                "{label}: the image lane must carry no temporal coefficient — \
+                 the migration claim is that every shipped curve is still two-coefficient"
+            );
+            let fixed = curve["fixedGb"].as_f64().expect("fixedGb");
+            let per_mpx = curve["perMpxGb"].as_f64().expect("perMpxGb");
+            for pixels in [512 * 512_u64, 768 * 768, 1024 * 1024, 1_000_001, 3] {
+                let expected = fixed + per_mpx * pixels as f64 / 1_000_000.0;
+                let actual = krea_phase_curve(curve, CurveGeometry::still(pixels))
+                    .expect("a shipped curve evaluates");
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{label} at {pixels}px: {actual} is not bit-identical to the \
+                     pre-sc-18812 value {expected}"
+                );
+                // ...and the temporal axis must be inert on a curve that declares no temporal
+                // coefficient, at every frame count, not merely at 1.
+                for frames in [1_u32, 2, 121, 297, 450] {
+                    let temporal = krea_phase_curve(curve, CurveGeometry { pixels, frames })
+                        .expect("a shipped curve evaluates at any frame count");
+                    assert_eq!(
+                        temporal.to_bits(),
+                        expected.to_bits(),
+                        "{label} at {pixels}px x {frames}f: an absent perMpxFrameGb moved the value"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The cross term is real arithmetic, not a decorative key: a curve that declares it must
+    /// price frames. Synthetic, because no committed curve carries the coefficient yet — a
+    /// discriminating case has to be constructed rather than borrowed.
+    #[test]
+    fn a_declared_temporal_coefficient_prices_frames() {
+        let curve = obj(json!({
+            "fixedGb": 2.5151564578656265,
+            "perMpxGb": 0.12442967585020881,
+            "perMpxFrameGb": 0.2998482076533136
+        }));
+        let pixels = 1280 * 704_u64;
+        let at = |frames: u32| {
+            krea_phase_curve(&curve, CurveGeometry { pixels, frames }).expect("curve evaluates")
+        };
+        let expected = |frames: u32| {
+            2.5151564578656265
+                + 0.12442967585020881 * pixels as f64 / 1_000_000.0
+                + 0.2998482076533136 * pixels as f64 / 1_000_000.0 * f64::from(frames)
+        };
+        for frames in [1_u32, 121, 177, 241] {
+            assert_eq!(
+                at(frames).to_bits(),
+                expected(frames).to_bits(),
+                "{frames}f"
+            );
+        }
+        assert!(
+            at(241) > at(121) + 30.0,
+            "241 frames must cost materially more than 121: {} vs {}",
+            at(241),
+            at(121)
+        );
+    }
+
+    /// A PRESENT but unreadable temporal coefficient fails the whole curve closed. Absence is the
+    /// only thing that means zero: silently degrading a malformed video curve into a valid image
+    /// curve would hand admission a number nobody measured.
+    #[test]
+    fn a_malformed_temporal_coefficient_fails_the_curve_closed() {
+        let with =
+            |value: Value| obj(json!({ "fixedGb": 1.0, "perMpxGb": 2.0, "perMpxFrameGb": value }));
+        for bad in [
+            json!(-0.5),
+            json!("not a number"),
+            json!(null),
+            json!([1.0]),
+        ] {
+            assert_eq!(
+                krea_phase_curve(&with(bad.clone()), CurveGeometry::still(1_000_000)),
+                None,
+                "a curve carrying perMpxFrameGb {bad} must not evaluate"
+            );
+        }
+        // The control: the SAME curve shape with a readable coefficient does evaluate, so the
+        // rejections above are attributable to the value and not to the key's presence.
+        assert_eq!(
+            krea_phase_curve(&with(json!(0.25)), CurveGeometry::still(1_000_000)),
+            Some(1.0 + 2.0 + 0.25)
+        );
+    }
+
+    /// A zero-frame geometry is nonsense, not a still. Pricing it as the bare intercept would
+    /// under-quote every phase.
+    #[test]
+    fn a_zero_frame_geometry_is_refused_rather_than_priced_as_the_intercept() {
+        let curve = obj(json!({ "fixedGb": 4.0, "perMpxGb": 1.0 }));
+        assert_eq!(
+            krea_phase_curve(
+                &curve,
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 0
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            krea_phase_curve(
+                &curve,
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 1
+                }
+            ),
+            Some(5.0)
+        );
+    }
+
+    /// sc-18812: the temporal extrapolation bound. An image fit declares no `maxMeasuredVoxels`,
+    /// which is read as one output frame, so it refuses multi-frame requests instead of
+    /// extrapolating a curve fitted at a single temporal point.
+    #[test]
+    fn an_image_fit_refuses_multi_frame_geometry_it_never_measured() {
+        let manifest = builtin_krea_turbo_manifest();
+        assert!(
+            manifest["candle"]["turboFit"]
+                .get("maxMeasuredVoxels")
+                .is_none(),
+            "the shipped image fit must declare no temporal bound — this test's premise"
+        );
+        let peaks = |frames: u32| {
+            krea_rung_phase_peaks(
+                &manifest,
+                "q8",
+                MemoryStrategy::StagedResidency,
+                1024,
+                1024,
+                frames,
+            )
+        };
+        assert!(peaks(1).is_some(), "the measured still geometry admits");
+        for frames in [0_u32, 2, 121] {
+            assert_eq!(
+                peaks(frames),
+                None,
+                "{frames} output frames were never measured on the image lane"
+            );
+        }
+    }
+
+    /// A declared voxel bound admits inside itself and refuses outside, and it is a VOXEL bound:
+    /// the same frame count passes at a small area and fails at a large one.
+    ///
+    /// That shape is not a preference. `VaeTiling::writable_frame_cap` is
+    /// `i32::MAX / (full_res_channels * out_h * out_w)`, so the tiling discontinuity the affine
+    /// curve cannot represent is a constant-VOXEL surface; a scalar frame bound would sit at a
+    /// different angle to it and admit geometry on the far side.
+    #[test]
+    fn the_temporal_bound_is_a_voxel_surface_not_a_frame_count() {
+        let mut manifest = builtin_krea_turbo_manifest();
+        // 1024x1024 x 100 frames of measured coverage, declared on the shipped image fit.
+        manifest["candle"]["turboFit"]["maxMeasuredVoxels"] = json!(1024 * 1024 * 100_u64);
+        let peaks = |width: u32, height: u32, frames: u32| {
+            krea_rung_phase_peaks(
+                &manifest,
+                "q8",
+                MemoryStrategy::StagedResidency,
+                width,
+                height,
+                frames,
+            )
+        };
+        assert!(
+            peaks(1024, 1024, 100).is_some(),
+            "exactly at the bound admits"
+        );
+        assert_eq!(
+            peaks(1024, 1024, 101),
+            None,
+            "one voxel past the bound refuses"
+        );
+        // The discriminating pair: ONE frame count, two areas, opposite verdicts. A frame bound
+        // could not tell these apart.
+        assert!(
+            peaks(512, 512, 400).is_some(),
+            "400 frames at a quarter of the area is inside the same voxel bound"
+        );
+        assert_eq!(
+            peaks(1024, 1024, 400),
+            None,
+            "400 frames at full area is outside it"
+        );
+    }
+
+    /// The committed sc-18810 fit report: 13 real q8 LTX records and the fitted `cross`
+    /// coefficients, read from the shipped artifact rather than transcribed.
+    fn ltx_temporal_fit() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../docs/generated/ltx-temporal-form-fit-sc-18810.json"
+        ))
+        .expect("the sc-18810 fit report parses")
+    }
+
+    /// The `cross` coefficients for one phase, in MANIFEST WIRE SHAPE — exactly the object a
+    /// `phaseVramCurve` is, with no adaptation.
+    ///
+    /// Note that `fits[phase].q8.chosen` is the per-series RMSE winner and is NOT uniformly
+    /// `cross` (text ranks `area_only` first, denoise ranks `latent_tokens` first). The schema
+    /// form adopted by this story is `cross` regardless, and
+    /// [`the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve`] pins why.
+    fn ltx_cross_curve(fit: &Value, phase: &str) -> JsonObject {
+        let coefficients = fit["fits"][phase]["q8"]["candidates"]["cross"]["coefficients"]
+            .as_object()
+            .expect("cross coefficients")
+            .clone();
+        let declared: Vec<&str> = coefficients.keys().map(String::as_str).collect();
+        assert_eq!(
+            declared,
+            ["fixedGb", "perMpxGb", "perMpxFrameGb"],
+            "{phase}: the fitted coefficient set must BE a phaseVramCurve, not merely resemble one"
+        );
+        coefficients
+    }
+
+    /// WHY `cross` and not one of the four rivals, graded from the committed fit report rather
+    /// than from prose. Two independent filters, and only `cross` survives both.
+    ///
+    /// **Filter 1 — the migration must be additive.** `latent_tokens` and `output_voxels` REPLACE
+    /// `perMpxGb` with a different regressor. Adopting either would have rewritten all 36 shipped
+    /// image curves, which is a breaking migration, not an added optional key. Only `additive`
+    /// and `cross` extend `{fixedGb, perMpxGb}`.
+    ///
+    /// **Filter 2 — accuracy where the peak actually lives.** Between those two, `cross` beats
+    /// `additive` by more than 15x on denoise and more than 300x on decode. `additive` is
+    /// nominally better on TEXT, by 1.29x on a phase where both sit inside 0.45 GiB and the
+    /// temporal response is smallest — that is the one place the tidier candidate wins, and it is
+    /// not where admission is decided.
+    #[test]
+    fn the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve() {
+        let fit = ltx_temporal_fit();
+        let shipped = ["fixedGb", "perMpxGb"];
+        let mut extends = Vec::new();
+        let candidates = fit["fits"]["decode"]["q8"]["candidates"]
+            .as_object()
+            .expect("candidate set");
+        assert_eq!(candidates.len(), 5, "all five fitted forms must be graded");
+        for (name, candidate) in candidates {
+            let keys: Vec<&str> = candidate["coefficients"]
+                .as_object()
+                .expect("coefficients")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            // STRICTLY extends: it keeps both shipped coefficients AND adds a temporal one.
+            // `area_only` is the shipped set itself and adds no temporal axis, so it is not a
+            // candidate for the change being made here.
+            if shipped.iter().all(|key| keys.contains(key)) && keys.len() > shipped.len() {
+                extends.push(name.as_str());
+            }
+        }
+        extends.sort_unstable();
+        assert_eq!(
+            extends,
+            ["additive", "cross"],
+            "only these forms can be an ADDITIVE schema change; the rest replace `perMpxGb`"
+        );
+        let held = |phase: &str, form: &str| {
+            fit["fits"][phase]["q8"]["candidates"][form]["heldOut"]["maxAbsGib"]
+                .as_f64()
+                .expect("held-out residual")
+        };
+        for (phase, factor) in [("denoise", 15.0), ("decode", 300.0)] {
+            let (cross, additive) = (held(phase, "cross"), held(phase, "additive"));
+            assert!(
+                cross * factor < additive,
+                "{phase}: cross {cross:.4} must beat additive {additive:.4} by more than {factor}x"
+            );
+        }
+        // Stated rather than hidden: the one phase where the rejected form scores better.
+        assert!(
+            held("text", "additive") < held("text", "cross"),
+            "text is where `additive` wins; if that stops being true this comment is stale"
+        );
+        assert!(
+            held("text", "cross") < 0.45,
+            "...and it only matters if cross is still small there in absolute terms"
+        );
+        // Against the SHIPPED area-only form, which is what the temporal term has to justify
+        // replacing, `cross` is better by orders of magnitude on both geometry-sensitive phases.
+        for phase in ["denoise", "decode"] {
+            assert!(
+                held(phase, "cross") * 50.0 < held(phase, "area_only"),
+                "{phase}: the temporal term must earn its place against the two-coefficient form"
+            );
+        }
+    }
+
+    /// sc-18812 success criterion 3: LTX's fitted curve round-trips
+    /// manifest shape -> production reader -> evaluation -> the sweep's real measured peaks,
+    /// inside the margin sc-18810 itself states.
+    ///
+    /// Nothing here is transcribed: the coefficients, the geometries, the observed peaks and the
+    /// margin all come out of the committed fit report, and the arithmetic is the SHIPPED
+    /// `krea_phase_curve` rather than a re-implementation. If the reader stopped honouring
+    /// `perMpxFrameGb` this fails by ~28 GiB on decode, not by a rounding digit.
+    ///
+    /// The margin is the fit's own worst reported absolute residual across its fit and held-out
+    /// splits. It is deliberately per phase: the whole finding of sc-18810 is that no single
+    /// aggregate margin exists, because the aggregate is a `max` over three curves and misses by
+    /// >= 10.26 GiB under every candidate form.
+    #[test]
+    fn the_ltx_fitted_curve_round_trips_through_the_shipped_reader() {
+        let fit = ltx_temporal_fit();
+        let observations = fit["observations"].as_array().expect("observations");
+        assert_eq!(
+            observations.len(),
+            13,
+            "the sweep's full record set must be graded, not a subset"
+        );
+        let mut graded = 0_usize;
+        for phase in ["text", "denoise", "decode"] {
+            let curve = ltx_cross_curve(&fit, phase);
+            let candidate = &fit["fits"][phase]["q8"]["candidates"]["cross"];
+            let margin = candidate["fit"]["maxAbsGib"]
+                .as_f64()
+                .expect("fit residual")
+                .max(
+                    candidate["heldOut"]["maxAbsGib"]
+                        .as_f64()
+                        .expect("held-out residual"),
+                );
+            assert!(
+                margin > 0.0 && margin < 0.5,
+                "{phase}: a stated margin of {margin} GiB is not a margin this test can grade against"
+            );
+            for observation in observations {
+                let geometry = &observation["geometry"];
+                let width = geometry["width"].as_u64().expect("width");
+                let height = geometry["height"].as_u64().expect("height");
+                let frames = u32::try_from(geometry["frames"].as_u64().expect("frames"))
+                    .expect("frame count fits u32");
+                // Every measured point is single-pass decode, which is what makes an affine
+                // temporal form applicable at all. A tiled record would belong to a different
+                // regime and must not be graded against this curve.
+                assert_eq!(
+                    observation["decodeTilingEngaged"].as_bool(),
+                    Some(false),
+                    "the fit's applicability rests on every point being single-pass"
+                );
+                let predicted = krea_phase_curve(
+                    &curve,
+                    CurveGeometry {
+                        pixels: width * height,
+                        frames,
+                    },
+                )
+                .expect("the fitted LTX curve evaluates through the shipped reader");
+                let observed = observation["activeGib"][phase]
+                    .as_f64()
+                    .expect("observed peak");
+                let residual = (predicted - observed).abs();
+                assert!(
+                    residual <= margin,
+                    "{phase} at {width}x{height}x{frames}f: predicted {predicted:.6} vs \
+                     measured {observed:.6} is {residual:.6} GiB, past the stated {margin:.6}"
+                );
+                graded += 1;
+            }
+        }
+        assert_eq!(
+            graded, 39,
+            "3 phases x 13 records must all have been graded"
+        );
+    }
+
+    /// sc-18829 handoff: "which phase binds at this geometry?" must be answerable from the CURVES,
+    /// at a geometry with no record — and the answer must actually vary, or the question is
+    /// decorative.
+    ///
+    /// Both geometries below are inside LTX's own declared envelope and inside the measured set,
+    /// and the binding phase differs between them: text carries the peak at 11,904 latent tokens
+    /// and decode carries it at 14,080. A per-model constant binding phase would be wrong for one
+    /// of these two.
+    #[test]
+    fn the_binding_phase_flips_within_one_models_envelope() {
+        let fit = ltx_temporal_fit();
+        let curves: Vec<(&str, JsonObject)> = ["text", "denoise", "decode"]
+            .into_iter()
+            .map(|phase| (phase, ltx_cross_curve(&fit, phase)))
+            .collect();
+        let peaks_at = |width: u64, height: u64, frames: u32| {
+            let geometry = CurveGeometry {
+                pixels: width * height,
+                frames,
+            };
+            let value = |name: &str| {
+                krea_phase_curve(
+                    &curves
+                        .iter()
+                        .find(|(phase, _)| *phase == name)
+                        .expect("phase")
+                        .1,
+                    geometry,
+                )
+                .expect("the fitted curve evaluates")
+            };
+            KreaTurboPhasePeaks {
+                text_gb: value("text"),
+                denoise_gb: value("denoise"),
+                decode_gb: value("decode"),
+            }
+        };
+        // 768x512 x 241 output frames = 11,904 latent tokens.
+        assert_eq!(peaks_at(768, 512, 241).binding_phase(), BindingPhase::Text);
+        // 1280x704 x 121 output frames = 14,080 latent tokens.
+        assert_eq!(
+            peaks_at(1280, 704, 121).binding_phase(),
+            BindingPhase::Decode
+        );
+        // ...and the flip is a property of the curves, not of the tie rule: the two triples are
+        // separated well beyond the sweep's worst per-phase residual.
+        let low = peaks_at(768, 512, 241);
+        let high = peaks_at(1280, 704, 121);
+        assert!(low.text_gb - low.decode_gb > 2.0, "{low:?}");
+        assert!(high.decode_gb - high.text_gb > 1.5, "{high:?}");
+    }
+
+    /// The tie rule the sc-18097 comparison seam depends on, stated where a reader can find it.
+    /// Ties resolve to the LATER phase; the index vocabulary is the one that seam is written in.
+    #[test]
+    fn the_binding_phase_resolves_ties_to_the_later_phase() {
+        let peaks = |text: f64, denoise: f64, decode: f64| KreaTurboPhasePeaks {
+            text_gb: text,
+            denoise_gb: denoise,
+            decode_gb: decode,
+        };
+        assert_eq!(peaks(9.0, 1.0, 1.0).binding_phase(), BindingPhase::Text);
+        assert_eq!(peaks(1.0, 9.0, 1.0).binding_phase(), BindingPhase::Denoise);
+        assert_eq!(peaks(1.0, 1.0, 9.0).binding_phase(), BindingPhase::Decode);
+        assert_eq!(peaks(9.0, 9.0, 1.0).binding_phase(), BindingPhase::Denoise);
+        assert_eq!(peaks(9.0, 9.0, 9.0).binding_phase(), BindingPhase::Decode);
+        assert_eq!(
+            [
+                BindingPhase::Text.index(),
+                BindingPhase::Denoise.index(),
+                BindingPhase::Decode.index()
+            ],
+            [0, 1, 2]
+        );
+    }
+
     /// sc-17097: NO shipped route may carry a `calibrationAbi` stamp the pinned gen-core has moved
     /// past, whatever its manifest shape.
     ///
@@ -3070,7 +3714,7 @@ mod tests {
             ("q8", MemoryStrategy::BoundedAttention),
             ("bf16", MemoryStrategy::BoundedAttention),
         ] {
-            let phases = krea_rung_phase_peaks(&manifest, tier, probe_rung, 1024, 1024)
+            let phases = krea_rung_phase_peaks(&manifest, tier, probe_rung, 1024, 1024, 1)
                 .expect("probed rung phase peaks");
             let required = phases.peak_gb() + HEADROOM_GB + 0.01;
             match krea_turbo_fit(
@@ -3332,12 +3976,24 @@ mod tests {
             })
         ));
 
-        let three_stage =
-            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::StagedResidency, 1024, 1024)
-                .expect("Q8 three-stage evidence");
-        let tiled =
-            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::BoundedDecode, 1024, 1024)
-                .expect("Q8 tiled-VAE evidence");
+        let three_stage = krea_rung_phase_peaks(
+            &manifest,
+            "q8",
+            MemoryStrategy::StagedResidency,
+            1024,
+            1024,
+            1,
+        )
+        .expect("Q8 three-stage evidence");
+        let tiled = krea_rung_phase_peaks(
+            &manifest,
+            "q8",
+            MemoryStrategy::BoundedDecode,
+            1024,
+            1024,
+            1,
+        )
+        .expect("Q8 tiled-VAE evidence");
         // sc-17097 INVERTS this assertion, and the inversion is the finding. Under the ABI-1
         // capture the Q8 decode peak was identical with and without tiling (16.514 -> 16.514), so
         // tiled VAE was a measured no-op that had to be prevented from displacing the cheaper
@@ -3425,7 +4081,7 @@ mod tests {
             ),
         ];
         for (rung, edge, measured) in samples {
-            let predicted = krea_rung_phase_peaks(&manifest, "q8", rung, edge, edge)
+            let predicted = krea_rung_phase_peaks(&manifest, "q8", rung, edge, edge, 1)
                 .expect("every published Q8 matrix cell has a curve");
             for (phase, predicted_gb, measured_gb) in [
                 ("text", predicted.text_gb, measured[0]),
@@ -3558,9 +4214,9 @@ mod tests {
             };
             let measured_768 = record(768);
             let measured_1024 = record(1024);
-            let predicted_768 = krea_rung_phase_peaks(&manifest, tier, rung, 768, 768)
+            let predicted_768 = krea_rung_phase_peaks(&manifest, tier, rung, 768, 768, 1)
                 .expect("768² fitted phase vector");
-            let predicted_1024 = krea_rung_phase_peaks(&manifest, tier, rung, 1024, 1024)
+            let predicted_1024 = krea_rung_phase_peaks(&manifest, tier, rung, 1024, 1024, 1)
                 .expect("1024² fitted phase vector");
             for (phase, lower_prediction, upper_prediction, lower_measured, upper_measured) in [
                 (
@@ -3663,11 +4319,18 @@ mod tests {
             MemoryStrategy::StagedResidency,
             1024,
             1024,
+            1,
         )
         .expect("BF16 three-stage evidence");
-        let tiled =
-            krea_rung_phase_peaks(&manifest, "bf16", MemoryStrategy::BoundedDecode, 1024, 1024)
-                .expect("BF16 tiled-VAE evidence");
+        let tiled = krea_rung_phase_peaks(
+            &manifest,
+            "bf16",
+            MemoryStrategy::BoundedDecode,
+            1024,
+            1024,
+            1,
+        )
+        .expect("BF16 tiled-VAE evidence");
         // sc-17097 inverts this for the same reason as the Q8 sibling: the ABI-1 BF16 decode peak
         // was flat across tiling (26.446 -> 26.446), so tiled VAE measured as a no-op. Re-measured
         // it is a real saving - three-stage 36.73 GiB against tiled VAE 29.86.
@@ -3742,7 +4405,7 @@ mod tests {
             ),
         ];
         for (rung, edge, measured) in samples {
-            let predicted = krea_rung_phase_peaks(&manifest, "bf16", rung, edge, edge)
+            let predicted = krea_rung_phase_peaks(&manifest, "bf16", rung, edge, edge, 1)
                 .expect("every published BF16 matrix cell has a curve");
             for (phase, predicted_gb, measured_gb) in [
                 ("text", predicted.text_gb, measured[0]),
