@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:febdf09628648817082d6d7a2b33c85292bea03db994df363ef521a5e0aeb66c",
+    "sceneWorksRevision": "source-tree:b70b32e91b107de2ad88773a9e81a3250a207f1e760815b6c1a33d492bee6fbc",
     "inferenceRevision": "b965641e388f4db646e4c60ab3f75219737e2cc8",
     "sources": {
       "manifest": {
@@ -58,7 +58,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "7b89df90e64268ce95738e11e4b118d1f6ed0db8a62009a757f50edd9b264c81"
+        "sha256": "eecb8b61b6e16a5021f98d30996877a3fe245983f8cdbf5834b14e72eb6d9ac1"
       },
       "cargo": {
         "path": "Cargo.toml",

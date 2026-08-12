@@ -136,8 +136,18 @@ export const FAMILY_STORIES = {
   15528: { mlx: 15528, candle: 17414 },
 };
 
-/** The stable family group key for a catalog id, which is the family's MLX story id. */
+/**
+ * The stable family group key for a catalog id, which is the family's MLX story id.
+ *
+ * The 155xx keys are epic SC-15448's per-family MLX stories. The video families epic 18803 admits
+ * have no such story — the image ladder never covered them — so their key is the story that first
+ * established the family in the apparatus, which is its rung-4 survey entry (sc-18813 for
+ * `ltx-video`). `FAMILY_STORIES` deliberately does NOT carry a row for it yet: that map answers
+ * "which story owns this cell", and until sc-18815 admits video to the model universe the family
+ * generates no cells to own.
+ */
 export function familyGroup(modelId) {
+  if (modelId.startsWith("ltx_2_3")) return 18813;
   if (modelId.startsWith("mage_flow")) return 15509;
   if (modelId.startsWith("z_image")) return 15510;
   if (modelId.startsWith("qwen_image")) return 15511;
@@ -1177,8 +1187,21 @@ function rung4Implementation(verdict, modelId, tier, mode, overlay) {
  * generated cells, so a verdict for a family or backend the catalog no longer advertises simply
  * never appears anywhere — it would sit in the file being maintained, reviewed and trusted while
  * having no effect at all.
+ *
+ * `catalogFamilyBackends` (sc-18813) is the third state that direction needs, and the survey is
+ * ORDERED to produce it. The universe this generator builds is still `type === "image"` only until
+ * sc-18815 lands, while admitting a modality to that universe requires its survey verdicts to
+ * already exist — `rung4SurveyCell` destructures `survey.get(key)` for every rung-4 cell, and the
+ * catalog -> survey direction above throws first. Landing either story alone therefore fails, so a
+ * verdict may run AHEAD of admission. It may not run ahead of the ROUTING CATALOG: the tolerated
+ * set is the family/backend pairs the routing catalog actually routes (`routedLanes` over
+ * `MODEL_CAPS`/`VIDEO_MODEL_CAPS`), not an unchecked exemption. A typo'd group, a backend the
+ * catalog does not route, or a verdict for a family nothing in the manifest maps to still throws.
+ *
+ * It also self-clears: once a modality is admitted, its pairs appear in `advertised` and the strict
+ * arm covers them again. Callers that pass nothing keep the original two-state behaviour.
  */
-export function assertRung4SurveyCoversEveryFamily(survey, models) {
+export function assertRung4SurveyCoversEveryFamily(survey, models, { catalogFamilyBackends } = {}) {
   const advertised = new Set(
     models.flatMap((model) => model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`)),
   );
@@ -1191,13 +1214,36 @@ export function assertRung4SurveyCoversEveryFamily(survey, models) {
     }
   }
   for (const key of survey.keys()) {
-    if (!advertised.has(key)) {
+    if (!advertised.has(key) && !catalogFamilyBackends?.has(key)) {
       const [group, backend] = key.split(":");
       throw new Error(
         `rung-4 survey: family SC-${group} carries a ${backend} verdict, but the catalog advertises no ${backend} entry in that family — the verdict reaches no cell (SC-15969)`,
       );
     }
   }
+}
+
+/**
+ * Every `familyGroup:backend` pair the ROUTING CATALOG routes, across every modality.
+ *
+ * This is deliberately wider than the matrix's model universe and deliberately narrower than "any
+ * string": it is what `assertRung4SurveyCoversEveryFamily` accepts from a survey verdict that has
+ * been written before its modality is admitted. `familyGroup` throws on an id it does not know, and
+ * that throw is the point — a family with no group mapping is not in the catalog's vocabulary and
+ * its verdict stays rejected.
+ */
+export function catalogFamilyBackends(manifestModels, routedBackends) {
+  const pairs = new Set();
+  for (const model of manifestModels) {
+    let group;
+    try {
+      group = familyGroup(model.id);
+    } catch {
+      continue;
+    }
+    for (const backend of routedBackends.get(model.id) ?? []) pairs.add(`${group}:${backend}`);
+  }
+  return pairs;
 }
 
 /**
@@ -1623,6 +1669,7 @@ function validateMatrix(
   rung4Survey,
   cellInventoryExpectations,
   calibrationPlan,
+  catalogFamilyBackendPairs,
 ) {
   const ids = matrix.models.map((model) => model.id);
   if (ids.length !== EXPECTED_IMAGE_COUNT) {
@@ -1661,7 +1708,9 @@ function validateMatrix(
   assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells);
   assertTwinCoverage(matrix.models);
   assertCellOwnershipIsBackendScoped(matrix.cells);
-  assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models);
+  assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models, {
+    catalogFamilyBackends: catalogFamilyBackendPairs,
+  });
   for (const model of matrix.models) {
     for (const map of ["owningFamilyStories", "owningModelStories", "axes"]) {
       const owned = Object.keys(model[map]).sort();
@@ -2751,6 +2800,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     rung4Survey,
     cellInventoryExpectations,
     calibrationPlan,
+    catalogFamilyBackends(manifest.models, routedBackends),
   );
 
   const planned = plannedCellIds(calibrationPlan, cells);
