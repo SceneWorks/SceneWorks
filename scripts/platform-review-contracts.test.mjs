@@ -284,6 +284,48 @@ test("all three manifest scripts import the shared JSONC parser", async () => {
   }
 });
 
+// sc-18854. The download-pattern gate is split into a networked RECORDER (`--write`, writes
+// config/download-pattern-evidence.json) and a hermetic GATE (`--check`, grades the committed
+// listings offline). `npm run check` runs inside check.yml's `parity-scaffold`, which feeds the
+// REQUIRED `parity` aggregator — so wiring the live/recording mode into any workflow would put
+// huggingface.co on a required context, which is exactly what the split exists to prevent. Two
+// GitHub-runner TLS flakes on outbound downloads were observed the day this landed.
+//
+// The negative assertion is the load-bearing half: nothing stops a future change from
+// "simplifying" the offline gate back into the live one.
+test("the download-pattern gate runs offline in CI and its networked modes stay out of every workflow", async () => {
+  const pkg = JSON.parse(await source("package.json"));
+  assert.match(pkg.scripts.check, /check-download-patterns\.mjs --self-test/);
+  assert.match(pkg.scripts.check, /check-download-patterns\.mjs --check/);
+  // The gate is only as good as its evidence, so the recorder must stay reachable by name.
+  assert.match(pkg.scripts["record:download-patterns"], /check-download-patterns\.mjs --write/);
+
+  const dir = new URL("../.github/workflows/", import.meta.url);
+  const workflows = (await readdir(dir)).filter((name) => /\.ya?ml$/.test(name));
+  assert.ok(workflows.length >= 10, `expected the workflow dir to be populated, got ${workflows.length}`);
+  for (const name of workflows) {
+    const text = await source(`.github/workflows/${name}`);
+    // A bare script invocation not immediately followed by --check/--self-test would be the
+    // live (networked) mode.
+    assert.doesNotMatch(
+      text,
+      /check-download-patterns\.mjs(?!\s+--(?:check|self-test))/,
+      `${name} must not invoke the live download-pattern check`,
+    );
+    // ...and the same via the npm aliases. `check:download-patterns:offline` is permitted.
+    assert.doesNotMatch(
+      text,
+      /check:download-patterns(?!:offline)/,
+      `${name} must not run the live check:download-patterns alias`,
+    );
+    assert.doesNotMatch(
+      text,
+      /record:download-patterns/,
+      `${name} must not run the download-pattern recorder`,
+    );
+  }
+});
+
 test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", async () => {
   const workflow = await source(".github/workflows/macos-mlx.yml");
   assert.match(workflow, /run_memory_calibration:/);
