@@ -5494,6 +5494,18 @@ fn model_supports_img2img(request: &ImageRequest) -> bool {
         .unwrap_or(false)
 }
 
+/// Pure worker-side gate shared by the MLX and Candle generic conditioning resolvers. Scheduler
+/// routing rejects unsupported plural/edit/control shapes before dispatch; this keeps the worker
+/// defensive about the fields it consumes so neither backend silently treats an edit or a missing
+/// reference as img2img.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn uses_generic_img2img(request: &ImageRequest, has_reference: bool) -> bool {
+    model_supports_img2img(request) && has_reference && request.mode != "edit_image"
+}
+
 /// Resolve the Krea "text style" tap-reweight gain (sc-11878; gate fixed in sc-12008). Set ONLY when
 /// the model's manifest declares the `ui.textStyleGain` slider — Krea/Qwen-Image-family only, so every
 /// other family self-gates to `None`. The user value comes from `advanced.textStyleGain`, clamped to
@@ -6241,7 +6253,7 @@ fn resolve_generic_lane_conditioning(
             }),
             None => Ok(LaneConditioning::default()),
         }
-    } else if model_supports_img2img(request) && has_reference && request.mode != "edit_image" {
+    } else if uses_generic_img2img(request, has_reference) {
         // Generic plain-t2i img2img latent-init for any `ui.img2img` model (epic 8588 A4, sc-10189):
         // a `referenceAssetId` + `advanced.strength` seeds the denoise from the VAE-encoded reference,
         // which the engine routes to that model's img2img entrypoint via the single
@@ -8150,6 +8162,10 @@ async fn generate_candle_stream(
     } else {
         Vec::new()
     };
+    let has_reference = request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
     // Generic img2img (reference-guided latent-init, sc-10134, epic 8588): a `ui.img2img` model in a
     // NON-edit mode carrying a `referenceAssetId` resolves to the img2img init `(image, advanced.strength)`,
     // threaded to `generate_one` as the single `Conditioning::Reference` the candle engine routes to its
@@ -8161,8 +8177,7 @@ async fn generate_candle_stream(
     // so a future overlap never double-drives the single `reference` slot).
     let img2img_reference = if edit_reference.is_none()
         && edit_refs.is_empty()
-        && request.mode != "edit_image"
-        && model_supports_img2img(request)
+        && uses_generic_img2img(request, has_reference)
     {
         resolve_img2img_init_generic(request, settings, project_path)?
     } else {
@@ -10077,7 +10092,7 @@ mod standard_tier_tests {
     /// A4 (sc-10189): the generic img2img arm keys off the `ui.img2img` manifest flag the catalog
     /// forwards as `modelManifestEntry`, NOT a hardcoded model string — so Krea + SD3.5 + any future
     /// `ui.img2img` model route uniformly, and a model without the flag stays plain txt2img.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     #[test]
     fn model_supports_img2img_reads_the_ui_manifest_flag() {
         let entry = |manifest: serde_json::Value| {
@@ -10097,6 +10112,40 @@ mod standard_tier_tests {
         )));
         assert!(!model_supports_img2img(&entry(json!({ "family": "sd3" }))));
         assert!(!model_supports_img2img(&entry(json!({ "ui": {} }))));
+    }
+
+    /// sc-18475: both SANA variants use the generic non-edit singular-reference gate on Candle as
+    /// MLX. The scheduler rejects plural/control carriers before dispatch; this covers the worker
+    /// fields after dispatch and prevents an edit or missing reference from becoming img2img.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn sana_variants_use_the_generic_img2img_worker_gate() {
+        let request = |model: &str, mode: &str, manifest_flag: bool| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": model,
+                    "mode": mode,
+                    "referenceAssetId": "reference-1",
+                    "modelManifestEntry": { "ui": { "img2img": manifest_flag } },
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+
+        for model in ["sana_1600m", "sana_sprint_1600m"] {
+            let img2img = request(model, "text_to_image", true);
+            assert!(uses_generic_img2img(&img2img, true));
+            assert!(!uses_generic_img2img(&img2img, false));
+            assert!(!uses_generic_img2img(
+                &request(model, "edit_image", true),
+                true
+            ));
+            assert!(!uses_generic_img2img(
+                &request(model, "text_to_image", false),
+                true
+            ));
+        }
     }
 
     /// A4.5 (sc-10193): on Z-Image t2i the Character Studio identity-init (`referenceStrength`, sc-3619)

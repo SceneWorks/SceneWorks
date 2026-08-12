@@ -1950,7 +1950,7 @@ fn sd3_5_manifest_entries_gate_correctly() {
 }
 
 /// sc-8489 (SANA Phase B2): the SANA builtin-manifest entry gates correctly at the catalog layer —
-/// family `sana`, `capabilities == ["text_to_image"]` only (edit/reference rejected), the UN-gated
+/// family `sana`, text-to-image plus non-edit image-to-image, the UN-gated
 /// `SceneWorks/Sana_1600M_1024px_mlx` MLX re-host (NOT gated — the mirror carries the NVIDIA
 /// non-commercial NOTICE), dense bf16 (NO `mlx.quantize` — the load path rejects a quant), the
 /// `mlx.minMemoryGb` memory-eligibility lever, the sana LoRA family, and the NVIDIA non-commercial
@@ -1967,13 +1967,17 @@ fn sana_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (base SANA is plain t2i).
+    // sc-18475: both native backends accept the advertised non-edit singular-reference img2img shape.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE; OK to
     // ship un-gated with notice, the Krea/Boogu precedent) — so NO `gated: true`.
     assert_ne!(
@@ -2045,8 +2049,8 @@ fn sana_manifest_entry_gates_correctly() {
     );
 }
 
-/// sc-8490: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family, text_to_image
-/// only (CFG-free few-step distillation, no edit/reference surface), un-gated `SceneWorks/*` MLX
+/// sc-8490/sc-18475: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family,
+/// text-to-image plus non-edit image-to-image, un-gated `SceneWorks/*` MLX
 /// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and the
 /// SANA LoRA family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
 /// loop fails CI. Descriptor-derived guidance/negative/backend flags are covered by
@@ -2060,13 +2064,17 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana-sprint family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (Sprint is plain few-step t2i).
+    // sc-18475: Sprint exposes the same non-edit singular-reference img2img shape as base SANA.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana-sprint capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana-sprint capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE) — no `gated`.
     assert_ne!(
         entry.get("gated").and_then(Value::as_bool),

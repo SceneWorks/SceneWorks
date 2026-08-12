@@ -137,6 +137,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::ZImageControl,
             CandleImageLane::ZImageImg2Img,
             CandleImageLane::Sd3Img2Img,
+            CandleImageLane::SanaImg2Img,
             CandleImageLane::Flux1Control,
             CandleImageLane::Flux2Control,
             CandleImageLane::KreaControl,
@@ -224,6 +225,8 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         (reference("sd3_5_large"), CandleImageLane::Sd3Img2Img),
         (reference("sd3_5_large_turbo"), CandleImageLane::Sd3Img2Img),
         (reference("sd3_5_medium"), CandleImageLane::Sd3Img2Img),
+        (reference("sana_1600m"), CandleImageLane::SanaImg2Img),
+        (reference("sana_sprint_1600m"), CandleImageLane::SanaImg2Img),
         (pose("flux_dev"), CandleImageLane::Flux1Control),
         (pose("flux2_dev"), CandleImageLane::Flux2Control),
         (pose("krea_2_turbo"), CandleImageLane::KreaControl),
@@ -523,7 +526,7 @@ fn non_candle_families_and_variants_are_never_candle_eligible() {
 }
 
 #[test]
-fn sana_candle_txt2img_routes_to_candle() {
+fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
     // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane (the
     // `candle-gen-sana` provider, candle-gen #495 — the whole `Efficient-Large-Model/
     // Sana_1600M_1024px_diffusers` snapshot). sc-11781: the CFG-free SANA-Sprint distill
@@ -536,9 +539,17 @@ fn sana_candle_txt2img_routes_to_candle() {
             image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
             "{model} plain txt2img must be candle-eligible (sc-11780 / sc-11781)"
         );
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "referenceAssetId": "reference-1",
+                "advanced": { "strength": 0.5 }
+            }))),
+            Some(CandleImageLane::SanaImg2Img)
+        );
         for payload in [
             json!({ "prompt": "p", "mode": "edit_image", "sourceAssetId": "a" }),
-            json!({ "prompt": "p", "referenceAssetId": "a" }),
             json!({ "prompt": "p", "maskAssetId": "a" }),
             json!({ "prompt": "p", "loras": [{ "path": "x", "weight": 0.8 }] }),
             json!({ "prompt": "p", "advanced": { "mlxQuantize": 4 } }),
@@ -546,6 +557,24 @@ fn sana_candle_txt2img_routes_to_candle() {
             assert!(
                 !image_request_candle_eligible(model, &object(payload.clone())),
                 "{model} conditioning/adapter/quant shape must fall back to torch: {payload}"
+            );
+        }
+
+        for malformed in [
+            json!({ "model": model, "referenceAssetIds": ["a"] }),
+            json!({ "model": model, "referenceAssetId": 7 }),
+            json!({ "model": model, "referenceAssetId": " " }),
+            json!({ "model": model, "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "model": model, "referenceAssetId": "a", "maskAssetId": "m" }),
+            json!({ "model": model, "referenceAssetId": "a", "loras": [{ "path": "x" }] }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "poses": [{}] } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "phases": [{}] } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "mlxQuantize": 4 } }),
+        ] {
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(malformed.clone())),
+                None,
+                "{model} malformed img2img shape must be rejected: {malformed}"
             );
         }
     }

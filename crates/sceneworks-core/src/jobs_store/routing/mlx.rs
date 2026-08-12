@@ -571,6 +571,16 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// nothing defers.
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+        && payload
+            .get("referenceAssetId")
+            .map(|value| value.as_str().is_some_and(|id| !id.trim().is_empty()))
+            .unwrap_or(true)
+        && !has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string_array(payload, "referenceAssetIds")
+        && !has_nonempty_string(payload, "maskAssetId")
+        && !has_nonempty_nested_array(payload, "advanced", "poses")
+        && !has_nonempty_nested_array(payload, "advanced", "phases")
+        && !has_nonempty_array(payload, "loras")
 }
 
 /// Anima base / aesthetic / turbo (epic 10512 / sc-10523) MLX-eligibility. The native `mlx-gen-anima`

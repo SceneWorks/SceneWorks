@@ -70,6 +70,7 @@ pub(crate) enum CandleImageLane {
     ZImageControl,
     ZImageImg2Img,
     Sd3Img2Img,
+    SanaImg2Img,
     Flux1Control,
     Flux2Control,
     KreaControl,
@@ -224,6 +225,11 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         shape: sd3_img2img_candle_eligible,
     },
     CandleImageRoute {
+        lane: CandleImageLane::SanaImg2Img,
+        models: ModelMatch::Any(&["sana_1600m", "sana_sprint_1600m"]),
+        shape: sana_img2img_candle_eligible,
+    },
+    CandleImageRoute {
         lane: CandleImageLane::Flux1Control,
         models: ModelMatch::Any(&["flux_dev"]),
         shape: flux1_control_candle_eligible,
@@ -315,6 +321,18 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     if !CANDLE_ROUTED_MODELS.contains(&model) {
         return false;
     }
+    // sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
+    // singular carrier is present but not a non-empty string, do not let it fall through as txt2img.
+    if matches!(model, "sana_1600m" | "sana_sprint_1600m")
+        && payload
+            .get("referenceAssetId")
+            .is_some_and(|value| match value.as_str() {
+                Some(id) => id.trim().is_empty(),
+                None => true,
+            })
+    {
+        return false;
+    }
     // Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679, epic 8236): the candle `z_image` base
     // generator (shift-6.0 / ~50-step / real CFG) is now a candle txt2img provider (`is_candle_engine`),
     // so a plain (non-pose, non-edit) `z_image` job routes to the generic candle txt2img lane here — the
@@ -332,6 +350,7 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     // shapes in the Lens port).
     if has_nonempty_string(payload, "sourceAssetId")
         || has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string_array(payload, "referenceAssetIds")
         || has_nonempty_string(payload, "maskAssetId")
     {
         return false;
@@ -365,6 +384,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
         .and_then(Value::as_array)
         .is_some_and(|poses| !poses.is_empty());
     if has_poses {
+        return false;
+    }
+    if has_nonempty_nested_array(payload, "advanced", "phases") {
         return false;
     }
     // A quant/tier request (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
@@ -799,6 +821,21 @@ pub(crate) fn sd3_img2img_candle_eligible(payload: &Map<String, Value>) -> bool 
         return false;
     }
     has_nonempty_string(payload, "referenceAssetId")
+}
+
+/// SANA base/Sprint non-edit img2img: exactly one singular reference, with no edit/control/adapter
+/// carrier that the generic worker path would otherwise drop. Candle has no Q4/Q8 or LoRA surface for
+/// these dense snapshots, so those request shapes remain unclaimed.
+pub(crate) fn sana_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+        && has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string_array(payload, "referenceAssetIds")
+        && !has_nonempty_string(payload, "maskAssetId")
+        && !has_nonempty_nested_array(payload, "advanced", "poses")
+        && !has_nonempty_nested_array(payload, "advanced", "phases")
+        && !has_nonempty_array(payload, "loras")
+        && !candle_request_wants_quant(payload)
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic

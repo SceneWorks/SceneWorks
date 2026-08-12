@@ -142,6 +142,36 @@ fn z_image_plain_txt2img_is_eligible() {
 }
 
 #[test]
+fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
+    for model in ["sana_1600m", "sana_sprint_1600m"] {
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "prompt": "p" }))
+        ));
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "referenceAssetId": "reference-1", "advanced": { "strength": 0.5 } }))
+        ));
+        for malformed in [
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+            json!({ "referenceAssetId": 7 }),
+            json!({ "referenceAssetId": " " }),
+            json!({ "referenceAssetId": "reference-1", "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1", "maskAssetId": "mask-1" }),
+            json!({ "referenceAssetId": "reference-1", "loras": [{ "id": "lora-1" }] }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "poses": [{}] } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "phases": [{}] } }),
+        ] {
+            assert!(
+                !image_request_mlx_eligible(model, &object(malformed.clone())),
+                "{model} malformed img2img shape must reject: {malformed}"
+            );
+        }
+    }
+}
+
+#[test]
 fn z_image_edit_mode_with_source_is_eligible() {
     // epic 3529: img2img-edit (sourceAssetId) now routes to MLX via the engine's
     // `Conditioning::Reference` img2img path.
