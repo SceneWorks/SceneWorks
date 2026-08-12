@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ab6a83611a22fb59f42b152718be7b30777be731311f906814e0b225002c6771",
+    "sceneWorksRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
     "inferenceRevision": "b965641e388f4db646e4c60ab3f75219737e2cc8",
     "sources": {
       "manifest": {
@@ -27,6 +27,34 @@
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
         "sha256": "9258bda1ae8b7e205f71a0d59158103d56eaf37f7c028ff043bc6b8b91caa10d"
+      },
+      "videoRouteWan": {
+        "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
+        "sha256": "6019140373a8c184094083b8a54801ed07fcf98d69f8ec1e7ffa55b2b7338cb1"
+      },
+      "videoRouteLtx": {
+        "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
+        "sha256": "aafbc07f02672cd35c86e94d5f9be564f0f01c09af86281b12c6c3a1a587eec7"
+      },
+      "videoRouteSvd": {
+        "path": "crates/sceneworks-worker/src/video_jobs/svd.rs",
+        "sha256": "dc406e63b414e894b28bd69bed864f8c236606ac35ed4ed36f189305fefba4f6"
+      },
+      "videoRouteBernini": {
+        "path": "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+        "sha256": "a405871a8593d7d2d1276183258c3d3ff8b0a58989ec9a5b07f16b7b095f93e4"
+      },
+      "videoRouteScail2": {
+        "path": "crates/sceneworks-worker/src/video_jobs/scail2.rs",
+        "sha256": "160240dead319741687bd604b77201936a9c3e040f3ff4f08fa19b93138a94e0"
+      },
+      "videoRouteKreaRealtime": {
+        "path": "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
+        "sha256": "eeb79543ce0ed5311d71002a15995f03734b0ca5ddefd3263a231ade10ab0813"
+      },
+      "videoRouteCandle": {
+        "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
+        "sha256": "ba2601bee5ebf36703fe7b0ac85e8eea5dec1dbfab6fe1635bc92f399e88aa58"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -58,7 +86,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "91d42e41e93420ca560cd02970d0256f689f26d263c47ec6120c6de10006f8c6"
+        "sha256": "d7fe881cbe8c2db088e7590966ea08ec9b3bbf8c39fb22b4ab17c920537e06bf"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -127,17 +155,30 @@
     "strategyParameterVerification"
   ],
   "summary": {
-    "imageModels": 53,
-    "cells": 9140,
+    "catalogEntries": 63,
+    "catalogEntriesByModality": {
+      "image": 53,
+      "video": 10
+    },
+    "cells": 10810,
     "publishedCells": 208,
-    "elidedCells": 8932,
+    "elidedCells": 10602,
     "elidedByState": {
-      "Implemented/unverified": 3075,
-      "Missing": 5857
+      "Implemented/unverified": 3357,
+      "Missing": 7245
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
     "mlxStagedStaticCoverageDenominator": 53,
+    "videoMlxStagedStaticCoverage": 1,
+    "videoMlxStagedStaticCoverageDenominator": 10,
+    "unroutedEntries": [
+      {
+        "id": "wan_2_2_vace_fun_14b",
+        "reason": "manifest entry + MLX engine (wan2_2_vace_fun_14b) but zero VIDEO_MODEL_CAPS rows, so the routing catalog routes it on no backend",
+        "owningStory": 18826
+      }
+    ],
     "fullModels": 0,
     "calibrationRuns": 84,
     "calibrationRunsByStatus": {
@@ -147,18 +188,50 @@
     "currentCalibrationRuns": 13,
     "rung4Survey": {
       "story": 15969,
-      "surveyedFamilyBackends": 40,
+      "surveyedFamilyBackends": 42,
+      "pendingFamilyBackends": [
+        {
+          "family": "krea-realtime",
+          "backend": "mlx",
+          "pendingSurveyStory": 18828
+        },
+        {
+          "family": "scail2",
+          "backend": "mlx",
+          "pendingSurveyStory": 18828
+        },
+        {
+          "family": "svd",
+          "backend": "candle",
+          "pendingSurveyStory": 18828
+        },
+        {
+          "family": "svd",
+          "backend": "mlx",
+          "pendingSurveyStory": 18828
+        },
+        {
+          "family": "wan-video",
+          "backend": "candle",
+          "pendingSurveyStory": 18826
+        },
+        {
+          "family": "wan-video",
+          "backend": "mlx",
+          "pendingSurveyStory": 18826
+        }
+      ],
       "structuralApplicability": {
-        "full": 14,
+        "full": 16,
         "partial": 26
       },
       "requestPeak": {
         "does-not-move": 1,
         "moves": 12,
-        "unmeasured": 27
+        "unmeasured": 29
       },
       "implementation": {
-        "none": 23,
+        "none": 25,
         "shared-primitive": 17
       }
     }
@@ -167,8 +240,14 @@
     {
       "id": "anima_aesthetic",
       "name": "Anima 2B Aesthetic",
+      "modality": "image",
+      "familyGroup": 15524,
       "family": "anima",
       "resolvedRoute": "anima_aesthetic",
+      "resolvedRoutes": {
+        "mlx": "anima_aesthetic",
+        "candle": "anima_aesthetic"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -226,8 +305,14 @@
     {
       "id": "anima_base",
       "name": "Anima 2B",
+      "modality": "image",
+      "familyGroup": 15524,
       "family": "anima",
       "resolvedRoute": "anima_base",
+      "resolvedRoutes": {
+        "mlx": "anima_base",
+        "candle": "anima_base"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -285,8 +370,14 @@
     {
       "id": "anima_turbo",
       "name": "Anima 2B Turbo",
+      "modality": "image",
+      "familyGroup": 15524,
       "family": "anima",
       "resolvedRoute": "anima_turbo",
+      "resolvedRoutes": {
+        "mlx": "anima_turbo",
+        "candle": "anima_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -342,10 +433,95 @@
       }
     },
     {
-      "id": "bernini_image",
-      "name": "Bernini (Image)",
+      "id": "bernini",
+      "name": "Bernini",
+      "modality": "video",
+      "familyGroup": 15528,
       "family": "bernini",
       "resolvedRoute": "bernini",
+      "resolvedRoutes": {
+        "mlx": "bernini",
+        "candle": "bernini"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 15528,
+        "candle": 17414
+      },
+      "owningModelStories": {
+        "mlx": null,
+        "candle": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "ads2v",
+            "multi_video_to_video",
+            "reference_to_video",
+            "reference_video_to_video",
+            "text_to_video",
+            "video_to_video"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "ads2v",
+            "multi_video_to_video",
+            "reference_to_video",
+            "reference_video_to_video",
+            "text_to_video",
+            "video_to_video"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "bernini_image",
+      "name": "Bernini (Image)",
+      "modality": "image",
+      "familyGroup": 15528,
+      "family": "bernini",
+      "resolvedRoute": "bernini",
+      "resolvedRoutes": {
+        "mlx": "bernini",
+        "candle": "bernini"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -409,8 +585,14 @@
     {
       "id": "boogu_image",
       "name": "Boogu Image",
+      "modality": "image",
+      "familyGroup": 15516,
       "family": "boogu",
       "resolvedRoute": "boogu_image",
+      "resolvedRoutes": {
+        "mlx": "boogu_image",
+        "candle": "boogu_image"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -470,8 +652,14 @@
     {
       "id": "boogu_image_edit",
       "name": "Boogu Image Edit",
+      "modality": "image",
+      "familyGroup": 15516,
       "family": "boogu",
       "resolvedRoute": "boogu_image_edit",
+      "resolvedRoutes": {
+        "mlx": "boogu_image_edit",
+        "candle": "boogu_image_edit"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -529,8 +717,14 @@
     {
       "id": "boogu_image_turbo",
       "name": "Boogu Image Turbo",
+      "modality": "image",
+      "familyGroup": 15516,
       "family": "boogu",
       "resolvedRoute": "boogu_image_turbo",
+      "resolvedRoutes": {
+        "mlx": "boogu_image_turbo",
+        "candle": "boogu_image_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -590,8 +784,14 @@
     {
       "id": "chroma1_base",
       "name": "Chroma1-Base",
+      "modality": "image",
+      "familyGroup": 15520,
       "family": "chroma",
       "resolvedRoute": "chroma1_base",
+      "resolvedRoutes": {
+        "mlx": "chroma1_base",
+        "candle": "chroma1_base"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -655,8 +855,14 @@
     {
       "id": "chroma1_flash",
       "name": "Chroma1-Flash",
+      "modality": "image",
+      "familyGroup": 15520,
       "family": "chroma",
       "resolvedRoute": "chroma1_flash",
+      "resolvedRoutes": {
+        "mlx": "chroma1_flash",
+        "candle": "chroma1_flash"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -720,8 +926,14 @@
     {
       "id": "chroma1_hd",
       "name": "Chroma1-HD",
+      "modality": "image",
+      "familyGroup": 15520,
       "family": "chroma",
       "resolvedRoute": "chroma1_hd",
+      "resolvedRoutes": {
+        "mlx": "chroma1_hd",
+        "candle": "chroma1_hd"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -785,8 +997,14 @@
     {
       "id": "flux_dev",
       "name": "FLUX.1 [dev]",
+      "modality": "image",
+      "familyGroup": 15514,
       "family": "flux",
       "resolvedRoute": "flux1_dev",
+      "resolvedRoutes": {
+        "mlx": "flux1_dev",
+        "candle": "flux1_dev"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -855,8 +1073,14 @@
     {
       "id": "flux_schnell",
       "name": "FLUX.1 [schnell]",
+      "modality": "image",
+      "familyGroup": 15514,
       "family": "flux",
       "resolvedRoute": "flux1_schnell",
+      "resolvedRoutes": {
+        "mlx": "flux1_schnell",
+        "candle": "flux1_schnell"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -919,8 +1143,14 @@
     {
       "id": "flux2_dev",
       "name": "FLUX.2 [dev]",
+      "modality": "image",
+      "familyGroup": 15519,
       "family": "flux2-dev",
       "resolvedRoute": "flux2_dev",
+      "resolvedRoutes": {
+        "mlx": "flux2_dev",
+        "candle": "flux2_dev"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -990,8 +1220,14 @@
     {
       "id": "flux2_klein_9b",
       "name": "FLUX.2 [klein] 9B",
+      "modality": "image",
+      "familyGroup": 15518,
       "family": "flux2-klein",
       "resolvedRoute": "flux2_klein_9b",
+      "resolvedRoutes": {
+        "mlx": "flux2_klein_9b",
+        "candle": "flux2_klein_9b"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1061,8 +1297,14 @@
     {
       "id": "flux2_klein_9b_kv",
       "name": "FLUX.2 [klein] 9B-KV",
+      "modality": "image",
+      "familyGroup": 15518,
       "family": "flux2-klein",
       "resolvedRoute": "flux2_klein_9b",
+      "resolvedRoutes": {
+        "mlx": "flux2_klein_9b",
+        "candle": "flux2_klein_9b"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1132,8 +1374,14 @@
     {
       "id": "flux2_klein_9b_true_v2",
       "name": "FLUX.2 [klein] 9B True V2",
+      "modality": "image",
+      "familyGroup": 15518,
       "family": "flux2-klein",
       "resolvedRoute": "flux2_klein_9b",
+      "resolvedRoutes": {
+        "mlx": "flux2_klein_9b",
+        "candle": "flux2_klein_9b"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1199,8 +1447,14 @@
     {
       "id": "ideogram_4",
       "name": "Ideogram 4",
+      "modality": "image",
+      "familyGroup": 15515,
       "family": "ideogram",
       "resolvedRoute": "ideogram_4",
+      "resolvedRoutes": {
+        "mlx": "ideogram_4",
+        "candle": "ideogram_4"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1266,8 +1520,14 @@
     {
       "id": "ideogram_4_turbo",
       "name": "Ideogram 4 Turbo",
+      "modality": "image",
+      "familyGroup": 15515,
       "family": "ideogram",
       "resolvedRoute": "ideogram_4_turbo",
+      "resolvedRoutes": {
+        "mlx": "ideogram_4_turbo",
+        "candle": "ideogram_4_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1331,8 +1591,14 @@
     {
       "id": "illustrious_xl_v1",
       "name": "Illustrious-XL v1.0 (anime)",
+      "modality": "image",
+      "familyGroup": 15525,
       "family": "sdxl",
       "resolvedRoute": "sdxl",
+      "resolvedRoutes": {
+        "mlx": "sdxl",
+        "candle": "sdxl"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1406,8 +1672,14 @@
     {
       "id": "illustrious_xl_v2",
       "name": "Illustrious-XL v2.0 (anime)",
+      "modality": "image",
+      "familyGroup": 15525,
       "family": "sdxl",
       "resolvedRoute": "sdxl",
+      "resolvedRoutes": {
+        "mlx": "sdxl",
+        "candle": "sdxl"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1481,8 +1753,14 @@
     {
       "id": "instantid_realvisxl",
       "name": "InstantID (RealVisXL)",
+      "modality": "image",
+      "familyGroup": 15526,
       "family": "sdxl",
       "resolvedRoute": "instantid",
+      "resolvedRoutes": {
+        "mlx": "instantid",
+        "candle": "instantid"
+      },
       "routeKind": "bespoke",
       "backends": [
         "mlx",
@@ -1544,8 +1822,14 @@
     {
       "id": "kolors",
       "name": "Kolors",
+      "modality": "image",
+      "familyGroup": 15521,
       "family": "kolors",
       "resolvedRoute": "kolors",
+      "resolvedRoutes": {
+        "mlx": "kolors",
+        "candle": "kolors"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1617,8 +1901,14 @@
     {
       "id": "krea_2_raw",
       "name": "Krea 2 Raw",
+      "modality": "image",
+      "familyGroup": 15517,
       "family": "krea_2",
       "resolvedRoute": "krea_2_raw",
+      "resolvedRoutes": {
+        "mlx": "krea_2_raw",
+        "candle": "krea_2_raw"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1682,8 +1972,14 @@
     {
       "id": "krea_2_turbo",
       "name": "Krea 2 Turbo",
+      "modality": "image",
+      "familyGroup": 15517,
       "family": "krea_2",
       "resolvedRoute": "krea_2_turbo",
+      "resolvedRoutes": {
+        "mlx": "krea_2_turbo",
+        "candle": "krea_2_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1747,10 +2043,62 @@
       }
     },
     {
+      "id": "krea_realtime_14b",
+      "name": "Krea Realtime 14B",
+      "modality": "video",
+      "familyGroup": "krea-realtime",
+      "family": "krea-realtime",
+      "resolvedRoute": "krea_realtime_14b",
+      "resolvedRoutes": {
+        "mlx": "krea_realtime_14b"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18828
+      },
+      "owningModelStories": {
+        "mlx": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "image_to_video",
+            "text_to_video",
+            "video_to_video"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
       "id": "lens",
       "name": "Lens",
+      "modality": "image",
+      "familyGroup": 15512,
       "family": "lens",
       "resolvedRoute": "lens",
+      "resolvedRoutes": {
+        "mlx": "lens",
+        "candle": "lens"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1814,8 +2162,14 @@
     {
       "id": "lens_turbo",
       "name": "Lens-Turbo",
+      "modality": "image",
+      "familyGroup": 15512,
       "family": "lens",
       "resolvedRoute": "lens_turbo",
+      "resolvedRoutes": {
+        "mlx": "lens_turbo",
+        "candle": "lens_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1877,10 +2231,170 @@
       }
     },
     {
+      "id": "ltx_2_3",
+      "name": "LTX-2.3",
+      "modality": "video",
+      "familyGroup": "ltx-video",
+      "family": "ltx-video",
+      "resolvedRoute": "ltx_2_3",
+      "resolvedRoutes": {
+        "mlx": "ltx_2_3",
+        "candle": "ltx_2_3_distilled"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18813,
+        "candle": 18813
+      },
+      "owningModelStories": {
+        "mlx": null,
+        "candle": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "replace_person",
+            "text_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "replace_person",
+            "text_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "ltx_2_3_eros",
+      "name": "LTX-2.3 10Eros",
+      "modality": "video",
+      "familyGroup": "ltx-video",
+      "family": "ltx-video",
+      "resolvedRoute": "ltx_2_3",
+      "resolvedRoutes": {
+        "mlx": "ltx_2_3",
+        "candle": "ltx_2_3_distilled"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18813,
+        "candle": 18813
+      },
+      "owningModelStories": {
+        "mlx": null,
+        "candle": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "replace_person",
+            "text_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "replace_person",
+            "text_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
       "id": "mage_flow",
       "name": "Mage-Flow RL",
+      "modality": "image",
+      "familyGroup": 15509,
       "family": "mage-flow",
       "resolvedRoute": "mage_flow",
+      "resolvedRoutes": {
+        "mlx": "mage_flow",
+        "candle": "mage_flow"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -1942,8 +2456,14 @@
     {
       "id": "mage_flow_base",
       "name": "Mage-Flow Base",
+      "modality": "image",
+      "familyGroup": 15509,
       "family": "mage-flow",
       "resolvedRoute": "mage_flow_base",
+      "resolvedRoutes": {
+        "mlx": "mage_flow_base",
+        "candle": "mage_flow_base"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2005,8 +2525,14 @@
     {
       "id": "mage_flow_edit",
       "name": "Mage-Flow Edit",
+      "modality": "image",
+      "familyGroup": 15509,
       "family": "mage-flow",
       "resolvedRoute": "mage_flow_edit",
+      "resolvedRoutes": {
+        "mlx": "mage_flow_edit",
+        "candle": "mage_flow_edit"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2066,8 +2592,14 @@
     {
       "id": "mage_flow_edit_base",
       "name": "Mage-Flow Edit-Base",
+      "modality": "image",
+      "familyGroup": 15509,
       "family": "mage-flow",
       "resolvedRoute": "mage_flow_edit_base",
+      "resolvedRoutes": {
+        "mlx": "mage_flow_edit_base",
+        "candle": "mage_flow_edit_base"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2127,8 +2659,14 @@
     {
       "id": "mage_flow_edit_turbo",
       "name": "Mage-Flow Edit-Turbo",
+      "modality": "image",
+      "familyGroup": 15509,
       "family": "mage-flow",
       "resolvedRoute": "mage_flow_edit_turbo",
+      "resolvedRoutes": {
+        "mlx": "mage_flow_edit_turbo",
+        "candle": "mage_flow_edit_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2188,8 +2726,14 @@
     {
       "id": "mage_flow_turbo",
       "name": "Mage-Flow Turbo",
+      "modality": "image",
+      "familyGroup": 15509,
       "family": "mage-flow",
       "resolvedRoute": "mage_flow_turbo",
+      "resolvedRoutes": {
+        "mlx": "mage_flow_turbo",
+        "candle": "mage_flow_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2251,8 +2795,14 @@
     {
       "id": "pulid_flux_dev",
       "name": "PuLID-FLUX (FLUX.1 [dev])",
+      "modality": "image",
+      "familyGroup": 15527,
       "family": "flux",
       "resolvedRoute": "pulid_flux",
+      "resolvedRoutes": {
+        "mlx": "pulid_flux",
+        "candle": "pulid_flux"
+      },
       "routeKind": "bespoke",
       "backends": [
         "mlx",
@@ -2316,8 +2866,14 @@
     {
       "id": "qwen_image",
       "name": "Qwen Image",
+      "modality": "image",
+      "familyGroup": 15511,
       "family": "qwen-image",
       "resolvedRoute": "qwen_image",
+      "resolvedRoutes": {
+        "mlx": "qwen_image",
+        "candle": "qwen_image"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2383,8 +2939,14 @@
     {
       "id": "qwen_image_edit_2511",
       "name": "Qwen Image Edit (2511)",
+      "modality": "image",
+      "familyGroup": 15511,
       "family": "qwen-image",
       "resolvedRoute": "qwen_image_edit",
+      "resolvedRoutes": {
+        "mlx": "qwen_image_edit",
+        "candle": "qwen_image_edit"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2450,8 +3012,14 @@
     {
       "id": "qwen_image_edit_2511_lightning",
       "name": "Qwen Image Edit (2511) Lightning",
+      "modality": "image",
+      "familyGroup": 15511,
       "family": "qwen-image",
       "resolvedRoute": "qwen_image_edit",
+      "resolvedRoutes": {
+        "mlx": "qwen_image_edit",
+        "candle": "qwen_image_edit"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2517,8 +3085,14 @@
     {
       "id": "realvisxl",
       "name": "RealVisXL (photoreal SDXL)",
+      "modality": "image",
+      "familyGroup": 15525,
       "family": "sdxl",
       "resolvedRoute": "sdxl",
+      "resolvedRoutes": {
+        "mlx": "sdxl",
+        "candle": "sdxl"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2592,8 +3166,14 @@
     {
       "id": "realvisxl_lightning",
       "name": "RealVisXL Lightning (fast photoreal SDXL)",
+      "modality": "image",
+      "familyGroup": 15525,
       "family": "sdxl",
       "resolvedRoute": "sdxl",
+      "resolvedRoutes": {
+        "mlx": "sdxl",
+        "candle": "sdxl"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2657,8 +3237,14 @@
     {
       "id": "sana_1600m",
       "name": "SANA 1600M",
+      "modality": "image",
+      "familyGroup": 15523,
       "family": "sana",
       "resolvedRoute": "sana_1600m",
+      "resolvedRoutes": {
+        "mlx": "sana_1600m",
+        "candle": "sana_1600m"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2720,8 +3306,14 @@
     {
       "id": "sana_sprint_1600m",
       "name": "SANA-Sprint 1.6B",
+      "modality": "image",
+      "familyGroup": 15523,
       "family": "sana",
       "resolvedRoute": "sana_sprint_1600m",
+      "resolvedRoutes": {
+        "mlx": "sana_sprint_1600m",
+        "candle": "sana_sprint_1600m"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2781,10 +3373,61 @@
       }
     },
     {
+      "id": "scail2_14b",
+      "name": "SCAIL-2",
+      "modality": "video",
+      "familyGroup": "scail2",
+      "family": "scail2",
+      "resolvedRoute": "scail2_14b",
+      "resolvedRoutes": {
+        "mlx": "scail2_14b"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18828
+      },
+      "owningModelStories": {
+        "mlx": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "animate_character",
+            "replace_person"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
       "id": "sd3_5_large",
       "name": "Stable Diffusion 3.5 Large",
+      "modality": "image",
+      "familyGroup": 15522,
       "family": "sd3",
       "resolvedRoute": "sd3_5_large",
+      "resolvedRoutes": {
+        "mlx": "sd3_5_large",
+        "candle": "sd3_5_large"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2845,8 +3488,14 @@
     {
       "id": "sd3_5_large_turbo",
       "name": "Stable Diffusion 3.5 Large Turbo",
+      "modality": "image",
+      "familyGroup": 15522,
       "family": "sd3",
       "resolvedRoute": "sd3_5_large_turbo",
+      "resolvedRoutes": {
+        "mlx": "sd3_5_large_turbo",
+        "candle": "sd3_5_large_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2907,8 +3556,14 @@
     {
       "id": "sd3_5_medium",
       "name": "Stable Diffusion 3.5 Medium",
+      "modality": "image",
+      "familyGroup": 15522,
       "family": "sd3",
       "resolvedRoute": "sd3_5_medium",
+      "resolvedRoutes": {
+        "mlx": "sd3_5_medium",
+        "candle": "sd3_5_medium"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -2969,8 +3624,14 @@
     {
       "id": "sdxl",
       "name": "Stable Diffusion XL",
+      "modality": "image",
+      "familyGroup": 15525,
       "family": "sdxl",
       "resolvedRoute": "sdxl",
+      "resolvedRoutes": {
+        "mlx": "sdxl",
+        "candle": "sdxl"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3044,8 +3705,14 @@
     {
       "id": "sensenova_u1_8b",
       "name": "SenseNova-U1 8B",
+      "modality": "image",
+      "familyGroup": 15513,
       "family": "sensenova-u1",
       "resolvedRoute": "sensenova_u1_8b",
+      "resolvedRoutes": {
+        "mlx": "sensenova_u1_8b",
+        "candle": "sensenova_u1_8b"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3113,8 +3780,14 @@
     {
       "id": "sensenova_u1_8b_fast",
       "name": "SenseNova-U1 8B Fast",
+      "modality": "image",
+      "familyGroup": 15513,
       "family": "sensenova-u1",
       "resolvedRoute": "sensenova_u1_8b_fast",
+      "resolvedRoutes": {
+        "mlx": "sensenova_u1_8b_fast",
+        "candle": "sensenova_u1_8b_fast"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3182,8 +3855,14 @@
     {
       "id": "sensenova_u1_8b_infographic_v2",
       "name": "SenseNova-U1 8B Infographic V2",
+      "modality": "image",
+      "familyGroup": 15513,
       "family": "sensenova-u1",
       "resolvedRoute": "sensenova_u1_8b",
+      "resolvedRoutes": {
+        "mlx": "sensenova_u1_8b",
+        "candle": "sensenova_u1_8b"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3251,8 +3930,14 @@
     {
       "id": "sensenova_u1_8b_infographic_v2_fast",
       "name": "SenseNova-U1 8B Infographic V2 Fast",
+      "modality": "image",
+      "familyGroup": 15513,
       "family": "sensenova-u1",
       "resolvedRoute": "sensenova_u1_8b_fast",
+      "resolvedRoutes": {
+        "mlx": "sensenova_u1_8b_fast",
+        "candle": "sensenova_u1_8b_fast"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3320,8 +4005,14 @@
     {
       "id": "sensenova_u1_8b_infographic_v3",
       "name": "SenseNova-U1 8B Infographic V3",
+      "modality": "image",
+      "familyGroup": 15513,
       "family": "sensenova-u1",
       "resolvedRoute": "sensenova_u1_8b",
+      "resolvedRoutes": {
+        "mlx": "sensenova_u1_8b",
+        "candle": "sensenova_u1_8b"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3389,8 +4080,14 @@
     {
       "id": "sensenova_u1_8b_infographic_v3_fast",
       "name": "SenseNova-U1 8B Infographic V3 Fast",
+      "modality": "image",
+      "familyGroup": 15513,
       "family": "sensenova-u1",
       "resolvedRoute": "sensenova_u1_8b_fast",
+      "resolvedRoutes": {
+        "mlx": "sensenova_u1_8b_fast",
+        "candle": "sensenova_u1_8b_fast"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3456,10 +4153,318 @@
       }
     },
     {
+      "id": "svd",
+      "name": "Stable Video Diffusion",
+      "modality": "video",
+      "familyGroup": "svd",
+      "family": "svd",
+      "resolvedRoute": "svd_xt",
+      "resolvedRoutes": {
+        "mlx": "svd_xt",
+        "candle": "svd_xt"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18828,
+        "candle": 18828
+      },
+      "owningModelStories": {
+        "mlx": null,
+        "candle": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "image_to_video"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "image_to_video"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wan_2_2",
+      "name": "Wan2.2",
+      "modality": "video",
+      "familyGroup": "wan-video",
+      "family": "wan-video",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "resolvedRoutes": {
+        "mlx": "wan2_2_ti2v_5b",
+        "candle": "wan2_2_ti2v_5b"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18826,
+        "candle": 18826
+      },
+      "owningModelStories": {
+        "mlx": null,
+        "candle": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "replace_person",
+            "text_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "replace_person",
+            "text_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wan_2_2_i2v_14b",
+      "name": "Wan2.2 14B (I2V)",
+      "modality": "video",
+      "familyGroup": "wan-video",
+      "family": "wan-video",
+      "resolvedRoute": "wan2_2_i2v_14b",
+      "resolvedRoutes": {
+        "mlx": "wan2_2_i2v_14b",
+        "candle": "wan2_2_i2v_14b"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18826,
+        "candle": 18826
+      },
+      "owningModelStories": {
+        "mlx": null,
+        "candle": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "extend_clip",
+            "first_last_frame",
+            "image_to_video",
+            "video_bridge"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wan_2_2_t2v_14b",
+      "name": "Wan2.2 14B (T2V)",
+      "modality": "video",
+      "familyGroup": "wan-video",
+      "family": "wan-video",
+      "resolvedRoute": "wan2_2_t2v_14b",
+      "resolvedRoutes": {
+        "mlx": "wan2_2_t2v_14b",
+        "candle": "wan2_2_t2v_14b"
+      },
+      "routeKind": "video",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 18826,
+        "candle": 18826
+      },
+      "owningModelStories": {
+        "mlx": null,
+        "candle": null
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "text_to_video"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "text_to_video"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wan_2_2_vace_fun_14b",
+      "name": "Wan2.2 VACE-Fun (A14B)",
+      "modality": "video",
+      "familyGroup": "wan-video",
+      "family": "wan-video",
+      "resolvedRoute": "wan2_2_vace_fun_14b",
+      "resolvedRoutes": {},
+      "routeKind": "video",
+      "backends": [],
+      "owningFamilyStories": {},
+      "owningModelStories": {},
+      "axes": {}
+    },
+    {
       "id": "z_image",
       "name": "Z-Image",
+      "modality": "image",
+      "familyGroup": 15510,
       "family": "z-image",
       "resolvedRoute": "z_image",
+      "resolvedRoutes": {
+        "mlx": "z_image",
+        "candle": "z_image"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3525,8 +4530,14 @@
     {
       "id": "z_image_edit",
       "name": "Z-Image-Edit",
+      "modality": "image",
+      "familyGroup": 15510,
       "family": "z-image",
       "resolvedRoute": "z_image_turbo",
+      "resolvedRoutes": {
+        "mlx": "z_image_turbo",
+        "candle": "z_image_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -3590,8 +4601,14 @@
     {
       "id": "z_image_turbo",
       "name": "Z-Image-Turbo",
+      "modality": "image",
+      "familyGroup": 15510,
       "family": "z-image",
       "resolvedRoute": "z_image_turbo",
+      "resolvedRoutes": {
+        "mlx": "z_image_turbo",
+        "candle": "z_image_turbo"
+      },
       "routeKind": "registry",
       "backends": [
         "mlx",
@@ -4795,6 +5812,60 @@
         "The guided-velocity modes run SEVERAL full forward passes per step over different conditioning combos. A window plan is re-walked once per forward, so the re-materialization cost of rung 4 is multiplied by the mode's pass count — a latency consequence to price into the window size, not a correctness problem.",
         "Bernini already loads and quantizes one expert before the next so only one bf16 dequant transient is resident. That is a LOAD-TIME transient bound; both experts are resident afterwards, so it does not overlap with what rung 4 would do."
       ]
+    },
+    {
+      "familyStory": "ltx-video",
+      "backend": "candle",
+      "structuralApplicability": "full",
+      "requestPeak": "unmeasured",
+      "implementation": "none",
+      "summary": "The same uniform 48-block AvDiT, walked by one loop. The difference from the MLX twin is RESIDENCY, not shape: Candle caches the Gemma text encoder, the AvDiT, the VAE and the audio chain together in one `Components` bundle that outlives the request, so the trunk is a much smaller share of what is resident while it runs, and rung 4's prerequisite — rung 1 — is genuinely absent here rather than merely undeclared.",
+      "blockStacks": [
+        {
+          "name": "transformer_blocks (AvDiT — joint video + audio + cross-modal)",
+          "blocks": "48",
+          "windowable": true
+        }
+      ],
+      "findings": [
+        "**The Candle rung-1 question, answered: the Gemma text encoder is RESIDENT, not staged.** The encoder is a field of `Components` (`lib.rs:79-80`), the bundle is built once and stored in `Mutex<Option<Components>>` (`:367`) by `candle_gen::cached` (`:374-376`), and `candle-gen/src/sync.rs:52-58` stores on miss and never clears — so the encoder outlives the request, not merely the encode. `load_components` builds the AvDiT FIRST and the encoder SECOND with no free between (`:168-174`; same order on the packed-tier path at `:227-236`), so the two co-reside from the first load onward. `render` takes `comps: &Components` (`:276`), which means it structurally CANNOT drop it: the encode at `:284-285` is followed by the denoise at `:303`/`:316` with `comps.te` still alive. Greps over the crate for `drop(`, `clear_cache`, `unload`, `release`, `empty_cache`, `Drop for` and `residency` find no free path. The fit gate agrees from the other direction: `component_footprint` (`:645-654`) sizes `text_encoder` and `dit` as a partition of ONE simultaneous load, documented at `:619-623` as \"the slots are a partition of the load\".",
+        "So `supports_sequential_offload: false` (`lib.rs:493`) is honest on Candle and under-reporting on MLX — the same flag value means different things on the two backends, which is precisely why this survey scores the behaviour from the code. The consequence for the ladder is the inverse of the MLX twin: `resident` is the Candle BASELINE and `staged_residency` is a real Missing, whereas on MLX staged is the baseline and `resident` is unreachable. Rung 4 requires rung 1 in the same request, so the Candle rung-4 cells will report the prerequisite gap from the generator's own rung-1 predicate — that is correct here and must not be \"fixed\" by copying the MLX finding across.",
+        "What is held alongside the trunk during denoise is what most limits rung 4's reach on this backend: `Components` keeps the ~24 GB Gemma encoder, the video VAE and the audio decoder + vocoder alive through the whole block loop (`lib.rs:79-97`), none of which is needed until after it. Rung 4 bounds the 48 blocks; on Candle it cannot bound the majority of what is resident while they run. Not inventoried in `blockStacks` because none of it is transformer trunk weight — recorded here per this survey's own convention for encoder and decode-side residents.",
+        "Rung 2 ships and auto-selects. `decode_budgeted` (`vae.rs:558-566`) is called unconditionally on the render path (`lib.rs:341`) and dispatches `auto_tiling_budgeted_ltx` to the shared `vae_tiling::decode_tiled(VaeTiling::LTX, ...)` (`vae.rs:547-549`). The budget resolves from `LTX_VAE_BUDGET_GIB`, else `nvidia-smi` total x 0.85 (`vae.rs:582`), else a 16.0 GiB default (`vae.rs:584`, resolution at `:639-645`), over a candidate grid of spatial 768->192 px and temporal (96,24)->(24,8) (`:611-613`); an over-budget geometry is a catchable error BEFORE the decode rather than an OOM (`:650-656`). Unlike the MLX twin's ~103 GiB unified-memory budget, a 16 GiB default means tiling is realistically engaged here.",
+        "Rung 3 is PARTIAL, and partial for a stated reason rather than by rounding. Every attention role — self, text cross, cross-modal — goes through one `Attention::forward` (`transformer.rs:131-192`) onto `candle_gen::sdpa_budgeted_bhsd(..., ATTN_SCORES_BUDGET)` (`:169-177`), which chunks the QUERY rows (`candle-gen/src/attention.rs:207-239`). But the budget is a compile-time `1_000_000_000` (`attention.rs:92`) and the planner returns the whole `sq` when `b*h*sk*sq` fits (`crates/contracts/gen-core/src/attention_budget.rs:170-171`). With `TEXT_MAX_LENGTH = 256` (`config.rs:39`) and 32 video heads (`config.rs:97`), cross-attention to the fixed text context needs ~122k query rows before it splits — a single un-chunked pass for every geometry below the validated `MAX_LATENT_TOKENS = 131_072` ceiling (`config.rs:50`) bar its top ~7%. Video SELF-attention chunks from ~5,590 tokens, so it is engaged on every real clip. The crate says so itself (`transformer.rs:159-164`). It is an i32-overflow correctness guard (sc-9116) that happens to bound memory, not a tunable operating point: the budget is a constant with no request or env knob, and there is no `AttentionPlan` variant on this path.",
+        "Rung 4 is absent: `block_window`, `BlockWindowBackend`, `run_windowed` and `BlockPlan` return zero hits across `crates/media/candle-gen/candle-gen-ltx/`. The AvDiT is loaded eagerly and wholly (`transformer.rs:591-597`) with no streamed loader analogous to `candle-gen-mage`'s, which does drive the shared primitive (`candle-gen-mage/src/transformer.rs:757-759`). The primitive is reachable; LTX simply does not call it.",
+        "Overlays are COMPATIBLE here too, by the same mechanism as the MLX twin. `install_ltx_adapters` calls `push_additive_lora` (`adapters.rs:213-217`), which appends an `AdditiveResidual::Lora { a, b, scale }` to a `Vec` on the shared `LoraLinear` (`candle-gen/src/train/lora.rs:307-309`) and applies it AFTER the base matmul in the forward (`:439-445`), in the deferred two-matmul form that never materializes the `[out,in]` product (`:110-112`) and never dequantizes a packed base. The module doc states the base is left unchanged specifically to avoid materializing a 22B dense transformer to fold a small adapter (`adapters.rs:3-6`). So a re-materialized block could replay the same pushes.",
+        "On the DISTILLED LoRA specifically: there is no fold to undo on this path either, but for a different reason than the MLX twin — the auto-injected distill LoRA is NOT APPLIED on Candle at all, so for `ltx_2_3_eros` the compatibility question is moot here rather than answered. The worker's Candle video path resolves user adapters only (`crates/sceneworks-worker/src/video_jobs/candle.rs:957` -> `resolve_ltx_user_adapters`), whose doc states the exclusion deliberately: \"Candle has one distilled denoise pass, so this shared resolver deliberately excludes the MLX-only two-pass 10Eros distill recipe\" (`crates/sceneworks-worker/src/video_jobs/ltx.rs:705-707`); the injecting resolver is `#[cfg(target_os = \"macos\")]` (`ltx.rs:692`, `:753`). The engine agrees from its own side rather than folding: `adapters.rs:87-95` ERRORS on a multi-entry `pass_scales` with \"candle LTX-2.3 uses one distilled denoise pass\". Any user LoRA that does arrive is still a forward-time residual, so the compatibility answer for USER overlays is the same as MLX's. Adapter targeting is narrower here (`transformer_blocks.N.attn{1,2}.{to_q,to_k,to_v,to_out.0}` only, `adapters.rs:49-60`) — audio and cross-modal projections are deliberately frozen.",
+        "Recorded as an open question this survey found but does not own: `VIDEO_MODEL_CAPS` routes `ltx_2_3_eros` on Candle (`crates/sceneworks-core/src/jobs_store/routing/catalog.rs:886`), its base checkpoint is documented as NOT pre-distilled (`crates/sceneworks-worker/src/video_jobs/ltx.rs:740-742`), and the Candle path injects no distill LoRA — so that route appears to render an un-distilled base. Whether it actually degrades cannot be settled from source; it needs a CUDA render. sc-18902 tracks it. It matters to this survey only because it decides which entries a future Candle rung-4 implementation claim could honestly cover."
+      ]
+    },
+    {
+      "familyStory": "ltx-video",
+      "backend": "mlx",
+      "structuralApplicability": "full",
+      "requestPeak": "unmeasured",
+      "implementation": "none",
+      "summary": "One uniform 48-block AvDiT stack walked by a single loop; only the per-modality patchify/adaLN embedders and the two output heads sit outside it, so one BlockPlan bounds essentially all of the trunk's weight bytes. This is also the catalog's cleanest rung-4 target by share of denoise-phase residency: the MLX path stages the ~24 GB Gemma text encoder out BEFORE the trunk loads and drops the trunk BEFORE decode, so during denoise the 48 blocks are very nearly the whole footprint.",
+      "blockStacks": [
+        {
+          "name": "transformer_blocks (AvDiT — joint video + audio + cross-modal)",
+          "blocks": "48",
+          "windowable": true
+        }
+      ],
+      "findings": [
+        "Rung 1 is engaged UNCONDITIONALLY, and this is the one place in the family where the capability flag and the behaviour disagree. `stage_text_phase` (`model.rs:578`) builds the Gemma TE, runs prompt enhancement and `encode_av` inside one scope (`:579-585`), then forces the graph with `mlx_rs::transforms::eval` (`:588`) so lazy evaluation cannot keep the ~24 GB of weights alive past the scope, and lets `te` drop at end of scope; the caller `mlx_rs::memory::clear_cache()`s immediately after (`:1186`) and only then builds the AvDiT (`:759`, comment `:756-758`: \"so the TE and the DiT never co-reside\"). So `supports_sequential_offload: false` (`:269-270`) UNDER-reports on this backend: the staging ships, it is simply not driven by the shared `Residency` seam. sc-18816 owns making that visible to the ladder; this verdict describes the behaviour as it is at the pinned revision.",
+        "`resident` is NOT a reachable state for MLX LTX, and should not be scored as if it were selectable. No code path co-resides the TE and the AvDiT, so the family's floor is already `max(TE, DiT)` rather than their sum and a `resident` measurement would have nothing to measure. sc-18808's real-weight capture corroborates it from the allocator side at 768x512x97 q8: `stagedTextEncoderBytes` 32.73 GB and `stagedTransformerBytes` 20.61 GB against a `costagedGiantsBytes` bound of 53.35 GB, with active memory dropping from `denoiseEntryActive` 20.69 GB to `decodeEntryActive` 1.02 GB.",
+        "The AvDiT is staged too, not only the text encoder: `model.rs:806-808` `eval`s the latents, `drop(transformer)`s and `clear_cache()`s before `decode_to_frames` (`:811`). That is what makes the 48-block trunk essentially the entire denoise-phase residency and gives rung 4 a larger share to move here than on any image family — but it is also why the request-peak question below is not answered by the trunk's size.",
+        "Where the request peak actually sits, from the one real-weight capture — and it is not the trunk. At 768x512x97 q8 (`ltx-2-3-mlx-q8-768x512-f97-fps24-seed18808`) the phase active peaks are `conditioningActivePeak` 35.56 GB, `denoiseActivePeak` 27.44 GB, `decodeActivePeak` 15.03 GB: the request peak is the CONDITIONING phase, i.e. the text encoder that rung 1 already stages, not the denoise trunk that rung 4 would bound. At that geometry a perfect rung-4 window could not move the request peak at all. This is n=1, one tier, one geometry, and video activations grow with frames as well as area, so denoise may well dominate at the top of the envelope (1280x704, 449 frames) — which is exactly why the finding here is `unmeasured` and not `does-not-move`. It does mean a rung-4 measurement for this family has to be taken across the frames axis, not at one geometry.",
+        "Rung 2 ships and auto-selects, but is INERT at the geometries this host renders. `decode_to_frames` (`pipeline.rs:157`) calls `auto_tiling_budgeted_ltx(out_h, out_w, out_f)` (`:260`) and tiles only when the modelled peak exceeds 85% of `get_memory_limit()` (`:266-267`); the shared planner returns `Ok(None)` when a single pass fits under the budget and the frame count is under the i32 write cap (`crates/contracts/gen-core/src/tiling.rs:840-843`). The cost model (`pipeline.rs:239-255`) puts 768x512x97 at ~15.15 GiB against an ~103 GiB budget on the sc-18808 host (`mlxMemoryLimitBytes` 130.6 GB x 0.85), so decode is single-pass there and rung 2 is implemented-but-not-engaged. Implemented is not engaged, and the matrix must not read the two as the same claim.",
+        "Rung 3 is NOT implemented on MLX — do not score it from the Candle twin, which does have real chunking. The only candidate is `ckpt_sdpa` (`transformer.rs:566-570`), documented \"Training-only knob ... `false` on the inference path\", initialised `false` at load (`:601`), settable only through `set_sdpa_checkpoint`, private at the attention level (`:606`) and public only on the `AvDiT` (`:1140`), whose sole non-test caller is the trainer (`training.rs:418`); even its `true` arm wraps the same monolithic `scaled_dot_product_attention` in `mlx::checkpoint` (recompute-for-backward, `:660`/`:682`), not query-row chunking. There is no `attn_budget` field on this attention, unlike `mlx-gen-wan/src/transformer.rs:289`, and `mlx-gen-ltx` appears in no `AttentionBudget` consumer.",
+        "Overlays are COMPATIBLE, with code evidence — this is the Z-Image situation, not the Krea/Candle one. `Linear` (`transformer.rs:329-331`) keeps `kind` (the possibly still-quantized base) and `lora: Option<LoraStack>` as separate fields; the forward runs the base (`:376`) and then ADDS each adapter's residual (`:418-420`), and `push_lora` (`:428`) appends rather than folding. The doc is explicit: \"a forward-time residual ... NOT a merged weight\" (`:270-274`), chosen over the reference `apply_loras_to_model` dequant-and-merge precisely because the shipped base is quantized (`adapters.rs:5-9`). So a block re-materialized by a rung-4 window can carry its overlay, provided the window re-runs `apply_ltx_adapters` (`adapters.rs:337`) or reattaches the `LoraStack` per re-materialization. The only in-place base mutation in the file is `cast_weights` (`:489`), a training-path dtype cast.",
+        "On the DISTILLED LoRA specifically — the overlay this family was asked about, and it is a LIVE RUNTIME overlay on this backend, not a baked one. `ltx_2_3_eros` declares `mlx.autoDistillLora` (`config/manifests/builtin.models.jsonc:11174`) and ships the cond_safe distill LoRA as a `coRequisite` download (`:11087-11098`) because its base checkpoint is NOT pre-distilled — without it the MLX video collapses to noise a few frames in (`crates/sceneworks-worker/src/video_jobs/ltx.rs:738-742`). The worker injects it AHEAD of the user LoRAs as an `AdapterSpec` carrying `pass_scales = [stage1, stage2]` (`ltx.rs:693-703`, resolver `:754`, MLX-gated at `:753`). Base `ltx_2_3` declares none and injects nothing (`crates/sceneworks-worker/src/video_jobs/tests.rs:10224`), because its hosted tiers are assembled FROM the distilled checkpoint at conversion time (`builtin.models.jsonc:10966`) — so the family carries both shapes at once, one baked and one injected.",
+        "COMPATIBILITY VERDICT for that distilled LoRA against a rung-4-rebuilt block: COMPATIBLE, on code evidence, because it rides exactly the same forward-time residual path as any user adapter — `push_lora` appends to a `LoraStack` beside an untouched base (`transformer.rs:428`), the forward adds the residual after the base matmul (`:418-420`), and the per-pass strength is runtime state, a `pass: Cell<usize>` on the stack (`:323`) driven by `dit.set_lora_pass(0)` / `(1)` (`pipeline.rs:929`, `:978`) across `NUM_DENOISE_PASSES = 2` (`:47`). Nothing is folded into the base, so nothing has to be un-folded to re-materialize a block. Two obligations a rung-4 window inherits here that no image family's has: it must re-apply the adapters on every re-materialization AND preserve the per-pass selection across both passes — losing the stage-2 strength would silently render at stage-1 strength rather than fail — and it must re-enter the whole trunk once per pass, so the window's re-materialization cost is doubled.",
+        "One second network is held resident and invoked MID-denoise, between the two passes: `LatentUpsampler` (`upsampler.rs:179`), called at `pipeline.rs:967` and again on the IC-LoRA path at `:1094` while the AvDiT is still live. It is deliberately NOT inventoried in `blockStacks`: it is a conv/ResBlock latent upscaler loaded from its own checkpoint, not transformer trunk weight, and `model.rs:312` records the intent — \"The small components (each << the TE / DiT) stay resident\". It is recorded here because a rung-4 window schedule for this family has to survive being re-entered for a second pass over an upscaled latent, which no image family's plan has to do.",
+        "The family is two catalog entries with different artifact shapes and the same trunk. `ltx_2_3` ships q4 (default) / q8 / bf16 tiers from `SceneWorks/ltx-2.3-mlx`; `ltx_2_3_eros` is a single bf16 all-in-one community merge that shares the same `model.diffusion_model.*` key layout. The 48-block structure is therefore family-wide, but per-block bytes differ by tier, so any future implementation claim has to be per entry and per tier rather than family-level."
+      ]
     }
   ],
   "coverage": [
@@ -5276,6 +6347,126 @@
       "implemented": 12,
       "states": {
         "Implemented/unverified": 12
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 36,
+      "states": {
+        "Implemented/unverified": 36
+      }
+    },
+    {
+      "modelId": "bernini",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 36,
+      "states": {
+        "Implemented/unverified": 36
       }
     },
     {
@@ -8331,6 +9522,66 @@
       }
     },
     {
+      "modelId": "krea_realtime_14b",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
+      "modelId": "krea_realtime_14b",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
+      "modelId": "krea_realtime_14b",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
+      "modelId": "krea_realtime_14b",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 18,
+      "states": {
+        "Implemented/unverified": 18
+      }
+    },
+    {
+      "modelId": "krea_realtime_14b",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "bounded_attention",
@@ -8648,6 +9899,246 @@
       "implemented": 12,
       "states": {
         "Implemented/unverified": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 12,
+      "states": {
+        "Implemented/unverified": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 36,
+      "states": {
+        "Implemented/unverified": 36
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
       }
     },
     {
@@ -10826,6 +12317,66 @@
       }
     },
     {
+      "modelId": "scail2_14b",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "scail2_14b",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "scail2_14b",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
+      "modelId": "scail2_14b",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 12,
+      "states": {
+        "Implemented/unverified": 12
+      }
+    },
+    {
+      "modelId": "scail2_14b",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 12,
+      "published": 0,
+      "elided": 12,
+      "implemented": 0,
+      "states": {
+        "Missing": 12
+      }
+    },
+    {
       "modelId": "sd3_5_large_turbo",
       "backend": "candle",
       "rung": "bounded_attention",
@@ -12044,6 +13595,486 @@
       "implemented": 0,
       "states": {
         "Missing": 27
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "svd",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 24,
+      "states": {
+        "Implemented/unverified": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 24,
+      "states": {
+        "Implemented/unverified": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 6,
+      "states": {
+        "Implemented/unverified": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 6,
+      "states": {
+        "Implemented/unverified": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 36,
+      "states": {
+        "Implemented/unverified": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 36,
+      "states": {
+        "Implemented/unverified": 36
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 36,
+      "published": 0,
+      "elided": 36,
+      "implemented": 0,
+      "states": {
+        "Missing": 36
       }
     },
     {
@@ -14109,6 +16140,7 @@
       "owningModelStory": 15898,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
@@ -14489,6 +16521,7 @@
       "owningModelStory": 15895,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
@@ -14869,6 +16902,7 @@
       "owningModelStory": 15922,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -15391,6 +17425,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -15463,6 +17498,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -15819,6 +17855,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -16171,6 +18208,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -16243,6 +18281,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -16613,6 +18652,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -16986,6 +19026,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -17058,6 +19099,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -17414,6 +19456,7 @@
       "owningModelStory": 15913,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -17940,6 +19983,7 @@
       "owningModelStory": 15477,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -18300,6 +20344,7 @@
       "owningModelStory": 15477,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -18660,6 +20705,7 @@
       "owningModelStory": 15477,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -20786,6 +22832,7 @@
       "owningModelStory": 15868,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "full",
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
@@ -21042,6 +23089,7 @@
       "owningModelStory": 15865,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "full",
         "requestPeak": "does-not-move",
         "implementation": "shared-primitive",
@@ -21455,6 +23503,7 @@
       "owningModelStory": 15459,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "full",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -21920,6 +23969,7 @@
       "owningModelStory": 15459,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "full",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -22225,6 +24275,7 @@
       "owningModelStory": 15459,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "full",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -22373,6 +24424,7 @@
       "owningModelStory": 15495,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -22533,6 +24585,7 @@
       "owningModelStory": 15495,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -22689,6 +24742,7 @@
       "owningModelStory": 15495,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -23052,6 +25106,7 @@
       "owningModelStory": 15456,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -23417,6 +25472,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -23714,6 +25770,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -24011,6 +26068,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -24308,6 +26366,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -24605,6 +26664,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -24902,6 +26962,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -25199,6 +27260,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -25496,6 +27558,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -25793,6 +27856,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -26090,6 +28154,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -26387,6 +28452,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -26684,6 +28750,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -26981,6 +29048,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -27278,6 +29346,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -27575,6 +29644,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -27872,6 +29942,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -28169,6 +30240,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -28466,6 +30538,7 @@
       "owningModelStory": 16170,
       "rung4Survey": {
         "story": 15969,
+        "surveyed": true,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
@@ -32837,6 +34910,7 @@
     "anima_aesthetic": [],
     "anima_base": [],
     "anima_turbo": [],
+    "bernini": [],
     "bernini_image": [],
     "boogu_image": [],
     "boogu_image_edit": [],
@@ -32916,8 +34990,11 @@
       "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:resident",
       "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:staged_residency"
     ],
+    "krea_realtime_14b": [],
     "lens": [],
     "lens_turbo": [],
+    "ltx_2_3": [],
+    "ltx_2_3_eros": [],
     "mage_flow": [
       "mage_flow:mage_flow:candle:bf16:text_to_image:lora:bounded_decode",
       "mage_flow:mage_flow:candle:bf16:text_to_image:none:bounded_decode",
@@ -32991,6 +35068,7 @@
     "realvisxl_lightning": [],
     "sana_1600m": [],
     "sana_sprint_1600m": [],
+    "scail2_14b": [],
     "sd3_5_large": [],
     "sd3_5_large_turbo": [],
     "sd3_5_medium": [],
@@ -33011,6 +35089,11 @@
     "sensenova_u1_8b_infographic_v2_fast": [],
     "sensenova_u1_8b_infographic_v3": [],
     "sensenova_u1_8b_infographic_v3_fast": [],
+    "svd": [],
+    "wan_2_2": [],
+    "wan_2_2_i2v_14b": [],
+    "wan_2_2_t2v_14b": [],
+    "wan_2_2_vace_fun_14b": [],
     "z_image": [
       "z_image:z_image:candle:bf16:style_variations:control:bounded_attention",
       "z_image:z_image:candle:bf16:style_variations:control:bounded_decode",

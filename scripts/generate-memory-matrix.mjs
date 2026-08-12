@@ -18,6 +18,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
 const EXPECTED_IMAGE_COUNT = 53;
+// sc-18815: the modalities the matrix carries. `utility` and `audio` entries have no memory ladder —
+// no rungs, no fit gate, no strategy selector — so they are outside the universe by design rather
+// than by omission, and admitting one would need the same three things video needed here.
+const MATRIX_MODALITIES = new Set(["image", "video"]);
+const EXPECTED_VIDEO_COUNT = 10;
 // SC-18218 removed FLUX.2-dev from this census: the pinned MLX provider is eager/resident-only,
 // so counting its generic route as staged coverage would contradict the captured contract.
 const EXPECTED_MLX_STAGED_COUNT = 38;
@@ -35,6 +40,16 @@ const RUNGS = [
   "bounded_transformer_residency",
 ];
 
+// The catalog `capabilities` that name a GENERATION MODE, which is the matrix's mode axis. A
+// capability outside this set (a UI affordance, a conditioning kind) is not a mode and must not
+// multiply the cross-product.
+//
+// sc-18815 adds the video modes. Every one is a distinct request shape the worker dispatches on
+// (`video_jobs::resolve_video_route` branches on `request.mode`), and several select a different
+// engine path entirely — `replace_person` and `animate_character` reach the VACE/SCAIL-2 arms rather
+// than the family's base generator. Collapsing them to one `catalog_default` mode, which is what the
+// image-only vocabulary did to every video entry, would publish one cell for coordinates whose peaks
+// are not the same measurement.
 const GENERATION_CAPABILITIES = new Set([
   "text_to_image",
   "edit_image",
@@ -43,6 +58,18 @@ const GENERATION_CAPABILITIES = new Set([
   "image_detail",
   "character_image",
   "style_variations",
+  "text_to_video",
+  "image_to_video",
+  "video_to_video",
+  "first_last_frame",
+  "extend_clip",
+  "video_bridge",
+  "replace_person",
+  "animate_character",
+  "reference_to_video",
+  "reference_video_to_video",
+  "multi_video_to_video",
+  "ads2v",
 ]);
 
 // This is ownership metadata, not conformance data. Drift is checked against the
@@ -137,17 +164,145 @@ export const FAMILY_STORIES = {
 };
 
 /**
- * The stable family group key for a catalog id, which is the family's MLX story id.
+ * Ownership for the VIDEO families epic 18803 admits (sc-18815).
  *
- * The 155xx keys are epic SC-15448's per-family MLX stories. The video families epic 18803 admits
- * have no such story — the image ladder never covered them — so their key is the story that first
- * established the family in the apparatus, which is its rung-4 survey entry (sc-18813 for
- * `ltx-video`). `FAMILY_STORIES` deliberately does NOT carry a row for it yet: that map answers
- * "which story owns this cell", and until sc-18815 admits video to the model universe the family
- * generates no cells to own.
+ * Kept as its own registry rather than as rows in `FAMILY_STORIES` because the two lanes' ownership
+ * rules genuinely differ, and collapsing them would either weaken the image lane's guard or force
+ * this lane to name stories that do not exist:
+ *
+ * - **One story may cover BOTH backends.** Epic 15448 split every image family per backend because
+ *   its evidence is produced on backend-specific hardware — an MLX story cannot be closed from CUDA.
+ *   A video family here is owned by its rung-4 SURVEY story, whose evidence is provider source read
+ *   at the pinned inference revision. sc-18813 delivered the MLX *and* candle LTX verdicts in one
+ *   story from one machine; inventing a per-backend pair would name a candle twin nobody filed.
+ * - **One story may cover several families.** sc-18828 surveys `scail2`, `krea-realtime` and `svd`
+ *   together. They are three unrelated architectures — merging them into one family group to satisfy
+ *   a one-story-one-owner rule would publish a false family — so the rule gives way, not the family.
+ *
+ * `bernini` is deliberately absent: its video and image entries are the SAME provider (`bernini`) and
+ * the SAME architecture, so it stays in image family 15528, whose survey verdict is already written
+ * about the Bernini renderer rather than about a still-image path. sc-18827 reconciles the video-side
+ * entry coverage within that family.
+ */
+export const VIDEO_FAMILY_STORIES = Object.freeze({
+  "ltx-video": 18813,
+  "wan-video": 18826,
+  scail2: 18828,
+  "krea-realtime": 18828,
+  svd: 18828,
+});
+
+/**
+ * Families that are IN the model universe but whose rung-4 verdict has not been written yet, with the
+ * story that owes it (sc-18815).
+ *
+ * This is the only honest way to admit a modality one story at a time. The alternative orderings both
+ * publish something false: admitting the family with no marker makes its rung-4 cells read as
+ * surveyed and found wanting, and holding the family out of the universe until its verdict lands is
+ * exactly the silent absence — `type === "image"` — this story exists to remove.
+ *
+ * It is a debt, not an exemption. `assertRung4SurveyCoversEveryFamily` rejects a row for a family the
+ * catalog does not advertise AND a row whose verdict has since landed, so each entry can only be
+ * deleted, never quietly kept; and the cells say `surveyed: false` with this story id on them rather
+ * than looking like any other `Missing`.
+ */
+export const PENDING_RUNG4_SURVEYS = new Map(
+  // The owing story is DERIVED from the family's owner, never restated: the story that owns a video
+  // family IS the story that writes its survey verdict, so two literals would be two chances to
+  // disagree about one fact. `VIDEO_FAMILY_STORIES` throws on a group it does not know, which keeps
+  // a typo'd family name out of this list rather than parking it here as a permanent debt.
+  ["wan-video", "scail2", "krea-realtime", "svd"].map((group) => {
+    if (!Object.hasOwn(VIDEO_FAMILY_STORIES, group)) {
+      throw new Error(`pending rung-4 survey: ${group} is not a video family`);
+    }
+    return [group, VIDEO_FAMILY_STORIES[group]];
+  }),
+);
+
+/**
+ * Catalog entries that are IN the universe but that the routing catalog routes on NO backend, with
+ * the reason and the story that owns the verdict (sc-18815).
+ *
+ * `wan_2_2_vace_fun_14b` is the only one, and it is a catalog defect rather than a property of the
+ * model: it has a manifest entry (`builtin.models.jsonc`), a real MLX engine
+ * (`engines.rs#video_engine_ids` maps it to `wan2_2_vace_fun_14b`) and a worker dispatch, but ZERO
+ * rows in `VIDEO_MODEL_CAPS` (`routing/catalog.rs`), so `video_model_mac_support` reports it
+ * unsupported. Backend scope comes from the routing catalog, which is this epic's stated authority,
+ * so the generator does not paper over it — it resolves to zero backends and therefore zero cells.
+ *
+ * Declaring it is the whole point. An entry with no backends emits nothing, and "emits nothing" and
+ * "is not in the catalog" look identical in the output — which is precisely the failure mode
+ * (silent absence) this story exists to end. The guard below fails closed in both directions: a NEW
+ * unrouted entry cannot appear without being named here, and this row cannot outlive the defect.
+ *
+ * `mochi_1` is the inverse defect and needs no row: it has a `VIDEO_MODEL_CAPS` row and a worker
+ * route but NO manifest entry, and the universe is built from the manifest, so it is excluded by
+ * construction. That is the correct outcome on its own terms — Mochi is frozen with no weights lane
+ * and epic 18803 lists it out of scope — and `mochi_is_routed_but_not_in_the_universe` pins that the
+ * exclusion is the manifest's doing rather than a coincidence of some other filter.
+ */
+export const UNROUTED_CATALOG_ENTRIES = new Map([
+  [
+    "wan_2_2_vace_fun_14b",
+    {
+      reason:
+        "manifest entry + MLX engine (wan2_2_vace_fun_14b) but zero VIDEO_MODEL_CAPS rows, so the routing catalog routes it on no backend",
+      owningStory: 18826,
+    },
+  ],
+]);
+
+/**
+ * Every entry that resolved to no backend must be a declared one, and every declared one must still
+ * resolve to none. Fails closed both ways so the list can only shrink by fixing the defect.
+ */
+export function assertUnroutedEntriesAreDeclared(models, declared = UNROUTED_CATALOG_ENTRIES) {
+  for (const model of models) {
+    if (!model.backends.length && !declared.has(model.id)) {
+      throw new Error(
+        `${model.id}: the routing catalog routes it on no backend, so it generates zero cells and is indistinguishable from an entry that is not in the catalog at all — declare it in UNROUTED_CATALOG_ENTRIES with its reason and owner, or route it (sc-18815)`,
+      );
+    }
+  }
+  const byId = new Map(models.map((model) => [model.id, model]));
+  for (const [id, entry] of declared) {
+    const model = byId.get(id);
+    if (!model) {
+      throw new Error(`UNROUTED_CATALOG_ENTRIES names ${id}, which is not in the model universe`);
+    }
+    if (model.backends.length) {
+      throw new Error(
+        `${id} is declared unrouted (sc-${entry.owningStory}) but the catalog now routes ${model.backends.join(",")} — delete the row so its cells stop being explained away`,
+      );
+    }
+  }
+}
+
+/** `SC-15509` for an image family group, the family's own name for a video one. */
+export function familyLabel(group) {
+  return typeof group === "number" ? `SC-${group}` : group;
+}
+
+/**
+ * The stable family group key for a catalog id.
+ *
+ * Image families (epic SC-15448) are keyed by the family's MLX story id, which doubles as the group
+ * key. The video families epic 18803 admits are keyed by the family's own NAME, because the story-id
+ * convention does not survive this lane: sc-18828 owns three unrelated families at once, so no
+ * assignment of story ids to those families is both distinct and true. A name is stable, carries no
+ * false ownership claim, and is the vocabulary the epic itself uses. `VIDEO_FAMILY_STORIES` answers
+ * the ownership question the key used to answer implicitly.
+ *
+ * `bernini` (video) and `bernini_image` share group 15528 on purpose — one engine, one block stack,
+ * two catalog entries — so the family is not counted or surveyed twice.
  */
 export function familyGroup(modelId) {
-  if (modelId.startsWith("ltx_2_3")) return 18813;
+  if (modelId.startsWith("ltx_2_3")) return "ltx-video";
+  if (modelId.startsWith("wan_2_2")) return "wan-video";
+  if (modelId === "scail2_14b") return "scail2";
+  if (modelId === "krea_realtime_14b") return "krea-realtime";
+  if (modelId === "svd") return "svd";
+  if (modelId === "bernini") return 15528;
   if (modelId.startsWith("mage_flow")) return 15509;
   if (modelId.startsWith("z_image")) return 15510;
   if (modelId.startsWith("qwen_image")) return 15511;
@@ -173,12 +328,16 @@ export function familyGroup(modelId) {
 
 export function familyStory(modelId, backend) {
   const group = familyGroup(modelId);
+  // A video family's survey story covers both backends (see `VIDEO_FAMILY_STORIES`), so it answers
+  // for either without a twin. `bernini` is not here: it is image family 15528 and takes the
+  // per-backend path below like every other member of that family.
+  if (Object.hasOwn(VIDEO_FAMILY_STORIES, group)) return VIDEO_FAMILY_STORIES[group];
   const stories = FAMILY_STORIES[group];
-  if (!stories) throw new Error(`${modelId}: family SC-${group} has no ownership entry`);
+  if (!stories) throw new Error(`${modelId}: family ${familyLabel(group)} has no ownership entry`);
   const story = stories[backend];
   if (!story) {
     throw new Error(
-      `${modelId}: family SC-${group} owns no ${backend} story, so a ${backend} cell cannot be attributed — file the ${backend} family twin`,
+      `${modelId}: family ${familyLabel(group)} owns no ${backend} story, so a ${backend} cell cannot be attributed — file the ${backend} family twin`,
     );
   }
   return story;
@@ -258,8 +417,17 @@ const CELL_OWNERSHIP_FIELDS = {
  * story that cannot close it — reached by assignment rather than by backend. So the owner identity is
  * asserted too.
  */
-export function assertCellOwnershipIsBackendScoped(cells, scope = buildStoryBackendScope()) {
+export function assertCellOwnershipIsBackendScoped(
+  cells,
+  scope = buildStoryBackendScope(),
+  modalityByModelId = new Map(),
+) {
   for (const cell of cells) {
+    // sc-18815: the video lane's ownership is checked by `assertVideoOwnership` against its own rule
+    // (no per-entry story, family story from `VIDEO_FAMILY_STORIES`), because `scope` is the image
+    // lane's registry and a video cell resolves in it to nothing. Skipping is safe only BECAUSE the
+    // other guard runs — the two are a partition of the cells, not a check and an exemption.
+    if (modalityByModelId.get(cell.modelId) === "video") continue;
     for (const [field, expected] of Object.entries(CELL_OWNERSHIP_FIELDS)) {
       const storyId = cell[field];
       if (!Number.isInteger(storyId)) {
@@ -330,7 +498,19 @@ export function assertCellInventoryMatchesCatalog(cells, expectedByScope) {
  * the catalog advertises: every dual-backend entry needs a Candle twin, and an mlx-only entry must
  * NOT have one, because an empty Candle story can never be closed.
  */
-export function assertTwinCoverage(models, modelStories = MODEL_STORIES, familyStories = FAMILY_STORIES) {
+export function assertTwinCoverage(
+  allModels,
+  modelStories = MODEL_STORIES,
+  familyStories = FAMILY_STORIES,
+) {
+  // sc-18815: the twin rule is an IMAGE-lane invariant and stays at full strength there. It encodes
+  // epic 15448's per-backend split, which exists because an image family's evidence is produced on
+  // backend-specific hardware. The video families this epic admits are owned by a single survey story
+  // whose evidence is provider source read at the pinned revision (`VIDEO_FAMILY_STORIES`), so
+  // demanding a distinct Candle twin would demand a story nobody filed and could only be satisfied by
+  // inventing one. `assertVideoOwnership` checks the video lane against ITS rule instead — the lane
+  // is not exempt, it is checked differently because it is owned differently.
+  const models = allModels.filter((model) => model.modality !== "video");
   const dual = models.filter((model) => model.backends.includes("candle"));
   const dualGroups = new Set(dual.map((model) => familyGroup(model.id)));
   for (const model of models) {
@@ -358,6 +538,47 @@ export function assertTwinCoverage(models, modelStories = MODEL_STORIES, familyS
     throw new Error(`${dualGroups.size} dual families map onto only ${candleFamilyTwins.size} distinct Candle family twins`);
   }
   return { dualModels: dual.length, dualFamilies: dualGroups.size };
+}
+
+/**
+ * The video lane's ownership rule (sc-18815), which is not the image lane's.
+ *
+ * Two claims, both fail-closed, and both about what must NOT be there as much as what must:
+ *
+ * 1. **No per-entry ownership story is invented.** Epic 18803 does not slice video per (entry,
+ *    backend) — measurement is a runbook (epic 18093) — so `owningModelStories` is `null` on every
+ *    video entry. A number appearing there is a fabricated owner, which is the same false-inventory
+ *    defect SC-15812's guard was written for, reached from the other direction.
+ * 2. **Every advertised backend resolves to the family's real owning story.** `bernini` takes the
+ *    per-backend image path (family 15528) because it IS an image-family member; the rest take
+ *    `VIDEO_FAMILY_STORIES`. Either way the value has to be the one `familyStory` derives, so a hand
+ *    edit here cannot point a cell at a story that does not own it.
+ */
+export function assertVideoOwnership(allModels, videoFamilyStories = VIDEO_FAMILY_STORIES) {
+  for (const model of allModels.filter((entry) => entry.modality === "video")) {
+    const group = familyGroup(model.id);
+    for (const backend of model.backends) {
+      const modelStoryId = model.owningModelStories[backend];
+      if (modelStoryId !== null) {
+        throw new Error(
+          `${model.id}:${backend}: video entries carry no per-entry ownership story, but this one names SC-${modelStoryId} — epic 18803 filed no per-(entry, backend) video stories, so the id cannot be one that owns this cell`,
+        );
+      }
+      const expected = Object.hasOwn(videoFamilyStories, group)
+        ? videoFamilyStories[group]
+        : FAMILY_STORIES[group]?.[backend];
+      if (!expected) {
+        throw new Error(
+          `${model.id}:${backend}: family ${familyLabel(group)} has no owning story on this backend`,
+        );
+      }
+      if (model.owningFamilyStories[backend] !== expected) {
+        throw new Error(
+          `${model.id}:${backend}: owningFamilyStory SC-${model.owningFamilyStories[backend]} is not family ${familyLabel(group)}'s ${backend} owner SC-${expected}`,
+        );
+      }
+    }
+  }
 }
 
 function sha256(body) {
@@ -646,6 +867,186 @@ function parseEngineRoutes(source) {
   return routes;
 }
 
+/**
+ * Resolve one catalog entry's route, whichever modality it belongs to.
+ *
+ * The two lanes are shaped differently and the difference is real, not incidental: the image lane has
+ * ONE provider per entry (`MODEL_TABLE` is consulted on both backends), the video lane has one PER
+ * BACKEND (LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on candle). `engineFor` is what the cell
+ * loop consumes, so a cell can never be stamped with the other backend's provider — which would bind
+ * its calibration evidence, plan row and closure digest to a provider that never ran it.
+ *
+ * Throws on an entry with no route at all. An unrouted entry is not a `Missing` cell, it is an entry
+ * the generator cannot describe, and silently dropping one is exactly the failure this story exists
+ * to remove.
+ */
+function resolveRoute(model, imageRoutes, videoRoutes) {
+  const image = imageRoutes.get(model.id);
+  if (image) {
+    return { ...image, engineFor: () => image.engine };
+  }
+  const video = videoRoutes.get(model.id);
+  if (video) {
+    const engines = sortedUnique(Object.values(video));
+    return {
+      // The scalar is only meaningful when the backends agree; `engineFor` is the authority.
+      engine: engines.length === 1 ? engines[0] : (video.mlx ?? video.candle),
+      repo: null,
+      kind: "video",
+      engineFor: (backend) => video[backend] ?? null,
+    };
+  }
+  throw new Error(`${model.id}: no resolved route/provider`);
+}
+
+/**
+ * The `(sceneworks id -> engine id)` arms one worker video-route resolver declares.
+ *
+ * The three syntactic forms below are the three the worker actually uses, and each is anchored on the
+ * function's own signature so an unrelated `match model` elsewhere in a 90 KB file cannot contribute
+ * arms. `&'static str` consts are resolved from the same file (`krea_realtime_engine_id` is spelled
+ * entirely in consts), because a parser that silently skipped a const-spelled arm would drop a whole
+ * family from the universe and read as "the worker does not route it".
+ *
+ * Fails closed: an absent function, or a function whose body yields no arm, throws. A video family
+ * whose resolver was renamed must be noticed here, not inferred from an empty map.
+ */
+export function parseVideoEngineIds(source, fnName) {
+  const consts = new Map(
+    [...source.matchAll(/const\s+([A-Z0-9_]+):\s*&'?\s*(?:static\s+)?str\s*=\s*"([^"]+)"\s*;/g)].map(
+      (match) => [match[1], match[2]],
+    ),
+  );
+  const literal = (token) => {
+    const quoted = token.match(/^"([^"]+)"$/);
+    if (quoted) return quoted[1];
+    const resolved = consts.get(token);
+    if (!resolved) {
+      throw new Error(`memory-matrix: ${fnName} names ${token}, which resolves to no &str const`);
+    }
+    return resolved;
+  };
+  const declaration = source.match(
+    new RegExp(`fn ${fnName}\\(model: &str\\) -> Option<&'static str> \\{([\\s\\S]*?)\\n\\}`),
+  );
+  if (!declaration) {
+    throw new Error(`memory-matrix: could not locate ${fnName} — the video route resolvers moved`);
+  }
+  const body = declaration[1];
+  const arms = new Map();
+  // `match model { "a" => Some("x"), "b" | "c" => Some("y"), … }`. The or-pattern is load-bearing:
+  // candle's LTX arm is `"ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled")`, so a single-token
+  // pattern would silently drop the BASE id and report `ltx_2_3` as candle-unrouted.
+  for (const arm of body.matchAll(
+    /((?:(?:"[^"]+"|[A-Z0-9_]+)\s*\|\s*)*(?:"[^"]+"|[A-Z0-9_]+))\s*=>\s*Some\(("[^"]+"|[A-Z0-9_]+)\)/g,
+  )) {
+    const engine = literal(arm[2]);
+    for (const id of arm[1].split("|")) arms.set(literal(id.trim()), engine);
+  }
+  // `(model == "a").then_some("x")`
+  for (const arm of body.matchAll(
+    /model\s*==\s*("[^"]+"|[A-Z0-9_]+)\s*\)\s*\.then_some\(("[^"]+"|[A-Z0-9_]+)\)/g,
+  )) {
+    arms.set(literal(arm[1]), literal(arm[2]));
+  }
+  // `matches!(model, "a" | "b").then_some("x")`
+  for (const arm of body.matchAll(
+    /matches!\(\s*model,([^)]*)\)\s*\.then_some\(("[^"]+"|[A-Z0-9_]+)\)/g,
+  )) {
+    const engine = literal(arm[2]);
+    for (const id of arm[1].matchAll(/"([^"]+)"|([A-Z0-9_]+)/g)) {
+      arms.set(literal(id[1] ? `"${id[1]}"` : id[2]), engine);
+    }
+  }
+  if (!arms.size) {
+    throw new Error(`memory-matrix: ${fnName} declared no model -> engine arm`);
+  }
+  return arms;
+}
+
+/**
+ * The union of engine ids `engines.rs#video_engine_ids` maps each video catalog id to, across
+ * backends. Used two ways: as the only source for `wan_2_2_vace_fun_14b` (whose MLX dispatch is a
+ * native VACE arm carrying no id string of its own), and as an independent cross-check that every
+ * per-backend provider derived from `video_jobs/*` is one the worker's own union agrees is that
+ * model's engine. Two sources have to be wrong the same way for a bad provider to reach a cell.
+ */
+function parseVideoEngineIdUnion(enginesBody) {
+  const declaration = enginesBody.match(
+    /fn video_engine_ids\(sceneworks_id: &str\) -> &'static \[&'static str\] \{([\s\S]*?)\n\s{4}\}/,
+  );
+  if (!declaration) {
+    throw new Error("memory-matrix: could not locate video_engine_ids in engines.rs");
+  }
+  const union = new Map();
+  for (const arm of declaration[1].matchAll(/((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*&\[([^\]]*)\]/g)) {
+    const engines = [...arm[2].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+    for (const id of arm[1].matchAll(/"([^"]+)"/g)) union.set(id[1], engines);
+  }
+  if (!union.size) throw new Error("memory-matrix: video_engine_ids declared no arm");
+  return union;
+}
+
+/**
+ * Per-backend video providers, derived from the worker's own route resolvers.
+ *
+ * The image lane resolves ONE provider per catalog id, because `MODEL_TABLE` is one table consulted
+ * on both backends. The video lane genuinely does not: LTX is backend-split (`ltx_2_3` on MLX,
+ * `ltx_2_3_distilled` on candle), so a single scalar route would have to be wrong on one of them —
+ * and a wrong provider is not cosmetic, it is the key calibration evidence, the plan, and the
+ * per-provider closure digests all bind on.
+ *
+ * Backend membership is NOT decided here. This answers "which provider serves this id on this
+ * backend if that backend serves it at all"; the routing catalog (`routedLanes`) decides whether it
+ * does. `scail2_14b` and `krea_realtime_14b` have candle-side `*_engine_id` arms (the candle
+ * `ReplacePersonScail2` dispatch) while the catalog routes them MLX-only — the catalog wins, per this
+ * epic's stated backend authority.
+ */
+export function parseVideoRoutes(bodies) {
+  const union = parseVideoEngineIdUnion(bodies.engines);
+  const mlx = new Map();
+  for (const [body, fnName] of [
+    [bodies.videoRouteWan, "wan_engine_id"],
+    [bodies.videoRouteLtx, "ltx_engine_id"],
+    [bodies.videoRouteSvd, "svd_engine_id"],
+    [bodies.videoRouteBernini, "bernini_engine_id"],
+    [bodies.videoRouteScail2, "scail2_engine_id"],
+    [bodies.videoRouteKreaRealtime, "krea_realtime_engine_id"],
+  ]) {
+    for (const [id, engine] of parseVideoEngineIds(body, fnName)) mlx.set(id, engine);
+  }
+  const candle = parseVideoEngineIds(bodies.videoRouteCandle, "candle_video_engine_id");
+  // The candle lane routes Bernini off the model id in `resolve_candle_video_route`, BEFORE the
+  // generic `is_candle_video_engine` arm, so it is absent from `candle_video_engine_id` by design and
+  // shares the MLX engine id. Reading only that one function would report Bernini as candle-unrouted
+  // while the routing catalog routes it — a provider hole on a shipping lane.
+  if (mlx.has("bernini")) candle.set("bernini", mlx.get("bernini"));
+
+  const routes = new Map();
+  for (const id of sortedUnique([...mlx.keys(), ...candle.keys(), ...union.keys()])) {
+    const byBackend = {};
+    if (mlx.has(id)) byBackend.mlx = mlx.get(id);
+    if (candle.has(id)) byBackend.candle = candle.get(id);
+    const declared = union.get(id);
+    if (declared) {
+      // `wan_2_2_vace_fun_14b`'s MLX arm is the native VACE dispatch, which carries no id string, so
+      // the union is its only source. Everything else must AGREE with the union.
+      if (!byBackend.mlx && declared.length === 1) byBackend.mlx = declared[0];
+      for (const [backend, engine] of Object.entries(byBackend)) {
+        if (!declared.includes(engine)) {
+          throw new Error(
+            `memory-matrix: video route ${id}:${backend} resolves to provider ${engine}, but ` +
+              `engines.rs#video_engine_ids lists ${declared.join(",")} for it — the worker's two ` +
+              "video route declarations disagree",
+          );
+        }
+      }
+    }
+    if (Object.keys(byBackend).length) routes.set(id, byBackend);
+  }
+  return routes;
+}
+
 // sc-16268: anchored on CODE, not on the `/// An id with no registered generator` doc comment that
 // used to terminate the region. Provenance now hashes these sources with their inert comments
 // stripped, so a parse that reads comment text would let a semantic change slip past the staleness
@@ -768,8 +1169,12 @@ function staticContractCoversProvider(contract, provider) {
 }
 
 function providerFor(model, backend, overlay, route) {
-  if (overlay !== "control") return route.engine;
-  return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? route.engine;
+  // Per-backend (sc-18815): the image lane's `engineFor` returns the one table route on either
+  // backend, so this is unchanged for it, while a video entry gets the provider that backend
+  // actually loads instead of whichever one happened to be listed first.
+  const engine = route.engineFor(backend) ?? route.engine;
+  if (overlay !== "control") return engine;
+  return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine;
 }
 
 function matrixOverlayFor(recordOverlay) {
@@ -843,6 +1248,18 @@ function geometryFor(model, backend) {
     maxWidth: limits.maxWidth ?? limits.maxSize ?? null,
     minHeight: limits.minHeight ?? limits.minSize ?? null,
     maxHeight: limits.maxHeight ?? limits.maxSize ?? null,
+    // sc-18815: the TEMPORAL half of a video entry's declared envelope. Publishing only the spatial
+    // half would say the envelope is fully described when the axis a video peak actually scales on
+    // is missing — the same silent omission, one field down. These are the catalog's DECLARED
+    // limits, nothing more: how the phase curve represents the temporal axis (raw frames, a
+    // latent-depth regressor, a cross term) is measured and decided by sc-18810/sc-18812, and this
+    // field neither anticipates nor constrains that. Image entries declare none of these keys, so
+    // the filter below drops them and every image envelope is byte-identical to before.
+    defaultDuration: defaults.duration ?? null,
+    durations: Array.isArray(limits.durations) ? limits.durations : [],
+    hardMaxDuration: limits.hardMaxDuration ?? null,
+    defaultFps: defaults.fps ?? null,
+    fps: Array.isArray(limits.fps) ? limits.fps : [],
   };
   return Object.fromEntries(
     Object.entries(envelope).filter(
@@ -1079,7 +1496,9 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
           } catch {
             owner = null;
           }
-          if (owner !== Number(group)) {
+          // Compared as strings: image family groups are numbers and the video groups sc-18815 adds
+          // are names, while a JSON object key is always a string.
+          if (String(owner) !== group) {
             throw new Error(`${at}: ${field} names ${id}, which belongs to another family`);
           }
         }
@@ -1123,8 +1542,26 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
  * "not applicable" — the state the five-value conformance vocabulary alone cannot express.
  */
 function rung4SurveyCell(survey, modelId, backend, tier, mode, overlay, overlayIncompatible) {
-  const verdict = survey.get(`${familyGroup(modelId)}:${backend}`);
-  if (!verdict) throw new Error(`${modelId}:${backend}: no rung-4 survey verdict (SC-15969)`);
+  const group = familyGroup(modelId);
+  const verdict = survey.get(`${group}:${backend}`);
+  if (!verdict) {
+    // sc-18815: the modality is admitted before every family's verdict is written, so the honest
+    // report is "not surveyed yet, and here is who owes it" — NOT a throw (the entry would vanish
+    // from the matrix again) and NOT a bare `Missing` (which is the shape of a surveyed family found
+    // to have no implementation). `surveyed: false` is the discriminator, and it is present on every
+    // rung-4 cell so a consumer never has to infer it from a null.
+    const owner = PENDING_RUNG4_SURVEYS.get(group);
+    if (!owner) throw new Error(`${modelId}:${backend}: no rung-4 survey verdict (SC-15969)`);
+    return {
+      story: 15969,
+      surveyed: false,
+      pendingSurveyStory: owner,
+      structuralApplicability: null,
+      requestPeak: "unsurveyed",
+      implementation: null,
+      overlayIncompatible,
+    };
+  }
   const scopedRequestPeak = (verdict.requestPeak.scopes ?? []).find(
     (scope) =>
       (scope.entries ?? [modelId]).includes(modelId) &&
@@ -1134,6 +1571,7 @@ function rung4SurveyCell(survey, modelId, backend, tier, mode, overlay, overlayI
   );
   return {
     story: 15969,
+    surveyed: true,
     // Always the family's OWN verdict. Overlay incompatibility is a property of the provider's
     // adapter mechanism, not of the architecture — Krea's 28-block trunk is windowable whatever its
     // adapters do — so it travels in its own field. Folding it into `structuralApplicability` would
@@ -1205,15 +1643,36 @@ function rung4Implementation(verdict, modelId, tier, mode, overlay) {
  * It also self-clears: once a modality is admitted, its pairs appear in `advertised` and the strict
  * arm covers them again. Callers that pass nothing keep the original two-state behaviour.
  */
-export function assertRung4SurveyCoversEveryFamily(survey, models, { catalogFamilyBackends } = {}) {
+export function assertRung4SurveyCoversEveryFamily(
+  survey,
+  models,
+  { catalogFamilyBackends, pendingSurveys = PENDING_RUNG4_SURVEYS } = {},
+) {
   const advertised = new Set(
     models.flatMap((model) => model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`)),
   );
   for (const key of advertised) {
     if (!survey.has(key)) {
       const [group, backend] = key.split(":");
+      if (pendingSurveys.has(group)) continue;
       throw new Error(
-        `family SC-${group} has no ${backend} rung-4 survey verdict, so its bounded_transformer_residency cells would report Missing without ever having been surveyed (SC-15969)`,
+        `family ${familyLabel(group)} has no ${backend} rung-4 survey verdict, so its bounded_transformer_residency cells would report Missing without ever having been surveyed (SC-15969)`,
+      );
+    }
+  }
+  // A pending declaration is a debt, not a licence. It expires the moment the verdict lands, and a
+  // row for a family the catalog does not advertise at all is a leftover that would sit in the source
+  // being maintained and trusted while naming nothing.
+  for (const [group, owner] of pendingSurveys) {
+    const covered = ["mlx", "candle"].filter((backend) => advertised.has(`${group}:${backend}`));
+    if (!covered.length) {
+      throw new Error(
+        `rung-4 survey: family ${familyLabel(group)} is declared pending on sc-${owner}, but the catalog advertises no entry in that family — remove the pending row (sc-18815)`,
+      );
+    }
+    if (covered.every((backend) => survey.has(`${group}:${backend}`))) {
+      throw new Error(
+        `rung-4 survey: family ${familyLabel(group)} now carries a verdict for every advertised backend, so its pending row (sc-${owner}) is stale — delete it so the cells stop reporting unsurveyed (sc-18815)`,
       );
     }
   }
@@ -1221,7 +1680,7 @@ export function assertRung4SurveyCoversEveryFamily(survey, models, { catalogFami
     if (!advertised.has(key) && !catalogFamilyBackends?.has(key)) {
       const [group, backend] = key.split(":");
       throw new Error(
-        `rung-4 survey: family SC-${group} carries a ${backend} verdict, but the catalog advertises no ${backend} entry in that family — the verdict reaches no cell (SC-15969)`,
+        `rung-4 survey: family ${familyLabel(group)} carries a ${backend} verdict, but the catalog advertises no ${backend} entry in that family — the verdict reaches no cell (SC-15969)`,
       );
     }
   }
@@ -1263,7 +1722,9 @@ function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, 
       ? manifestById.get("z_image_turbo")
       : model;
   return backend === "mlx"
-    ? sequentialEngines.has(route.engine)
+    // The MLX provider id specifically: `engine_supports_sequential` is a claim about the MLX
+    // registry, and a video entry's candle provider is a different id (sc-18815).
+    ? sequentialEngines.has(route.engineFor("mlx") ?? route.engine)
     : declaredModel.candle?.supportsSequentialOffload === true ||
         declaredModel.candle?.sequentialPeakGb !== undefined ||
         declaredModel.candle?.turboFit !== undefined;
@@ -1397,6 +1858,9 @@ function strategyStatus({
   const staticRung4Implementation = rung === "bounded_transformer_residency"
     ? rung4Implementation(staticRung4Verdict, model.id, tier, mode, overlay)
     : null;
+  // `staticRung4Verdict` is `undefined` for a family declared pending (sc-18815). Every term below
+  // already fails closed on that, and deliberately so: no rung-4 claim may be made for a family
+  // nobody has surveyed, whichever direction the missing evidence would have pointed.
   const staticRung4Allowed =
     rung !== "bounded_transformer_residency" ||
     (["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
@@ -1616,9 +2080,16 @@ function strategyStatus({
   // forward-time residual), not of rung 4: MLX Z-Image streams overlays fine, and generalising
   // Krea's rule to every family would have been wrong in the other direction.
   if (rung === "bounded_transformer_residency") {
-    const verdict = rung4Survey.get(`${familyGroup(model.id)}:${backend}`);
+    const group = familyGroup(model.id);
+    const verdict = rung4Survey.get(`${group}:${backend}`);
     if (!verdict) {
-      throw new Error(`${model.id}:${backend}: no rung-4 survey verdict (SC-15969)`);
+      // sc-18815: a family declared pending has no verdict to answer from, so the cell falls through
+      // to `Missing` — and carries `surveyed: false` from `rung4SurveyCell` so the reason is on the
+      // cell rather than inferred. Any other family with no verdict is still a generation failure.
+      if (!PENDING_RUNG4_SURVEYS.has(group)) {
+        throw new Error(`${model.id}:${backend}: no rung-4 survey verdict (SC-15969)`);
+      }
+      return { state: "Missing", source: null, parameters: {} };
     }
     // Implementation is per ENTRY and per MODE — inference may route a catalog entry's modes to
     // different descriptors than the one carrying the contract — and the rung is unreachable without
@@ -1675,9 +2146,22 @@ function validateMatrix(
   calibrationPlan,
   catalogFamilyBackendPairs,
 ) {
-  const ids = matrix.models.map((model) => model.id);
+  // sc-18815: censused PER MODALITY. A single total would let a video entry appearing cover for an
+  // image entry disappearing, which is exactly the accounting the image-only filter made impossible
+  // to notice in the other direction.
+  const ids = matrix.models.filter((model) => model.modality === "image").map((model) => model.id);
+  const videoIds = matrix.models.filter((model) => model.modality === "video").map((model) => model.id);
+  const unknownModality = matrix.models.filter((model) => !MATRIX_MODALITIES.has(model.modality));
+  if (unknownModality.length) {
+    throw new Error(
+      `matrix carries entries of unadmitted modalities: ${unknownModality.map((model) => `${model.id}(${model.modality})`).join(",")}`,
+    );
+  }
   if (ids.length !== EXPECTED_IMAGE_COUNT) {
     throw new Error(`expected exactly ${EXPECTED_IMAGE_COUNT} image entries, found ${ids.length}`);
+  }
+  if (videoIds.length !== EXPECTED_VIDEO_COUNT) {
+    throw new Error(`expected exactly ${EXPECTED_VIDEO_COUNT} video entries, found ${videoIds.length}`);
   }
   if (
     new Set(expectedIds).size !== ids.length ||
@@ -1711,7 +2195,13 @@ function validateMatrix(
   assertCellInventoryMatchesCatalog(matrix.cells, cellInventoryExpectations);
   assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells);
   assertTwinCoverage(matrix.models);
-  assertCellOwnershipIsBackendScoped(matrix.cells);
+  assertVideoOwnership(matrix.models);
+  assertUnroutedEntriesAreDeclared(matrix.models);
+  assertCellOwnershipIsBackendScoped(
+    matrix.cells,
+    buildStoryBackendScope(),
+    new Map(matrix.models.map((model) => [model.id, model.modality])),
+  );
   assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models, {
     catalogFamilyBackends: catalogFamilyBackendPairs,
   });
@@ -2157,6 +2647,19 @@ export const SOURCE_PATHS = Object.freeze({
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
   engines: "crates/sceneworks-worker/src/engines.rs",
   imageRouting: "crates/sceneworks-worker/src/image_jobs/base.rs",
+  // sc-18815: the video lane's route resolvers. The image lane resolves a provider from ONE table
+  // (`engines.rs#MODEL_TABLE`); the video lane has no such table — `resolve_video_route` /
+  // `resolve_candle_video_route` (`video_jobs/mod.rs`) consult one `*_engine_id` function per family,
+  // and those functions are where the model-id -> provider-id mapping actually lives. Deriving the
+  // universe's providers from anywhere else would be a restatement that can drift; deriving them from
+  // here means a worker route change rotates this artifact's provenance, which is the point.
+  videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
+  videoRouteLtx: "crates/sceneworks-worker/src/video_jobs/ltx.rs",
+  videoRouteSvd: "crates/sceneworks-worker/src/video_jobs/svd.rs",
+  videoRouteBernini: "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+  videoRouteScail2: "crates/sceneworks-worker/src/video_jobs/scail2.rs",
+  videoRouteKreaRealtime: "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
+  videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
   mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
   memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
   vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
@@ -2244,10 +2747,17 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         : semanticSourceBody(relative, bodies[name]),
     ]),
   );
-  const images = manifest.models.filter((model) => model.type === "image");
-  const manifestById = new Map(images.map((model) => [model.id, model]));
+  // sc-18815: the model universe is MODALITY-AWARE, not `type === "image"`. Every entry of an
+  // admitted modality is in, whether or not anything has been measured on it — an entry the matrix
+  // does not carry cannot even report `Missing`, which is how the video lane read as complete while
+  // covering one modality. Adding a modality here is deliberate and gated: it needs route resolution
+  // (`resolveRoutes`), a family group, and a rung-4 survey verdict or a declared pending owner.
+  const entries = manifest.models.filter((model) => MATRIX_MODALITIES.has(model.type));
+  const images = entries.filter((model) => model.type === "image");
+  const manifestById = new Map(entries.map((model) => [model.id, model]));
   const expectedIds = parseExpectedImageIds(enginesBody);
   const routes = parseEngineRoutes(enginesBody);
+  const videoRoutes = parseVideoRoutes(bodies);
   const routedBackends = routedLanes({
     routingCatalog: bodies.routingCatalog,
     routingCandle: bodies.routingCandle,
@@ -2268,18 +2778,35 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
 
   // sc-16073: no advertised route without cells, and no orphaned control measurements. The worker's MLX
   // and Candle declarations are checked independently rather than trusting their documented twin set.
-  assertDeclaredControlLanes(images, bodies.imageRouting);
+  // Over the WHOLE universe, not just the image half (sc-18815). The first arm compares two image
+  // source lists and is unaffected; the second looks for a `[backend].control` measurement block on
+  // an entry that declares no control lane, and scoping that to `images` would let a video entry
+  // acquire one and orphan its measurements silently — the sc-16069 failure in a new modality.
+  assertDeclaredControlLanes(entries, bodies.imageRouting);
 
-  const models = images
+  const models = entries
     .map((model) => {
-      const route = routes.get(model.id);
-      if (!route) throw new Error(`${model.id}: no resolved route/provider`);
+      const route = resolveRoute(model, routes, videoRoutes);
       const backends = backendScopes(model, routedBackends);
       return {
         id: model.id,
         name: model.name,
+        modality: model.type,
+        // sc-18815: the family GROUP key, published so a consumer can join an entry to its
+        // `rung4SurveyRows` row or its `summary.rung4Survey.pendingFamilyBackends` row. It used to be
+        // derivable from `owningFamilyStories.mlx`, because an image family's group key IS its MLX
+        // story id — that coincidence does not survive the video lane, where the key is a family name
+        // and the owner is a survey story. Publishing the key makes the join explicit instead of
+        // resting on an identity that is now only true for one modality.
+        familyGroup: familyGroup(model.id),
         family: model.family ?? null,
-        resolvedRoute: route.engine,
+        // Video providers are per-backend (LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on
+        // candle), so the single-valued route the image lane publishes cannot describe them. Publish
+        // the resolved provider per backend and keep the scalar as the MLX-or-only one.
+        resolvedRoute: route.engineFor(backends[0] ?? "mlx") ?? route.engine,
+        resolvedRoutes: Object.fromEntries(
+          backends.map((backend) => [backend, route.engineFor(backend)]),
+        ),
         routeKind: route.kind,
         backends,
         // Per-backend maps, not scalars: the entry has one owner per backend it advertises, and
@@ -2287,8 +2814,15 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         owningFamilyStories: Object.fromEntries(
           backends.map((backend) => [backend, familyStory(model.id, backend)]),
         ),
+        // sc-18815: the video lane has no per-(entry, backend) ownership story and must not invent
+        // one. Epic 15448 filed 53 x 2 image stories; epic 18803 deliberately did not slice video
+        // that way (measurement is a runbook, per epic 18093), so the truthful value is `null` and
+        // `assertCellOwnershipIsBackendScoped` enforces the split in both directions.
         owningModelStories: Object.fromEntries(
-          backends.map((backend) => [backend, modelStory(model.id, backend)]),
+          backends.map((backend) => [
+            backend,
+            model.type === "image" ? modelStory(model.id, backend) : null,
+          ]),
         ),
       };
     })
@@ -2328,7 +2862,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const cells = [];
   for (const modelSummary of models) {
     const model = manifestById.get(modelSummary.id);
-    const route = routes.get(model.id);
+    const route = resolveRoute(model, routes, videoRoutes);
     for (const backend of modelSummary.backends) {
       // SC-15812: resolved HERE, inside the per-backend loop, so a cell names the story that owns
       // its (model, backend) pair rather than whichever backend happened to be listed first.
@@ -2582,7 +3116,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const rung4SurveyRowsByFamily = new Map();
   for (const cell of cells.filter(
     (candidate) =>
-      candidate.rung === "bounded_transformer_residency" && candidate.overlay === "none",
+      candidate.rung === "bounded_transformer_residency" &&
+      candidate.overlay === "none" &&
+      // sc-18815: a pending family has no verdict, so it has no row. It is NOT silently absent —
+      // `summary.rung4Survey.pendingFamilyBackends` names it and every one of its rung-4 cells
+      // carries `surveyed: false` with the owing story. Synthesising a row here would put a
+      // verdict-shaped object full of nulls next to twenty real ones.
+      candidate.rung4Survey.surveyed,
   )) {
     const key = `${familyGroup(cell.modelId)}:${cell.backend}`;
     const existing = rung4SurveyRowsByFamily.get(key);
@@ -2622,16 +3162,25 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         rows.filter((row) => row[key] === value).length,
       ]),
     );
-  const mlxStagedModels = new Set(
-    cells
-      .filter(
-        (cell) =>
-          cell.backend === "mlx" &&
-          cell.rung === "staged_residency" &&
-          isImplemented(cell.state),
-      )
-      .map((cell) => cell.modelId),
-  );
+  // sc-18815: censused per modality. `mlxStagedStaticCoverage` is a claim about the 53 IMAGE entries
+  // — its denominator says so — so admitting video must not inflate it. The video `bernini` entry is
+  // the concrete case: it shares the `bernini` engine with `bernini_image`, which is already counted,
+  // so a modality-blind set would have read 39/53 for a lane that gained nothing.
+  const modalityById = new Map(models.map((model) => [model.id, model.modality]));
+  const stagedByModality = (modality) =>
+    new Set(
+      cells
+        .filter(
+          (cell) =>
+            cell.backend === "mlx" &&
+            cell.rung === "staged_residency" &&
+            isImplemented(cell.state) &&
+            modalityById.get(cell.modelId) === modality,
+        )
+        .map((cell) => cell.modelId),
+    );
+  const mlxStagedModels = stagedByModality("image");
+  const mlxStagedVideoModels = stagedByModality("video");
   const matrix = {
     // 2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were both RENAMED (now plural)
     // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
@@ -2668,7 +3217,20 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     // of coordinates the catalog resolved to, which is no longer `cells.length`. A version-6 reader
     // that counts `cells` by state now reads a sample and calls it a census, which is precisely why
     // this is a new version rather than an additive one.
-    schemaVersion: 7,
+    //
+    // 8 (sc-18815): the model universe is MODALITY-AWARE. `summary.imageModels` was REMOVED — not
+    // renamed-with-an-alias — and replaced by `catalogEntries` + `catalogEntriesByModality`. Leaving
+    // `imageModels` in place reading 63 would be worse than the image-only universe it replaced: a
+    // reader would get a plausible number under a false name, where now it gets `undefined` and has
+    // to look. `models[]` gained required `modality` and `resolvedRoutes` (video providers are
+    // per-backend) and grew 53 -> 63; `models[].backends` and `owningModelStories` may be EMPTY for
+    // an entry the routing catalog routes nowhere; `cells[].owningModelStory` may be `null`;
+    // `cells[].rung4Survey` gained a required `surveyed` discriminator and nullable verdict fields;
+    // `rung4SurveyRows[].familyStory` may be a family NAME; and `summary` gained `unroutedEntries`,
+    // `videoMlxStagedStaticCoverage`(+Denominator) and `rung4Survey.pendingFamilyBackends`. A
+    // version-7 reader that took `owningModelStory` as an integer, or `imageModels` as the entry
+    // count, is wrong on both — hence a version, not an additive bump.
+    schemaVersion: 8,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,
@@ -2753,7 +3315,18 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       "strategyParameterVerification",
     ],
     summary: {
-      imageModels: models.length,
+      // sc-18815: `imageModels` became a lie the moment video was admitted — it counted the whole
+      // universe under a name that claimed one modality. `catalogEntries` is the total the field
+      // always actually held, and `catalogEntriesByModality` is the breakdown the old name pretended
+      // to be. Renamed rather than kept-and-supplemented: a field named `imageModels` reading 63 is
+      // worse than the state this story replaced, and sc-18830 carries the doc follow-through.
+      catalogEntries: models.length,
+      catalogEntriesByModality: Object.fromEntries(
+        [...MATRIX_MODALITIES].map((modality) => [
+          modality,
+          models.filter((model) => model.modality === modality).length,
+        ]),
+      ),
       // The number of coordinates the CATALOG resolved to, unchanged in meaning by sc-18099 and no
       // longer equal to `cells.length`. `publishedCells` and `elidedCells` partition it.
       cells: cells.length,
@@ -2761,8 +3334,20 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       elidedCells: 0,
       elidedByState: {},
       publicationPredicate: PUBLICATION_PREDICATE,
+      // Still exactly the image-lane claim it has always been (sc-18815); the video lane is counted
+      // beside it rather than folded in, because they are different populations with different
+      // evidence and one number covering both could not say which lane moved.
       mlxStagedStaticCoverage: mlxStagedModels.size,
       mlxStagedStaticCoverageDenominator: EXPECTED_IMAGE_COUNT,
+      videoMlxStagedStaticCoverage: mlxStagedVideoModels.size,
+      videoMlxStagedStaticCoverageDenominator: EXPECTED_VIDEO_COUNT,
+      // sc-18815: entries in the universe that the routing catalog routes nowhere, and therefore
+      // resolve to zero coordinates. Published so a reader can tell them from entries that are
+      // simply not in the catalog — see `UNROUTED_CATALOG_ENTRIES`.
+      unroutedEntries: [...UNROUTED_CATALOG_ENTRIES]
+        .filter(([id]) => models.some((model) => model.id === id))
+        .map(([id, entry]) => ({ id, ...entry }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
       fullModels: 0,
       calibrationRuns: calibrationBundle.records.length,
       calibrationRunsByStatus: {
@@ -2778,6 +3363,21 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       rung4Survey: {
         story: 15969,
         surveyedFamilyBackends: rung4SurveyRows.length,
+        // sc-18815: the families in the universe that no verdict covers yet, and who owes each one.
+        // Named here so "surveyed" and "in the matrix" can never be read as the same set again.
+        pendingFamilyBackends: [...PENDING_RUNG4_SURVEYS]
+          .flatMap(([group, owner]) =>
+            ["mlx", "candle"]
+              .filter((backend) =>
+                models.some(
+                  (model) => familyGroup(model.id) === group && model.backends.includes(backend),
+                ),
+              )
+              .map((backend) => ({ family: group, backend, pendingSurveyStory: owner })),
+          )
+          .sort((left, right) =>
+            `${left.family}:${left.backend}`.localeCompare(`${right.family}:${right.backend}`),
+          ),
         structuralApplicability: tally(rung4SurveyRows, "structuralApplicability"),
         requestPeak: tally(rung4SurveyRows, "requestPeak"),
         implementation: tally(rung4SurveyRows, "implementation"),
@@ -2850,7 +3450,18 @@ function renderMarkdown(matrix) {
     "",
     `- SceneWorks revision: \`${matrix.generatedFrom.sceneWorksRevision}\``,
     `- Inference revision: \`${matrix.generatedFrom.inferenceRevision}\``,
-    `- Catalog entries: ${matrix.summary.imageModels}`,
+    `- Catalog entries: ${matrix.summary.catalogEntries} (${
+      Object.entries(matrix.summary.catalogEntriesByModality)
+        .map(([modality, count]) => `${modality} ${count}`)
+        .join(", ")
+    })`,
+    ...(matrix.summary.unroutedEntries.length
+      ? [
+          `- Unrouted entries (zero resolved coordinates): ${matrix.summary.unroutedEntries
+            .map((entry) => `\`${entry.id}\` — ${entry.reason} (sc-${entry.owningStory})`)
+            .join("; ")}`,
+        ]
+      : []),
     `- Resolved coordinates: ${matrix.summary.cells}`,
     `- Published cells: ${matrix.summary.publishedCells}`,
     `- Elided coordinates: ${matrix.summary.elidedCells} (${
@@ -2858,7 +3469,7 @@ function renderMarkdown(matrix) {
         .map(([state, count]) => `${state} ${count}`)
         .join(", ") || "none"
     })`,
-    `- MLX staged-residency static coverage: ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}`,
+    `- MLX staged-residency static coverage: image ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}, video ${matrix.summary.videoMlxStagedStaticCoverage}/${matrix.summary.videoMlxStagedStaticCoverageDenominator}`,
     `- Full models: ${matrix.summary.fullModels}`,
     `- Full complete calibration records: ${matrix.summary.calibrationRunsByStatus.complete}`,
     `- Base-only runtime-complete calibration records: ${matrix.summary.calibrationRunsByStatus.runtimeComplete}`,
@@ -2870,8 +3481,10 @@ function renderMarkdown(matrix) {
     "",
     "One row per (catalog entry, backend): ownership is backend-scoped, so a single row per entry could only name one backend's stories (SC-15812).",
     "",
-    "| Catalog entry | Backend | Route | Family story | Model story | Staged residency |",
-    "| --- | --- | --- | --- | ---: | --- |",
+    "sc-18815: the `Modality` column exists because the universe is no longer one modality. Video entries carry no per-entry ownership story — epic 18803 does not slice video that way, so `Model story` is `—` rather than a story id that could not close the cell — and their family story is the family's rung-4 survey story, which covers both backends.",
+    "",
+    "| Catalog entry | Modality | Backend | Route | Family story | Model story | Staged residency |",
+    "| --- | --- | --- | --- | --- | ---: | --- |",
   ];
   for (const model of matrix.models) {
     for (const backend of model.backends) {
@@ -2892,7 +3505,7 @@ function renderMarkdown(matrix) {
           ? "Runtime verified"
           : "Implemented/unverified";
       lines.push(
-        `| \`${model.id}\` | ${backend} | \`${model.resolvedRoute}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | SC-${model.owningModelStories[backend]} | ${staged ? stagedState : "Missing"} |`,
+        `| \`${model.id}\` | ${model.modality} | ${backend} | \`${model.resolvedRoutes[backend]}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | ${model.owningModelStories[backend] === null ? "—" : `SC-${model.owningModelStories[backend]}`} | ${staged ? stagedState : "Missing"} |`,
       );
     }
   }
@@ -2906,17 +3519,22 @@ function renderMarkdown(matrix) {
     "",
     "`partial` means windowable over a sub-stack but not the whole trunk — neither Implemented nor Structurally N/A, and recorded rather than rounded to either.",
     "",
-    "| Family story | Backend | Structural applicability | Implementation | Request peak |",
+    "| Family | Backend | Structural applicability | Implementation | Request peak |",
     "| --- | --- | --- | --- | --- |",
   );
   for (const row of matrix.rung4SurveyRows) {
     lines.push(
-      `| SC-${row.familyStory} | ${row.backend} | ${row.structuralApplicability} | ${row.implementation} | ${row.requestPeak} |`,
+      `| ${familyLabel(row.familyStory)} | ${row.backend} | ${row.structuralApplicability} | ${row.implementation} | ${row.requestPeak} |`,
+    );
+  }
+  for (const row of matrix.summary.rung4Survey.pendingFamilyBackends) {
+    lines.push(
+      `| ${familyLabel(row.family)} | ${row.backend} | _not surveyed (sc-${row.pendingSurveyStory})_ | — | unsurveyed |`,
     );
   }
   lines.push(
     "",
-    `Surveyed family/backend pairs: ${matrix.summary.rung4Survey.surveyedFamilyBackends}. sc-18099 split the verdict by what it is a property OF: the family-level summary, block-stack inventory and findings are on \`rung4SurveyRows\` in the JSON artifact — carried once per (family, backend), so they survive a family whose rung-4 cells were all elided — while \`cells[].rung4Survey\` keeps the genuinely per-coordinate half, the resolved request-peak finding and the overlay-incompatibility verdict.`,
+    `Surveyed family/backend pairs: ${matrix.summary.rung4Survey.surveyedFamilyBackends}; awaiting a verdict: ${matrix.summary.rung4Survey.pendingFamilyBackends.length}. sc-18815: a pending pair's rung-4 cells report \`Missing\` and carry \`rung4Survey.surveyed: false\` with the owing story, so "not surveyed yet" never reads as "surveyed and found wanting". sc-18099 split the verdict by what it is a property OF: the family-level summary, block-stack inventory and findings are on \`rung4SurveyRows\` in the JSON artifact — carried once per (family, backend), so they survive a family whose rung-4 cells were all elided — while \`cells[].rung4Survey\` keeps the genuinely per-coordinate half, the resolved request-peak finding and the overlay-incompatibility verdict.`,
     "",
   );
   return lines.join("\n");

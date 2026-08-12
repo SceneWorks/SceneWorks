@@ -345,6 +345,7 @@
       "type": "object",
       "required": [
         "story",
+        "surveyed",
         "structuralApplicability",
         "requestPeak",
         "implementation",
@@ -355,20 +356,43 @@
         "story": {
           "const": 15969
         },
+        "surveyed": {
+          "description": "sc-18815. False when the cell's family has no rung-4 verdict yet, which the modality-aware universe makes reachable: a modality is admitted one story at a time, so a family can be in the matrix before its survey lands. It is present on EVERY rung-4 cell rather than only the false ones, because a consumer inferring it from an absent key is the hole this field exists to close. When false, the three verdict fields are null/`unsurveyed` and `pendingSurveyStory` names who owes the verdict \u2014 the cell reports `Missing` for a reason it states, not for the reason a surveyed family with no implementation would.",
+          "type": "boolean"
+        },
+        "pendingSurveyStory": {
+          "type": "integer"
+        },
         "structuralApplicability": {
-          "$ref": "#/$defs/rung4StructuralApplicability"
+          "oneOf": [
+            { "$ref": "#/$defs/rung4StructuralApplicability" },
+            { "type": "null" }
+          ]
         },
         "requestPeak": {
-          "$ref": "#/$defs/rung4RequestPeak"
+          "oneOf": [
+            { "$ref": "#/$defs/rung4RequestPeak" },
+            { "const": "unsurveyed" }
+          ]
         },
         "implementation": {
-          "$ref": "#/$defs/rung4Implementation"
+          "oneOf": [
+            { "$ref": "#/$defs/rung4Implementation" },
+            { "type": "null" }
+          ]
         },
         "overlayIncompatible": {
           "description": "True when THIS cell is exempt because the provider's adapter mechanism cannot carry an overlay onto a rebuilt block. Scoped to cells whose entry and mode actually have the streaming path: on a route with no such path the rung is Missing for the ordinary reason, so a sibling cell of the same provider can read `false` while the provider-level fact still holds.",
           "type": "boolean"
         }
       }
+    },
+    "familyGroup": {
+      "description": "sc-18815. A family group key. Image families (epic SC-15448) are keyed by the family's MLX story id; the video families epic 18803 admits are keyed by the family's own NAME, because sc-18828 owns three unrelated families at once and no assignment of story ids to those families is both distinct and true. `VIDEO_FAMILY_STORIES` in the generator answers the ownership question the key used to answer implicitly.",
+      "type": [
+        "integer",
+        "string"
+      ]
     },
     "implementedMarginal": {
       "type": "object",
@@ -436,16 +460,16 @@
       }
     },
     "backendScopedStories": {
-      "description": "Owning Shortcut story per advertised backend (SC-15812). An mlx-only entry carries only `mlx`; a Candle cell can never be covered by the MLX story.",
+      "description": "Owning Shortcut story per advertised backend (SC-15812). An mlx-only entry carries only `mlx`; a Candle cell can never be covered by the MLX story. sc-18815: `null` is permitted, and means there is no story of that role for this entry at all \u2014 the video lane's `owningModelStories`, because epic 18803 filed no per-(entry, backend) video stories. Empty for an entry the routing catalog routes nowhere.",
       "type": "object",
       "additionalProperties": false,
-      "minProperties": 1,
+      "minProperties": 0,
       "properties": {
         "mlx": {
-          "type": "integer"
+          "type": ["integer", "null"]
         },
         "candle": {
-          "type": "integer"
+          "type": ["integer", "null"]
         }
       }
     }
@@ -468,8 +492,8 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row.",
-      "const": 7
+      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row. 8 (sc-18815): the model universe is MODALITY-AWARE rather than `type === \"image\"`. `summary.imageModels` was REMOVED and replaced by `catalogEntries` + `catalogEntriesByModality` \u2014 not additive, because a reader indexing `imageModels` now gets `undefined` rather than a wrong number, which is the point; `models[]` gained required `modality` and `resolvedRoutes` and its count moved 53 -> 63; `models[].backends` and `owningModelStories` may be EMPTY (an entry the routing catalog routes nowhere); `cells[].owningModelStory` may be `null` (video cells have no per-entry owner); `cells[].rung4Survey` gained a required `surveyed` discriminator and its three verdict fields became nullable; `rung4SurveyRows[].familyStory` may be a family NAME rather than a story id; `summary` gained `unroutedEntries`, `videoMlxStagedStaticCoverage`(+`Denominator`) and `rung4Survey.pendingFamilyBackends`.",
+      "const": 8
     },
     "generatedFrom": {
       "type": "object"
@@ -511,7 +535,9 @@
     "summary": {
       "type": "object",
       "required": [
-        "imageModels",
+        "catalogEntries",
+        "catalogEntriesByModality",
+        "unroutedEntries",
         "cells",
         "publishedCells",
         "elidedCells",
@@ -519,11 +545,50 @@
         "publicationPredicate",
         "mlxStagedStaticCoverage",
         "mlxStagedStaticCoverageDenominator",
+        "videoMlxStagedStaticCoverage",
+        "videoMlxStagedStaticCoverageDenominator",
         "fullModels",
         "calibrationRunsByStatus",
         "rung4Survey"
       ],
       "properties": {
+        "catalogEntries": {
+          "description": "sc-18815. The number of entries in the model universe, across every admitted modality. Named `imageModels` until video was admitted, at which point the name stopped being true of the number it held \u2014 a field called `imageModels` reading 63 is worse than the image-only universe it replaced.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "catalogEntriesByModality": {
+          "description": "sc-18815. `catalogEntries` split by modality, so a video entry appearing can never cover for an image entry disappearing.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image", "video"],
+          "properties": {
+            "image": { "type": "integer", "minimum": 0 },
+            "video": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "unroutedEntries": {
+          "description": "sc-18815. Entries in the universe that the routing catalog routes on NO backend, so they resolve to zero coordinates. Published because \"emits nothing\" and \"is not in the catalog\" are otherwise indistinguishable in this artifact, which is the silent absence this story exists to end.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "reason", "owningStory"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 },
+              "owningStory": { "type": "integer" }
+            }
+          }
+        },
+        "videoMlxStagedStaticCoverage": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "videoMlxStagedStaticCoverageDenominator": {
+          "type": "integer",
+          "minimum": 1
+        },
         "cells": {
           "description": "sc-18099: the number of coordinates the CATALOG resolved to, which is NOT `cells.length` any more. `publishedCells` + `elidedCells` partition it.",
           "type": "integer",
@@ -564,6 +629,7 @@
           "required": [
             "story",
             "surveyedFamilyBackends",
+            "pendingFamilyBackends",
             "structuralApplicability",
             "requestPeak",
             "implementation"
@@ -575,6 +641,20 @@
             "surveyedFamilyBackends": {
               "type": "integer",
               "minimum": 1
+            },
+            "pendingFamilyBackends": {
+              "description": "sc-18815. Families in the model universe whose rung-4 verdict has not been written yet, with the story that owes it. Every one of their rung-4 cells carries `rung4Survey.surveyed: false`, so an unsurveyed family is never readable as a surveyed one that was found to have no implementation. Empty once every admitted family is surveyed.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["family", "backend", "pendingSurveyStory"],
+                "properties": {
+                  "family": { "$ref": "#/$defs/familyGroup" },
+                  "backend": { "enum": ["mlx", "candle"] },
+                  "pendingSurveyStory": { "type": "integer" }
+                }
+              }
             }
           }
         }
@@ -599,7 +679,7 @@
         "additionalProperties": false,
         "properties": {
           "familyStory": {
-            "type": "integer"
+            "$ref": "#/$defs/familyGroup"
           },
           "summary": {
             "$ref": "#/$defs/rung4Summary"
@@ -630,8 +710,8 @@
     },
     "models": {
       "type": "array",
-      "minItems": 53,
-      "maxItems": 53,
+      "minItems": 63,
+      "maxItems": 63,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -639,7 +719,10 @@
           "id",
           "name",
           "family",
+          "modality",
+          "familyGroup",
           "resolvedRoute",
+          "resolvedRoutes",
           "routeKind",
           "backends",
           "owningFamilyStories",
@@ -659,18 +742,39 @@
               "null"
             ]
           },
+          "familyGroup": {
+            "description": "sc-18815. The family group key this entry belongs to, so a consumer can join it to `rung4SurveyRows` and `summary.rung4Survey.pendingFamilyBackends`. Derivable from `owningFamilyStories.mlx` for image entries only \u2014 an image family's key IS its MLX story id \u2014 and that coincidence does not hold for video, where the key is a family name and the owner is a survey story.",
+            "$ref": "#/$defs/familyGroup"
+          },
+          "modality": {
+            "description": "sc-18815. The catalog modality this entry belongs to. The matrix universe was `type === \"image\"` until this story; publishing the modality is what lets a consumer tell an image cell from a video one, and what the per-modality censuses in `summary` are derived from.",
+            "enum": [
+              "image",
+              "video"
+            ]
+          },
           "resolvedRoute": {
             "type": "string"
+          },
+          "resolvedRoutes": {
+            "description": "sc-18815. The provider each advertised backend resolves to. Video providers are genuinely per-backend \u2014 LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on candle \u2014 so the scalar `resolvedRoute` cannot describe them. Empty for an entry the routing catalog routes nowhere (`summary.unroutedEntries`).",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mlx": { "type": "string" },
+              "candle": { "type": "string" }
+            }
           },
           "routeKind": {
             "enum": [
               "registry",
-              "bespoke"
+              "bespoke",
+              "video"
             ]
           },
           "backends": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "items": {
               "enum": [
                 "mlx",
@@ -689,7 +793,7 @@
             "description": "sc-18099. The coordinate axes this entry resolves on each advertised backend. These ARE the cross-product `cells` used to enumerate, published so that eliding an unmeasured coordinate can never make a lane invisible — the sc-16069 failure, where a shipping control lane with no measurement block produced zero cells and absent evidence read as absent feature. Reconciled against the resolved cross-product by validateMatrix before either artifact is written.",
             "type": "object",
             "additionalProperties": false,
-            "minProperties": 1,
+            "minProperties": 0,
             "properties": {
               "mlx": {
                 "$ref": "#/$defs/resolvedAxes"
@@ -918,7 +1022,11 @@
             "type": "integer"
           },
           "owningModelStory": {
-            "type": "integer"
+            "description": "sc-18815. Null on a VIDEO cell: epic 18803 filed no per-(entry, backend) video stories \u2014 measurement is a runbook, per epic 18093 \u2014 so any integer here would name a story that cannot close the cell, which is the false inventory SC-15812's guard exists to prevent. Always an integer on an image cell.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "rung4Survey": {
             "$ref": "#/$defs/rung4SurveyVerdict"
