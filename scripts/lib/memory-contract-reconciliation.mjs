@@ -140,7 +140,9 @@ function engineContractIndex(engineFacts, pin) {
 }
 
 export function validateMemoryContractFacts(engineFacts, pin) {
-  return engineContractIndex(engineFacts, pin).size;
+  const providers = engineContractIndex(engineFacts, pin).size;
+  routeEligibilityFromEngineFacts(engineFacts);
+  return providers;
 }
 
 function manifestContracts(manifest) {
@@ -175,77 +177,47 @@ function manifestContracts(manifest) {
   return rows;
 }
 
-function exactFunctionBody(source, name) {
-  const marker = source.search(new RegExp(`\\bfn\\s+${name}\\s*\\(`));
-  if (marker < 0) throw new Error(`route source has no Rust function ${name}`);
-  const open = source.indexOf("{", marker);
-  if (open < 0) throw new Error(`route source function ${name} has no body`);
-  let depth = 0;
-  for (let index = open; index < source.length; index += 1) {
-    if (source[index] === "{") depth += 1;
-    if (source[index] === "}") depth -= 1;
-    if (depth === 0) return source.slice(open + 1, index);
-  }
-  throw new Error(`route source function ${name} has an unterminated body`);
-}
+const ROUTE_TIERS = new Set(["bf16", "q4", "q8", "nvfp4"]);
+const ROUTE_MODES = new Set([
+  "text_to_image",
+  "style_variations",
+  "edit_image",
+  "image_to_image",
+  "image_inpaint",
+  "image_detail",
+  "character_image",
+]);
+const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
 
-function providerStrings(body) {
-  return [...body.matchAll(/"([a-z][a-z0-9_]+)"/g)].map((match) => ({
-    provider: match[1],
-    offset: match.index,
-  }));
-}
-
-function rustStatement(body, offset) {
-  const start = body.lastIndexOf(";", offset) + 1;
-  const next = body.indexOf(";", offset);
-  return body.slice(start, next < 0 ? body.length : next + 1);
-}
-
-function eligibleOverlays(statement) {
-  const overlays = ["none"];
-  if (!statement.includes("spec.adapters.is_empty()")) overlays.push("lora");
-  if (!statement.includes("spec.control.is_none()")) overlays.push("control");
-  if (!statement.includes("spec.pid.is_none()") && !statement.includes("spec.identity.is_none()")) {
-    overlays.push("identity");
-  }
-  return overlays;
-}
-
-/**
- * Read the production load-shape helpers themselves. SC-18457 replaces their literal population
- * with contract-derived eligibility; its branch must replace this transition parser with that
- * exported population before the final paired-pin regeneration.
- */
-export function routeEligibilityFromRust({ imageRouting, mlxFitGate }) {
+/** Read the executable worker registry's pin-bound route witness, never Rust source text. */
+export function routeEligibilityFromEngineFacts(engineFacts) {
   const rows = [];
-  const mlx = exactFunctionBody(imageRouting, "apply_measured_mlx_load_shape_for_request");
-  for (const item of providerStrings(mlx)) {
-    const statement = rustStatement(mlx, item.offset);
-    for (const overlay of eligibleOverlays(statement)) {
-      rows.push({
-        backend: "mlx",
-        provider: item.provider,
-        mode: statement.includes("plain_text_to_image") ? "text_to_image" : null,
-        overlay,
-      });
+  const seen = new Set();
+  for (const document of engineFacts) {
+    const backend = document.backend;
+    if (!Array.isArray(document.memoryRouteWitnesses) || document.memoryRouteWitnesses.length === 0) {
+      throw new Error(`engine capability facts for ${backend ?? "(unset)"} have no memoryRouteWitnesses`);
+    }
+    for (const [index, witness] of document.memoryRouteWitnesses.entries()) {
+      requireObject(witness, `${backend} memory route witness ${index}`);
+      const allowed = new Set(["provider", "tier", "mode", "overlay"]);
+      for (const field of Object.keys(witness)) {
+        if (!allowed.has(field)) throw new Error(`${backend} memory route witness ${index} has unknown field ${field}`);
+      }
+      if (typeof witness.provider !== "string" || !witness.provider) {
+        throw new Error(`${backend} memory route witness ${index} has no provider`);
+      }
+      if (!ROUTE_TIERS.has(witness.tier)) throw new Error(`${backend}:${witness.provider} has unknown route tier ${witness.tier}`);
+      if (!ROUTE_MODES.has(witness.mode)) throw new Error(`${backend}:${witness.provider}:${witness.tier} has unknown route mode ${witness.mode}`);
+      if (!ROUTE_OVERLAYS.has(witness.overlay)) throw new Error(`${backend}:${witness.provider}:${witness.tier}:${witness.mode} has unknown route overlay ${witness.overlay}`);
+      const row = { backend, ...witness };
+      const key = JSON.stringify(row);
+      if (seen.has(key)) throw new Error(`duplicate memory route witness ${key}`);
+      seen.add(key);
+      rows.push(row);
     }
   }
-  const sequential = exactFunctionBody(mlxFitGate, "with_selected_sequential_shape");
-  for (const item of providerStrings(sequential)) {
-    for (const overlay of eligibleOverlays(rustStatement(sequential, item.offset))) {
-      rows.push({ backend: "mlx", provider: item.provider, mode: null, overlay });
-    }
-  }
-  const candle = exactFunctionBody(imageRouting, "apply_candle_image_load_shape");
-  for (const item of providerStrings(candle)) {
-    for (const overlay of eligibleOverlays(rustStatement(candle, item.offset))) {
-      rows.push({ backend: "candle", provider: item.provider, mode: null, overlay });
-    }
-  }
-  return [...new Map(rows.map((row) => [JSON.stringify(row), row])).values()].sort((left, right) =>
-    JSON.stringify(left).localeCompare(JSON.stringify(right)),
-  );
+  return rows.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
 }
 
 function planRows(plan) {
@@ -280,9 +252,9 @@ export function collectMemoryContractMismatches({
   calibrationPlan,
   closures,
   survey,
-  routeEligibility,
 }) {
   const engine = engineContractIndex(engineFacts, pin);
+  const routeEligibility = routeEligibilityFromEngineFacts(engineFacts);
   const declarations = manifestContracts(manifest);
   const out = [];
 
@@ -309,11 +281,12 @@ export function collectMemoryContractMismatches({
     }
   }
 
-  const eligible = (backend, provider, mode, overlay) => routeEligibility.some(
+  const eligible = (backend, provider, tier, mode, overlay) => routeEligibility.some(
     (row) =>
       row.backend === backend &&
       row.provider === provider &&
-      (row.mode === null || row.mode === mode) &&
+      row.tier === tier &&
+      row.mode === mode &&
       row.overlay === overlay,
   );
   for (const row of declarations) {
@@ -333,7 +306,7 @@ export function collectMemoryContractMismatches({
             candidate.tier === tier &&
             candidate.overlay === overlay,
           );
-          if (!cell || !eligible(row.backend, row.provider, mode, overlay)) {
+          if (!cell || !eligible(row.backend, row.provider, tier, mode, overlay)) {
             out.push(mismatch({
               leg: "manifest_route",
               direction: "manifest_to_route",
@@ -366,33 +339,79 @@ export function collectMemoryContractMismatches({
     }
   }
 
-  const familyProviders = new Map();
-  for (const cell of cells) {
-    if (!engine.has(laneKey(cell.backend, cell.provider))) continue;
-    const familyKey = `${cell.owningFamilyStory}:${cell.backend}`;
-    if (!familyProviders.has(familyKey)) familyProviders.set(familyKey, new Set());
-    familyProviders.get(familyKey).add(cell.provider);
-  }
   const surveyFamilies = survey.families ?? {};
   for (const [familyStory, family] of Object.entries(surveyFamilies)) {
     for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
-      const providers = familyProviders.get(`${familyStory}:${backend}`) ?? new Set();
-      const implemented = [...providers].filter((provider) =>
-        engine.get(laneKey(backend, provider))?.implemented.has("bounded_transformer_residency"),
+      const familyCells = cells.filter((cell) =>
+        cell.rung === "bounded_transformer_residency" &&
+        cell.owningFamilyStory === Number(familyStory) &&
+        cell.backend === backend,
       );
-      if (verdict.implementation === "none") {
-        for (const provider of implemented) {
-          const contract = engine.get(laneKey(backend, provider));
-          out.push(mismatch({
-            leg: "survey_engine",
-            direction: "survey_to_engine",
-            backend,
-            provider,
-            familyStory: Number(familyStory),
-            rung: "bounded_transformer_residency",
-            selectorDigest: contract.selectorDigest,
-          }));
-        }
+      const scopes = verdict.implementationScopes?.length
+        ? verdict.implementationScopes.map((scope) => ({
+            entries: scope.entries,
+            tiers: scope.tiers,
+            modes: scope.modes,
+            overlays: scope.overlays,
+          }))
+        : verdict.implementation === "none"
+          ? []
+          : [{
+              entries: verdict.implementedEntries ?? [],
+              tiers: verdict.implementedTiers,
+              modes: verdict.implementedModes,
+              overlays: verdict.implementedOverlays,
+            }];
+      const surveyCoordinates = new Map();
+      for (const cell of familyCells) {
+        const claimed = scopes.some((scope) =>
+          scope.entries.includes(cell.modelId) &&
+          (scope.tiers ?? [cell.tier]).includes(cell.tier) &&
+          (scope.modes ?? [cell.mode]).includes(cell.mode) &&
+          (scope.overlays ?? [cell.overlay]).includes(cell.overlay),
+        );
+        if (claimed) surveyCoordinates.set(reconciliationMismatchKey(mismatch({
+          leg: "survey_engine",
+          direction: "survey_to_engine",
+          backend,
+          provider: cell.provider,
+          modelId: cell.modelId,
+          familyStory: Number(familyStory),
+          mode: cell.mode,
+          tier: cell.tier,
+          overlay: cell.overlay,
+          rung: "bounded_transformer_residency",
+          selectorDigest: engine.get(laneKey(backend, cell.provider))?.selectorDigest,
+        })), cell);
+      }
+      const engineCoordinates = new Map();
+      for (const cell of familyCells) {
+        const contract = engine.get(laneKey(backend, cell.provider));
+        const supported =
+          contract?.implementedByTier.get(cell.tier)?.has("bounded_transformer_residency") &&
+          eligible(backend, cell.provider, cell.tier, cell.mode, cell.overlay);
+        if (supported) engineCoordinates.set(reconciliationMismatchKey(mismatch({
+          leg: "survey_engine",
+          direction: "survey_to_engine",
+          backend,
+          provider: cell.provider,
+          modelId: cell.modelId,
+          familyStory: Number(familyStory),
+          mode: cell.mode,
+          tier: cell.tier,
+          overlay: cell.overlay,
+          rung: "bounded_transformer_residency",
+          selectorDigest: contract.selectorDigest,
+        })), cell);
+      }
+      for (const key of surveyCoordinates.keys()) {
+        if (!engineCoordinates.has(key)) out.push(JSON.parse(key));
+      }
+      for (const [key] of engineCoordinates) {
+        if (surveyCoordinates.has(key)) continue;
+        const row = JSON.parse(key);
+        row.direction = "engine_to_survey";
+        out.push(row);
       }
     }
   }
@@ -405,6 +424,14 @@ export function collectMemoryContractMismatches({
 
 function validateWaivers(ledger, pin, mismatches) {
   requireObject(ledger, "memory-contract waiver ledger");
+  const schemaPath = "../packages/schemas/memory-contract-reconciliation-waivers.schema.json";
+  const allowedTopLevel = new Set(["$schema", "schemaVersion", "inferenceRevision", "waivers"]);
+  for (const field of Object.keys(ledger)) {
+    if (!allowedTopLevel.has(field)) throw new Error(`memory-contract waiver ledger has unknown field ${field}`);
+  }
+  if (ledger.$schema !== schemaPath) {
+    throw new Error(`memory-contract waiver ledger $schema must be ${schemaPath}`);
+  }
   if (ledger.schemaVersion !== 1) throw new Error("memory-contract waiver ledger schemaVersion must be 1");
   if (ledger.inferenceRevision !== pin) {
     throw new Error(`memory-contract waiver ledger is keyed to ${ledger.inferenceRevision ?? "(unset)"}, but Cargo pins ${pin}`);

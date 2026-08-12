@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   collectMemoryContractMismatches,
   reconcileMemoryContracts,
+  routeEligibilityFromEngineFacts,
 } from "./lib/memory-contract-reconciliation.mjs";
 
 const PIN = "a".repeat(40);
@@ -42,6 +43,12 @@ function backendFacts(backend) {
     generatedFrom: { inferenceRevision: PIN, dumper: "fixture" },
     engines: [{ id: `${backend}_alpha` }],
     memoryContracts: [contract(`${backend}_alpha`)],
+    memoryRouteWitnesses: [{
+      provider: `${backend}_alpha`,
+      tier: "q4",
+      mode: "text_to_image",
+      overlay: "none",
+    }],
   };
 }
 
@@ -101,20 +108,33 @@ function fixture() {
       families: {
         100: {
           backends: {
-            mlx: { implementation: "provider-local" },
-            candle: { implementation: "shared-primitive" },
+            mlx: {
+              implementation: "provider-local",
+              implementedEntries: ["mlx_model"],
+              implementedTiers: ["q4"],
+              implementedModes: ["text_to_image"],
+              implementedOverlays: ["none"],
+            },
+            candle: {
+              implementation: "shared-primitive",
+              implementationScopes: [{
+                entries: ["candle_model"],
+                tiers: ["q4"],
+                modes: ["text_to_image"],
+                overlays: ["none"],
+              }],
+            },
           },
         },
       },
     },
-    routeEligibility: ["mlx", "candle"].map((backend) => ({
-      backend,
-      provider: `${backend}_alpha`,
-      mode: null,
-      overlay: "none",
-    })),
   };
-  input.waiverLedger = { schemaVersion: 1, inferenceRevision: PIN, waivers: [] };
+  input.waiverLedger = {
+    $schema: "../packages/schemas/memory-contract-reconciliation-waivers.schema.json",
+    schemaVersion: 1,
+    inferenceRevision: PIN,
+    waivers: [],
+  };
   return input;
 }
 
@@ -140,12 +160,35 @@ test("engine to manifest is mutation-proven green-red-green", () => {
 
 test("manifest to route is mutation-proven green-red-green", () => {
   greenRedGreen(
-    (input) => input.routeEligibility.splice(0, 1),
-    /unwaived mismatch/,
+    (input) => input.engineFacts[0].memoryRouteWitnesses.splice(0, 1),
+    /no memoryRouteWitnesses/,
   );
   greenRedGreen(
     (input) => input.manifest.models[0].mlx.memoryStrategyContract.implementations[0].overlays = ["lora"],
     /unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => input.engineFacts[0].memoryRouteWitnesses[0].tier = "q8",
+    /unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => input.engineFacts[0].memoryRouteWitnesses[0].mode = "edit_image",
+    /unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => input.engineFacts[0].memoryRouteWitnesses[0].overlay = "lora",
+    /unwaived mismatch/,
+  );
+});
+
+test("route facts are independent of syntax-equivalent Rust source", () => {
+  const facts = fixture().engineFacts;
+  const blockForm = "if eligible { spec.with_load_shape(deferred) } else { spec }";
+  const expressionForm = "eligible.then(|| spec.with_load_shape(deferred)).unwrap_or(spec)";
+  assert.notEqual(blockForm, expressionForm);
+  assert.deepEqual(
+    routeEligibilityFromEngineFacts(facts, blockForm),
+    routeEligibilityFromEngineFacts(facts, expressionForm),
   );
 });
 
@@ -167,6 +210,79 @@ test("survey to engine is mutation-proven green-red-green", () => {
   greenRedGreen(
     (input) => input.survey.families[100].backends.mlx.implementation = "none",
     /unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => {
+      const contractValue = input.engineFacts[0].memoryContracts[0];
+      contractValue.surfaces[0].implementedRungs = ["resident"];
+      recomputeDigest(contractValue);
+    },
+    /unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => input.survey.families[100].backends.mlx.implementedTiers = ["q8"],
+    /unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => input.survey.families[100].backends.candle.implementationScopes[0].modes = ["edit_image"],
+    /unwaived mismatch/,
+  );
+  greenRedGreen(
+    (input) => {
+      input.cells.push({
+        ...input.cells[1],
+        tier: "q8",
+      });
+      input.survey.families[100].backends.candle.implementationScopes.push({
+        entries: ["candle_model"],
+        tiers: ["q8"],
+        modes: ["text_to_image"],
+        overlays: ["none"],
+      });
+    },
+    /unwaived mismatch/,
+  );
+});
+
+test("survey and engine scope mismatches carry exact coordinates in both directions", () => {
+  const missingEngine = fixture();
+  const contractValue = missingEngine.engineFacts[0].memoryContracts[0];
+  contractValue.surfaces[0].implementedRungs = ["resident"];
+  recomputeDigest(contractValue);
+  assert.deepEqual(
+    collectMemoryContractMismatches(missingEngine).filter((row) => row.leg === "survey_engine"),
+    [{
+      leg: "survey_engine",
+      direction: "survey_to_engine",
+      backend: "mlx",
+      provider: "mlx_alpha",
+      modelId: "mlx_model",
+      familyStory: 100,
+      mode: "text_to_image",
+      tier: "q4",
+      overlay: "none",
+      rung: "bounded_transformer_residency",
+      selectorDigest: contractValue.selectorDigest,
+    }],
+  );
+
+  const missingSurvey = fixture();
+  missingSurvey.survey.families[100].backends.candle.implementationScopes = [];
+  assert.deepEqual(
+    collectMemoryContractMismatches(missingSurvey).filter((row) => row.leg === "survey_engine"),
+    [{
+      leg: "survey_engine",
+      direction: "engine_to_survey",
+      backend: "candle",
+      provider: "candle_alpha",
+      modelId: "candle_model",
+      familyStory: 100,
+      mode: "text_to_image",
+      tier: "q4",
+      overlay: "none",
+      rung: "bounded_transformer_residency",
+      selectorDigest: missingSurvey.engineFacts[1].memoryContracts[0].selectorDigest,
+    }],
   );
 });
 
@@ -203,6 +319,18 @@ test("under-keyed and stale waivers fail exactly", () => {
   const duplicate = structuredClone(input);
   duplicate.waiverLedger.waivers.push(structuredClone(duplicate.waiverLedger.waivers[0]));
   assert.throws(() => reconcileMemoryContracts(duplicate), /duplicate waiver/);
+
+  const missingSchema = structuredClone(input);
+  delete missingSchema.waiverLedger.$schema;
+  assert.throws(() => reconcileMemoryContracts(missingSchema), /\$schema must be/);
+
+  const extraTopLevel = structuredClone(input);
+  extraTopLevel.waiverLedger.comment = "not in the closed schema";
+  assert.throws(() => reconcileMemoryContracts(extraTopLevel), /unknown field comment/);
+
+  const extraWaiverField = structuredClone(input);
+  extraWaiverField.waiverLedger.waivers[0].comment = "not in the closed schema";
+  assert.throws(() => reconcileMemoryContracts(extraWaiverField), /waiver 0 has unknown field comment/);
 
   const stale = fixture();
   stale.waiverLedger.waivers = structuredClone(input.waiverLedger.waivers);

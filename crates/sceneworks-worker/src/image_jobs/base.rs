@@ -3864,48 +3864,13 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
 /// in a macOS test build and dead-code-error again under `-D warnings`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
-    let directory = matches!(&spec.weights, WeightsSource::Dir(_));
-    let qwen_native = matches!(engine_id, "qwen_image" | "qwen_image_edit")
-        && directory
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    let flux_supported = matches!(engine_id, "flux1_schnell" | "flux1_dev")
-        && directory
-        && spec.adapters.is_empty()
-        && spec.extra_controls.is_empty()
-        && spec.pid.is_none()
-        && spec.identity.is_none()
-        && !(spec.control.is_some() && spec.ip_adapter.is_some());
-    let flux2_supported = matches!(engine_id, "flux2_dev" | "flux2_klein_9b")
-        && directory
-        && spec.adapters.is_empty()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.pid.is_none()
-        && spec.identity.is_none();
-    let mage_supported = matches!(
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Candle,
         engine_id,
-        "mage_flow_base"
-            | "mage_flow"
-            | "mage_flow_turbo"
-            | "mage_flow_edit_base"
-            | "mage_flow_edit"
-            | "mage_flow_edit_turbo"
-    ) && directory
-        && spec.adapters.is_empty()
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.pid.is_none()
-        && spec.identity.is_none();
-    if qwen_native || flux_supported || flux2_supported || mage_supported {
-        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
-    } else {
-        spec
-    }
+        crate::memory_route_registry::MemoryRouteMode::TextToImage,
+        spec,
+        false,
+    )
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -4201,43 +4166,18 @@ fn apply_measured_mlx_load_shape_for_request(
     spec: LoadSpec,
     plain_text_to_image: bool,
 ) -> LoadSpec {
-    let directory_native = matches!(&spec.weights, WeightsSource::Dir(_))
-        && spec.precision == gen_core::Precision::Bf16;
-    let lens_native = directory_native
-        && ((engine_id == "lens" && spec.quantize == Some(gen_core::Quant::Q4))
-            || (engine_id == "lens_turbo" && spec.quantize.is_none()))
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    let qwen_native = directory_native
-        && matches!(engine_id, "qwen_image" | "qwen_image_edit")
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.pid.is_none();
-    let krea_native = directory_native
-        && engine_id == "krea_2_turbo"
-        && plain_text_to_image
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    let sdxl_native = directory_native
-        && engine_id == "sdxl"
-        && plain_text_to_image
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    if lens_native || qwen_native || krea_native || sdxl_native {
-        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+    let mode = if plain_text_to_image {
+        crate::memory_route_registry::MemoryRouteMode::TextToImage
     } else {
-        spec
-    }
+        crate::memory_route_registry::MemoryRouteMode::EditImage
+    };
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Mlx,
+        engine_id,
+        mode,
+        spec,
+        false,
+    )
 }
 
 #[cfg(all(test, target_os = "macos"))]

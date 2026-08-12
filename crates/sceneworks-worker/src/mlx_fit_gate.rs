@@ -4450,11 +4450,13 @@ fn weights_floor_load_admission(
 
 fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     let spec = spec.with_offload_policy(OffloadPolicy::Sequential);
-    if engine_id == "z_image_turbo" {
-        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
-    } else {
-        spec
-    }
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Mlx,
+        engine_id,
+        crate::memory_route_registry::MemoryRouteMode::TextToImage,
+        spec,
+        true,
+    )
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the

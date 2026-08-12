@@ -1557,5 +1557,1483 @@
       "supportsSequentialOffload": true,
       "registryCached": true
     }
+  ],
+  "memoryRouteWitnesses": [
+    {
+      "provider": "krea_2_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "krea_2_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "krea_2_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "krea_2_turbo",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens_turbo",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens_turbo",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "lens_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "identity"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "none"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "control"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "identity"
+    }
   ]
 }
