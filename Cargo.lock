@@ -6415,6 +6415,7 @@ dependencies = [
  "if-addrs",
  "keyring",
  "nix",
+ "objc2-foundation",
  "reqwest 0.12.28",
  "sceneworks-core",
  "serde",
