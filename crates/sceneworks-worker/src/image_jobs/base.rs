@@ -7973,10 +7973,7 @@ fn candle_resolved_tier_key(
     )
 }
 
-#[cfg(any(
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    all(test, target_os = "macos")
-))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_quant_for_resolved_tier(
     request: &ImageRequest,
     tier: &str,
