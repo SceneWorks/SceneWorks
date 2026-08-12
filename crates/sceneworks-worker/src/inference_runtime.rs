@@ -58,6 +58,27 @@ pub(crate) fn media() -> &'static ProviderRegistry {
     }
 }
 
+/// Fresh, weights-free provider-owned memory-contract surfaces for generated capability facts.
+/// Kept separate from the process catalog so each platform dumper can construct its contract-only
+/// inventory without loading model weights.
+pub(crate) fn memory_contract_surface_registry() -> gen_core::Result<ProviderRegistry> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        platform_runtime::memory_contract_surface_registry()
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        gen_core::ProviderRegistryBuilder::new().build()
+    }
+}
+
 /// The runtime's dedicated **candle audio** provider registry (SceneWorks Audio Studio, epic 13400 /
 /// sc-13404), or `None` when this build ships no audio lane. Audio is candle-native on every platform
 /// and rides a separate registry from [`media`] (the mlx media graph on macOS): the `runtime-macos`

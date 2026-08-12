@@ -575,7 +575,13 @@ test("the pre-push derived-docs trigger covers every non-Rust source the matrix 
   assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
   const trigger = new RegExp(pattern);
   const rustArm = /(^|\/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$/;
-  for (const relative of Object.values(SOURCE_PATHS)) {
+  // Imported reconciliation logic also changes the generated summary/gate even though it is code,
+  // not a hashed data source, so a module-only edit must run the same stale-artifact check.
+  const derivedInputs = [
+    ...Object.values(SOURCE_PATHS),
+    "scripts/lib/memory-contract-reconciliation.mjs",
+  ];
+  for (const relative of derivedInputs) {
     if (rustArm.test(relative)) continue;
     assert.ok(trigger.test(relative), `${relative} must trigger the pre-push derived-docs check`);
   }
