@@ -6,8 +6,10 @@
 // and the REAL committed evidence rather than to synthetic inputs.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +17,7 @@ import {
   EVIDENCE_FILE,
   KNOWN_REPO_CONDITIONS,
   KNOWN_ZERO_MATCHES,
+  argumentError,
   claimKey,
   collectClaims,
   gradeRecordedEvidence,
@@ -314,4 +317,169 @@ test("no declared pattern in the catalog uses a construct the translator refuses
 test("an entry with no revision keys on the default branch, and a pinned one keys on the pin", () => {
   assert.equal(claimKey("Org/demo", null), "Org/demo@main");
   assert.equal(claimKey("Org/demo", "a".repeat(40)), `Org/demo@${"a".repeat(40)}`);
+});
+
+// sc-18854 review, MINOR 2. `--self-test` and `--check` used to `return` BEFORE the
+// `--dry-run` rejection, so `--check --dry-run` exited 0 having graded offline with the flag
+// ignored — the reviewer would believe they had verified the artifact against a live re-record
+// when nothing had touched the network. Validation now runs before the mode dispatch.
+//
+// Each case is one guard, both directions: the accepted rows are what stops a rejection from
+// being written too broadly.
+test("argumentError rejects every flag combination a mode would otherwise swallow", () => {
+  // Rejected — the two the reviewer named, plus the --write twins of the same swallow.
+  for (const argv of [
+    ["--check", "--dry-run"],
+    ["--self-test", "--dry-run"],
+    ["--check", "--write"],
+    ["--self-test", "--write"],
+    ["--check", "--write", "--dry-run"],
+    ["--self-test", "--write", "--dry-run"],
+  ]) {
+    const error = argumentError(argv);
+    assert.ok(error, `${argv.join(" ")} must be rejected, not silently ignored`);
+    assert.match(error, /ignores/);
+    assert.match(error, /--write --dry-run/, "the rejection must name the mode that does work");
+  }
+
+  // Rejected for the older reason: --dry-run belongs to the recorder.
+  assert.match(argumentError(["--dry-run"]), /only applies to the recorder/);
+  assert.match(argumentError(["--model", "ltx_2_3", "--dry-run"]), /only applies to the recorder/);
+  assert.match(argumentError(["--check", "--model", "ltx_2_3"]), /grades the whole catalog/);
+
+  // ACCEPTED — the other direction. A guard that rejected these would break `npm run check`,
+  // the recorder, and the reviewer tool itself.
+  for (const argv of [
+    [],
+    ["--check"],
+    ["--self-test"],
+    ["--write"],
+    ["--write", "--dry-run"],
+    ["--model", "ltx_2_3"],
+  ]) {
+    assert.equal(argumentError(argv), null, `${argv.join(" ") || "(no flags)"} must be accepted`);
+  }
+});
+
+// The test above cannot see the DEFECT, and that is the whole point of this one. The bug was
+// PLACEMENT, not the predicate: `argumentError`'s body was already correct where it sat, and
+// moving the call back below the `--self-test`/`--check` dispatch leaves every assertion above
+// green while `--check --dry-run` goes back to exiting 0 with the flag ignored. So drive the real
+// CLI and assert the rejected combinations did no work at all.
+const WORK_DONE = /graded \d+ pattern|checked \d+ pattern|self-test case\(s\) passed/;
+
+test("the CLI rejects those combinations before any mode runs, not after", () => {
+  for (const argv of [
+    ["--check", "--dry-run"],
+    ["--self-test", "--dry-run"],
+    ["--check", "--write"],
+    ["--self-test", "--write", "--dry-run"],
+    ["--dry-run"],
+  ]) {
+    // No replay preload: if validation is doing its job, nothing here reaches the network.
+    const run = spawnSync(process.execPath, ["scripts/check-download-patterns.mjs", ...argv], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    const output = `${run.stdout}${run.stderr}`;
+    assert.equal(run.status, 1, `${argv.join(" ")} must exit 1, got ${run.status}: ${output}`);
+    assert.doesNotMatch(
+      output,
+      WORK_DONE,
+      `${argv.join(" ")} must be rejected BEFORE the mode runs — this output shows it ran anyway`,
+    );
+  }
+
+  // Both accepted offline modes must still do their work and exit 0, so the rejection above
+  // cannot be passing by rejecting everything.
+  for (const [argv, expected] of [
+    [["--check"], /graded \d+ pattern/],
+    [["--self-test"], /self-test case\(s\) passed/],
+  ]) {
+    const run = spawnSync(process.execPath, ["scripts/check-download-patterns.mjs", ...argv], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    const output = `${run.stdout}${run.stderr}`;
+    assert.equal(run.status, 0, `${argv.join(" ")} must still exit 0: ${output}`);
+    assert.match(output, expected);
+    assert.match(output, WORK_DONE);
+  }
+});
+
+// sc-18854 review, MINOR 1. END-TO-END, because the defect was an exit-code COLLISION that no
+// in-process test of a pure function can see: `runLive` wrote the live zero-match verdict and the
+// artifact-comparison verdict to the same `process.exitCode`, so `--write --dry-run` exited 1 on a
+// clean tree while printing "is UP TO DATE". The runbook documents that exit code as the one
+// signal separating an honest re-record from a hand edit, so it was wrong on every clean run.
+//
+// The network is replayed from the committed artifact (see the fixture header), so this is offline
+// and deterministic. Both directions are asserted, and the clean direction deliberately runs on a
+// tree that DOES have a live zero-match (the tracked LipDub row) — without that the test would be
+// vacuous, since it is the collision that has to not happen.
+const PERTURBED_KEY = "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb";
+const runReplayed = (args, env = {}) => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "./scripts/fixtures/replay-download-pattern-network.mjs",
+      "scripts/check-download-patterns.mjs",
+      ...args,
+    ],
+    { cwd: root, encoding: "utf8", env: { ...process.env, ...env } },
+  );
+  return { status: result.status, output: `${result.stdout}${result.stderr}` };
+};
+const runDryRun = (env = {}) => runReplayed(["--write", "--dry-run"], env);
+
+test("--write --dry-run: the exit code carries the artifact verdict and only that", () => {
+  const clean = runDryRun();
+  // Anti-vacuity: prove the live verdicts really did fire on this run. If the catalog ever grades
+  // clean live, this assertion fails loudly rather than letting the test pass for the wrong reason.
+  assert.match(
+    clean.output,
+    /ZERO-MATCH PATTERNS \(\d+\)/,
+    "a live zero-match must be present, or this test proves nothing about the collision",
+  );
+  assert.match(clean.output, /ARTIFACT VERDICT: UP TO DATE \(\d+ key\(s\)\) — exit 0/);
+  assert.doesNotMatch(clean.output, /WOULD CHANGE/);
+  assert.equal(clean.status, 0, `a clean artifact must exit 0 despite the live zero-match above`);
+
+  // Direction 2: one appended file in one replayed listing — the smallest possible divergence
+  // between the committed artifact and a re-record — must red.
+  const tampered = runDryRun({ REPLAY_EXTRA_FILE: PERTURBED_KEY });
+  assert.match(tampered.output, /ARTIFACT VERDICT: WOULD CHANGE — exit 1/);
+  assert.doesNotMatch(tampered.output, /UP TO DATE/);
+  assert.equal(tampered.status, 1, "a divergent artifact must exit 1");
+});
+
+// The counterpart of the test above: routing the live verdicts through a flag must not have
+// DROPPED them. Same replayed network, plain live mode (no --write, so no dry-run verdict owns the
+// exit code), each verdict isolated to a single catalog entry and asserted in both directions.
+test("plain live mode still reds on a zero-match and on an unreachable repo, and greens otherwise", () => {
+  const clean = runReplayed(["--model", "ltx_2_3"]);
+  assert.match(clean.output, /Every declared download pattern matches at least one file\./);
+  assert.equal(clean.status, 0, `a fully matching entry must exit 0: ${clean.output}`);
+
+  const zeroMatch = runReplayed(["--model", "ltx_2_3_ic_lipdub"]);
+  assert.match(zeroMatch.output, /ZERO-MATCH PATTERNS \(1\)/);
+  assert.equal(zeroMatch.status, 1, "a zero-match must still red the live mode");
+
+  // Same entry as the green run, with only its listing made unreadable.
+  const outage = runReplayed(["--model", "ltx_2_3"], { REPLAY_ERROR_KEY: PERTURBED_KEY });
+  assert.match(outage.output, /UNREACHABLE \(could not verify/);
+  assert.match(outage.output, /HTTP 503/);
+  assert.equal(outage.status, 1, "an unreachable repo must still red the live mode");
+});
+
+// The fixture is only meaningful if the replay is faithful, and it is only faithful if the key it
+// perturbs above genuinely exists. A typo'd key would make the perturbation a no-op and the
+// direction-2 assertion above would then be testing nothing.
+test("the replay perturbation targets a key that is actually recorded", async () => {
+  const { evidence } = await realInputs();
+  assert.ok(
+    evidence.repos.some((entry) => entry.key === PERTURBED_KEY),
+    `the perturbed key ${PERTURBED_KEY} must exist in the committed evidence`,
+  );
 });

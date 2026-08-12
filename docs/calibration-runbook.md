@@ -329,12 +329,31 @@ Two things follow, and both are now enforced rather than remembered:
   node scripts/check-download-patterns.mjs --write --dry-run
   ```
 
-  It performs the same networked re-record, writes nothing, and exits non-zero if the committed
-  artifact is not byte-identical to what a re-record would produce. That is what distinguishes an
-  honest re-record from a hand edit. It is a **human tool and is deliberately wired into nothing**:
-  it needs huggingface.co, and the entire point of the record/grade split is that no required lane
-  depends on that. Expect it to red harmlessly whenever an unrevisioned key's upstream default
-  branch has moved since the last record — read the diff before concluding anything.
+  It performs the same networked re-record, writes nothing, and ends with an
+  `=== ARTIFACT VERDICT: … ===` banner. **The banner, not the absence of noise above it, is the
+  signal:**
+
+  - `=== ARTIFACT VERDICT: UP TO DATE (N key(s)) — exit 0 ===` — the committed artifact is
+    byte-identical to what a re-record produces. That is what distinguishes an honest re-record
+    from a hand edit.
+  - `=== ARTIFACT VERDICT: WOULD CHANGE — exit 1 ===` — it is not. Re-record and **read the diff
+    before concluding anything**: an unrevisioned key whose upstream default branch has moved since
+    the last record reds this way harmlessly, and so does a hand edit.
+
+  🔴 **In this mode the exit code carries that verdict and nothing else** (sc-18854 review). The
+  live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner,
+  and today's tree prints a tracked `ZERO-MATCH PATTERNS (1)` for LipDub on every clean run — but
+  they deliberately do not move the exit status, because an anti-tamper mode that reds
+  unconditionally signals nothing. Grade those lists with
+  `npm run check:download-patterns:offline`; that is the gate CI runs.
+
+  `--dry-run` is rejected outright when it is not paired with `--write`, including in combination
+  with `--check` or `--self-test` (both of which ignore it — they never touch the network or the
+  artifact). Same reason: a flag that is silently swallowed lets a reviewer believe they verified
+  the artifact when they did not.
+
+  It is a **human tool and is deliberately wired into nothing**: it needs huggingface.co, and the
+  entire point of the record/grade split is that no required lane depends on that.
 
   Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
   `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to

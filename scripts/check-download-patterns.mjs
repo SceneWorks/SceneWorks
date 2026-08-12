@@ -137,6 +137,7 @@ const MODEL_MANIFEST = "config/manifests/builtin.models.jsonc";
 const LORA_MANIFEST = "config/manifests/builtin.loras.jsonc";
 export const EVIDENCE_FILE = "config/download-pattern-evidence.json";
 const RECORD_COMMAND = "node scripts/check-download-patterns.mjs --write";
+const CHECK_COMMAND = "npm run check:download-patterns:offline";
 
 const STORY_REF_PATTERN = /^sc-\d+$/;
 
@@ -767,6 +768,16 @@ async function runLive({ only, write, dryRun }) {
 
   console.log(`checked ${patterns} pattern(s) across ${entries} download entr(ies)`);
 
+  // The live verdicts below accumulate into a flag instead of writing straight to
+  // `process.exitCode`, because `--write --dry-run` publishes an ANTI-TAMPER verdict and has to
+  // own its exit code outright (sc-18854 review). Folding the live verdicts in made the mode
+  // exit 1 on a clean tree — the tracked LipDub zero-match fires on every run — so a reviewer
+  // following the runbook would see a non-zero exit, find no re-record diff to explain it, and
+  // conclude the artifact had been hand-edited. A tamper detector that reds unconditionally
+  // detects nothing.
+  let liveFailure = false;
+  let dryRunVerdict = null;
+
   if (write) {
     if (only) {
       console.error(
@@ -788,22 +799,16 @@ async function runLive({ only, write, dryRun }) {
       // artifact what a re-record would produce?" without touching the working tree. Deliberately
       // wired into NOTHING automatic: it needs the network, and the point of the split is that no
       // required lane depends on huggingface.co.
+      //
+      // The verdict is computed here but REPORTED LAST, so the line a reviewer is looking for is
+      // not buried above several screens of live diagnostics.
       let current = null;
       try {
         current = await readFile(target, "utf8");
       } catch {
         current = null;
       }
-      if (current === next) {
-        console.log(`\n${EVIDENCE_FILE} is UP TO DATE (${repos.length} key(s)) — nothing written.`);
-      } else {
-        console.error(
-          `\n${EVIDENCE_FILE} WOULD CHANGE — the committed artifact is not what a re-record` +
-            ` produces. Re-record with \`${RECORD_COMMAND}\` and commit the result.` +
-            (current === null ? " (no committed artifact found)" : ""),
-        );
-        process.exitCode = 1;
-      }
+      dryRunVerdict = { upToDate: current === next, missing: current === null, keys: repos.length };
     } else {
       await writeFile(target, next, "utf8");
       console.log(`wrote ${EVIDENCE_FILE} (${repos.length} repo@revision key(s))`);
@@ -821,7 +826,7 @@ async function runLive({ only, write, dryRun }) {
   if (untranslatable.length > 0) {
     console.error(`\nUNTRANSLATABLE PATTERNS (${untranslatable.length}):`);
     for (const line of untranslatable) console.error(`  ${line}`);
-    process.exitCode = 1;
+    liveFailure = true;
   }
   if (unreachable.length > 0) {
     console.log(`\nUNREACHABLE (could not verify — set $HF_TOKEN if these are gated):`);
@@ -836,14 +841,39 @@ async function runLive({ only, write, dryRun }) {
       `\nEither the glob is wrong, the tier is not published yet, or the entry's pinned revision` +
         ` predates the files it declares (sc-18809 — the trailing @<rev> above is what was checked).`,
     );
-    process.exitCode = 1;
+    liveFailure = true;
+  } else if (unreachable.length > 0) {
+    liveFailure = true;
+  } else {
+    console.log("\nEvery declared download pattern matches at least one file.");
+  }
+
+  if (dryRunVerdict) {
+    // The ONLY thing that sets the exit code in this mode. The runbook documents it as answering
+    // exactly one question, so it must answer exactly that one.
+    if (dryRunVerdict.upToDate) {
+      console.log(
+        `\n=== ARTIFACT VERDICT: UP TO DATE (${dryRunVerdict.keys} key(s)) — exit 0 ===\n` +
+          `${EVIDENCE_FILE} is byte-identical to what a re-record produces: an honest re-record,` +
+          ` not a hand edit. Nothing was written.`,
+      );
+    } else {
+      console.error(
+        `\n=== ARTIFACT VERDICT: WOULD CHANGE — exit 1 ===\n${EVIDENCE_FILE} is not what a` +
+          ` re-record produces. Re-record with \`${RECORD_COMMAND}\` and commit the result.` +
+          (dryRunVerdict.missing ? " (no committed artifact found)" : ""),
+      );
+      process.exitCode = 1;
+    }
+    console.log(
+      `This mode's exit code carries the artifact verdict above and NOTHING else — the live` +
+        ` verdicts printed before it (zero-match, gated, redirect, untranslatable, unreachable)` +
+        ` do not change it. Grade those with \`${CHECK_COMMAND}\`.`,
+    );
     return;
   }
-  if (unreachable.length > 0) {
-    process.exitCode = 1;
-    return;
-  }
-  console.log("\nEvery declared download pattern matches at least one file.");
+
+  if (liveFailure) process.exitCode = 1;
 }
 
 // OFFLINE gate. This is the CI path; it must not perform any network I/O.
@@ -1252,8 +1282,53 @@ export function runSelfTest({ log = console.log } = {}) {
   return failures;
 }
 
+// Argument validation, split out so it runs BEFORE the mode dispatch and can be unit-tested.
+// Returns an error string, or null if the combination is legal.
+//
+// Placement is the whole point (sc-18854 review): `--self-test` and `--check` return early, so a
+// rejection written after them silently ACCEPTS the flag it exists to reject. `--check --dry-run`
+// exited 0 having graded offline — no network, no artifact comparison — which is precisely the
+// "reviewer believes they verified the artifact when they did not" failure the bare `--dry-run`
+// rejection was written to prevent, and `--check` is the documented CI command so it is the
+// likelier typo of the two.
+export function argumentError(argv) {
+  const selfTest = argv.includes("--self-test");
+  const check = argv.includes("--check");
+  const write = argv.includes("--write");
+  const dryRun = argv.includes("--dry-run");
+
+  if ((selfTest || check) && (write || dryRun)) {
+    const mode = selfTest ? "--self-test" : "--check";
+    const offending = [write ? "--write" : null, dryRun ? "--dry-run" : null].filter(Boolean);
+    return (
+      `${mode} ignores ${offending.join(" and ")}: it never reads the network and never touches` +
+      ` ${EVIDENCE_FILE}. To verify the committed artifact against a live re-record, run` +
+      ` \`${RECORD_COMMAND} --dry-run\`.`
+    );
+  }
+  if (dryRun && !write) {
+    // Fail rather than ignore it. `--dry-run` alone reads as "do the safe thing", and silently
+    // treating it as a plain live run would let a reviewer believe they had verified the artifact.
+    return (
+      "--dry-run only applies to the recorder; use `--write --dry-run` to check whether the" +
+      " committed evidence file is what a re-record would produce."
+    );
+  }
+  if (check && argv.includes("--model")) {
+    return "--check grades the whole catalog (coverage is a set property); --model applies to the live modes only.";
+  }
+  return null;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
+
+  const error = argumentError(argv);
+  if (error) {
+    console.error(error);
+    process.exitCode = 1;
+    return;
+  }
 
   if (argv.includes("--self-test")) {
     console.log("check-download-patterns --self-test");
@@ -1269,31 +1344,12 @@ async function main() {
   }
 
   if (argv.includes("--check")) {
-    if (argv.includes("--model")) {
-      console.error(
-        "--check grades the whole catalog (coverage is a set property); --model applies to the live modes only.",
-      );
-      process.exitCode = 1;
-      return;
-    }
     await runCheck();
     return;
   }
 
   const only = argv.includes("--model") ? argv[argv.indexOf("--model") + 1] : null;
-  const write = argv.includes("--write");
-  const dryRun = argv.includes("--dry-run");
-  if (dryRun && !write) {
-    // Fail rather than ignore it. `--dry-run` alone reads as "do the safe thing", and silently
-    // treating it as a plain live run would let a reviewer believe they had verified the artifact.
-    console.error(
-      "--dry-run only applies to the recorder; use `--write --dry-run` to check whether the" +
-        " committed evidence file is what a re-record would produce.",
-    );
-    process.exitCode = 1;
-    return;
-  }
-  await runLive({ only, write, dryRun });
+  await runLive({ only, write: argv.includes("--write"), dryRun: argv.includes("--dry-run") });
 }
 
 // Only run when invoked as a script — the test file imports the pure functions above.
