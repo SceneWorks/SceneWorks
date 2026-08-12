@@ -8738,12 +8738,6 @@
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
-      "loraCompatibility": {
-        // No SANA LoRA wired yet (the engine descriptor reports supports_lora: false). Family
-        // reserved for when/if adapters are added.
-        "families": ["sana"],
-        "types": []
-      },
       "mlx": {
         // Quant-matrix turnkey (sc-8489/sc-8513): default q4 (`standard_tier_subdir` resolves the
         // `q4/` subdir; q8/bf16 selectable via advanced.mlxQuantize). The transformer + Gemma-2 TE are
@@ -8905,12 +8899,6 @@
         "count": [1, 2, 4],
         "samplers": ["default"],
         "schedulers": ["default"]
-      },
-      "loraCompatibility": {
-        // No SANA LoRA wired yet (the engine descriptor reports supports_lora: false). Family reserved
-        // for when/if adapters are added.
-        "families": ["sana"],
-        "types": []
       },
       "mlx": {
         // Quant-matrix turnkey (sc-8490/sc-8513): default q4 (`standard_tier_subdir` resolves `q4/`;

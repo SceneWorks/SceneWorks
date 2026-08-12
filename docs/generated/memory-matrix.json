@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:4b73d9e9671d224109bbde24d277c8c4007d7429b1b5b44775a0a68e426e2334",
+    "sceneWorksRevision": "source-tree:882a4f34b5f30c94ceeebeaa70d22f4e208a7ea39a9ce68540bee134b83ca584",
     "inferenceRevision": "ae8ae4f6a869e73659cc876e4ae75a93ce20e8e8",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "c9494e2289fe4d78de9a919612c8245c036ef38690e7e5bd0a62d13241ef832c"
+        "sha256": "e49c3808e4a1479c6ca10a8ab3094ba9c71c88f025e02cbdaaddb3130e44a9f7"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -128,12 +128,12 @@
   ],
   "summary": {
     "imageModels": 53,
-    "cells": 9200,
+    "cells": 9080,
     "publishedCells": 208,
-    "elidedCells": 8992,
+    "elidedCells": 8872,
     "elidedByState": {
-      "Implemented/unverified": 3055,
-      "Missing": 5937
+      "Implemented/unverified": 3031,
+      "Missing": 5841
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -2683,7 +2683,6 @@
             "text_to_image"
           ],
           "overlays": [
-            "lora",
             "none"
           ],
           "rungs": [
@@ -2705,7 +2704,6 @@
             "text_to_image"
           ],
           "overlays": [
-            "lora",
             "none"
           ],
           "rungs": [
@@ -2748,7 +2746,6 @@
             "text_to_image"
           ],
           "overlays": [
-            "lora",
             "none"
           ],
           "rungs": [
@@ -2770,7 +2767,6 @@
             "text_to_image"
           ],
           "overlays": [
-            "lora",
             "none"
           ],
           "rungs": [
@@ -10583,240 +10579,240 @@
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
