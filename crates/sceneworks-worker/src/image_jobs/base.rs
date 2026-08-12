@@ -429,6 +429,8 @@ enum CandleImageRoute {
     Flux2Edit,
     /// Qwen-Image-Edit reference / dual-latent edit (sc-5487).
     QwenEdit,
+    /// SenseNova-U1 instruction/character edit through the registered Reference/MultiReference path.
+    SenseNovaEdit,
     /// Z-Image img2img / edit (sc-6595).
     ZimageEdit,
     /// Mage-Flow Base/RL/Turbo instruction edit. Uses the generic registry stream, but requires
@@ -479,6 +481,8 @@ enum CandleImageRoute {
     QwenControl,
     /// Kolors strict-pose ControlNet (sc-5489).
     KolorsControl,
+    /// Kolors source-image img2img/edit through the registered generator.
+    KolorsEdit,
     /// Z-Image strict-pose Fun-ControlNet (sc-5489).
     ZimageControl,
     /// FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736).
@@ -539,6 +543,164 @@ const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &[
 ];
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_conditioned_angle_set(request: &ImageRequest) -> bool {
+    request.mode == "character_image"
+        && advanced::flag(&request.advanced, "angleSet")
+        && pose_entries(request).is_empty()
+}
+
+/// Seeds/prompts for a Candle reference-edit lane. Angle sets use the canonical 11 prompts with one
+/// shared seed; every other request preserves the ordinary count/per-image seed contract.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_conditioned_edit_work(request: &ImageRequest) -> Vec<(i64, String)> {
+    if candle_conditioned_angle_set(request) {
+        let seed = resolve_seed(request, 0);
+        return sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER
+            .iter()
+            .map(|angle| (seed, augment_prompt_for_angle(&request.prompt, angle)))
+            .collect();
+    }
+    (0..request.count as usize)
+        .map(|index| (resolve_seed(request, index), request.prompt.clone()))
+        .collect()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn sensenova_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        return request.reference_asset_ids.iter().take(5).cloned().collect();
+    }
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
+    }
+    if request.mode == "edit_image" {
+        if let Some(id) = request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return vec![id.to_owned()];
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_sensenova_candle_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let ids = sensenova_edit_candle_reference_ids(request);
+    if ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "SenseNova edit requires at least one reference image".to_owned(),
+        ));
+    }
+    ids.iter()
+        .map(|id| {
+            let image = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                id,
+                project_path,
+            )?;
+            if request.fit_mode == "stretch" {
+                Ok(image)
+            } else {
+                fit_engine_image(image, request.width, request.height, &request.fit_mode)
+            }
+        })
+        .collect()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_sensenova_candle_true_cfg(request: &ImageRequest) -> f32 {
+    let default = if request.mode == "character_image" {
+        1.5
+    } else {
+        1.0
+    };
+    request
+        .advanced
+        .get("trueCfgScale")
+        .or_else(|| request.advanced.get("imageGuidanceScale"))
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(default)
+        .clamp(1.0, 10.0)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_kolors_edit_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(source_id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        source_id,
+        project_path,
+    )?;
+    let image = if request.fit_mode == "stretch" {
+        source
+    } else {
+        fit_engine_image(source, request.width, request.height, &request.fit_mode)?
+    };
+    Ok(Some((
+        image,
+        advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0),
+    )))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn is_sensenova_candle_model(model: &str) -> bool {
+    sceneworks_core::mlx_tier_completeness::SENSENOVA_MODELS.contains(&model)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn sensenova_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+        && !sensenova_edit_candle_reference_ids(request).is_empty()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn kolors_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == "kolors"
+        && request.mode == "edit_image"
+        && request
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        && request.reference_asset_id.is_none()
+        && request.reference_asset_ids.is_empty()
+        && request.mask_asset_id.is_none()
+        && pose_entries(request).is_empty()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl CandleImageRoute {
     /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. Z-Image
     /// edit is the registered Turbo alias and therefore participates; the remaining bespoke edit,
@@ -577,6 +739,19 @@ impl CandleImageRoute {
             | CandleImageRoute::Flux1Control
             | CandleImageRoute::KreaControl => pose_entries(request).len() as u32,
             CandleImageRoute::InstantId => instantid_image_count(request, settings),
+            CandleImageRoute::QwenEdit
+                if qwen_edit_candle::qwen_edit_candle_pose_count(request)
+                    .is_some_and(|count| count > 0) =>
+            {
+                qwen_edit_candle::qwen_edit_candle_pose_count(request).unwrap_or_default() as u32
+            }
+            CandleImageRoute::Flux2Edit
+            | CandleImageRoute::QwenEdit
+            | CandleImageRoute::SenseNovaEdit
+                if candle_conditioned_angle_set(request) =>
+            {
+                sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
+            }
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
@@ -591,6 +766,9 @@ impl CandleImageRoute {
             CandleImageRoute::SdxlEdit => sdxl_edit_candle::SDXL_EDIT_CANDLE_ENGINE,
             CandleImageRoute::Flux2Edit => flux2_edit_candle::FLUX2_EDIT_CANDLE_ENGINE,
             CandleImageRoute::QwenEdit => qwen_edit_candle::QWEN_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::SenseNovaEdit | CandleImageRoute::KolorsEdit => {
+                candle_adapter_label(&request.model)
+            }
             CandleImageRoute::ZimageEdit => candle_adapter_label(&request.model),
             CandleImageRoute::KreaEdit => krea_edit_candle::KREA_EDIT_CANDLE_ENGINE,
             CandleImageRoute::KreaTurboOnRaw | CandleImageRoute::KreaMultiPhase => {
@@ -655,10 +833,29 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::InstantId)
     } else if sdxl_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SdxlEdit)
+    } else if matches!(
+        request.model.as_str(),
+        "flux2_dev"
+            | "qwen_image_edit"
+            | "qwen_image_edit_2509"
+            | "qwen_image_edit_2511"
+            | "qwen_image_edit_2511_lightning"
+    ) && candle_conditioned_pose_requires_reject(request)
+    {
+        // Defense in depth for direct worker calls: the scheduler rejects malformed pose carriers
+        // and valid pose sets paired with unsupported conditioned modes. The worker must reject the
+        // same shapes rather than letting typed parsing erase them or falling through to the stub.
+        Some(CandleImageRoute::PoseReject)
+    } else if flux2_control_candle_available(request, settings) {
+        // Character Studio FLUX.2 pose payloads also carry a reference image. The pose/control lane
+        // must win before reference edit so the skeleton is never silently dropped.
+        Some(CandleImageRoute::Flux2Control)
     } else if flux2_edit_candle_available(request, settings) {
         Some(CandleImageRoute::Flux2Edit)
     } else if qwen_edit_candle_available(request, settings) {
         Some(CandleImageRoute::QwenEdit)
+    } else if sensenova_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::SenseNovaEdit)
     } else if zimage_edit_candle_available(request, settings) {
         Some(CandleImageRoute::ZimageEdit)
     } else if is_mage_edit_model(&request.model)
@@ -683,10 +880,10 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
         Some(CandleImageRoute::KolorsControl)
+    } else if kolors_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::KolorsEdit)
     } else if zimage_control_available(request, settings) {
         Some(CandleImageRoute::ZimageControl)
-    } else if flux2_control_candle_available(request, settings) {
-        Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
     } else if krea_control_candle_available(request, settings) {
@@ -773,6 +970,37 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::CandleTxt2Img)
     } else {
         None
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_conditioned_pose_requires_reject(request: &ImageRequest) -> bool {
+    let pose_count = match request.advanced.get("poses") {
+        None | Some(Value::Null) => return false,
+        Some(Value::Array(poses))
+            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.iter().all(Value::is_object) =>
+        {
+            poses.len()
+        }
+        Some(_) => return true,
+    };
+    if pose_count == 0 {
+        return false;
+    }
+    match request.model.as_str() {
+        // FLUX.2 pose ControlNet serves every non-edit mode; instruction edit plus a pose has no
+        // composition contract and must reject rather than fall through after both specialists say no.
+        "flux2_dev" => request.mode == "edit_image",
+        // Qwen Edit's exact pose recipe is Character Studio with one identity reference; every other
+        // valid pose-bearing mode/reference shape is unsupported and must likewise reject explicitly.
+        "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning" => {
+            !qwen_edit_candle::qwen_edit_candle_mode(request)
+        }
+        _ => false,
     }
 }
 
@@ -8053,7 +8281,7 @@ async fn generate_candle_stream(
     // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
-    let true_cfg = resolve_true_cfg(request, &model);
+    let mut true_cfg = resolve_true_cfg(request, &model);
     let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
     let negative_prompt = resolve_negative_prompt(request, &model);
 
@@ -8120,8 +8348,6 @@ async fn generate_candle_stream(
     };
     let adapter_count = adapters.len();
 
-    let count = request.count as usize;
-    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is out-of-
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
     // non-caption prompt into a minimal valid caption — the same worker-side guarantee the macOS path
@@ -8132,6 +8358,16 @@ async fn generate_candle_stream(
     } else {
         request.prompt.clone()
     };
+    let work: Vec<(i64, String)> = if is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+    {
+        candle_conditioned_edit_work(request)
+    } else {
+        (0..request.count as usize)
+            .map(|index| (resolve_seed(request, index), prompt.clone()))
+            .collect()
+    };
+    let total = work.len();
     // In-lane edit conditioning (sc-6598 Ideogram / sc-7524 Boogu): resolve the source `Reference`
     // (+ optional `Mask` for Ideogram) + strength once, seed-independent — the candle sibling of the MLX
     // `generate_stream` edit path. Both families edit on the SAME engine as their T2I (no separate bespoke
@@ -8150,6 +8386,11 @@ async fn generate_candle_stream(
         // `z_image_edit` is a catalog alias for the registered Turbo provider. Resolve its source
         // into the generic request so memory admission, lifecycle cleanup, and telemetry stay shared.
         (resolve_zimage_edit_init(request, settings, project_path)?, None)
+    } else if request.model == "kolors" && request.mode == "edit_image" {
+        (
+            resolve_candle_kolors_edit_init(request, settings, project_path)?,
+            None,
+        )
     } else {
         (None, None)
     };
@@ -8159,9 +8400,16 @@ async fn generate_candle_stream(
         resolve_boogu_edit(request, settings, project_path)?
     } else if is_mage_edit_model(&request.model) {
         resolve_mage_edit(request, settings, project_path)?
+    } else if is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+    {
+        resolve_sensenova_candle_edit(request, settings, project_path)?
     } else {
         Vec::new()
     };
+    if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
+        true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
+    }
     let has_reference = request
         .reference_asset_id
         .as_deref()
@@ -9131,8 +9379,8 @@ async fn generate_candle_stream(
         move |generator, tx, cancel| {
             drive_gen_items_reported(
                 tx,
-                seeds,
-                move |_index, seed, preview, prompt_enhancement, on_progress| {
+                work,
+                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires(
                         generator,
@@ -9208,7 +9456,7 @@ async fn generate_candle_stream(
         adapter_label,
         &raw_settings,
         auto_tier_streaming.as_ref(),
-        count,
+        total,
         rx,
         cancel,
         blocking,
@@ -10053,6 +10301,117 @@ mod candle_label_tests {
         let none = vram_reject_tail(&[]);
         assert!(none.contains("No smaller tier is installed"), "{none}");
         assert!(!none.contains("Select a smaller"), "{none}");
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod kolors_edit_worker_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settings(data_dir: &Path) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1".to_owned(),
+            access_token: None,
+            data_dir: data_dir.to_path_buf(),
+            config_dir: data_dir.join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: false,
+            backend_candle_enabled: true,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
+        let data = tempfile::tempdir().expect("data dir");
+        let settings = settings(data.path());
+        let weights = data.path().join("models/kolors-test");
+        std::fs::create_dir_all(&weights).expect("model path");
+
+        let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+        let project = store.create_project("Kolors edit contract").expect("project");
+        let project_path = PathBuf::from(&project.path);
+        let source_file = data.path().join("kolors-source.png");
+        image::RgbImage::from_pixel(48, 32, image::Rgb([180, 40, 90]))
+            .save(&source_file)
+            .expect("source PNG");
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "kolors-source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source_file,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("source asset");
+        let asset_id = asset["id"].as_str().expect("asset id");
+        let request = ImageRequest::from_payload(
+            json!({
+                "projectId": project.id,
+                "model": "kolors",
+                "mode": "edit_image",
+                "sourceAssetId": asset_id,
+                "fitMode": "stretch",
+                "advanced": {
+                    "modelPath": weights,
+                    "strength": "0.72"
+                }
+            })
+            .as_object()
+            .expect("request object"),
+        );
+
+        assert_eq!(
+            resolve_candle_image_route(&request, &settings),
+            Some(CandleImageRoute::KolorsEdit)
+        );
+        let (source, strength) = resolve_candle_kolors_edit_init(
+            &request,
+            &settings,
+            &project_path,
+        )
+        .expect("source resolution")
+        .expect("Kolors edit init");
+        assert_eq!((source.width, source.height), (48, 32));
+        assert_eq!(source.pixels[0..3], [180, 40, 90]);
+        assert!((strength - 0.72).abs() < f32::EPSILON);
+
+        let missing_source = ImageRequest::from_payload(
+            json!({
+                "projectId": project.id,
+                "model": "kolors",
+                "mode": "edit_image",
+                "advanced": { "modelPath": weights }
+            })
+            .as_object()
+            .expect("request object"),
+        );
+        assert_ne!(
+            resolve_candle_image_route(&missing_source, &settings),
+            Some(CandleImageRoute::KolorsEdit)
+        );
+        assert!(
+            resolve_candle_kolors_edit_init(&missing_source, &settings, &project_path)
+                .expect("missing source is not an I/O error")
+                .is_none()
+        );
     }
 }
 

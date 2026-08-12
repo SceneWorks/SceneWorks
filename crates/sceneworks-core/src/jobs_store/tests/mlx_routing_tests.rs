@@ -434,13 +434,134 @@ fn flux2_txt2img_edit_and_lycoris_all_route_mlx() {
     assert!(flux2_mlx_eligible(&object(
         json!({ "prompt": "a red fox" })
     )));
-    assert!(flux2_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "image_generation", "prompt": "a red fox"
+    }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "edit_image", "sourceAssetId": "asset_1"
+    }))));
     assert!(flux2_mlx_eligible(&object(
-        json!({ "referenceAssetId": "asset_1" })
+        json!({ "mode": "reference", "referenceAssetId": "asset_1" })
     )));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "character_image", "referenceAssetIds": ["asset_1", "asset_2"]
+    }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "character_image", "referenceAssetId": "asset_1",
+        "advanced": { "poses": [{ "id": "pose_1" }] }
+    }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "style_variations", "referenceAssetId": "asset_1"
+    }))));
+    assert!(!flux2_mlx_eligible(&object(
+        json!({ "mode": "edit_image" })
+    )));
+    assert!(!flux2_mlx_eligible(&object(json!({
+        "mode": "reference", "referenceAssetId": "asset_1", "sourceAssetId": "asset_2"
+    }))));
+    assert!(!flux2_mlx_eligible(&object(json!({
+        "mode": "image_generation", "referenceAssetId": "asset_1"
+    }))));
     assert!(flux2_mlx_eligible(&object(json!({
         "loras": [{ "networkType": "lycoris" }]
     }))));
+}
+
+#[test]
+fn conditioned_mlx_routes_reject_conflicting_malformed_and_silent_t2i_shapes() {
+    for model in ["qwen_image_edit_2511", "sensenova_u1_8b"] {
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({
+                "mode": "character_image", "referenceAssetIds": ["a", "b"],
+                "advanced": { "trueCfgScale": "2.5" }
+            }))
+        ));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_request_mlx_eligible(
+                model,
+                &object(json!({
+                    "mode": "character_image", "referenceAssetIds": absent_plural,
+                    "referenceAssetId": "a"
+                }))
+            ));
+        }
+        for malformed in [
+            json!({ "mode": "character_image", "referenceAssetIds": ["a", ""] }),
+            json!({ "mode": "character_image", "referenceAssetIds": ["a", "b", "c", "d", "e", "f"] }),
+            json!({ "mode": "character_image", "referenceAssetIds": {} }),
+            json!({ "mode": "character_image", "referenceAssetId": "" }),
+            json!({ "mode": "character_image", "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "mode": "character_image", "referenceAssetId": "a", "advanced": { "trueCfgScale": false } }),
+        ] {
+            assert!(!image_request_mlx_eligible(model, &object(malformed)));
+        }
+    }
+    assert!(!image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "text_to_image", "referenceAssetId": "ignored" }))
+    ));
+    assert!(image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "image_generation", "prompt": "a red fox" }))
+    ));
+    assert!(!image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "image_generation", "referenceAssetId": "ignored" }))
+    ));
+    for model in ["krea_2_raw", "krea_2_turbo"] {
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a" }))
+        ));
+        assert!(!image_request_mlx_eligible(
+            model,
+            &object(
+                json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "b" })
+            )
+        ));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_request_mlx_eligible(
+                model,
+                &object(json!({
+                    "model": model, "mode": "edit_image",
+                    "referenceAssetIds": absent_plural, "referenceAssetId": "a"
+                }))
+            ));
+        }
+        for unsupported in [
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "maskAssetId": "mask" }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "controls": [{}] }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "poses": [{}] } }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "phases": [{}] } }),
+        ] {
+            assert!(!image_request_mlx_eligible(model, &object(unsupported)));
+        }
+    }
+    for model in [
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_request_mlx_eligible(
+                model,
+                &object(json!({
+                    "mode": "style_variations", "referenceAssetIds": absent_plural,
+                    "referenceAssetId": "a"
+                }))
+            ));
+        }
+        for malformed in [
+            json!({ "mode": "reference", "referenceAssetIds": ["a", "b", "c", "d", "e"] }),
+            json!({ "mode": "reference", "referenceAssetIds": ["a", null] }),
+            json!({ "mode": "reference", "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "mode": "reference", "referenceAssetId": "a", "advanced": { "trueCfgScale": [] } }),
+        ] {
+            assert!(!image_request_mlx_eligible(model, &object(malformed)));
+        }
+    }
 }
 
 #[test]

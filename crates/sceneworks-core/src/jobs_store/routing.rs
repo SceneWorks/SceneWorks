@@ -247,6 +247,48 @@ pub(super) fn has_nonempty_string_array(payload: &Map<String, Value>, key: &str)
         })
 }
 
+/// Validate the mutually-exclusive image-reference carriers used by native conditioned-image
+/// routes and return the selected reference count. Missing, null, blank strings, and an empty plural
+/// array are absent. A malformed plural array, blank/non-string plural member, an oversized plural
+/// set, a malformed scalar, or more than one populated carrier fails closed.
+pub(super) fn conditioned_reference_count(
+    payload: &Map<String, Value>,
+    allow_source: bool,
+    max_plural: usize,
+) -> Option<usize> {
+    let plural_count = match payload.get("referenceAssetIds") {
+        None | Some(Value::Null) => 0,
+        Some(Value::Array(values)) if values.is_empty() => 0,
+        Some(Value::Array(values))
+            if values.len() <= max_plural
+                && values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            values.len()
+        }
+        Some(_) => return None,
+    };
+    let singular = match payload.get("referenceAssetId") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(_) => return None,
+    };
+    let source = match payload.get("sourceAssetId") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(_) => return None,
+    };
+    if source && !allow_source {
+        return None;
+    }
+    let active = usize::from(plural_count > 0) + usize::from(singular) + usize::from(source);
+    if active != 1 {
+        return None;
+    }
+    Some(if plural_count > 0 { plural_count } else { 1 })
+}
+
 /// True when `payload[object_key][array_key]` is a non-empty array.
 pub(super) fn has_nonempty_nested_array(
     payload: &Map<String, Value>,
@@ -291,4 +333,48 @@ pub(super) fn has_nonnull_or_malformed_nested_carrier(
             .is_some_and(|value| !value.is_null()),
         Some(_) => true,
     }
+}
+
+/// True when an optional advanced numeric knob is present but is neither a finite JSON number nor a
+/// finite numeric string. Missing and null mean "use the model default"; malformed authored values
+/// fail closed so a submitted control can never be silently replaced by that default.
+pub(super) fn has_malformed_optional_nested_number(
+    payload: &Map<String, Value>,
+    object_key: &str,
+    number_key: &str,
+) -> bool {
+    match payload.get(object_key) {
+        None | Some(Value::Null) => false,
+        Some(Value::Object(object)) => match object.get(number_key) {
+            None | Some(Value::Null) => false,
+            Some(Value::Number(value)) => value.as_f64().map_or(true, |value| !value.is_finite()),
+            Some(Value::String(value)) => value
+                .trim()
+                .parse::<f64>()
+                .map_or(true, |value| !value.is_finite()),
+            Some(_) => true,
+        },
+        Some(_) => true,
+    }
+}
+
+/// Unsupported structural carriers for Krea's reference edit lane. LoRAs, quant selection,
+/// guidance, and text-style controls are deliberately allowed; mask/control/pose/phase inputs have
+/// no consumer in the edit provider and therefore fail closed.
+pub(super) fn krea_edit_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
+    ["controls", "controlnets"]
+        .iter()
+        .any(|key| has_nonempty_or_malformed_array(payload, key))
+        || has_nonempty_or_malformed_string(payload, "maskAssetId")
+        || ["poses", "phases"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        || [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }

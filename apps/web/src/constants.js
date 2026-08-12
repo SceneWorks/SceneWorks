@@ -307,9 +307,9 @@ const seededFallbackModels = [
     ui: {
       description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
       promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
-      // Edit-style variation knob (imageGuidanceScale): higher = closer to the
-      // reference, lower = more prompt-driven variation. Drives advanced.imageGuidanceScale.
-      variationStrength: { label: "Reference strength", default: 1.5, min: 0.5, max: 4.0, step: 0.1 },
+      // Edit-style true-CFG knob: the registered engine rejects IP/reference blend strengths.
+      hideReferenceStrength: true,
+      variationStrength: { label: "Reference strength", default: 1.5, min: 1.0, max: 4.0, step: 0.1 },
     },
   },
   {
@@ -329,7 +329,8 @@ const seededFallbackModels = [
     ui: {
       description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image, editing, and Character Studio reference (~50s/image on MPS) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base 8B (carries outfit + accessories across new scenes; face may drift). Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality reference work.",
       promptGuide: { title: "SenseNova-U1 8B Fast Prompt Guide", path: "/prompt-guides/sensenova-u1-8b-fast.md" },
-      variationStrength: { label: "Reference strength", default: 1.5, min: 0.5, max: 4.0, step: 0.1 },
+      hideReferenceStrength: true,
+      variationStrength: { label: "Reference strength", default: 1.5, min: 1.0, max: 4.0, step: 0.1 },
       viewAngles: [
         { id: "three_quarter_left", label: "Three-quarter left" },
         { id: "three_quarter_right", label: "Three-quarter right" },

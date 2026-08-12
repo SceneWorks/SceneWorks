@@ -702,6 +702,29 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_sensenova_models_do_not_advertise_lora_compatibility():
+    """sc-18476: SenseNova has no diffusion-LoRA merge path, so advertise none."""
+    manifest = _load_builtin_models_manifest()
+    sensenova = {
+        model["id"]: model
+        for model in manifest["models"]
+        if model.get("family") == "sensenova-u1"
+    }
+    assert set(sensenova) == {
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
+    }
+    for model_id, model in sensenova.items():
+        assert "loraCompatibility" not in model, (
+            f"{model_id} must omit the LoRA advertisement; the SenseNova worker accepts no "
+            "user adapters"
+        )
+
+
 def test_schema_accepts_mlx_sequential_offload_capability():
     """SC-18377: MLX staged-residency declarations are part of the authoring contract."""
     schema = _load_schema(SCHEMA_PATH)

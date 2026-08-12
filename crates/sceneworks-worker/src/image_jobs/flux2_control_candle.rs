@@ -109,8 +109,22 @@ fn resolve_flux2_control_base(
 pub(super) fn flux2_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_flux2_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && flux2_control_candle_pose_count(request).is_some_and(|count| count > 0)
         && matches!(resolve_flux2_control_base(request, settings), Ok(Some(_)))
+}
+
+/// Strict scheduler/worker pose contract: no filtered-away malformed entries and no unbounded set.
+fn flux2_control_candle_pose_count(request: &ImageRequest) -> Option<usize> {
+    match request.advanced.get("poses") {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Array(poses))
+            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.iter().all(Value::is_object) =>
+        {
+            Some(poses.len())
+        }
+        Some(_) => None,
+    }
 }
 
 /// Strict control consumes a control-map overlay, not an image-reference edit route. Character

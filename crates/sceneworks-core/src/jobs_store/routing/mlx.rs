@@ -9,9 +9,11 @@ use crate::jobs_store::routing::catalog::{
     MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_or_malformed_array,
+    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
+    has_nonempty_nested_array, has_nonempty_or_malformed_array,
     has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier, SENSENOVA_MODEL_IDS,
+    has_nonnull_or_malformed_nested_carrier, krea_edit_has_unsupported_carrier,
+    SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -225,13 +227,32 @@ pub(crate) fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
-/// FLUX.2 MLX-routing conditions, shared by klein and dev. FLUX.2 is an **MLX-only** family (no torch
-/// backend), so everything it does runs on MLX: klein txt2img (sc-3025), edit/reference + KV-cache +
+/// FLUX.2 MLX-routing conditions, shared by klein and dev. FLUX.2 runs on MLX on Mac and matching
+/// Candle routes off-Mac: klein txt2img (sc-3025), edit/reference + KV-cache +
 /// multi-reference (sc-3029), third-party LyCORIS via the core loader (epic 3641), and FLUX.2-dev
-/// txt2img (epic 5914 — dev's manifest advertises `text_to_image` only, so its edit/character modes
-/// are never offered until the Pixtral path lands in sc-5919).
-pub(crate) fn flux2_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
+/// txt2img plus edit/reference/character/style workflows. Reference-bearing modes require one strict,
+/// non-conflicting reference carrier so malformed requests cannot fall through to unconditioned T2I.
+pub(crate) fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
+    if matches!(
+        mode,
+        Some(
+            "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
+        )
+    ) {
+        return conditioned_reference_count(
+            payload,
+            matches!(mode, Some("edit_image" | "image_to_image")),
+            4,
+        )
+        .is_some()
+            && !mlx_conditioned_edit_has_unsupported_carrier(payload, true, false, true)
+            && !conditioned_true_cfg_is_malformed(payload);
+    }
+    matches!(mode, None | Some("image_generation" | "text_to_image"))
+        && !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+        && !has_nonempty_or_malformed_string(payload, "referenceAssetId")
+        && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
 }
 
 /// Qwen-Image (sc-3024 / strict pose sc-3575) MLX-routing conditions: text-to-image,
@@ -252,11 +273,10 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if has_poses {
         return true;
     }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_reference {
+    if has_nonempty_or_malformed_string(payload, "referenceAssetId")
+        || has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        || has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+    {
         return false;
     }
     true
@@ -271,19 +291,11 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// (sc-3398) shares the same gate (its sampler + distill-LoRA are worker-local). Third-party
 /// LyCORIS now applies on the core MLX loader (epic 3641), so it no longer forces torch.
 pub(crate) fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    match payload.get("mode").and_then(Value::as_str) {
-        Some("edit_image") => has_source || has_reference,
-        Some("character_image") => has_reference,
-        _ => false,
-    }
+    let mode = payload.get("mode").and_then(Value::as_str);
+    matches!(mode, Some("edit_image" | "character_image"))
+        && conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
+        && !mlx_conditioned_edit_has_unsupported_carrier(payload, true, false, true)
+        && !conditioned_true_cfg_is_malformed(payload)
 }
 
 /// FLUX.1 (`flux_schnell` / `flux_dev`) MLX-routing conditions. Text-to-image and
@@ -409,30 +421,72 @@ pub(crate) fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// reference the it2i path needs; plain T2I is always eligible. User LoRAs are not supported
 /// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
 pub(crate) fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
     let has_poses = payload
         .get("advanced")
         .and_then(Value::as_object)
         .and_then(|advanced| advanced.get("poses"))
         .and_then(Value::as_array)
         .is_some_and(|poses| !poses.is_empty());
-    if has_poses {
+    if has_poses
+        || mlx_conditioned_edit_has_unsupported_carrier(payload, false, true, false)
+        || conditioned_true_cfg_is_malformed(payload)
+    {
         // No skeleton/ControlNet conditioning — strict pose is not an MLX SenseNova path.
         return false;
     }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    match payload.get("mode").and_then(Value::as_str) {
-        Some("edit_image") => has_source || has_reference,
-        Some("character_image") => has_reference,
-        // Plain T2I (text_to_image / no mode) — eligible with or without an inert reference.
-        _ => true,
+    match mode {
+        Some("edit_image") => conditioned_reference_count(payload, true, 5).is_some(),
+        Some("character_image") => conditioned_reference_count(payload, false, 5).is_some(),
+        // Plain T2I (`image_generation` / `text_to_image` / no mode) is eligible only without
+        // reference carriers. A reference submitted in T2I mode is malformed, not permission to
+        // drop conditioning.
+        None | Some("image_generation" | "text_to_image") => {
+            !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+                && !has_nonempty_or_malformed_string(payload, "referenceAssetId")
+                && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        }
+        _ => false,
     }
+}
+
+fn conditioned_true_cfg_is_malformed(payload: &Map<String, Value>) -> bool {
+    ["trueCfgScale", "imageGuidanceScale"]
+        .iter()
+        .any(|key| has_malformed_optional_nested_number(payload, "advanced", key))
+}
+
+fn mlx_conditioned_edit_has_unsupported_carrier(
+    payload: &Map<String, Value>,
+    allow_loras: bool,
+    reject_strength: bool,
+    allow_poses: bool,
+) -> bool {
+    (!allow_loras && has_nonempty_or_malformed_array(payload, "loras"))
+        || ["controls", "controlnets"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        || has_nonempty_or_malformed_string(payload, "maskAssetId")
+        || (!allow_poses && has_nonempty_or_malformed_nested_array(payload, "advanced", "poses"))
+        || has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
+        || [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        || (reject_strength
+            && ["strength", "ipAdapterScale", "referenceStrength"]
+                .iter()
+                .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key)))
+        || (reject_strength
+            && ["strength", "referenceStrength"]
+                .iter()
+                .any(|key| payload.get(*key).is_some_and(|value| !value.is_null())))
 }
 
 /// Kolors (epic 3090) MLX-routing conditions. The engine `kolors` model (an SDXL-family U-Net under
@@ -538,7 +592,9 @@ pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
         // null), a single `referenceAssetId`, or a plain `sourceAssetId`. Checking only `sourceAssetId`
         // here stranded the two-ref form: the mlx worker refused it and, with no torch/candle Krea edit
         // lane on Mac, it sat on "Waiting for an available GPU worker" forever.
-        return is_krea_edit && edit_has_reference(payload);
+        return is_krea_edit
+            && conditioned_reference_count(payload, true, 2).is_some()
+            && !krea_edit_has_unsupported_carrier(payload);
     }
     true
 }
@@ -547,12 +603,6 @@ pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// [`edit_reference_ids`](../../../sceneworks-worker) resolves — a non-empty `referenceAssetIds`
 /// list, a `referenceAssetId`, or a `sourceAssetId`. Mirrors that worker helper so the router and
 /// the worker agree on what counts as a runnable edit.
-fn edit_has_reference(payload: &Map<String, Value>) -> bool {
-    has_nonempty_string_array(payload, "referenceAssetIds")
-        || has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "sourceAssetId")
-}
-
 /// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.
 /// The native `mlx-gen-sd3` engine serves the **text-to-image** surface only (Large + Medium run true
 /// CFG, Turbo is the CFG-free few-step distill); there is no source/reference/edit path, so an

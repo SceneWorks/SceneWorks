@@ -2108,6 +2108,25 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
             .contains("route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request))"),
         "the resolved candle route must supply the adapter label"
     );
+    let pose_reject = between(
+        run_job,
+        "CandleImageRoute::PoseReject => {",
+        "CandleImageRoute::PoseControlBaseMissing => {",
+    );
+    assert!(
+        pose_reject.contains("return Err(WorkerError::InvalidPayload"),
+        "PoseReject must terminate dispatch with a typed payload error"
+    );
+    let pose_reject_dispatch = run_job
+        .find("CandleImageRoute::PoseReject => {")
+        .expect("PoseReject dispatch arm");
+    let stub_fallback = run_job
+        .find("if !handled {\n        if request.hires_fix.enabled")
+        .expect("procedural-stub fallback");
+    assert!(
+        pose_reject_dispatch < stub_fallback,
+        "PoseReject dispatch must execute before the procedural-stub fallback"
+    );
 
     let base = include_str!("base.rs");
     let mlx_stream = between(
@@ -2726,6 +2745,13 @@ fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
             json!({ "projectId": "p", "mode": "character_image" })
         )),
         1.5
+    );
+    assert_eq!(
+        resolve_sensenova_img_cfg(&request(json!({
+            "projectId": "p", "mode": "character_image",
+            "advanced": { "trueCfgScale": 3.0, "imageGuidanceScale": 2.5 }
+        }))),
+        3.0
     );
     assert_eq!(
         resolve_sensenova_img_cfg(&request(json!({
@@ -7197,6 +7223,32 @@ fn flux2_edit_image_guidance_lever() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
+    let model = mlx_model("flux2_dev").unwrap();
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "character_image",
+                "advanced": { "trueCfgScale": 7.0, "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(7.0)
+    );
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "edit_image",
+                "advanced": { "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(2.0)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn build_edit_conditioning_single_vs_multi() {
     let img = |seed| gen_core::Image {
         width: 8,
@@ -7874,6 +7926,29 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&zimage_base_t2i, &settings).unwrap();
     assert_eq!(route, ImageRoute::Mlx);
     assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() {
+    let req = request(json!({
+        "projectId": "p", "model": "sensenova_u1_8b", "mode": "character_image",
+        "prompt": "portrait", "referenceAssetIds": ["first", "second"], "count": 1,
+        "seed": 123, "advanced": { "angleSet": true, "trueCfgScale": 1.5 }
+    }));
+    let work = candle_conditioned_edit_work(&req);
+    assert_eq!(work.len(), 11);
+    assert!(work.iter().all(|(seed, _)| *seed == work[0].0));
+    assert_eq!(work[0].0, 123);
+    assert_eq!(
+        CandleImageRoute::SenseNovaEdit.image_count(&req, &Settings::from_env()),
+        11
+    );
+    assert_eq!(
+        sensenova_edit_candle_reference_ids(&req),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+    assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
@@ -9304,15 +9379,169 @@ fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_cl
         "character_image",
         "style_variations",
     ] {
-        let dev_unsupported = request(json!({
+        let dev_conditioned = request(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
             "mode": mode, "referenceAssetId": "asset_1", "count": 1
         }));
         assert!(
-            !flux2_edit_candle_mode(&dev_unsupported),
-            "flux2_dev must remain edit_image-only; mode={mode}"
+            flux2_edit_candle_mode(&dev_conditioned),
+            "flux2_dev conditioned mode must reach the edit provider; mode={mode}"
         );
     }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_edit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let model_path = root.path().to_string_lossy().to_string();
+
+    let flux_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+        "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert!(flux2_control_candle_available(&flux_pose, &settings));
+    assert!(!flux2_edit_candle_available(&flux_pose, &settings));
+    assert_eq!(
+        resolve_candle_image_route(&flux_pose, &settings),
+        Some(CandleImageRoute::Flux2Control),
+        "the real Character Studio pose payload must keep its skeleton control"
+    );
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        let supported_control = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "pose the subject",
+            "mode": mode, "referenceAssetId": "identity", "count": 1,
+            "advanced": {
+                "modelPath": model_path.clone(),
+                "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+            }
+        }));
+        assert_eq!(
+            resolve_candle_image_route(&supported_control, &settings),
+            Some(CandleImageRoute::Flux2Control),
+            "FLUX.2 non-edit pose mode {mode} remains a control request"
+        );
+    }
+
+    let flux_edit_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "edit with pose",
+        "mode": "edit_image", "sourceAssetId": "source", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&flux_edit_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "valid pose + edit_image must reject explicitly, never return None to the stub"
+    );
+
+    for poses in [Value::Null, json!([])] {
+        let plain_character = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": poses }
+        }));
+        assert!(flux2_edit_candle_available(&plain_character, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&plain_character, &settings),
+            Some(CandleImageRoute::Flux2Edit)
+        );
+    }
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        let malformed_pose = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": malformed }
+        }));
+        assert!(!flux2_edit_candle_available(&malformed_pose, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&malformed_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "direct worker routing must reject a malformed carrier after typed parsing"
+        );
+    }
+
+    let qwen_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "prompt": "keep the person", "mode": "character_image",
+        "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path,
+            "poses": [
+                { "keypoints": [[0.5, 0.2, 1.0]] },
+                { "keypoints": [[0.2, 0.5, 1.0]] }
+            ]
+        }
+    }));
+    assert!(qwen_edit_candle_available(&qwen_pose, &settings));
+    let route = resolve_candle_image_route(&qwen_pose, &settings);
+    assert_eq!(route, Some(CandleImageRoute::QwenEdit));
+    assert_eq!(
+        route
+            .expect("Qwen pose route")
+            .image_count(&qwen_pose, &settings),
+        2,
+        "Qwen pose plans must reserve one streamed result per pose"
+    );
+
+    let malformed_qwen = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetId": "identity",
+        "advanced": { "poses": false }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&malformed_qwen, &settings),
+        Some(CandleImageRoute::PoseReject)
+    );
+
+    for (mode, references) in [
+        ("edit_image", json!({ "sourceAssetId": "source" })),
+        ("text_to_image", json!({})),
+        ("reference", json!({ "referenceAssetId": "identity" })),
+        (
+            "style_variations",
+            json!({ "referenceAssetId": "identity" }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": "qwen_image_edit_2511_lightning", "mode": mode,
+            "advanced": { "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }] }
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(references.as_object().expect("reference object").clone());
+        let unsupported_pose = request(payload);
+        assert_eq!(
+            resolve_candle_image_route(&unsupported_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "Qwen pose mode {mode} must reject explicitly, never return None to the stub"
+        );
+    }
+    let ambiguous_identity_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetIds": ["one", "two"],
+        "advanced": { "poses": [{}] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&ambiguous_identity_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "the exact Qwen pose recipe accepts one identity, not a silently truncated array"
+    );
 }
 
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
@@ -9906,11 +10135,18 @@ fn qwen_edit_engine_id_maps_variants() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn qwen_edit_reference_ids_prefers_reference_then_source() {
-    // referenceAssetId (character flow) wins over a source.
+fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
+    // Ordered plural references are the character/reference-array contract.
     assert_eq!(
         qwen_edit_reference_ids(&request(json!({
-            "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
+            "projectId": "p", "mode": "character_image",
+            "referenceAssetIds": ["ref_1", "ref_2"]
+        }))),
+        vec!["ref_1".to_owned(), "ref_2".to_owned()]
+    );
+    assert_eq!(
+        qwen_edit_reference_ids(&request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref_1"
         }))),
         vec!["ref_1".to_owned()]
     );
@@ -9963,6 +10199,17 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             &model
         ),
         6.0
+    );
+    assert_eq!(
+        resolve_qwen_edit_guidance(
+            &request(json!({
+                "projectId": "p", "mode": "character_image",
+                "advanced": { "imageGuidanceScale": 2.5 }
+            })),
+            &model
+        ),
+        2.5,
+        "legacy imageGuidanceScale remains a deliberate fallback"
     );
     // The character reference path clamps to [1, 10].
     assert_eq!(
@@ -16267,6 +16514,14 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "ZimageEdit",
         "MageEdit",
         "KreaEdit",
+        // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
+        // separately loaded conditioning network is overlaid. The route then uses the generic
+        // `generate_candle_stream` base-model admission gate.
+        "SenseNovaEdit",
+        // Kolors source edit lazily VAE-encodes the img2img init inside the registered base pipeline;
+        // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
+        // and reaches the generic `generate_candle_stream` base-model admission gate.
+        "KolorsEdit",
         // Krea sampling-regime lanes: the same base, a different schedule / phase list.
         "KreaTurboOnRaw",
         "KreaMultiPhase",

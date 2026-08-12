@@ -221,6 +221,24 @@ fn flux2_edit_image_guidance(request: &ImageRequest) -> Option<f32> {
     (scale > 1.0).then_some(scale)
 }
 
+/// Effective text guidance for FLUX.2 reference/edit paths. Character/Image Studio's variation
+/// slider emits `trueCfgScale`; `guidanceScale` remains the direct-request/legacy fallback.
+fn flux2_edit_text_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
+    if !model.supports_guidance() {
+        return None;
+    }
+    request
+        .advanced
+        .get("trueCfgScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .or_else(|| resolve_guidance(request, model))
+}
+
 /// Resolve the numeric tier the FLUX.2 edit provider will actually load. Standard tier resolution
 /// may fall through q4 → q8 → bf16 when the requested directory is absent, so the request-derived
 /// tier must be reconciled against the resolved directory before it enters either `LoadSpec` or the
@@ -463,7 +481,7 @@ async fn generate_flux2_edit_stream(
         backend,
     );
     let steps = resolve_steps(request, &model);
-    let guidance = resolve_guidance(request, &model);
+    let guidance = flux2_edit_text_guidance(request, &model);
     // Identity strength (sc-8278): map the UI `referenceStrength` slider onto the engine's
     // image-guidance CFG so a strong prompt doesn't drop the reference identity (sc-8234).
     let image_guidance = flux2_edit_image_guidance(request);

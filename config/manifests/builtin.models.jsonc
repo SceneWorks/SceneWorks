@@ -3274,16 +3274,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        // SenseNova-U1 is an 8B MoT autoregressive image model with no diffusion-LoRA merge path,
-        // so no user LoRAs apply. Declare the model's own family rather than [] (sc-6038): an empty
-        // list matches EVERY LoRA in the picker (loraMatchesModel returns true when the model has no
-        // families) while the worker drops them all (sensenova.rs loads Vec::new()) — a silent
-        // ignore. No LoRA declares `sensenova-u1`, so the picker correctly offers none. (An 8-step
-        // distill LoRA exists upstream but is not wired.)
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3332,12 +3322,13 @@
         "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image and instruction-based editing with strong prompt following, dense text, and infographics. In Character Studio, drives a *wardrobe-preserving* reference flow: SenseNova carries the tank, jacket, props, tattoos, and hair color from the reference into new scenes very faithfully, but face geometry can drift — best when outfit consistency matters more than face identity (for face-locked identity, pick InstantID or PuLID-FLUX). Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         // Edit-style backbone (no IP-Adapter / face-ID engine): the variation knob
-        // rides imageGuidanceScale. Higher = closer to the source/reference, lower
+        // rides trueCfgScale. Higher = closer to the source/reference, lower
         // = more prompt-driven variation. sc-2018 audit accepts this as the
         // character_image engine declaration. Default 1.5 for character_image
         // (the adapter raises the default vs the 1.0 edit baseline so the
         // reference subject pulls harder by default).
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b.md",
@@ -3424,10 +3415,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3469,7 +3456,8 @@
         "label": "SenseNova-U1 8B Infographic V2",
         "description": "Infographic-specialized variant of SenseNova-U1 (NEO-unify, ~16B), a coexisting checkpoint refresh of the base 8B model. Tuned for information-dense visual content — posters, presentations, comics, resumes, knowledge illustrations — with sharper dense small-text, more stable complex layouts, improved aesthetics, and a fix for the black-background issue. Same unified surface as the base: text-to-image, instruction editing, wardrobe-preserving Character Studio, VQA, and Document Studio (interleaved text+image). Heavy: ~35GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Infographic V2 Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b-infographic-v2.md",
@@ -3555,10 +3543,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3600,7 +3584,8 @@
         "label": "SenseNova-U1 8B Infographic V3",
         "description": "Infographic-specialized variant of SenseNova-U1 (NEO-unify, ~16B), the third-generation checkpoint. Tuned for information-dense visual content — posters, presentations, comics, resumes, knowledge illustrations — with the same dense small-text and stable-layout strengths as V2, plus notably stronger image editing (localized text/content edits and global style/layout changes). Same unified surface: text-to-image, instruction editing, wardrobe-preserving Character Studio, VQA, and Document Studio (interleaved text+image). Heavy: ~35GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Infographic V3 Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b-infographic-v3.md",
@@ -3690,14 +3675,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        // No user-LoRA path (MoT autoregressive; the distill LoRA is baked into this variant).
-        // Declare the model's own family rather than [] (sc-6038): an empty list matches every LoRA
-        // in the picker but the worker drops them — no LoRA declares `sensenova-u1`, so none are
-        // offered.
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3744,9 +3721,10 @@
         "label": "SenseNova-U1 8B Fast",
         "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image, editing, and Character Studio reference (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base SenseNova-U1 8B (carries outfit + accessories + tattoos across new scenes, face may drift — pick InstantID or PuLID-FLUX for face-locked identity). Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality reference work.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        // Edit-style variation knob (imageGuidanceScale); see SenseNova-U1 8B
+        // Edit-style variation knob (trueCfgScale); see SenseNova-U1 8B
         // for context. The fast variant defaults match the base variant.
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         // Multi-backbone angle set: same prompt-driven SenseNova turnaround path
         // as the base model, but practical for MPS batch use via the 8-step
         // distill LoRA.
@@ -3842,10 +3820,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3887,7 +3861,8 @@
         "label": "SenseNova-U1 8B Infographic V2 Fast",
         "description": "8-step distilled SenseNova-U1 Infographic V2 — ~5–6× faster infographic/poster text-to-image, editing, and Character Studio reference at a small quality trade-off. Same infographic strengths as the V2 base (dense small-text, stable layouts, black-background fix) at 8 steps / cfg 1.0. Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Use the V2 base for max-quality dense-text work.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "viewAngles": [
           { "id": "three_quarter_left", "label": "Three-quarter left" },
           { "id": "three_quarter_right", "label": "Three-quarter right" },
@@ -3982,10 +3957,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -4027,7 +3998,8 @@
         "label": "SenseNova-U1 8B Infographic V3 Fast",
         "description": "8-step distilled SenseNova-U1 Infographic V3 — ~5–6× faster infographic/poster text-to-image, editing, and Character Studio reference at a small quality trade-off. Same infographic strengths and stronger editing as the V3 base, at 8 steps / cfg 1.0. Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Use the V3 base for max-quality dense-text work.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "viewAngles": [
           { "id": "three_quarter_left", "label": "Three-quarter left" },
           { "id": "three_quarter_right", "label": "Three-quarter right" },

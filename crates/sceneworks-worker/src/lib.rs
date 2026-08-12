@@ -366,6 +366,8 @@ mod cuda_preflight_gpu_smoke;
 // packed q4 tier subdir of the `SceneWorks/qwen-image-edit-2511-mlx` turnkey (NOT the upstream snapshot
 // the pre-fix code reached) and that q4 packed-loads + renders a coherent edit on real CUDA.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod conditioned_image_gpu_smoke;
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_edit_candle_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
 // Test-only + candle-only; drives the bespoke `runtime_cuda::providers::instantid::InstantId` provider across

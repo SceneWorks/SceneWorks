@@ -198,7 +198,22 @@ export function loraHasResolvableFamily(lora) {
   return loraFamilies(lora).length > 0;
 }
 
+function isSensenovaU1Model(model) {
+  return (
+    normalizeLoraFamily(model?.family) === "sensenova-u1" ||
+    String(model?.id ?? "").trim().toLowerCase().startsWith("sensenova_u1_")
+  );
+}
+
 export function loraMatchesModel(lora, model) {
+  // SenseNova has no diffusion-LoRA merge path. Its six builtin manifests intentionally omit
+  // `loraCompatibility` (an absent advertisement is the only schema-valid representation), while
+  // the two pre-catalog fallback rows are identified by id. Fail closed before the generic
+  // no-family permissive branch so startup/catalog loading cannot surface an adapter the worker
+  // deliberately cannot consume.
+  if (isSensenovaU1Model(model)) {
+    return false;
+  }
   // The API WITHDREW this model's synthesized LoRA advertisement because no backend lane on this
   // deployment can honour it — an imported Krea 2 checkpoint on a candle host (the candle
   // single-file entrypoint takes no adapters, sc-14135), or a Mage-Flow fine-tune on any host.
