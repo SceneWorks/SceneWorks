@@ -327,13 +327,6 @@ pub(crate) struct CurveGeometry {
     pub frames: u32,
 }
 
-impl CurveGeometry {
-    /// The still-image geometry every pre-sc-18812 call site meant. One output frame.
-    pub(crate) fn still(pixels: u64) -> Self {
-        Self { pixels, frames: 1 }
-    }
-}
-
 /// Which phase carries the peak of a phase triple at one geometry (sc-18812).
 ///
 /// Typed because the binding phase FLIPS inside a single model's envelope — on measured q8 LTX,
@@ -2333,7 +2326,7 @@ mod tests {
             let per_mpx = curve["perMpxGb"].as_f64().expect("perMpxGb");
             for pixels in [512 * 512_u64, 768 * 768, 1024 * 1024, 1_000_001, 3] {
                 let expected = fixed + per_mpx * pixels as f64 / 1_000_000.0;
-                let actual = krea_phase_curve(curve, CurveGeometry::still(pixels))
+                let actual = krea_phase_curve(curve, CurveGeometry { pixels, frames: 1 })
                     .expect("a shipped curve evaluates");
                 assert_eq!(
                     actual.to_bits(),
@@ -2404,7 +2397,13 @@ mod tests {
             json!([1.0]),
         ] {
             assert_eq!(
-                krea_phase_curve(&with(bad.clone()), CurveGeometry::still(1_000_000)),
+                krea_phase_curve(
+                    &with(bad.clone()),
+                    CurveGeometry {
+                        pixels: 1_000_000,
+                        frames: 1
+                    }
+                ),
                 None,
                 "a curve carrying perMpxFrameGb {bad} must not evaluate"
             );
@@ -2412,7 +2411,13 @@ mod tests {
         // The control: the SAME curve shape with a readable coefficient does evaluate, so the
         // rejections above are attributable to the value and not to the key's presence.
         assert_eq!(
-            krea_phase_curve(&with(json!(0.25)), CurveGeometry::still(1_000_000)),
+            krea_phase_curve(
+                &with(json!(0.25)),
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 1
+                }
+            ),
             Some(1.0 + 2.0 + 0.25)
         );
     }
