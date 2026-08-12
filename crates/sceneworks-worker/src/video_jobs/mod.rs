@@ -21,7 +21,7 @@ use std::f32::consts::PI;
 use std::path::Path;
 
 use sceneworks_core::video_request::{
-    duration_limit_error, fps_limit_error, is_ltx_model, VideoRequest,
+    duration_limit_error, fps_limit_error, is_ltx_model, reference_limit_error, VideoRequest,
 };
 
 // Used only by the video generation metrics builders below, which are themselves
@@ -407,7 +407,76 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
     {
         return Err(WorkerError::InvalidPayload(message));
     }
+    // The model's declared reference-media caps (sc-17160). Bounds a THIRD axis the two above do
+    // not touch: how much conditioning media the engine is handed. The API gate is the one that
+    // returns a caller a 400, but it only covers what IT enqueues — a job replayed from a
+    // pre-sc-17160 row, or produced by any future non-HTTP path, reaches the engine through here.
+    //
+    // It matters most for the audio references, whose default cap is 0: an engine handed
+    // `Conditioning::ReferenceAudio` it does not consume renders unconditioned, and an
+    // unconditioned render is invisible in the output rather than an error (epic 1788). Refusing
+    // at the funnel is what keeps "this model takes no audio references" from degrading into
+    // "this model quietly ignored them".
+    if let Some(message) = reference_limit_error(
+        &request.model,
+        request.reference_asset_ids.len(),
+        request.source_clip_asset_ids.len(),
+        request.reference_audio_asset_ids.len(),
+        &request.model_manifest_entry,
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
     Ok(())
+}
+
+/// Resolve a video request's `referenceAudioAssetIds` (sc-17160) into the engine conditioning:
+/// one [`gen_core::Conditioning::ReferenceAudio`] per id, in submission order.
+///
+/// The audio sibling of [`bernini::resolve_bernini_conditioning`]'s reference-image handling, and
+/// deliberately built on the SAME two primitives the voice-clone reference uses
+/// ([`ltx::resolve_clip_media_path`] + [`crate::audio_jobs::read_wav_pcm16`]) rather than a second
+/// implementation of either.
+///
+/// **The path handling is the load-bearing part.** An asset id is not a filename: the id resolves
+/// through [`ProjectStore::get_asset`] to a PROJECT-RELATIVE `file.path` in the sidecar, which is
+/// then joined under the project root by `safe_project_path`. Reading the id as a bare name — or
+/// joining the sidecar path without the guard — is the sc-4278 / F-MLXW-14 escape, and the
+/// training-preview class of bug where a relative path was assumed absolute. Going through
+/// `resolve_clip_media_path` inherits both the lookup and the guard.
+///
+/// Ungated (compiled in every feature/target config) for the same reason
+/// `resolve_clip_media_path` is: the body depends only on cross-platform helpers, and the
+/// preflight caller below is itself cross-platform.
+pub(crate) fn resolve_reference_audio_conditioning(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<gen_core::Conditioning>> {
+    request
+        .reference_audio_asset_ids
+        .iter()
+        .map(|asset_id| {
+            let asset_id = asset_id.trim();
+            if asset_id.is_empty() {
+                return Err(WorkerError::InvalidPayload(
+                    "referenceAudioAssetIds must not contain blank ids".to_owned(),
+                ));
+            }
+            let path = ltx::resolve_clip_media_path(
+                settings,
+                &request.project_id,
+                asset_id,
+                project_path,
+            )?;
+            Ok(gen_core::Conditioning::ReferenceAudio {
+                audio: crate::audio_jobs::read_wav_pcm16(&path)?,
+                // No per-reference strength knob today: the request carries one flat list, and
+                // inventing a weight the caller cannot set would be a knob that silently does
+                // nothing. `None` is what the voice-clone reference passes for the same reason.
+                strength: None,
+            })
+        })
+        .collect()
 }
 
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
@@ -422,6 +491,20 @@ pub(crate) async fn run_video_generate_job(
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
+    // Prove the audio references resolve BEFORE the job is marked Running — the same posture as
+    // `resolve_voice_clone_plan`, which resolves its reference up front so a missing or
+    // undecodable clip fails in the first second rather than deep inside a render that has
+    // already cost minutes of GPU time. This runs the whole path: project-scoped asset lookup,
+    // the `safe_project_path` guard, the WAV decode, and the `Conditioning::ReferenceAudio`
+    // construction.
+    //
+    // The vector is discarded here because no engine consumes audio references YET — MiniMax-H3
+    // Ref2VA is the first and its generation arm is sc-17149, which calls this same function and
+    // keeps the value. Until then the resolution's product value is the early, honest refusal;
+    // for every already-shipped model the list is empty (their `limits.maxReferenceAudioAssets`
+    // defaults to 0, so `video_preflight` above has already refused a non-empty one) and this is
+    // a no-op that touches no disk.
+    resolve_reference_audio_conditioning(settings, &request, &project_path)?;
     let plan = VideoPlan::new(&request, &project_path);
     if let Some(parent) = plan.media_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1612,6 +1695,11 @@ fn video_asset_fact(
         "fitMode": request.fit_mode,
         "sourceClipAssetIds": request.source_clip_asset_ids,
         "referenceAssetIds": request.reference_asset_ids,
+        // sc-17160: the audio references join the list-valued ids for exactly the sc-12345 reason
+        // — they are a top-level payload field, so the `advanced.clone()` every `*_raw_settings`
+        // builder starts with does not carry them, and a replay that omits them re-runs a
+        // multi-modal reference job with its audio conditioning silently missing.
+        "referenceAudioAssetIds": request.reference_audio_asset_ids,
         "referenceClipAssetId": request.reference_clip_asset_id,
         "characterId": request.character_id,
         "characterLookId": request.character_look_id,

@@ -603,6 +603,19 @@ describe("VideoStudio Bernini task modes", () => {
     expect(payload.referenceAssetIds).toEqual([]);
   });
 
+  // sc-17160: the audio-reference list is on every video job body, present-but-empty when the
+  // user picked none, so a replay reader never has to tell "absent" from "empty" and the picker
+  // (sc-17161) has a field to fill rather than a payload shape to invent.
+  it("carries the audio-reference list on the submitted payload", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip], selectedAsset: clip });
+    await render(context);
+    await click(modeButton("Video → Video"));
+    await click(buttonWithText(container, "Render clip"));
+
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.referenceAudioAssetIds).toEqual([]);
+  });
+
   it("submits all chosen reference images for reference_to_video", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [refA, refB] });
     await render(context);

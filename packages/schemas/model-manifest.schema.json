@@ -683,6 +683,34 @@
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/VideoStudio.jsx", "anchor": "selectedModel.limits.recommendedMaxDuration" }],
                 "description": "Non-blocking UI recommendation; intentionally not enforced."
               },
+              "maxReferenceAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum still-image references (`referenceAssetIds`) this model conditions on; API and worker reject an over-cap request rather than dropping the extras. ABSENT MEANS 8, the ceiling every video family shipped before sc-17160 enforced, so an undeclared model is byte-for-byte unchanged. Declared only by a family whose real cap differs (MiniMax-H3 Ref2VA takes 9) — no builtin model needs it yet; sc-17158 is the first."
+              },
+              "maxSourceClipAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum source/reference video clips (`sourceClipAssetIds`) this model conditions on. ABSENT MEANS 8, the pre-sc-17160 ceiling. Declared by a family whose real cap differs (MiniMax-H3 Ref2VA takes 3) — no builtin model needs it yet; sc-17158 is the first."
+              },
+              "maxReferenceAudioAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum AUDIO references (`referenceAudioAssetIds`, sc-17160) this model conditions on. ABSENT MEANS 0 — unlike the two caps above, the default is a refusal, because the payload field is newer than every shipped video family and an engine handed conditioning it cannot consume renders unconditioned, which is invisible in the output. A model must declare that it takes audio references before one can reach it. No builtin model needs it yet; sc-17158 is the first."
+              },
+              "maxCombinedReferenceAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum reference FILES in total across `referenceAssetIds` + `sourceClipAssetIds` + `referenceAudioAssetIds` (sc-17160). NOT derivable from the three per-list caps — MiniMax-H3 Ref2VA takes 9 + 3 + 3 per list but only 12 files together — which is why it is its own key: it is the only cap that can refuse a request in which every individual list fits. ABSENT MEANS NO COMBINED CEILING, so an undeclared model is unchanged. No builtin model needs it yet; sc-17158 is the first."
+              },
               "samplers": {
                 "type": "array",
                 "minItems": 1,

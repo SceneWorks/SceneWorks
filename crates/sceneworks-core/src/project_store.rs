@@ -4787,7 +4787,14 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
     // The list-valued source ids are parents too — mv2v's clips, the reference-driven modes'
     // subject images, and ads2v's reference video. Without them those modes' provenance names
     // only a subset of what the clip was actually derived from (sc-12345).
-    let list_source_keys = ["sourceClipAssetIds", "referenceAssetIds"];
+    // sc-17160 adds the audio references: media the clip was genuinely derived from, so leaving
+    // them out would name only a subset of its provenance — the same gap sc-12345 closed for the
+    // clip and image lists.
+    let list_source_keys = [
+        "sourceClipAssetIds",
+        "referenceAssetIds",
+        "referenceAudioAssetIds",
+    ];
     let parents: Vec<Value> = source_keys
         .iter()
         .chain(std::iter::once(&"referenceClipAssetId"))
@@ -4845,6 +4852,9 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "fitMode": get("fitMode"),
         "sourceClipAssetIds": list_or_empty("sourceClipAssetIds"),
         "referenceAssetIds": list_or_empty("referenceAssetIds"),
+        // sc-17160. `list_or_empty` keeps the array shape on facts written before this key
+        // existed, so the replay reader never distinguishes "absent" from "empty".
+        "referenceAudioAssetIds": list_or_empty("referenceAudioAssetIds"),
         "referenceClipAssetId": get("referenceClipAssetId"),
         "characterId": get("characterId"),
         "characterLookId": get("characterLookId"),
@@ -9201,8 +9211,31 @@ mod tests {
         let old_normalized = &old["recipe"]["normalizedSettings"];
         assert_eq!(old_normalized["referenceAssetIds"], json!([]));
         assert_eq!(old_normalized["sourceClipAssetIds"], json!([]));
+        assert_eq!(old_normalized["referenceAudioAssetIds"], json!([]));
         assert_eq!(old_normalized["fitMode"], Value::Null);
         assert_eq!(old["lineage"]["parents"], json!([]));
+
+        // sc-17160: the audio references replay and count as parents for the same reason the
+        // image and clip lists do — a re-run that omits them renders the same prompt with its
+        // audio conditioning silently gone, which is invisible in the output.
+        let ref2va = json!({
+            "type": "video",
+            "assetId": "asset-ref2va",
+            "mediaPath": "assets/videos/ref2va.mp4",
+            "mimeType": "video/mp4",
+            "mode": "reference_to_video", "model": "minimax_h3",
+            "referenceAssetIds": ["ref-1"],
+            "referenceAudioAssetIds": ["voice-1", "music-1"],
+        });
+        let multimodal = build_generated_asset_sidecar("project-1", "job-4", "genset-1", &ref2va);
+        assert_eq!(
+            multimodal["recipe"]["normalizedSettings"]["referenceAudioAssetIds"],
+            json!(["voice-1", "music-1"])
+        );
+        assert_eq!(
+            multimodal["lineage"]["parents"],
+            json!(["ref-1", "voice-1", "music-1"])
+        );
     }
 
     #[test]

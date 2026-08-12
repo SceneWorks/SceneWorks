@@ -3643,6 +3643,203 @@ async fn image_and_video_job_routes_normalize_payloads() {
     assert_eq!(queue["counts"]["queued"], 5);
 }
 
+/// THE regression test the cap change required: a video model that declares none of the four new
+/// `limits` keys keeps the exact reference budget it had before sc-17160.
+///
+/// The shape that matters is 8 images + 8 clips — SIXTEEN reference files on one request, which
+/// this route accepts today because the pre-story caps were per-list only. Introducing the combined
+/// cap as a payload-sanity BLANKET of 12 (the reading the story's wording invites) would have
+/// refused it, silently narrowing every already-shipped video model. That is why the combined cap
+/// is per-model declaration only, and why this test asserts an ACCEPT rather than a reject: the
+/// rejecting tests would all still pass with the regression in place.
+#[tokio::test]
+async fn existing_video_models_keep_their_pre_sc_17160_reference_budget() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Budget" }),
+    )
+    .await;
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "ads2v",
+            "prompt": "drive the edit",
+            "sourceClipAssetId": "clip-src",
+            "referenceClipAssetId": "clip-ref",
+            "referenceAssetIds": ["i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8"],
+            "sourceClipAssetIds": ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "16 reference files was legal before this story and must stay legal: {job}"
+    );
+    assert_eq!(
+        job["payload"]["referenceAssetIds"].as_array().map(Vec::len),
+        Some(8)
+    );
+    assert_eq!(
+        job["payload"]["sourceClipAssetIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+}
+
+/// The story's acceptance pair at the ROUTE, against a model that declares the Ref2VA reference
+/// surface: 9 images + 3 clips + 3 audio is 15 reference files and must be refused; 9 + 2 + 1 is
+/// 12 and must be accepted, with all three lists on the enqueued payload.
+///
+/// Driven off a SEEDED manifest rather than a shipped model on purpose. The caps are per-model
+/// (`limits.maxReferenceAssets` / `maxSourceClipAssets` / `maxReferenceAudioAssets` /
+/// `maxCombinedReferenceAssets`), so the only honest way to exercise the accepting side today is a
+/// model that declares them — MiniMax-H3's own manifest entry is sc-17158. That separation is the
+/// point of the design: this test needs no engine and no weights to pin the contract.
+///
+/// The combined budget has NO payload-sanity blanket, only this per-model declaration — see the
+/// note in `validate_video_job`. 12 is MiniMax-H3's number and today's per-list caps already admit
+/// a 16-file request (8 images + 8 clips), so a blanket 12 would have narrowed every existing
+/// video model. `existing_video_models_keep_their_pre_sc_17160_reference_budget` holds that line.
+#[tokio::test]
+async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "ref2va_probe",
+              "name": "Ref2VA Probe",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "stub",
+              "capabilities": ["text_to_video", "reference_to_video"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {
+                "maxReferenceAssets": 9,
+                "maxSourceClipAssets": 3,
+                "maxReferenceAudioAssets": 3,
+                "maxCombinedReferenceAssets": 12
+              },
+              "ui": {}
+            },
+            {
+              "id": "legacy_probe",
+              "name": "Legacy Probe",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "stub",
+              "capabilities": ["text_to_video", "reference_to_video"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": {}
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Ref2VA" }),
+    )
+    .await;
+
+    let submit = |model: &str, images: usize, clips: usize, audio: usize| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": "project-1",
+            "model": model,
+            "mode": "reference_to_video",
+            "prompt": "the subject speaks",
+            "referenceAssetIds": (0..images).map(|i| format!("img-{i}")).collect::<Vec<_>>(),
+            "sourceClipAssetIds": (0..clips).map(|i| format!("clip-{i}")).collect::<Vec<_>>(),
+            "referenceAudioAssetIds": (0..audio).map(|i| format!("aud-{i}")).collect::<Vec<_>>(),
+        });
+        async move { request(app, "POST", "/api/v1/video/jobs", body).await }
+    };
+
+    // 9 + 3 + 3 = 15 > 12. REFUSED, and the message decomposes the total so the caller knows how
+    // much to cut without counting three lists themselves. Nothing but the combined budget can
+    // decide this one: 9 <= 9, 3 <= 3 and 3 <= 3 all pass their own caps.
+    let (status, over) = submit("ref2va_probe", 9, 3, 3).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        over["detail"],
+        "ref2va_probe takes up to 12 reference files in total, but this request supplies 15 \
+         (9 reference images + 3 source clips + 3 audio references). Remove 3 of them."
+    );
+
+    // 9 + 2 + 1 = 12. ACCEPTED, at the cap, and every list reaches the enqueued payload.
+    let (status, job) = submit("ref2va_probe", 9, 2, 1).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "video_generate");
+    assert_eq!(
+        job["payload"]["referenceAssetIds"].as_array().map(Vec::len),
+        Some(9)
+    );
+    assert_eq!(
+        job["payload"]["sourceClipAssetIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        job["payload"]["referenceAudioAssetIds"],
+        json!(["aud-0"]),
+        "the audio references must reach the worker verbatim, not just validate"
+    );
+
+    // A shape that clears the blanket but not what THIS model declares: 4 clips against its
+    // declared 3, only 8 files in total. Refused by the per-model gate, naming the model.
+    let (status, per_model) = submit("ref2va_probe", 4, 4, 0).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        per_model["detail"],
+        "ref2va_probe takes up to 3 source clips, but this request supplies 4. Reduce \
+         sourceClipAssetIds to 3 or fewer, or choose a model that takes more."
+    );
+
+    // The SAME 9 + 2 + 1 request against a model that declares nothing is refused — twice over,
+    // and the image cap is what it trips first. This is the per-family shape doing its job: the
+    // declaration travels with the model, not with the API constant.
+    let (status, legacy) = submit("legacy_probe", 9, 2, 1).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        legacy["detail"],
+        "legacy_probe takes up to 8 reference images, but this request supplies 9. Reduce \
+         referenceAssetIds to 8 or fewer, or choose a model that takes more."
+    );
+}
+
 #[tokio::test]
 async fn bernini_video_modes_validate_required_media() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -3718,7 +3915,14 @@ async fn bernini_video_modes_validate_required_media() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Reference id lists are bounded before the worker has to encode them.
-    let (status, _) = request(
+    //
+    // THE REGRESSION ASSERTION FOR sc-17160. This 9-reference request 400'd before that story and
+    // must keep 400ing after it, even though the API's payload-sanity blanket was raised from 8 to
+    // 9 for MiniMax-H3 — bernini declares no `limits.maxReferenceAssets`, so the per-model gate in
+    // `create_video_job` holds it at the historical 8. The status alone would pass for the wrong
+    // reason (any 400 satisfies it), so the message is asserted too: it has to be bernini's own cap
+    // talking, not the blanket.
+    let (status, over_cap) = request(
         app.clone(),
         "POST",
         "/api/v1/video/jobs",
@@ -3732,6 +3936,82 @@ async fn bernini_video_modes_validate_required_media() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        over_cap["detail"],
+        "bernini takes up to 8 reference images, but this request supplies 9. Reduce \
+         referenceAssetIds to 8 or fewer, or choose a model that takes more."
+    );
+
+    // 8 is still admitted — the cap moved for nobody, in either direction.
+    let (status, at_cap) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["ref-1", "ref-2", "ref-3", "ref-4", "ref-5", "ref-6", "ref-7", "ref-8"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        at_cap["payload"]["referenceAssetIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+    // And the new list is present-but-empty on a model that has nothing to do with it, so a replay
+    // reader never has to tell "absent" from "empty" (sc-12345).
+    assert_eq!(at_cap["payload"]["referenceAudioAssetIds"], json!([]));
+
+    // The new audio list is INERT for every already-shipped video model: bernini declares no
+    // `limits.maxReferenceAudioAssets`, which defaults to 0, so a single audio reference is
+    // refused rather than accepted-and-silently-dropped by an engine that cannot consume it.
+    let (status, audio_refused) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["ref-1"],
+            "referenceAudioAssetIds": ["voice-1"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        audio_refused["detail"],
+        "bernini takes no audio references, but this request supplies 1. Remove \
+         referenceAudioAssetIds, or choose a model that conditions on audio references."
+    );
+
+    // Blank audio ids are rejected exactly as blank image and clip ids are, and by the blanket —
+    // so the refusal does not depend on the model declaring anything.
+    let (status, blank_audio) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["ref-1"],
+            "referenceAudioAssetIds": ["  "]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        blank_audio["detail"],
+        "referenceAudioAssetIds must not contain blank ids"
+    );
 
     // A complete video_to_video request creates a base video_generate job that
     // carries the source clip.

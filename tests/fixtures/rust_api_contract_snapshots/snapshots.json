@@ -2672,6 +2672,7 @@
       "prompt": "hero walks through rain",
       "quality": "balanced",
       "referenceAssetIds": [],
+      "referenceAudioAssetIds": [],
       "referenceClipAssetId": null,
       "replacementMode": "face_only",
       "seed": null,

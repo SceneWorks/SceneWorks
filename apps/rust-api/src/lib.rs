@@ -62,7 +62,8 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    default_resolution, duration_limit_error, fps_limit_error, resolve_duration, resolve_fps,
+    default_resolution, duration_limit_error, fps_limit_error, reference_limit_error,
+    resolve_duration, resolve_fps,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -4158,6 +4159,29 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             "sourceClipAssetIds must contain at most {MAX_VIDEO_SOURCE_CLIP_ASSET_IDS} ids"
         )));
     }
+    // The audio references (sc-17160), rejected blank-first and bounded exactly like the two
+    // id lists above — same order, same wording — because "consistent with the existing lists"
+    // is the contract a caller reads off one list and applies to the next.
+    if payload
+        .reference_audio_asset_ids
+        .iter()
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "referenceAudioAssetIds must not contain blank ids",
+        ));
+    }
+    if payload.reference_audio_asset_ids.len() > MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "referenceAudioAssetIds must contain at most {MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS} ids"
+        )));
+    }
+    // There is deliberately NO combined blanket here, only the three per-list ones above. 12 is
+    // MiniMax-H3's number, not a product-wide truth: today's caps admit 8 images AND 8 clips on
+    // one request, so a blanket 12 would refuse a 16-file shape this route accepts right now —
+    // narrowing every existing video model, which is precisely what the cap change must not do.
+    // The combined budget is a per-model fact and lives with the model, as
+    // `limits.maxCombinedReferenceAssets` (see `create_video_job`).
     // Only a *named* duration is bounded here, for the same reason as fps below: an omitted one is
     // resolved from the model's declared `defaults.duration` in `create_video_job`. This blanket
     // stays a payload-sanity check; the model's own `limits.hardMaxDuration` is enforced there
@@ -4494,8 +4518,32 @@ const MAX_IMAGE_DIMENSION: u32 = 4096;
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.
 const MAX_VIDEO_DIMENSION: u32 = 1920;
-const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 8;
+// ---------------------------------------------------------------------------
+// Reference-media payload-sanity blankets (sc-17160).
+//
+// These three are the OUTER bound — "no video model in the product accepts more than
+// this" — and play exactly the role the `1..=30` duration and `1..=60` fps blankets do
+// a few lines up in `validate_video_job`: they run BEFORE the model is known (a recipe
+// preset can still replace it — sc-12300), so they cannot be the per-model answer.
+//
+// The BINDING per-model cap is `sceneworks_core::video_request::reference_limit_error`,
+// enforced in `create_video_job` against the resolved manifest entry, and mirrored in the
+// worker's `video_preflight`. Its defaults are 8 images / 8 clips / 0 audio / no combined
+// ceiling, so raising the image blanket from 8 to 9 here does NOT hand a 9th reference to
+// any already-shipped model — bernini and every other family still refuse it, one layer
+// down, on `limits.maxReferenceAssets`.
+//
+// The COMBINED cap has no blanket at all, only a per-model declaration, for the same reason
+// in the opposite direction: see the note where the per-list checks end.
+// ---------------------------------------------------------------------------
+
+/// 9 — MiniMax-H3 Ref2VA's image-reference ceiling, the largest of any shipped video model
+/// (every other family stops at [`sceneworks_core::video_request::DEFAULT_MAX_REFERENCE_ASSETS`]).
+const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 9;
 const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
+/// 3 — Ref2VA's audio-reference ceiling. No model declares more; models that declare
+/// nothing take none at all (`DEFAULT_MAX_REFERENCE_AUDIO_ASSETS` is 0).
+const MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS: usize = 3;
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {
