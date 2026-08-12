@@ -104,6 +104,20 @@
       ]
     },
     {
+      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt@1456334c3d69924de5083e553733b108ed1147f2",
+      "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+      "revision": "1456334c3d69924de5083e553733b108ed1147f2",
+      "resolvedSha": "1456334c3d69924de5083e553733b108ed1147f2",
+      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+      "gated": "auto",
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors"
+      ]
+    },
+    {
       "key": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR@main",
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
       "revision": null,
@@ -115,20 +129,6 @@
         "README.md",
         "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
         "ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"
-      ]
-    },
-    {
-      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub@main",
-      "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
-      "revision": null,
-      "resolvedSha": "1456334c3d69924de5083e553733b108ed1147f2",
-      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
-      "gated": "auto",
-      "files": [
-        ".gitattributes",
-        "LICENSE",
-        "README.md",
-        "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors"
       ]
     },
     {

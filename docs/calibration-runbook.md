@@ -341,11 +341,16 @@ Two things follow, and both are now enforced rather than remembered:
     the last record reds this way harmlessly, and so does a hand edit.
 
   🔴 **In this mode the exit code carries that verdict and nothing else** (sc-18854 review). The
-  live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner,
-  and today's tree prints a tracked `ZERO-MATCH PATTERNS (1)` for LipDub on every clean run — but
-  they deliberately do not move the exit status, because an anti-tamper mode that reds
-  unconditionally signals nothing. Grade those lists with
-  `npm run check:download-patterns:offline`; that is the gate CI runs.
+  live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner —
+  today's tree prints `ACCESS-GATED (2)` and `SERVED BY A DIFFERENT REPO (1)` on every clean run,
+  and since sc-18917 no `ZERO-MATCH PATTERNS` line at all — but they deliberately do not move the
+  exit status, because an anti-tamper mode that reds unconditionally signals nothing. Grade those
+  lists with `npm run check:download-patterns:offline`; that is the gate CI runs.
+
+  Do **not** read the absent zero-match line as the two modes having converged. They answer
+  different questions, and `scripts/check-download-patterns.test.mjs` no longer relies on a live
+  catalog defect to prove it: the collision case now injects a bogus declared pattern into a
+  throwaway copy of the catalog, which moves a live verdict without moving the artifact.
 
   `--dry-run` is rejected outright when it is not paired with `--write`, including in combination
   with `--check` or `--self-test` (both of which ignore it — they never touch the network or the
@@ -358,12 +363,12 @@ Two things follow, and both are now enforced rather than remembered:
   Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
   `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to
   run. The recorder never evaluates a pattern — it only transcribes — so you cannot record your way
-  out of a real zero-match. 83 of the 96 keys are pinned to immutable 40-hex revisions, whose
-  listings cannot go stale. **The other 13 are unrevisioned and that immutability argument does not
+  out of a real zero-match. 84 of the 96 keys are pinned to immutable 40-hex revisions, whose
+  listings cannot go stale. **The other 12 are unrevisioned and that immutability argument does not
   cover them** — they read a moving default branch, and while each records the `resolvedSha` it
   actually read so drift is visible in a re-record diff, nothing forces a re-record. **sc-18924
-  tracks pinning all 13**, which is what closes that window; sc-18917 and sc-18923 each pin one as a
-  side effect of their own fixes.
+  tracks pinning the rest**, which is what closes that window; sc-18917 already pinned one as a side
+  effect of its own fix (it was 13 before) and sc-18923 owns another.
 
   Each recorded key also carries `gated` and `servedRepo`, and the gate hard-fails on both
   (`evidence-gated`, `evidence-repo-id-mismatch`) with tracked waivers in `KNOWN_REPO_CONDITIONS`.

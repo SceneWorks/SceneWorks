@@ -46,17 +46,17 @@
 // The usual objection to a recorded fixture is decay. It does not apply here, for two
 // structural reasons:
 //
-//  1. **83 of 96 keys are pinned to an immutable 40-hex revision.** A git SHA's file listing
+//  1. **84 of 96 keys are pinned to an immutable 40-hex revision.** A git SHA's file listing
 //     is timeless — re-reading it in a year returns the same bytes. There is nothing to
 //     decay.
 //
-//     The other **13 keys are unrevisioned** and this argument does NOT cover them. They read a
+//     The other **12 keys are unrevisioned** and this argument does NOT cover them. They read a
 //     moving default branch, and while each records the `resolvedSha` it actually read — so drift
 //     is VISIBLE in a re-record diff — nothing forces anyone to re-record. That is a real
-//     stale-green window, and it is 13 keys wide, not one. **sc-18924 tracks pinning all 13**,
-//     which is what converts them onto the immutability argument above. sc-18917 pins exactly one
-//     of them (the LipDub/DubIt rename) as a side effect of fixing that entry, and sc-18923 owns
-//     another; the remaining eleven have no other owner and are sc-18924's alone.
+//     stale-green window, and it is 12 keys wide, not one. **sc-18924 tracks pinning all of them**,
+//     which is what converts them onto the immutability argument above. sc-18917 already pinned one
+//     (the LipDub/DubIt rename, as a side effect of fixing that entry — it was 13 before) and
+//     sc-18923 owns another; the remaining eleven have no other owner and are sc-18924's alone.
 //  2. **Coverage is graded as a set, in both directions.** Adding an entry, or re-pinning
 //     one, changes its `repo@revision` key, and a key with no recorded listing is a hard
 //     failure naming the re-record command. Conversely a recorded key that nothing claims
@@ -97,8 +97,9 @@
 // The cost of that false claim was a live catalog entry grading green while being unfetchable.
 // Measured across all 96 recorded keys, TWO are gated:
 //
-//   Lightricks/LTX-2.3-22b-IC-LoRA-HDR@main      gated:"auto"   (sc-18923)
-//   Lightricks/LTX-2.3-22b-IC-LoRA-LipDub@main   gated:"auto"   (sc-18917)
+//   Lightricks/LTX-2.3-22b-IC-LoRA-HDR@main       gated:"auto"   (sc-18923)
+//   Lightricks/LTX-2.3-22b-IC-LoRA-DubIt@1456334c gated:"auto"   (sc-18923; was LipDub@main until
+//                                                                 sc-18917 repointed and pinned it)
 //
 // For HDR: `HEAD .../resolve/main/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors` returns **401**
 // unauthenticated, and this gate graded it green. `gated:"auto"` means terms are auto-approved ON
@@ -114,17 +115,20 @@
 //
 // The same body also carries `id` — the repo HF ACTUALLY served. `fetch` follows the 307 a renamed
 // repo issues, so an entry naming a dead repo resolves silently; `evidence-repo-id-mismatch`
-// catches that. Both live instances are waived and tracked (sc-18917, sc-18926).
+// catches that. ONE live instance remains, waived and tracked (sc-18926); the other — LipDub ->
+// DubIt — was fixed at the source by sc-18917 rather than waived onward.
 //
 // What a green run still does NOT prove: that the token's account has accepted the licence, or
 // that the bytes download. Those need a real authenticated fetch. The ceiling is real — it is just
 // one rung higher than this header used to claim.
 //
-// The LIVE modes deliberately ignore `KNOWN_ZERO_MATCHES` and report the raw truth, so
-// `--write` currently exits 1 on the tracked lipdub gap (sc-18917). Policy lives in the
-// gate; the pre-flight is for a human who wants the unfiltered picture. Do not "fix" that
-// exit code by teaching the recorder about waivers — a recorder that knows which failures
-// are acceptable is one step from a recorder that records them as passing.
+// The LIVE modes deliberately ignore `KNOWN_ZERO_MATCHES` and report the raw truth, so `--write`
+// exits 1 on any tracked zero-match gap. There is none today — sc-18917 fixed the last one — so
+// `--write` currently exits 0, but do NOT read that as the modes agreeing: the gated and redirect
+// lists still print above and are still waived in `--check`. Policy lives in the gate; the
+// pre-flight is for a human who wants the unfiltered picture. Do not "fix" that exit code by
+// teaching the recorder about waivers — a recorder that knows which failures are acceptable is one
+// step from a recorder that records them as passing.
 
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -157,21 +161,13 @@ const STORY_REF_PATTERN = /^sc-\d+$/;
 // changed, which is the same "required context reds for a reason unrelated to this PR"
 // failure mode this design exists to avoid. Structural expiry fires exactly when the
 // underlying fact changes, which is the only moment the entry is actually wrong.
-export const KNOWN_ZERO_MATCHES = [
-  {
-    label: "lora:ltx_2_3_ic_lipdub",
-    repo: "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
-    revision: null,
-    pattern: "ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors",
-    story: "sc-18917",
-    reason:
-      "Upstream renamed the repo LipDub -> DubIt and the weight file with it; the old path " +
-      "still resolves through HF's rename redirect, so the listing returns 200 but holds " +
-      "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors instead. The DubIt repo is also access-gated, " +
-      "so correcting the filename alone may not make it fetchable. Fixing the manifest entry " +
-      "is sc-18917; it must delete this waiver in the same change.",
-  },
-];
+// EMPTY, and that is a verdict rather than an oversight: the catalog currently declares no
+// pattern that matches zero files. The list's only entry was the LipDub/DubIt rename, deleted by
+// sc-18917 when it repointed the manifest entry — the gate forced it, reporting
+// `waiver-stale-unclaimed` the moment the waived tuple stopped being claimed. Keep the list (and
+// this comment) rather than deleting the mechanism: the next real zero-match needs somewhere with
+// an owner to go, and an empty list is the honest statement that today there is none.
+export const KNOWN_ZERO_MATCHES = [];
 
 // Known, TRACKED repo-level defects: the repo is access-gated, or HF served a DIFFERENT repo than
 // the manifest names. Same discipline as `KNOWN_ZERO_MATCHES` — a reason, an `sc-NNNN` owner, and
@@ -215,24 +211,19 @@ export const KNOWN_REPO_CONDITIONS = [
   },
   {
     kind: "evidence-gated",
-    repo: "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
-    revision: null,
-    story: "sc-18917",
+    repo: "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+    revision: "1456334c3d69924de5083e553733b108ed1147f2",
+    story: "sc-18923",
     reason:
-      "Same posture as HDR (gated:\"auto\", 401 on the weight file), reached through the LipDub -> " +
-      "DubIt rename redirect. sc-18917 owns the rename fix and inherits the gating question with " +
-      "it; note its activity-18919 argued gating was a non-issue BECAUSE HDR already ships this " +
-      "way, which was circular — HDR is broken too, and is now sc-18923.",
-  },
-  {
-    kind: "evidence-repo-id-mismatch",
-    repo: "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
-    revision: null,
-    story: "sc-18917",
-    reason:
-      "Upstream renamed the repo LipDub -> DubIt. The declared name still resolves through HF's " +
-      "307 rename redirect, so the listing is served by Lightricks/LTX-2.3-22b-IC-LoRA-DubIt. " +
-      "sc-18917 repoints the manifest entry and deletes this waiver with it.",
+      "Re-keyed by sc-18917 from Lightricks/LTX-2.3-22b-IC-LoRA-LipDub@main when that entry was " +
+      "repointed onto the renamed repo and pinned; the gate forced it, reporting " +
+      "repo-waiver-stale-unclaimed on the old key. The rename is fixed and the GATING is not: " +
+      "the pinned revision answers 200 with gated:\"auto\" while HEAD on " +
+      "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors returns 401 unauthenticated — the identical " +
+      "posture as the HDR sibling above. It is deliberately owned by sc-18923 rather than by " +
+      "sc-18917: sc-18917 fixed a rename and is done, so naming it here would leave a waiver whose " +
+      "owner is closed. sc-18923 owns the gated-IC-LoRA class (surface licence acceptance, re-host, " +
+      "or withdraw) and must delete BOTH its waivers — HDR's and this one — in the same change.",
   },
   {
     kind: "evidence-repo-id-mismatch",

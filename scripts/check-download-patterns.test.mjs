@@ -7,7 +7,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
@@ -222,35 +223,77 @@ test("evidence-gated: the real HDR entry reds without its waiver and is tracked 
 });
 
 // The repo-id guard's reason for existing: it catches what the sha check structurally cannot.
-test("evidence-repo-id-mismatch catches both live redirects, including the one the sha check cannot", async () => {
+//
+// This used to loop over TWO live redirects. sc-18917 fixed one of them at the source (the manifest
+// entry that named the dead `…IC-LoRA-LipDub` repo now names `…IC-LoRA-DubIt` directly), so only
+// the mmaudio DFN5B entry is still redirected. That deletion costs a shape the loop used to cover
+// — an UNREVISIONED redirected key, where `claim.revision &&` makes the sha guard inert outright
+// rather than merely satisfied — so the second half of this test rebuilds that shape from the same
+// real listing instead of letting the coverage quietly lapse with the fix.
+test("evidence-repo-id-mismatch catches the live redirect, in both the pinned and unrevisioned shapes", async () => {
   const { claims, evidence } = await realInputs();
 
-  for (const [repo, servedBy] of [
-    ["apple/DFN5B-CLIP-ViT-H-14-384", "apple/DFN5B-CLIP-ViT-H-14-378"],
-    ["Lightricks/LTX-2.3-22b-IC-LoRA-LipDub", "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt"],
-  ]) {
-    const claim = claims.find((row) => row.repo === repo);
-    assert.ok(claim, `a manifest entry must still declare ${repo}`);
-    const entry = evidence.repos.find((row) => row.key === claimKey(claim.repo, claim.revision));
-    assert.ok(entry, `${repo} must have a recorded listing`);
-    assert.equal(entry.servedRepo, servedBy, `${repo} must genuinely still be served by ${servedBy}`);
+  const repo = "apple/DFN5B-CLIP-ViT-H-14-384";
+  const servedBy = "apple/DFN5B-CLIP-ViT-H-14-378";
+  const claim = claims.find((row) => row.repo === repo);
+  assert.ok(claim, `a manifest entry must still declare ${repo}`);
+  assert.ok(claim.revision, `${repo} must still be the PINNED shape for the first half to bind`);
+  const entry = evidence.repos.find((row) => row.key === claimKey(claim.repo, claim.revision));
+  assert.ok(entry, `${repo} must have a recorded listing`);
+  assert.equal(entry.servedRepo, servedBy, `${repo} must genuinely still be served by ${servedBy}`);
 
-    // The sha check passes on BOTH — which is the point. An HF rename redirect preserves the sha,
-    // and for the unrevisioned LipDub key `claim.revision &&` makes that guard inert outright.
-    // Without the repo-id guard these two are invisible.
-    const problems = gradeRecordedEvidence({
-      claims: [claim],
-      evidence: { repos: [entry] },
+  // Shape 1 — PINNED. The sha check passes, because an HF rename redirect preserves the sha. So
+  // the redirect is invisible without the repo-id guard even when the entry IS pinned.
+  const pinned = gradeRecordedEvidence({
+    claims: [claim],
+    evidence: { repos: [entry] },
+    waivers: [],
+    repoConditions: [],
+  }).problems;
+  assert.ok(
+    pinned.some((problem) => problem.kind === "evidence-repo-id-mismatch"),
+    `expected evidence-repo-id-mismatch for ${repo}, got ${JSON.stringify(pinned)}`,
+  );
+  assert.ok(
+    !pinned.some((problem) => problem.kind === "evidence-revision-mismatch"),
+    `${repo}: the sha check must NOT fire — that is why the repo-id guard is needed`,
+  );
+
+  // Shape 2 — UNREVISIONED, which is where renames actually bite (nothing forces a re-record of a
+  // moving default branch). Same real listing, re-keyed to `@main`. Here the sha guard is not just
+  // satisfied, it is unreachable: `claim.revision &&` short-circuits before it can look.
+  const unrevisionedKey = claimKey(repo, null);
+  assert.notEqual(unrevisionedKey, entry.key, "the re-key must actually change the key");
+  const unrevisioned = gradeRecordedEvidence({
+    claims: [{ ...claim, revision: null }],
+    evidence: { repos: [{ ...entry, key: unrevisionedKey, revision: null }] },
+    waivers: [],
+    repoConditions: [],
+  }).problems;
+  assert.ok(
+    unrevisioned.some((problem) => problem.kind === "evidence-repo-id-mismatch"),
+    `expected evidence-repo-id-mismatch unrevisioned, got ${JSON.stringify(unrevisioned)}`,
+  );
+  assert.ok(
+    !unrevisioned.some((problem) => problem.kind === "evidence-revision-mismatch"),
+    "unrevisioned: the sha guard is inert, so only the repo-id guard can see this",
+  );
+
+  // The other direction, on both shapes: a listing served by the repo it names must NOT fire.
+  // Without this the two assertions above would still pass if the guard fired unconditionally.
+  for (const [name, graded] of [
+    ["pinned", { claim, entry }],
+    ["unrevisioned", { claim: { ...claim, revision: null }, entry: { ...entry, key: unrevisionedKey, revision: null } }],
+  ]) {
+    const honest = gradeRecordedEvidence({
+      claims: [graded.claim],
+      evidence: { repos: [{ ...graded.entry, servedRepo: graded.claim.repo }] },
       waivers: [],
       repoConditions: [],
     }).problems;
     assert.ok(
-      problems.some((problem) => problem.kind === "evidence-repo-id-mismatch"),
-      `expected evidence-repo-id-mismatch for ${repo}, got ${JSON.stringify(problems)}`,
-    );
-    assert.ok(
-      !problems.some((problem) => problem.kind === "evidence-revision-mismatch"),
-      `${repo}: the sha check must NOT fire — that is why the repo-id guard is needed`,
+      !honest.some((problem) => problem.kind === "evidence-repo-id-mismatch"),
+      `${name}: a repo serving its own listing must not fire, got ${JSON.stringify(honest)}`,
     );
   }
 });
@@ -418,7 +461,7 @@ test("the CLI rejects those combinations before any mode runs, not after", () =>
 // tree that DOES have a live zero-match (the tracked LipDub row) — without that the test would be
 // vacuous, since it is the collision that has to not happen.
 const PERTURBED_KEY = "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb";
-const runReplayed = (args, env = {}) => {
+const runReplayed = (args, env = {}, cwd = root) => {
   const result = spawnSync(
     process.execPath,
     [
@@ -427,26 +470,125 @@ const runReplayed = (args, env = {}) => {
       "scripts/check-download-patterns.mjs",
       ...args,
     ],
-    { cwd: root, encoding: "utf8", env: { ...process.env, ...env } },
+    { cwd, encoding: "utf8", env: { ...process.env, ...env } },
   );
   return { status: result.status, output: `${result.stdout}${result.stderr}` };
 };
 const runDryRun = (env = {}) => runReplayed(["--write", "--dry-run"], env);
 
-test("--write --dry-run: the exit code carries the artifact verdict and only that", () => {
-  const clean = runDryRun();
-  // Anti-vacuity: prove the live verdicts really did fire on this run. If the catalog ever grades
-  // clean live, this assertion fails loudly rather than letting the test pass for the wrong reason.
-  assert.match(
-    clean.output,
-    /ZERO-MATCH PATTERNS \(\d+\)/,
-    "a live zero-match must be present, or this test proves nothing about the collision",
+// A COMPLETE temporary catalog — the recorder, its one local import, the replay fixture, both
+// manifests and the committed evidence — with ONE deliberate defect injected into a manifest entry.
+//
+// WHY THIS EXISTS (sc-18917). The collision test below needs a run in which a LIVE verdict fires
+// while the recorded artifact is still byte-identical to a re-record. Until sc-18917 that
+// combination was supplied for free by a real catalog defect — the LipDub row declared a file
+// upstream had renamed away — and the test leaned on it, saying so in its own comment. Repointing
+// that entry removes it, and it cannot simply be re-borrowed elsewhere: a live zero-match can only
+// come from a listing that lacks a declared pattern, and that is the very listing the recorder
+// transcribes, so ANY perturbation of the replayed network moves the artifact as well.
+//
+// The one input that moves a live verdict WITHOUT moving the artifact is the MANIFEST — a declared
+// pattern matching nothing leaves every listing untouched — and the manifest path is fixed relative
+// to the script, hence a temporary root. The result is a collision proof that holds permanently
+// rather than one that expires the moment the catalog is healthy.
+const INJECT_TARGET_ID = "ltx_2_3_ic_lipdub";
+const INJECTED_PATTERN = "sw-injected-zero-match-sc-18917.safetensors";
+
+async function withInjectedZeroMatch(run) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sw-download-patterns-"));
+  try {
+    await mkdir(path.join(dir, "scripts", "lib"), { recursive: true });
+    await mkdir(path.join(dir, "scripts", "fixtures"), { recursive: true });
+    await mkdir(path.join(dir, "config", "manifests"), { recursive: true });
+    // `copyFile` for the evidence specifically: the whole point is that it stays byte-identical, so
+    // a re-record inside the temp root reproduces it and the UP-TO-DATE branch is reachable.
+    for (const rel of [
+      "scripts/check-download-patterns.mjs",
+      "scripts/lib/jsonc.mjs",
+      "scripts/fixtures/replay-download-pattern-network.mjs",
+      "config/download-pattern-evidence.json",
+    ]) {
+      await copyFile(path.join(root, rel), path.join(dir, rel));
+    }
+
+    const models = await readJsonc("config/manifests/builtin.models.jsonc");
+    const loras = await readJsonc("config/manifests/builtin.loras.jsonc");
+    const target = loras.loras.find((lora) => lora.id === INJECT_TARGET_ID);
+    assert.ok(target, `${INJECT_TARGET_ID} must exist in the LoRA manifest`);
+    const declared = target.source?.file;
+    assert.ok(declared, `${INJECT_TARGET_ID} must declare a single source.file to widen`);
+    // `source.files` is the manifest's own multi-pattern shape, so the injected catalog is still a
+    // LEGAL one: the real declared file, plus one pattern that cannot match. Nothing about the
+    // repo@revision key changes, so the replayed listing — and therefore the artifact — does not.
+    delete target.source.file;
+    target.source.files = [declared, INJECTED_PATTERN];
+    // Written as plain JSON: `readManifests` strips JSONC comments before parsing, and comment-free
+    // JSON is a fixed point of that. Comments carry no meaning to the script.
+    await writeFile(
+      path.join(dir, "config/manifests/builtin.models.jsonc"),
+      JSON.stringify(models),
+      "utf8",
+    );
+    await writeFile(
+      path.join(dir, "config/manifests/builtin.loras.jsonc"),
+      JSON.stringify(loras),
+      "utf8",
+    );
+    return await run({ dir, declaredFile: declared });
+  } finally {
+    // In a `finally` because a failed assertion inside `run` is the likeliest exit path, and that
+    // is exactly the path a leaked temp dir hides on.
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// The injection is only meaningful if the pattern genuinely matches nothing while the entry's REAL
+// declared file genuinely matches. Assert both against the committed listing, so a stale fixture
+// cannot turn the collision test into a run with two zero-matches or none.
+test("the injected zero-match pattern is absent and the real declared file is present", async () => {
+  const { claims, evidence } = await realInputs();
+  const claim = claims.find((row) => row.label === `lora:${INJECT_TARGET_ID}`);
+  assert.ok(claim, `lora:${INJECT_TARGET_ID} must exist for the injection to bind`);
+  const entry = evidence.repos.find((row) => row.key === claimKey(claim.repo, claim.revision));
+  assert.ok(entry, `${INJECT_TARGET_ID} must have a recorded listing`);
+  assert.ok(!entry.files.includes(INJECTED_PATTERN), "the injected pattern must match nothing");
+  assert.deepEqual(
+    claim.declared.filter((pattern) => !entry.files.includes(pattern)),
+    [],
+    `every declared pattern of ${INJECT_TARGET_ID} must be present at its pinned revision`,
   );
+});
+
+test("--write --dry-run: the exit code carries the artifact verdict and only that", async () => {
+  // Direction 1 — THE COLLISION ITSELF. A live zero-match fires while the artifact is unchanged,
+  // so the exit code must be 0. This is the assertion the whole temp-root construction exists for.
+  await withInjectedZeroMatch(async ({ dir }) => {
+    const collided = runReplayed(["--write", "--dry-run"], {}, dir);
+    assert.match(
+      collided.output,
+      /ZERO-MATCH PATTERNS \(1\)/,
+      `the injected live zero-match must fire, or this proves nothing: ${collided.output}`,
+    );
+    assert.ok(
+      collided.output.includes(INJECTED_PATTERN),
+      "the zero-match must be the injected pattern, not some unrelated catalog drift",
+    );
+    assert.match(collided.output, /ARTIFACT VERDICT: UP TO DATE \(\d+ key\(s\)\) — exit 0/);
+    assert.doesNotMatch(collided.output, /WOULD CHANGE/);
+    assert.equal(
+      collided.status,
+      0,
+      `a live zero-match must not move this mode's exit code: ${collided.output}`,
+    );
+  });
+
+  // Direction 2 — the real tree, which sc-18917 left with no live zero-match at all.
+  const clean = runDryRun();
   assert.match(clean.output, /ARTIFACT VERDICT: UP TO DATE \(\d+ key\(s\)\) — exit 0/);
   assert.doesNotMatch(clean.output, /WOULD CHANGE/);
-  assert.equal(clean.status, 0, `a clean artifact must exit 0 despite the live zero-match above`);
+  assert.equal(clean.status, 0, `a clean artifact must exit 0: ${clean.output}`);
 
-  // Direction 2: one appended file in one replayed listing — the smallest possible divergence
+  // Direction 3: one appended file in one replayed listing — the smallest possible divergence
   // between the committed artifact and a re-record — must red.
   const tampered = runDryRun({ REPLAY_EXTRA_FILE: PERTURBED_KEY });
   assert.match(tampered.output, /ARTIFACT VERDICT: WOULD CHANGE — exit 1/);
@@ -457,14 +599,25 @@ test("--write --dry-run: the exit code carries the artifact verdict and only tha
 // The counterpart of the test above: routing the live verdicts through a flag must not have
 // DROPPED them. Same replayed network, plain live mode (no --write, so no dry-run verdict owns the
 // exit code), each verdict isolated to a single catalog entry and asserted in both directions.
-test("plain live mode still reds on a zero-match and on an unreachable repo, and greens otherwise", () => {
+test("plain live mode still reds on a zero-match and on an unreachable repo, and greens otherwise", async () => {
   const clean = runReplayed(["--model", "ltx_2_3"]);
   assert.match(clean.output, /Every declared download pattern matches at least one file\./);
   assert.equal(clean.status, 0, `a fully matching entry must exit 0: ${clean.output}`);
 
-  const zeroMatch = runReplayed(["--model", "ltx_2_3_ic_lipdub"]);
-  assert.match(zeroMatch.output, /ZERO-MATCH PATTERNS \(1\)/);
-  assert.equal(zeroMatch.status, 1, "a zero-match must still red the live mode");
+  await withInjectedZeroMatch(async ({ dir }) => {
+    const zeroMatch = runReplayed(["--model", INJECT_TARGET_ID], {}, dir);
+    // Exactly ONE: the injected pattern. Two would mean the entry's real declared file stopped
+    // matching, which is the sc-18917 defect coming back.
+    assert.match(zeroMatch.output, /ZERO-MATCH PATTERNS \(1\)/);
+    assert.ok(zeroMatch.output.includes(INJECTED_PATTERN));
+    assert.equal(zeroMatch.status, 1, "a zero-match must still red the live mode");
+
+    // Same temp root, a different entry: still green. Without this the red above could be caused
+    // by the temporary catalog being broken rather than by the injected pattern.
+    const greenInTemp = runReplayed(["--model", "ltx_2_3"], {}, dir);
+    assert.match(greenInTemp.output, /Every declared download pattern matches at least one file\./);
+    assert.equal(greenInTemp.status, 0, `the temp root must otherwise be healthy: ${greenInTemp.output}`);
+  });
 
   // Same entry as the green run, with only its listing made unreadable.
   const outage = runReplayed(["--model", "ltx_2_3"], { REPLAY_ERROR_KEY: PERTURBED_KEY });
