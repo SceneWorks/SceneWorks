@@ -717,7 +717,9 @@ fn wan_user_adapter_resident_bytes(
 /// meantime, so caching the first reading would gate the load against a stale number. The cost is one
 /// extra `nvidia-smi` per Mochi job, which is noise next to the download it exists to avoid.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gate::VramBudget> {
+pub(crate) async fn candle_video_vram_budget(
+    settings: &Settings,
+) -> Option<crate::vram_gate::VramBudget> {
     let budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),

@@ -1704,7 +1704,10 @@ pub(crate) mod bernini;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-mod candle;
+// `pub(crate)` since sc-18814: the shared video memory gate reads this lane's VRAM budget from
+// `candle_video_vram_budget` — the same figure `wan_video_fit_error` / `svd_fit_error` are handed
+// — rather than probing the card a second way.
+pub(crate) mod candle;
 #[cfg(target_os = "macos")]
 use bernini::{
     bernini_available, bernini_engine_id, bernini_raw_settings, generate_bernini, BERNINI_ADAPTER,

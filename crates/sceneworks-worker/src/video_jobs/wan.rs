@@ -1287,6 +1287,13 @@ pub(super) struct VideoGenInput {
     /// MLX (macOS) path and the resident-only LTX candle engine. SVD-XT also selects Sequential in
     /// sc-14625 for its conditioner → UNet → VAE lifecycle.
     pub(super) offload_policy: OffloadPolicy,
+    /// Per-request memory-rung knobs selected by the video memory gate (sc-18814), or `None` for
+    /// the provider's own defaults. Set ONLY by [`generate_video_using`], from
+    /// `crate::video_admission::admit_video_generation`; every handler leaves it at the
+    /// `Default` so a route the gate makes no decision on is byte-identical to before the gate
+    /// existed. The image lane's equivalent is `mlx_fit_gate::evaluate_request`'s
+    /// `MlxRequestEvaluation::memory`.
+    pub(super) memory: Option<gen_core::GenerationMemory>,
 }
 
 #[cfg(any(
@@ -1296,6 +1303,7 @@ pub(super) struct VideoGenInput {
 impl Default for VideoGenInput {
     fn default() -> Self {
         Self {
+            memory: None,
             engine_id: "",
             model_dir: PathBuf::new(),
             quant: None,
@@ -1418,6 +1426,9 @@ pub(super) fn run_loaded_video_generation(
         decode_chunk_size: input.decode_chunk_size,
         conditioning_fps: input.conditioning_fps,
         softness: input.softness,
+        // The video memory gate's selection (sc-18814). `None` — every route the gate does not
+        // decide, plus a selected resident rung — leaves the provider's own defaults in place.
+        memory: input.memory,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -1783,6 +1794,24 @@ pub(super) async fn generate_video_using(
             input.scheduler_shift = raw_shift;
         }
     }
+    // The video memory gate (sc-18814, epic 18803). Resolved here — the ONE funnel every video
+    // family on both lanes passes through — so no per-family edit is needed and neither lane can
+    // silently miss it. The budget probe is async on the candle lane, so it happens before the
+    // blocking task is spawned; the selection itself runs inside `run`, where the loaded
+    // generator (and therefore the provider's memory contract) is in scope. That is the same
+    // position the image lane calls `mlx_fit_gate::evaluate_request` from: after the load, before
+    // `generate`.
+    let admission_budget = crate::video_admission::live_video_budget(settings).await;
+    // The catalog model id, read straight off the payload rather than by re-parsing the whole
+    // request into a throwaway `VideoRequest` (F-118, the same reason `advanced` arrives by
+    // reference). Absent ⇒ the same default `VideoRequest::from_payload` applies.
+    let admission_model_id = job
+        .payload
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("ltx_2_3")
+        .to_owned();
+
     let cancel = CancelFlag::new();
     let stall_timeout = video_stall_timeout();
     let log_engine_id = input.engine_id;
@@ -1809,8 +1838,35 @@ pub(super) async fn generate_video_using(
                 e.i2v,
             )
         });
+        let admission_tier = crate::mlx_fit_gate::spec_numeric_tier(engine_id, &spec);
+        let admission_headroom_bytes = crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &spec);
+        let admission_geometry = (input.width, input.height, input.frames);
         tokio::spawn(async move {
             let run = move |generator: &dyn Generator| {
+                let mut input = input;
+                let outcome = crate::video_admission::admit_video_generation(
+                    generator,
+                    crate::video_admission::VideoAdmissionInputs {
+                        model_id: &admission_model_id,
+                        route: engine_id,
+                        lane: crate::video_admission::LANE,
+                        tier: admission_tier,
+                        width: admission_geometry.0,
+                        height: admission_geometry.1,
+                        frames: admission_geometry.2,
+                        budget: admission_budget,
+                        headroom_bytes: admission_headroom_bytes,
+                        // No video route carries a calibration binding yet (epic 18803 R2/R4,
+                        // sc-18817), so there is no measured closure for currency to be graded
+                        // against. Both sides of the comparison carry the sentinel, which states
+                        // that rather than naming a revision nothing was measured at (sc-17774).
+                        expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+                    },
+                );
+                if let Some(refusal) = outcome.refusal {
+                    return Err(WorkerError::InvalidPayload(refusal));
+                }
+                input.memory = outcome.memory;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard

@@ -29,6 +29,13 @@ mod routing;
 pub(crate) use routing::candle::*;
 #[cfg(test)]
 pub(crate) use routing::catalog::*;
+// The video memory gate (`crate::video_request`, sc-18814) reads its per-family backend surface
+// from the catalog in every build, not only under `cfg(test)`, so these two escape the test-gated
+// glob above by name.
+#[cfg(not(test))]
+pub(crate) use routing::catalog::{
+    video_model_has_candle_video_route, video_model_is_mlx_video_routed,
+};
 pub(crate) use routing::gaps::*;
 pub(crate) use routing::mlx::*;
 

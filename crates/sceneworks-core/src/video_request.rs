@@ -18,6 +18,11 @@
 use serde_json::Value;
 
 use crate::contracts::JsonObject;
+// The memory-ladder rung vocabulary (sc-18814). `sceneworks-core` already owns this enum — the
+// worker's `memory_strategy` bridges it to gen-core's `MemoryStrategy` — so the video gate can
+// return a selected rung without this crate gaining a gen-core dependency it deliberately does
+// not have.
+use crate::memory_calibration::StrategyRung;
 use crate::payload_util::{
     array_or_empty, clamped_u32, declared_resolution, nonempty_string_or, object_or_empty,
     optional_i64, optional_id, parse_u32, string_list,
@@ -746,6 +751,447 @@ fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
         .filter(|value| value.is_finite())
         .unwrap_or(default)
         .clamp(min, max)
+}
+
+// ======================================================================================
+// Video memory admission (sc-18814, epic 18803)
+// ======================================================================================
+//
+// Until this section existed, a video job could not select ANY memory rung. `mlx_fit_gate::
+// evaluate_request` — the only request-geometry-aware call into the ladder selector — is reached
+// exclusively from `image_jobs/{base,krea_control,krea_imported}.rs`; nothing under
+// `video_jobs/` calls it, and this file borrowed only `mlx_fit_gate::too_big_error`'s message
+// convention. Every video request therefore ran with a binary verdict at best (candle's
+// `vram_gate` fit errors, MLX's `mochi_fit_check`) and no verdict at all at worst.
+//
+// **Epic decision 3 (recorded on sc-18814, and unchanged by the epic-19048 convergence decision
+// at activity-19060): keep this file as the video gate and have it reach the SHARED selector —
+// do not unify it with `mlx_fit_gate`.** `mlx_fit_gate` is MLX-specific in name and content while
+// the video lane spans both backends; the genuinely shared seam is the worker's
+// `memory_strategy::select_strategy`, which BOTH `mlx_fit_gate` and `candle_memory_strategy`
+// already funnel through.
+//
+// `sceneworks-core` deliberately has no `gen-core` dependency (stated on
+// `sceneworks_worker::memory_strategy::load_shape_from_receipt`), and `select_strategy` is
+// gen-core-typed and worker-owned. So the selector arrives here as an INJECTED
+// [`VideoStrategySelector`] rather than by inverting the crate graph: this file owns the video
+// policy (per-family/per-lane surface, the geometry set that must be graded, the refusal
+// message), and the worker's `video_admission::LadderVideoSelector` answers each geometry by
+// calling `select_strategy`. Ordering, first-fit and margin grading stay in the one shared
+// place — nothing about them is re-implemented here.
+//
+// **No prediction math lives here** (activity-19060): this section never computes a peak. It
+// decides WHICH geometries must be graded and WHAT the answer means. sc-18829's frames-aware MLX
+// term attaches inside the selector, to a geometry that already carries `frames`.
+
+/// Which backend lane a video admission decision is being made for.
+///
+/// The two lanes are NOT symmetric, and this gate must never imply they are — see
+/// [`video_admission_surface`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoLane {
+    /// macOS / MLX (`video_mlx_routed`).
+    Mlx,
+    /// Windows+Linux / candle (`backend-candle`).
+    Candle,
+}
+
+impl VideoLane {
+    /// Stable label for tracing and evidence keys — the same spellings
+    /// `memory_calibration::Backend` and the memory matrix use.
+    pub const fn as_key(self) -> &'static str {
+        match self {
+            Self::Mlx => "mlx",
+            Self::Candle => "candle",
+        }
+    }
+}
+
+/// What this gate claims for one `(family, lane)` pair.
+///
+/// Stated per family rather than assumed uniform, because the video lane is **not** uniform:
+/// `krea_realtime_14b` has no candle engine at all, `scail2_14b` reaches candle only through its
+/// own distinct-engine predicates (it is deliberately absent from `CANDLE_VIDEO_*`), and `svd` is
+/// candle image→video only. See [`video_admission_surface`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoAdmissionSurface {
+    /// The family has at least one video route on this lane. `false` ⇒ this gate makes no
+    /// decision for it there ([`VideoAdmission::NotRouted`]); it is not a refusal.
+    pub routed: bool,
+    /// This gate models the family's VAE single-pass write bound, so it can classify a request's
+    /// decode regime and place the interior worst case ([`single_pass_decode_frame_cap`]).
+    /// `false` ⇒ only the requested geometry is graded, and the gate says so rather than
+    /// pretending the envelope was covered.
+    pub decode_cap_modelled: bool,
+}
+
+/// The per-family, per-lane admission surface — the routing catalog
+/// (`jobs_store::routing::catalog::VIDEO_MODEL_CAPS` plus the distinct-engine predicates beside
+/// it) is the backend authority here, NOT the manifest's advisory `mlx` / `candle` hint objects.
+///
+/// The conditionality is real and is spelled out per family instead of collapsed into a default:
+///
+/// | family | MLX | candle |
+/// |---|---|---|
+/// | `ltx_2_3`, `ltx_2_3_eros` | routed | routed (t2v) |
+/// | `wan_2_2` (TI2V-5B) | routed | routed (t2v + VACE) |
+/// | `wan_2_2_t2v_14b` | routed | routed (t2v + VACE) |
+/// | `wan_2_2_i2v_14b` | routed | routed (**i2v only** + VACE) |
+/// | `svd` | routed | routed (**i2v only**, `catalog.rs:894`) |
+/// | `bernini` | routed | routed via `bernini_video_candle_eligible` (distinct engine) |
+/// | `scail2_14b` | routed | **`candle_video_routed = false`** (`catalog.rs:908`) — reachable only via `scail2_{animate,replace}_candle_eligible`, its own distinct engine |
+/// | `krea_realtime_14b` | routed | **no candle engine exists at all** (`catalog.rs:936`) |
+///
+/// `routed` is answered from those predicates rather than re-derived; the per-family table above
+/// is pinned against them by `video_admission_surface_matches_the_routing_catalog`.
+pub fn video_admission_surface(model: &str, lane: VideoLane) -> VideoAdmissionSurface {
+    VideoAdmissionSurface {
+        routed: match lane {
+            VideoLane::Mlx => crate::jobs_store::video_model_is_mlx_video_routed(model),
+            VideoLane::Candle => crate::jobs_store::video_model_has_candle_video_route(model),
+        },
+        decode_cap_modelled: vae_full_res_channels(model).is_some(),
+    }
+}
+
+/// `i32::MAX`, gen-core's `tiling::MAX_WRITABLE_ELEMS`: the widest full-resolution write one VAE
+/// decode pass may materialize. Transcribed (this crate has no gen-core dependency) and pinned
+/// against the real constant by `sceneworks-worker`'s `video_admission` tests.
+const MAX_WRITABLE_ELEMS: u64 = i32::MAX as u64;
+
+/// The full-resolution channel count of a video family's VAE — the divisor in gen-core's
+/// `VaeTiling::writable_frame_cap` — or `None` for a family whose VAE this gate does not model.
+///
+/// Transcribed from the inference bundle pinned by `sceneworks-worker/Cargo.toml`
+/// (`b965641e388f4db646e4c60ab3f75219737e2cc8`) and pinned against `gen_core::VaeTiling` by
+/// `sceneworks-worker`'s `video_admission` tests, so a pin bump that moves a channel count is red
+/// there rather than silently wrong here:
+///
+/// * LTX (`VaeTiling::LTX`) — 8. `mlx-gen-ltx/src/vae.rs`, `candle-gen-ltx/src/vae.rs`.
+/// * Wan2.2 z48 / `vae22` (`VaeTiling::WAN22`) — 64. Only `wan_2_2` (the dense TI2V-5B) uses it:
+///   `mlx-gen-wan/src/pipeline.rs:235` — "The dense TI2V-5B is welded to the z48 `vae22` decode".
+/// * Wan2.1 z16 (`VaeTiling::WAN`) — 96. The A14B grid plus every Wan-derived renderer:
+///   `mlx-gen-wan/src/model.rs:1482` and `model_vace.rs:242` (A14B / VACE),
+///   `mlx-gen-bernini/src/vae_features.rs:1` ("the Wan z16 VAE"),
+///   `mlx-gen-scail2/src/generate.rs:49` and `mlx-gen-krea-realtime/src/t2v.rs:287` (both
+///   `auto_tiling_budgeted_z16_quality_overlap`).
+///
+/// **`svd` and `mochi_1` are deliberately unmodelled.** SVD's write bound lives in
+/// `candle-gen-svd/src/vae.rs`'s PRIVATE `SVD_VAE_TILING` (256 full-res channels, non-causal
+/// `temporal_scale: 1`) and there is no `mlx-gen-svd` crate in the pinned bundle to read a second
+/// value from, so a transcription here could not be pinned on either lane — exactly the
+/// lockstep-drift class `pinned_engine_geometry` exists to prevent. Mochi-1 is frozen. Both
+/// return `None`, which makes [`video_admission_surface`] report `decode_cap_modelled: false`
+/// rather than let the gate imply an envelope it did not cover. Tracked as a follow-up.
+pub fn vae_full_res_channels(model: &str) -> Option<u32> {
+    if is_ltx_model(model) {
+        return Some(8);
+    }
+    match model {
+        // The dense TI2V-5B, and only it, decodes through the z48 vae22.
+        "wan_2_2" => Some(64),
+        // The Wan2.1 z16 VAE: the A14B grid and every renderer built on it.
+        "wan_2_2_t2v_14b"
+        | "wan_2_2_i2v_14b"
+        | "wan_2_2_vace_fun_14b"
+        | "bernini"
+        | "scail2_14b"
+        | "krea_realtime_14b" => Some(96),
+        _ => None,
+    }
+}
+
+/// The most **output frames** `model`'s VAE can decode in one pass at `width`×`height` before its
+/// widest full-resolution write exceeds [`MAX_WRITABLE_ELEMS`] — gen-core's
+/// `VaeTiling::writable_frame_cap`, `MAX_WRITABLE_ELEMS / (full_res_channels * out_h * out_w)`.
+/// `None` when the family's VAE is unmodelled (see [`vae_full_res_channels`]).
+///
+/// This is a **constant-voxel surface**, not a frame count: "297 frames at 0.90 MP" and "682 at
+/// 0.39 MP" are the same 268,435,455-output-voxel bound for LTX's 8 channels seen at two areas
+/// (sc-18812, activity-19042). It is one-sided machine-independent — no host renders more than
+/// this many single-pass frames, while a smaller host tiles earlier because the memory bound in
+/// gen-core's `budgeted_plan` fires first.
+pub fn single_pass_decode_frame_cap(model: &str, width: u32, height: u32) -> Option<u32> {
+    let channels = u64::from(vae_full_res_channels(model)?);
+    let per_frame = channels
+        .checked_mul(u64::from(width))?
+        .checked_mul(u64::from(height))?;
+    if per_frame == 0 {
+        return None;
+    }
+    u32::try_from(MAX_WRITABLE_ELEMS / per_frame).ok()
+}
+
+/// Which decode regime a geometry executes in.
+///
+/// gen-core's `budgeted_plan` takes the single pass only when `out_frames <= writable_frame_cap`
+/// **and** the estimated single-pass peak fits the budget; otherwise it tiles. A gate that grades
+/// a tiled request with a single-pass cost model under-predicts, and the epic's whole measured
+/// corpus is single-pass (`decodeTilingEngaged: false` on all 13 LTX records), so the regime has
+/// to travel with the geometry rather than be assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoDecodePass {
+    /// At or under the write cap: one pass, and peak rises monotonically with frames up to here.
+    SinglePass,
+    /// Past the write cap: gen-core forces tiling, so the decode transient drops.
+    Tiled,
+    /// The family's VAE is unmodelled ([`vae_full_res_channels`] is `None`), so this gate does
+    /// not claim to know the regime.
+    Unmodelled,
+}
+
+/// Why a geometry is in the set the gate grades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoGeometryRole {
+    /// The geometry the caller asked for.
+    Requested,
+    /// The single-pass write cap, which is a **local maximum strictly inside** the request's
+    /// frame envelope. See [`video_admission_geometries`].
+    SinglePassDecodeCap,
+}
+
+/// One geometry an admission decision is graded at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoAdmissionGeometry {
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
+    /// Always 1 on this lane: a video job produces a single clip (unlike images, which batch
+    /// `count`). Carried so the selector's geometry type is total.
+    pub batch: u32,
+    pub decode_pass: VideoDecodePass,
+    pub role: VideoGeometryRole,
+}
+
+impl VideoAdmissionGeometry {
+    /// Output voxels — the regressor the temporal coefficient multiplies, and the unit the write
+    /// bound is expressed in.
+    pub const fn output_voxels(self) -> u64 {
+        (self.width as u64) * (self.height as u64) * (self.frames as u64)
+    }
+}
+
+/// Every geometry whose peak must be graded before admitting `frames` at `width`×`height`.
+///
+/// **Peak memory is not monotonic in frames, so the envelope's extremes are not its worst case.**
+/// gen-core's `budgeted_plan` runs one pass while `out_frames <= writable_frame_cap`, and both of
+/// its cost terms grow with frames there. Past the cap it must tile, and the tile term clamps —
+/// the largest tile it may pick is itself bounded by the same voxel surface
+/// (`full_res_channels * tile_f * tile_h * tile_w > MAX_WRITABLE_ELEMS` is skipped,
+/// `gen-core/src/tiling.rs:901`). Measured on LTX at 0.90 MP: single-pass climbs to ~94.3 GB at
+/// f297 (the cap) and tiled decode drops to ~63.8 GB at f305 on a 128 GiB host. **The cap, not
+/// the maximum, is the most expensive geometry in the envelope.**
+///
+/// So the set is:
+/// * the requested geometry, always, with its regime classified; plus
+/// * the cap geometry whenever the request sits **above** the cap — i.e. whenever the cap is a
+///   local maximum strictly interior to `[minimum, requested]`. Admitting at the max rung over
+///   both is never weaker than grading the request alone.
+///
+/// Below the cap the request is itself the interior maximum, so one geometry is the whole answer;
+/// an unmodelled family likewise gets one geometry, honestly labelled
+/// [`VideoDecodePass::Unmodelled`].
+pub fn video_admission_geometries(
+    model: &str,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Vec<VideoAdmissionGeometry> {
+    let cap = single_pass_decode_frame_cap(model, width, height);
+    let requested = VideoAdmissionGeometry {
+        width,
+        height,
+        frames,
+        batch: 1,
+        decode_pass: match cap {
+            None => VideoDecodePass::Unmodelled,
+            Some(cap) if frames <= cap => VideoDecodePass::SinglePass,
+            Some(_) => VideoDecodePass::Tiled,
+        },
+        role: VideoGeometryRole::Requested,
+    };
+    let mut geometries = vec![requested];
+    if let Some(cap) = cap {
+        if cap > 0 && cap < frames {
+            geometries.push(VideoAdmissionGeometry {
+                width,
+                height,
+                frames: cap,
+                batch: 1,
+                decode_pass: VideoDecodePass::SinglePass,
+                role: VideoGeometryRole::SinglePassDecodeCap,
+            });
+        }
+    }
+    geometries
+}
+
+/// The shared ladder selector's answer for ONE geometry.
+///
+/// Deliberately the same three outcomes as `memory_strategy::Selection` — this gate narrows that
+/// type rather than introducing a second vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VideoRungSelection {
+    /// The first rung in the normative order whose graded peak fits the live budget.
+    Selected {
+        rung: StrategyRung,
+        needed_gb: f64,
+        available_gb: f64,
+    },
+    /// Every implemented rung was graded and none fits.
+    Reject { needed_gb: f64, available_gb: f64 },
+    /// Nothing gradable reached the selector (no provider contract, no budget signal, or only
+    /// unverified evidence). The house never-block-without-evidence posture applies: this is not
+    /// a refusal.
+    Undecidable,
+}
+
+/// The seam this gate reaches the shared ladder selector through.
+///
+/// Implemented in `sceneworks-worker` by `video_admission::LadderVideoSelector`, which builds
+/// candidates from the loaded provider's own `MemoryProviderContract` and calls
+/// `memory_strategy::select_strategy`. The trait exists because `sceneworks-core` has no gen-core
+/// dependency, not because the selection is pluggable policy — there is exactly one selector.
+///
+/// **The seam sc-18829 attaches to.** The frames-aware MLX term is a change to how a peak is
+/// computed for a geometry that this trait already hands over complete: `frames` and
+/// `decode_pass` are on [`VideoAdmissionGeometry`], and `mlx_fit_gate::collect_estimate_bases`
+/// already carries per-phase peaks (`mlx_fit_gate.rs:1359-1360`) for the binding-phase question
+/// `KreaTurboPhasePeaks::binding_phase()` answers on the candle side. Nothing here has to move.
+pub trait VideoStrategySelector {
+    /// Grade one geometry through the shared selector.
+    fn select(&mut self, geometry: VideoAdmissionGeometry) -> VideoRungSelection;
+}
+
+/// The video gate's verdict.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VideoAdmission {
+    /// The family has no video route on this lane, so no memory decision was made. Distinct from
+    /// a refusal on purpose.
+    NotRouted,
+    /// Nothing gradable reached the selector for any geometry. Never blocks.
+    Undecidable,
+    /// Run at `rung`. `geometry` is the one that bound the choice.
+    Admitted {
+        rung: StrategyRung,
+        geometry: VideoAdmissionGeometry,
+        needed_gb: f64,
+        available_gb: f64,
+    },
+    /// No rung fits. `message` follows the house convention.
+    Refused {
+        message: String,
+        geometry: VideoAdmissionGeometry,
+        needed_gb: f64,
+        available_gb: f64,
+    },
+}
+
+/// Route one video request through the shared ladder selector.
+///
+/// Grades every geometry [`video_admission_geometries`] names and returns the **highest** rung any
+/// of them required — a single run executes at one rung, and the binding geometry is the one that
+/// needed the most reduction. Any geometry the selector rejects refuses the whole request (the
+/// most-needed rejection wins, so the message names the real worst case).
+///
+/// A geometry the selector cannot decide contributes nothing: with at least one decided geometry
+/// the request is admitted at the max over the decided ones, and with none it is
+/// [`VideoAdmission::Undecidable`]. That is the same never-block-without-evidence posture
+/// `mlx_fit_gate::fit_decision` and [`hard_max_duration`] already take, and it is why turning this
+/// gate on cannot refuse a job that runs today.
+pub fn video_admission(
+    model: &str,
+    lane: VideoLane,
+    width: u32,
+    height: u32,
+    frames: u32,
+    selector: &mut dyn VideoStrategySelector,
+) -> VideoAdmission {
+    if !video_admission_surface(model, lane).routed {
+        return VideoAdmission::NotRouted;
+    }
+    let mut admitted: Option<(StrategyRung, VideoAdmissionGeometry, f64, f64)> = None;
+    let mut rejected: Option<(VideoAdmissionGeometry, f64, f64)> = None;
+    for geometry in video_admission_geometries(model, width, height, frames) {
+        match selector.select(geometry) {
+            VideoRungSelection::Selected {
+                rung,
+                needed_gb,
+                available_gb,
+            } => {
+                let deeper = match admitted {
+                    Some((best, ..)) => rung > best,
+                    None => true,
+                };
+                if deeper {
+                    admitted = Some((rung, geometry, needed_gb, available_gb));
+                }
+            }
+            VideoRungSelection::Reject {
+                needed_gb,
+                available_gb,
+            } => {
+                let worse = match rejected {
+                    Some((_, worst, _)) => needed_gb > worst,
+                    None => true,
+                };
+                if worse {
+                    rejected = Some((geometry, needed_gb, available_gb));
+                }
+            }
+            VideoRungSelection::Undecidable => {}
+        }
+    }
+    // A rejection anywhere in the graded set refuses the request, even when another geometry
+    // fitted: the run has to survive every geometry it will execute.
+    if let Some((geometry, needed_gb, available_gb)) = rejected {
+        return VideoAdmission::Refused {
+            message: video_too_big_error(model, geometry, needed_gb, available_gb),
+            geometry,
+            needed_gb,
+            available_gb,
+        };
+    }
+    match admitted {
+        Some((rung, geometry, needed_gb, available_gb)) => VideoAdmission::Admitted {
+            rung,
+            geometry,
+            needed_gb,
+            available_gb,
+        },
+        None => VideoAdmission::Undecidable,
+    }
+}
+
+/// The house refusal message (`mlx_fit_gate::too_big_error`'s convention, the same one
+/// [`duration_limit_error`] and [`fps_limit_error`] follow): name the model, state what was asked
+/// and what the budget is, and give the lever.
+///
+/// It also names the geometry that bound the decision, which matters here in a way it does not on
+/// the image lane: when the binding geometry is the single-pass write cap
+/// ([`VideoGeometryRole::SinglePassDecodeCap`]) it is NOT the frame count the caller typed, and a
+/// message that quoted the request would send them to shorten a clip that is not the problem.
+pub fn video_too_big_error(
+    model: &str,
+    geometry: VideoAdmissionGeometry,
+    needed_gb: f64,
+    available_gb: f64,
+) -> String {
+    let where_ = match geometry.role {
+        VideoGeometryRole::Requested => format!(
+            "{}x{} x {} frames",
+            geometry.width, geometry.height, geometry.frames
+        ),
+        VideoGeometryRole::SinglePassDecodeCap => format!(
+            "{}x{} at the {}-frame single-pass decode limit inside this clip",
+            geometry.width, geometry.height, geometry.frames
+        ),
+    };
+    format!(
+        "{model}: {where_} needs about {needed_gb:.1} GB but only about {available_gb:.1} GB is \
+         available, at every memory strategy this model implements. Reduce the resolution or the \
+         clip length, or free memory and try again."
+    )
 }
 
 #[cfg(test)]
@@ -2631,5 +3077,424 @@ mod tests {
                  must not claim the unsnapped 150"
             );
         }
+    }
+
+    // ==================================================================================
+    // Video memory admission (sc-18814)
+    // ==================================================================================
+
+    /// A selector that answers from a fixed script keyed by frame count, so the gate's own
+    /// composition logic is what is under test rather than any real budget.
+    struct ScriptedSelector {
+        answers: Vec<(u32, VideoRungSelection)>,
+        seen: Vec<VideoAdmissionGeometry>,
+    }
+
+    impl ScriptedSelector {
+        fn new(answers: Vec<(u32, VideoRungSelection)>) -> Self {
+            Self {
+                answers,
+                seen: Vec::new(),
+            }
+        }
+    }
+
+    impl VideoStrategySelector for ScriptedSelector {
+        fn select(&mut self, geometry: VideoAdmissionGeometry) -> VideoRungSelection {
+            self.seen.push(geometry);
+            self.answers
+                .iter()
+                .find(|(frames, _)| *frames == geometry.frames)
+                .map(|(_, answer)| *answer)
+                .unwrap_or(VideoRungSelection::Undecidable)
+        }
+    }
+
+    fn selected(rung: StrategyRung, needed_gb: f64) -> VideoRungSelection {
+        VideoRungSelection::Selected {
+            rung,
+            needed_gb,
+            available_gb: 128.0,
+        }
+    }
+
+    /// The six video families this epic covers, plus the two catalog members it does not
+    /// (`mochi_1` is frozen; `wan_2_2_vace_fun_14b` is an advanced-mode id on the same engines).
+    const ALL_VIDEO_FAMILIES: &[&str] = &[
+        "ltx_2_3",
+        "ltx_2_3_eros",
+        "wan_2_2",
+        "wan_2_2_t2v_14b",
+        "wan_2_2_i2v_14b",
+        "svd",
+        "bernini",
+        "scail2_14b",
+        "krea_realtime_14b",
+        "mochi_1",
+    ];
+
+    /// AC 2 — the per-family backend surface is CONDITIONAL, and the gate reads it from the
+    /// routing catalog rather than assuming uniformity.
+    ///
+    /// Anti-vacuity is explicit: the candle column must contain BOTH values, so a
+    /// `routed: true`-everywhere regression cannot pass, and each asymmetric family is named.
+    #[test]
+    fn video_admission_surface_is_conditional_per_family_and_lane() {
+        let mlx: Vec<bool> = ALL_VIDEO_FAMILIES
+            .iter()
+            .map(|model| video_admission_surface(model, VideoLane::Mlx).routed)
+            .collect();
+        let candle: Vec<bool> = ALL_VIDEO_FAMILIES
+            .iter()
+            .map(|model| video_admission_surface(model, VideoLane::Candle).routed)
+            .collect();
+
+        // Every catalog video family is MLX-routed; that column is genuinely uniform and is
+        // asserted as such rather than left implied.
+        assert!(
+            mlx.iter().all(|routed| *routed),
+            "every catalog video family is MLX-routed: {mlx:?}"
+        );
+        // The candle column is NOT uniform. If it ever becomes so, this test must be re-derived
+        // rather than relaxed.
+        assert!(
+            candle.contains(&true) && candle.contains(&false),
+            "the candle video surface must carry both values, else the conditionality this gate \
+             exists to express is vacuous: {candle:?}"
+        );
+
+        // The two asymmetric families, named.
+        assert!(
+            !video_admission_surface("krea_realtime_14b", VideoLane::Candle).routed,
+            "krea_realtime_14b has no candle engine at all (catalog.rs:936)"
+        );
+        assert!(
+            video_admission_surface("krea_realtime_14b", VideoLane::Mlx).routed,
+            "krea_realtime_14b IS MLX-routed, so the candle answer above is a lane difference, \
+             not an unknown model"
+        );
+        assert!(
+            video_admission_surface("scail2_14b", VideoLane::Candle).routed,
+            "scail2_14b reaches candle through its own distinct engine (sc-6837) even though its \
+             candle_video_routed column is false — reading the column alone would be wrong"
+        );
+    }
+
+    /// The surface is not re-derived: it agrees with the routing predicates the worker actually
+    /// dispatches on, driven with realistic payloads.
+    #[test]
+    fn video_admission_surface_matches_the_routing_catalog() {
+        for model in ALL_VIDEO_FAMILIES {
+            let mlx_predicate = ["text_to_video", "image_to_video", "animate_character"]
+                .iter()
+                .any(|mode| crate::jobs_store::video_mode_is_mlx_eligible(model, mode));
+            assert_eq!(
+                video_admission_surface(model, VideoLane::Mlx).routed,
+                mlx_predicate,
+                "{model}: MLX surface disagrees with video_mode_is_mlx_eligible"
+            );
+
+            let t2v = payload(json!({ "model": *model, "mode": "text_to_video" }));
+            let i2v = payload(json!({
+                "model": *model,
+                "mode": "image_to_video",
+                "sourceAssetId": "asset_1",
+            }));
+            let animate = payload(json!({
+                "model": *model,
+                "mode": "animate_character",
+                "referenceAssetId": "asset_1",
+                "sourceClipAssetId": "clip_1",
+            }));
+            let candle_predicate = [&t2v, &i2v, &animate].into_iter().any(|payload| {
+                crate::jobs_store::video_request_candle_eligible(model, payload)
+                    || crate::jobs_store::scail2_animate_candle_eligible(model, payload)
+                    || crate::jobs_store::bernini_video_candle_eligible(model, payload)
+            });
+            assert_eq!(
+                video_admission_surface(model, VideoLane::Candle).routed,
+                candle_predicate,
+                "{model}: candle surface disagrees with the candle routing predicates"
+            );
+        }
+    }
+
+    /// `svd` is candle image→video ONLY (`catalog.rs:894`) — the conditionality is per MODE, not
+    /// only per model, and the predicate this surface is pinned against knows it.
+    #[test]
+    fn svd_is_candle_image_to_video_only() {
+        assert!(
+            !crate::jobs_store::video_request_candle_eligible(
+                "svd",
+                &payload(json!({ "model": "svd", "mode": "text_to_video" })),
+            ),
+            "svd has no candle txt2video route"
+        );
+        assert!(
+            crate::jobs_store::video_request_candle_eligible(
+                "svd",
+                &payload(json!({
+                    "model": "svd",
+                    "mode": "image_to_video",
+                    "sourceAssetId": "asset_1",
+                })),
+            ),
+            "svd IS candle-routed for image_to_video, so the line above is a mode difference"
+        );
+    }
+
+    /// The write bound is a CONSTANT-VOXEL surface, not a frame count: the two figures this epic
+    /// quotes for LTX are the same bound seen at two areas.
+    #[test]
+    fn single_pass_decode_frame_cap_is_a_constant_voxel_surface() {
+        // 1280x704 = 901,120 px, the shipped 14B/LTX landscape bucket.
+        assert_eq!(
+            single_pass_decode_frame_cap("ltx_2_3", 1280, 704),
+            Some(297)
+        );
+        // 768x512 = 393,216 px, the blanket default geometry.
+        assert_eq!(single_pass_decode_frame_cap("ltx_2_3", 768, 512), Some(682));
+
+        // Both caps sit just under the same 268,435,455-output-voxel surface for LTX's 8 channels,
+        // and one more frame at either area would cross it.
+        for (width, height) in [(1280_u32, 704_u32), (768, 512)] {
+            let cap = single_pass_decode_frame_cap("ltx_2_3", width, height).unwrap();
+            let voxels = u64::from(width) * u64::from(height) * u64::from(cap);
+            assert!(
+                voxels * 8 <= MAX_WRITABLE_ELEMS,
+                "{width}x{height} f{cap}: the cap itself must be writable"
+            );
+            assert!(
+                (voxels + u64::from(width) * u64::from(height)) * 8 > MAX_WRITABLE_ELEMS,
+                "{width}x{height} f{}: one frame past the cap must NOT be writable, else the cap \
+                 is not tight",
+                cap + 1
+            );
+        }
+
+        // A denser VAE caps far earlier at the same area — the bound is per-model, never a
+        // hardcoded LTX number.
+        assert_eq!(
+            single_pass_decode_frame_cap("krea_realtime_14b", 768, 512),
+            Some(56),
+            "the Wan z16 VAE's 96 full-res channels cap 12x earlier than LTX's 8"
+        );
+    }
+
+    /// AC — the tiling cap is a LOCAL MAXIMUM strictly inside the frame envelope, so a request
+    /// above it must not be graded on its own tiled geometry alone.
+    #[test]
+    fn the_decode_cap_joins_the_graded_set_only_when_it_is_interior() {
+        // Below the cap: one geometry, single-pass, and it IS the interior maximum.
+        let under = video_admission_geometries("ltx_2_3", 1280, 704, 241);
+        assert_eq!(under.len(), 1);
+        assert_eq!(under[0].role, VideoGeometryRole::Requested);
+        assert_eq!(under[0].decode_pass, VideoDecodePass::SinglePass);
+
+        // Exactly at the cap: still single-pass, still one geometry.
+        let at = video_admission_geometries("ltx_2_3", 1280, 704, 297);
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0].decode_pass, VideoDecodePass::SinglePass);
+
+        // Above the cap: the request is tiled (cheaper), and the cap — the expensive interior
+        // maximum — is added.
+        let over = video_admission_geometries("ltx_2_3", 1280, 704, 305);
+        assert_eq!(over.len(), 2, "the cap must join the set: {over:?}");
+        assert_eq!(over[0].frames, 305);
+        assert_eq!(over[0].decode_pass, VideoDecodePass::Tiled);
+        assert_eq!(over[1].frames, 297);
+        assert_eq!(over[1].role, VideoGeometryRole::SinglePassDecodeCap);
+        assert_eq!(over[1].decode_pass, VideoDecodePass::SinglePass);
+        assert!(
+            over[1].output_voxels() < over[0].output_voxels(),
+            "the cap geometry has FEWER voxels than the request, which is exactly why grading \
+             only the request would miss it"
+        );
+    }
+
+    /// An unmodelled family is labelled, not silently assumed single-pass.
+    #[test]
+    fn an_unmodelled_vae_grades_one_geometry_and_says_so() {
+        assert_eq!(vae_full_res_channels("svd"), None);
+        assert!(!video_admission_surface("svd", VideoLane::Mlx).decode_cap_modelled);
+        assert!(
+            video_admission_surface("ltx_2_3", VideoLane::Mlx).decode_cap_modelled,
+            "LTX IS modelled, so the svd answer is a per-family fact rather than the gate being \
+             off everywhere"
+        );
+        let geometries = video_admission_geometries("svd", 1024, 576, 1_000);
+        assert_eq!(geometries.len(), 1);
+        assert_eq!(geometries[0].decode_pass, VideoDecodePass::Unmodelled);
+    }
+
+    /// The request runs at ONE rung, so the answer is the deepest any graded geometry required.
+    #[test]
+    fn video_admission_selects_the_deepest_rung_the_graded_set_requires() {
+        let mut selector = ScriptedSelector::new(vec![
+            (305, selected(StrategyRung::Resident, 40.0)),
+            (297, selected(StrategyRung::BoundedDecode, 92.0)),
+        ]);
+        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+        let VideoAdmission::Admitted { rung, geometry, .. } = verdict else {
+            panic!("expected admission, got {verdict:?}");
+        };
+        assert_eq!(rung, StrategyRung::BoundedDecode);
+        assert_eq!(
+            geometry.role,
+            VideoGeometryRole::SinglePassDecodeCap,
+            "the CAP bound the choice, not the frame count the caller typed"
+        );
+        assert_eq!(selector.seen.len(), 2);
+    }
+
+    /// The same request graded WITHOUT the cap geometry would have been admitted resident — this
+    /// is the concrete consequence of the non-monotonicity, and it is asserted rather than
+    /// described.
+    #[test]
+    fn grading_only_the_request_would_have_understated_the_rung() {
+        let mut request_only = ScriptedSelector::new(vec![
+            (305, selected(StrategyRung::Resident, 40.0)),
+            (297, selected(StrategyRung::BoundedDecode, 92.0)),
+        ]);
+        // Drive the selector by hand over the request geometry alone.
+        let requested = video_admission_geometries("ltx_2_3", 1280, 704, 305)[0];
+        assert_eq!(
+            request_only.select(requested),
+            selected(StrategyRung::Resident, 40.0)
+        );
+    }
+
+    #[test]
+    fn video_admission_refuses_when_any_graded_geometry_rejects() {
+        let mut selector = ScriptedSelector::new(vec![
+            (305, selected(StrategyRung::Resident, 40.0)),
+            (
+                297,
+                VideoRungSelection::Reject {
+                    needed_gb: 94.3,
+                    available_gb: 63.8,
+                },
+            ),
+        ]);
+        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+        let VideoAdmission::Refused {
+            message, geometry, ..
+        } = verdict
+        else {
+            panic!("expected refusal, got {verdict:?}");
+        };
+        assert_eq!(geometry.role, VideoGeometryRole::SinglePassDecodeCap);
+        // The house convention: name the model, what was asked, the budget, and the lever.
+        assert!(message.starts_with("ltx_2_3: "), "{message}");
+        assert!(message.contains("94.3 GB"), "{message}");
+        assert!(message.contains("63.8 GB"), "{message}");
+        assert!(message.contains("Reduce the resolution"), "{message}");
+        // ...and it must NOT quote the caller's 305 frames, which are not the problem.
+        assert!(
+            message.contains("297-frame single-pass decode limit"),
+            "a cap-bound refusal must name the cap: {message}"
+        );
+        assert!(
+            !message.contains("305"),
+            "quoting the requested frame count here would send the caller to shorten a clip that \
+             is not what bound the decision: {message}"
+        );
+    }
+
+    /// A requested-geometry refusal quotes the request, so the message above is not simply always
+    /// the cap wording.
+    #[test]
+    fn a_requested_geometry_refusal_quotes_the_request() {
+        let mut selector = ScriptedSelector::new(vec![(
+            241,
+            VideoRungSelection::Reject {
+                needed_gb: 80.0,
+                available_gb: 60.0,
+            },
+        )]);
+        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 241, &mut selector);
+        let VideoAdmission::Refused { message, .. } = verdict else {
+            panic!("expected refusal, got {verdict:?}");
+        };
+        assert!(message.contains("1280x704 x 241 frames"), "{message}");
+        assert!(!message.contains("single-pass decode limit"), "{message}");
+    }
+
+    /// Never block without evidence: an ungradable request is not a refusal.
+    #[test]
+    fn video_admission_is_undecidable_when_nothing_is_gradable() {
+        let mut selector = ScriptedSelector::new(Vec::new());
+        assert_eq!(
+            video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 241, &mut selector),
+            VideoAdmission::Undecidable
+        );
+        assert_eq!(selector.seen.len(), 1, "the geometry was still offered");
+    }
+
+    /// An undecidable geometry contributes nothing rather than vetoing a decided sibling.
+    #[test]
+    fn one_undecidable_geometry_does_not_veto_a_decided_one() {
+        let mut selector =
+            ScriptedSelector::new(vec![(297, selected(StrategyRung::StagedResidency, 70.0))]);
+        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+        let VideoAdmission::Admitted { rung, geometry, .. } = verdict else {
+            panic!("expected admission, got {verdict:?}");
+        };
+        assert_eq!(rung, StrategyRung::StagedResidency);
+        assert_eq!(geometry.role, VideoGeometryRole::SinglePassDecodeCap);
+    }
+
+    /// A family with no route on the lane gets NO memory decision — distinct from a refusal, and
+    /// the selector is never even called.
+    #[test]
+    fn an_unrouted_family_gets_no_decision_on_that_lane() {
+        // 49 frames at 768x512 is under the Wan z16 VAE's 56-frame single-pass cap, so the graded
+        // set is one geometry and the selector-call count below is unambiguous.
+        let mut selector = ScriptedSelector::new(vec![(49, selected(StrategyRung::Resident, 1.0))]);
+        assert_eq!(
+            video_admission(
+                "krea_realtime_14b",
+                VideoLane::Candle,
+                768,
+                512,
+                49,
+                &mut selector,
+            ),
+            VideoAdmission::NotRouted
+        );
+        assert!(
+            selector.seen.is_empty(),
+            "an unrouted family must not reach the selector"
+        );
+        // The same model on the lane it IS routed on reaches the selector, so the assertion above
+        // is about the LANE and not about the model being unknown.
+        assert!(matches!(
+            video_admission(
+                "krea_realtime_14b",
+                VideoLane::Mlx,
+                768,
+                512,
+                49,
+                &mut selector,
+            ),
+            VideoAdmission::Admitted {
+                rung: StrategyRung::Resident,
+                ..
+            }
+        ));
+        assert_eq!(selector.seen.len(), 1);
+    }
+
+    /// The frame count reaching the gate is the one the engine renders, so the gate and the asset
+    /// sidecar cannot disagree about which geometry was admitted.
+    #[test]
+    fn the_graded_frame_count_is_the_engine_snapped_one() {
+        let snapped = ltx_frame_count(305);
+        assert_eq!(snapped, 305, "305 = 8*38 + 1 is already on the LTX lattice");
+        let geometries = video_admission_geometries("ltx_2_3", 1280, 704, snapped);
+        assert_eq!(geometries[0].frames, snapped);
+        // And the cap itself is on the same lattice, so admitting at it is a geometry the engine
+        // could actually be asked for.
+        assert_eq!(ltx_frame_count(297), 297);
     }
 }

@@ -150,8 +150,20 @@ mod fit_gate;
 // `scripts/derive-ladder-margins.test.mjs`.
 pub mod ladder_margin_policy;
 pub mod memory_strategy;
+// The worker half of the VIDEO memory gate (sc-18814, epic 18803): implements
+// `sceneworks_core::video_request`'s selector seam by calling `memory_strategy::select_strategy`.
+// Cross-platform on purpose — the video lane spans both backends and the gate must not imply the
+// two are symmetric, so one module serves both and names the difference explicitly.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod video_admission;
 // The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
 // training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
