@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "ae8ae4f6a869e73659cc876e4ae75a93ce20e8e8",
+    "inferenceRevision": "20bff896e562e9850e4d3f16956d345337e1d0aa",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [

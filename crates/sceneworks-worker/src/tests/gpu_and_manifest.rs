@@ -1953,8 +1953,8 @@ fn sd3_5_manifest_entries_gate_correctly() {
 /// family `sana`, text-to-image plus non-edit image-to-image, the UN-gated
 /// `SceneWorks/Sana_1600M_1024px_mlx` MLX re-host (NOT gated — the mirror carries the NVIDIA
 /// non-commercial NOTICE), dense bf16 (NO `mlx.quantize` — the load path rejects a quant), the
-/// `mlx.minMemoryGb` memory-eligibility lever, the sana LoRA family, and the NVIDIA non-commercial
-/// notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
+/// `mlx.minMemoryGb` memory-eligibility lever, no unsupported LoRA advertisement, and the NVIDIA
+/// non-commercial notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
 /// shipped) so manifest drift on any of these levers fails CI without a real download. The
 /// descriptor-derived guidance/negative/backend surface is covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
@@ -2024,18 +2024,12 @@ fn sana_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet) — an empty list would match every
-    // LoRA (sc-1927).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana loraCompatibility.families"
+    // SANA adapters are not wired. Do not advertise a reserved LoRA family: the request router
+    // rejects LoRA carriers fail-closed, so surfacing an adapter picker here would promise an
+    // operation the worker intentionally refuses.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
@@ -2051,8 +2045,8 @@ fn sana_manifest_entry_gates_correctly() {
 
 /// sc-8490/sc-18475: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family,
 /// text-to-image plus non-edit image-to-image, un-gated `SceneWorks/*` MLX
-/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and the
-/// SANA LoRA family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
+/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and no
+/// unsupported LoRA advertisement. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
 /// loop fails CI. Descriptor-derived guidance/negative/backend flags are covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
 #[test]
@@ -2126,17 +2120,10 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana-sprint mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana-sprint loraCompatibility.families"
+    // Sprint shares the same fail-closed adapter contract as base SANA.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana-sprint must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
