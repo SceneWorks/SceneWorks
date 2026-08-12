@@ -3,6 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
@@ -144,9 +145,14 @@ test("Windows Krea provisioning accepts supported newer Python 3 runtimes", asyn
 
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
-  assert.match(
+  // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
+  // is outside `default-members`, so a plain `cargo test` never reaches it either. Under the old
+  // selector the shared protocol guards in src/lib.rs executed in ZERO lanes on either platform.
+  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle$/m);
+  assert.doesNotMatch(
     workflow,
-    /cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter/,
+    /cargo test -p sceneworks-memory-adapter --features candle --bin/,
+    "a --bin selector on the TEST step drops the lib target, where the shared protocol guards live",
   );
   assert.match(workflow, /console\.log\(JSON\.stringify\(a,null,2\)\)/);
   assert.match(workflow, /'amortizable','unable_to_amortize'/);
@@ -163,10 +169,42 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   assert.ok(hostedStart >= 0, "macos-checks job not found");
   assert.ok(hostedEnd > hostedStart, "nax-worker must follow macos-checks");
   const hosted = workflow.slice(hostedStart, hostedEnd);
+  // Same no-`--bin` rule as the Candle twin above (sc-18808 review). `--bin memory-mlx-adapter`
+  // silently drops the crate's lib test target; `memory-candle-adapter` still stays out on its own
+  // `required-features = ["candle"]`, so omitting the selector widens coverage without widening the
+  // lane's platform surface.
   assert.match(
     hosted,
-    /^ {6}- name: Test the MLX memory adapter \(memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter$/m,
+    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx$/m,
   );
+  assert.doesNotMatch(
+    hosted,
+    /cargo test -p sceneworks-memory-adapter --features mlx --bin/,
+    "a --bin selector drops the lib target, where the shared protocol guards live",
+  );
+});
+
+// The third `--bin` guard (sc-18808 review), and the one that actually runs on a feature-targeted
+// PR. The two above pin CI workflows that do NOT: windows-candle.yml has no `pull_request` trigger
+// for these branches, so `check.yml`'s hosted `candle` job — which is just
+// `scripts/check-candle-build.mjs` — is the ONLY candle-configured compiler a PR here reaches.
+// `cargo check --bin` does not compile `#[cfg(test)]`, so under the narrow selector the crate's
+// candle test module was not typechecked in any PR-reachable lane at all: a test that failed to
+// compile merged green and first broke on the self-hosted `cuda` pool ~24m later.
+test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not just its bin", async () => {
+  const script = await source("scripts/check-candle-build.mjs");
+  assert.match(
+    script,
+    /\["check", "-p", "sceneworks-memory-adapter", "--features", "candle", "--all-targets"\]/,
+  );
+  assert.doesNotMatch(
+    script,
+    /"--bin",\s*\n?\s*"memory-candle-adapter"/,
+    "`cargo check --bin` skips #[cfg(test)] — the candle test module would go untypechecked on PRs",
+  );
+  // And this script is genuinely the lane that runs: check.yml must still call it.
+  assert.match(await source(".github/workflows/check.yml"), /run: npm run rust:check:candle$/m);
+  assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
 });
 
 test("Docker relevance gate paginates and checks for truncated file lists", async () => {
@@ -1685,6 +1723,95 @@ test("the FLUX.2 composition audit still runs, and is still wired into a lane", 
     workerLib,
     /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod flux2_composition_audit;/,
     "an undeclared module is compiled by no lane, so the composition check would vanish in silence",
+  );
+});
+
+// sc-18808 review. The MLX LTX arm hand-copies four `limits.*` values out of
+// config/manifests/builtin.models.jsonc — LTX_RESOLUTIONS, LTX_DURATIONS_SECONDS, LTX_FPS and
+// LTX_DIMENSION_MULTIPLE — and DERIVES its accepted frame envelope `[97, 449]` from the durations x
+// fps cross product. The derivation was the point: the envelope is not written down. But nothing
+// bound the four inputs, so a limits edit in the manifest would leave the derived envelope stale and
+// silently change what a real-weight video capture admits, with no test anywhere going red.
+//
+// The adapter crate deliberately carries two dependencies (serde_json + sha2) and cannot take
+// sceneworks-core's bundled SQLite / image codecs just to reach `strip_jsonc_comments`, so the
+// binding lives here, where the manifest reader already exists and `npm run check` runs it on every
+// PR. Every extraction below asserts it MATCHED before it compares — a renamed constant must red,
+// not silently pass with nothing to check.
+test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+
+  const rustConst = (name) => {
+    const start = adapter.indexOf(`const ${name}`);
+    assert.ok(start >= 0, `${name} must still exist in the MLX adapter`);
+    const equals = adapter.indexOf("=", start);
+    const end = adapter.indexOf(";", equals);
+    assert.ok(equals > start && end > equals, `${name} must be a simple const initializer`);
+    return adapter.slice(equals + 1, end).trim();
+  };
+  // `[(768, 512), ...]` is a Rust tuple array; `(`/`)` -> `[`/`]` makes it JSON.
+  const rustTuples = (name) => JSON.parse(rustConst(name).replaceAll("(", "[").replaceAll(")", "]"));
+
+  const providerId = JSON.parse(rustConst("LTX_PROVIDER"));
+  assert.equal(providerId, "ltx_2_3");
+  const model = manifest.models.find((entry) => entry.id === providerId);
+  assert.ok(model, `builtin.models.jsonc must still declare ${providerId}`);
+  const limits = model.limits;
+  assert.ok(limits, `${providerId} must still declare a limits block`);
+
+  assert.deepEqual(
+    rustTuples("LTX_RESOLUTIONS"),
+    limits.resolutions.map((size) => size.split("x").map(Number)),
+    "LTX_RESOLUTIONS is a verbatim copy of limits.resolutions",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("LTX_DURATIONS_SECONDS")),
+    limits.durations,
+    "LTX_DURATIONS_SECONDS is a verbatim copy of limits.durations",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("LTX_FPS")),
+    limits.fps,
+    "LTX_FPS is a verbatim copy of limits.fps",
+  );
+  assert.equal(
+    Number(rustConst("LTX_DIMENSION_MULTIPLE")),
+    limits.requiresDimensionsMultipleOf,
+    "LTX_DIMENSION_MULTIPLE is limits.requiresDimensionsMultipleOf",
+  );
+
+  // ... and the envelope those four inputs feed. Recomputed here from the MANIFEST through the same
+  // nearest-8k+1 ladder `sceneworks_core::video_request::ltx_frame_count` implements, so a limits
+  // edit is caught as a changed ENVELOPE — what the arm actually admits — and not merely as a
+  // changed constant.
+  const snap = (raw) => {
+    const frames = Math.max(raw, 9);
+    const lower = frames - ((frames - 1) % 8);
+    const upper = lower + 8;
+    if (lower < 9) return upper;
+    return frames - lower <= upper - frames ? lower : upper;
+  };
+  const reachable = limits.durations.flatMap((duration) =>
+    limits.fps.map((fps) => snap(duration * fps)),
+  );
+  assert.match(
+    adapter,
+    /const LTX_FRAME_ENVELOPE: \(u32, u32\) = ltx_frame_envelope\(\);/,
+    "the frame envelope must stay DERIVED from the declared arrays, not written down",
+  );
+  const envelopeTestAt = adapter.indexOf(
+    "fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps(",
+  );
+  assert.ok(envelopeTestAt >= 0, "the envelope derivation test must still exist");
+  assert.match(
+    adapter.slice(envelopeTestAt, envelopeTestAt + 600),
+    new RegExp(
+      `assert_eq!\\(LTX_FRAME_ENVELOPE, \\(${Math.min(...reachable)}, ${Math.max(...reachable)}\\)\\)`,
+    ),
+    "the pinned envelope must equal the one the shipped limits actually reach",
   );
 });
 

@@ -1,0 +1,37 @@
+{
+  "_comment": "sc-18808 standalone capture plan for the first VIDEO calibration lane, mlx:ltx_2_3. It is deliberately NOT in config/memory-calibration-plan.json: generate-memory-matrix.mjs resolves its coordinate universe from manifest.models.filter(m => m.type === \"image\"), so a video plan entry matches no coordinate and assertCalibrationPlanTargetsResolvedCoordinates fails the check gate closed. Moving this row into the shipped plan is sc-18817's job, once sc-18815 has made the matrix modality-aware. Drive it with: node scripts/memory-calibration-harness.mjs run --config docs/calibration/sc-18808/ltx-mlx-video-capture-plan.json --backend mlx --fresh-per-case --provider-command '[\"<target>/release/memory-mlx-adapter\"]' --sceneworks-repo <repo> --inference-repo <inference-at-pin> --output <outside-the-repo>.json",
+  "providers": [
+    {
+      "name": "mlx-ltx-2-3-q8-staged-768x512-f97",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 97
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f97-fps24-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    }
+  ]
+}

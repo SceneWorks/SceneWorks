@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:43af05c79e2cef00bbaaebecb17e56a32432eb18e8828d8236c661fcc12c339a",
+    "sceneWorksRevision": "source-tree:febdf09628648817082d6d7a2b33c85292bea03db994df363ef521a5e0aeb66c",
     "inferenceRevision": "b965641e388f4db646e4c60ab3f75219737e2cc8",
     "sources": {
       "manifest": {
@@ -54,7 +54,7 @@
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "a2a97c4b570bda63ad6dceb50026855886ba999fdce4a172f9ffd55c712c8b92"
+        "sha256": "4165afa07f9588e751400b3957a18d666132209d43f176e41a6cc0ea0bfd614e"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",

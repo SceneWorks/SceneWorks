@@ -12,7 +12,7 @@
     "check:evidence-corpus": "node scripts/check-evidence-corpus.mjs --self-test && node scripts/check-evidence-corpus.mjs",
     "generate:memory-matrix": "node scripts/generate-memory-matrix.mjs",
     "check:memory-matrix": "node scripts/generate-memory-matrix.mjs --check",
-    "check:memory-calibration": "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json",
+    "check:memory-calibration": "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/ltx-mlx-video-sc-18808.json",
     "report:stale-lanes": "node scripts/stale-lane-report.mjs",
     "check:rust-derived-docs": "npm run check:memory-matrix && npm run check:tier-integrity",
     "generate:tier-integrity": "node scripts/check-tier-integrity.mjs",
