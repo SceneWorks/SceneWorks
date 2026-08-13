@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "8428c64dc15e8331225d17e7c0def25ddc4551a0",
+    "inferenceRevision": "cb8e61c90c1b313c2b9a71a4916c0aad52781cc4",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -104,7 +104,70 @@
     },
     {
       "modelId": "ltx_2_3",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "image_to_video",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
       "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "video_bridge",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "image_to_video",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "replace_person",
       "engineIds": [
         "ltx_2_3_distilled"
       ]
@@ -112,6 +175,13 @@
     {
       "modelId": "ltx_2_3_eros",
       "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "video_bridge",
       "engineIds": [
         "ltx_2_3_distilled"
       ]
@@ -142,6 +212,20 @@
       "mode": "extend_clip",
       "engineIds": [
         "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "wan2_2_ti2v_5b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "image_to_video",
+      "engineIds": [
+        "wan2_2_ti2v_5b"
       ]
     },
     {
@@ -219,6 +303,13 @@
       "mode": "video_bridge",
       "engineIds": [
         "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_vace_fun_14b",
+      "mode": "replace_person",
+      "engineIds": [
+        "wan2_2_vace_fun_14b"
       ]
     }
   ],
@@ -323,6 +414,7 @@
       "wan2_2_t2v_14b",
       "wan2_2_i2v_14b",
       "wan_vace",
+      "wan2_2_vace_fun_14b",
       "z_image_turbo",
       "z_image"
     ],
@@ -1159,9 +1251,14 @@
         "family": "ltx",
         "backend": "candle",
         "modality": "video",
-        "conditioning": [],
+        "conditioning": [
+          "reference",
+          "keyframe",
+          "videoClip",
+          "controlClip"
+        ],
         "supports_lora": true,
-        "supports_lokr": false,
+        "supports_lokr": true,
         "supported_quants": [],
         "supports_preview": false,
         "supports_prompt_enhancement": false,
@@ -1739,7 +1836,10 @@
         "family": "wan",
         "backend": "candle",
         "modality": "video",
-        "conditioning": [],
+        "conditioning": [
+          "reference",
+          "keyframe"
+        ],
         "supports_lora": true,
         "supports_lokr": true,
         "supported_quants": [
@@ -1817,6 +1917,28 @@
         ],
         "supports_lora": false,
         "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "uni_pc",
+          "euler",
+          "unipc"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "wan2_2_vace_fun_14b",
+        "family": "wan",
+        "backend": "candle",
+        "modality": "video",
+        "conditioning": [
+          "controlClip",
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
         "supported_quants": [],
         "supports_preview": false,
         "supports_prompt_enhancement": false,

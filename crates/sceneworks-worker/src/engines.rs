@@ -1319,8 +1319,7 @@ mod tests {
     /// dispatch) and the candle map (`candle_video_engine_id`) in `video_jobs`. LTX is backend-split
     /// (`ltx_2_3` on mlx, `ltx_2_3_distilled` on candle) and `ltx_2_3_eros` shares the base engine id
     /// per backend; the resolver lists both and picks whichever the active registry actually holds.
-    /// `wan_2_2_vace_fun_14b` is mlx-only (candle has no VACE engine), so it resolves to `None` on the
-    /// candle lane and is skipped there.
+    /// VACE-Fun uses the same dedicated `wan2_2_vace_fun_14b` provider id on both native backends.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -1536,8 +1535,7 @@ mod tests {
             // The advertised sampler/scheduler menu the engine honors, from whichever source applies:
             // image models via MODEL_TABLE (`mlx_model`); video models via their engine-id map
             // (`video_descriptor`); the bespoke out-of-MODEL_TABLE image models (InstantID / PuLID,
-            // sc-7432) via `bespoke_advertised`. A model with no source on the active backend is skipped
-            // (e.g. the mlx-only `wan_2_2_vace_fun_14b` on the candle lane).
+            // sc-7432) via `bespoke_advertised`. A model with no source on the active backend is skipped.
             let Some((adv_samplers, adv_schedulers, adv_guidance)) = mlx_model(id)
                 .map(|resolved| resolved.descriptor)
                 .or_else(|| video_descriptor(id))
@@ -2089,12 +2087,12 @@ mod tests {
     /// assumption while SceneWorks continues routing adapter-bearing jobs here.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    fn candle_ltx_descriptor_advertises_user_lora_inference() {
+    fn candle_ltx_descriptor_advertises_user_adapter_inference() {
         let descriptor = video_descriptor("ltx_2_3")
             .expect("ltx_2_3 must resolve to the candle ltx_2_3_distilled descriptor");
         assert_eq!(descriptor.id, "ltx_2_3_distilled");
         assert!(descriptor.capabilities.supports_lora);
-        assert!(!descriptor.capabilities.supports_lokr);
+        assert!(descriptor.capabilities.supports_lokr);
     }
 
     /// sc-11991 (epic 1788): `mochi_1` resolves through THIS module to a real gen-core descriptor on

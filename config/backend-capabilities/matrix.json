@@ -3,8 +3,8 @@
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
     "modelCount": 91,
-    "cellCount": 868,
-    "mlxOnlyCellCount": 124,
+    "cellCount": 866,
+    "mlxOnlyCellCount": 83,
     "candleOnlyCellCount": 41,
     "exceptionCount": 0
   },
@@ -13,18 +13,18 @@
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
     "apiGeneration": "fdf2170b59442994679decea4516c80658c2c407326d6f6a72444ead30e30ff6",
     "apiValidation": "4057d142373904f43546de63248b2dd9cd016998df901664921051fd80df7be2",
-    "descriptorAudioFacts": "8fdd9f42086295e35e9ad57f19decce27d6aba029fbfb93c36eff9a62c46349b",
-    "descriptorCandleFacts": "74ce256fe10d0632cf5ebd930e3521007f9b3f7a24e8cec2dee5484f72eea7c6",
-    "descriptorCandleRuntime": "8c35ac3ec8cdbff8111588d0ff4829a31865a7e4cda12dd0c8fc4b36da25964c",
-    "descriptorMlxFacts": "f5fa3ef70d6a4444994193640f26b5152e05bb4b0fd65db8ba783626d4dd68d5",
-    "descriptorMlxRuntime": "c3daad70fe74ce7aba5ac342a2b6f60932118c5829973d771a6954dfcc92daab",
-    "descriptorPreviewFacts": "8658bd494caa9ba9582b7b50619c5e2fcf6e04e5f37b06d0a0ba9a7700799c38",
+    "descriptorAudioFacts": "e330a692dd7f3ac1c201b385853b69fac84ad8aa5a6cb589b216fb90e4659f3a",
+    "descriptorCandleFacts": "3ea6cef0917dfbd32b00085a0e620686a1dc1be6f8025c40be8a67964ca95383",
+    "descriptorCandleRuntime": "3ad7e1179591d10235273ea85794f6eb2fc44cb8677f228b9af1ab367ffcc2b7",
+    "descriptorMlxFacts": "21e2e76df23482c60729002ccff4a2d43b4aa0716d31a1bfc678b4f750c0b8a9",
+    "descriptorMlxRuntime": "3bfbfc7e33f6714af2386faf430222ca00a0278565331e3796d9099db88fbca7",
+    "descriptorPreviewFacts": "24b1350eb13bc8ad4d6d3ca56c21074565bf22b23d72bbcae4b508e0b73d5582",
     "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
-    "manifest": "e82ffbd0016f22c065fa77d95dcc1b32d99e052d662a8e82bad5e12a2acdf70d",
-    "routerCandle": "3d78abed88706432cb09cb072abf557cf340874aca0011dcaad8dfd240784578",
-    "routerCatalog": "3135599886b30cbffefdfdda1cb97e37bd6f6a549ba9ab0ea5f82fd86e05b10f",
+    "manifest": "c53549dcf212c424daa861d6f2b9bbf64647293880e2c0862eac022e33aa06d3",
+    "routerCandle": "7832b891d9fb87ee593afcbc098c6577d2118a629c7a54138ac942bb74ac9ef0",
+    "routerCatalog": "e2bf1d34b6beff854d6b3e8b37328e9a9e3c810443932853413a9d472bdc4c41",
     "routerGaps": "e2b2fa7a5fe90832ff46f6de3fdf29a71c28ef5ed5e63b0faebe2dfbf51b99f1",
-    "routerMlx": "cb9ae8bb3a39360bf039b22e3b52781304c089a2adfe0f78b2b22da12e089d87",
+    "routerMlx": "47b5a603778b7feeff45b4c471e182ba83d82ab47a9cff8d4ec85fb7b1e66bbe",
     "scheduler": "92af1d98bfc4ca7ae4ec7c8ee63aa37a02c66393b0b2ee6614acd58c3373dba6",
     "trainingCatalog": "783b049b02a0e4085ddc0a4c59ace7b1093a6cc919fe26625109abf884b60a49",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
@@ -37,27 +37,27 @@
     "webSimpleJobs": "bba715b793b6fbe6a644d4db31172e3a8a3fc9c8d93fede22767a2989b09dd27",
     "webSimpleVideo": "b75c0a2b754e8f3288d569548e33df6e9889d7a4813b64a83557a0baeb329637",
     "webUpscaleEngines": "31f3e26fbd009954126a324ea37dc9e2e1a9fa89955620c50794fb2df1ec40d4",
-    "webVideoStudio": "2e7f20c353bcab79e299a3dbc39a0aae064869822e324220250eec875fcf21c1",
+    "webVideoStudio": "86ee842bbb5a59029f7b96b84ea928e539becae126a42a6a7e1fd7969ea5fed5",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
-    "webVideoValidation": "1650a576cbe0a080e70e466f71a26e9d7b599379987e891385b2d33bab86cea9",
+    "webVideoValidation": "96e4706c436f7d61ea378ece6aabb328e0dd5531272bf6b00b8368aa7c064a9c",
     "workerAudioDispatch": "1679977fd1fbd9427572df035fd32e2644f79363eadceef90305ea54083043b1",
     "workerDispatch": "e39682f095cb924ebe555d688af3c5d704c2acb60451da606e7d408c0faf300b",
-    "workerEngineTable": "6b59d7ebcd46601465ed9d67bf62e3347cdab7555b745b6203bae447946afcc7",
+    "workerEngineTable": "78a2f8c833abaea291f5fb7901224caa3d018e570da9044952e5177e1736ef25",
     "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
     "workerImageDispatch": "d297780579c42c0d60a887e4cca5a3ac03cb6d9c904520a6a44b95b5f395940c",
     "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "352991ae26c8d842c9af1c37e9c6d3261ae6554debe5089744ef8e7972fd15ed",
-    "workerVideoCandle": "209e2e9760c8e3afc1482855a4c0052e6575d305542677a8782dc099a34f8f30",
-    "workerVideoDispatch": "8686346f7e665ab8974d3bd7316826d8b3cac9699719a722c7ef225c750dc183",
+    "workerVideoCandle": "5ed923d9c38891293e3401bfd1103fc1e82a93902ce11fbd5787620208f7a1ef",
+    "workerVideoDispatch": "9bb7813013171f23145ab66aa38224fff68b38e7faa8296f9864fa0f015a8949",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "9971e3df9b78ca4fc4007ba5d22226cf2f078c0ff649c8feeeec7b71ab3ef054",
+    "workerVideoLtx": "f34450f4e5dcd09d9dea2cc6917381ef9cf8c0796dfccb215270df0e0dd9feac",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
-    "workerVideoScail2": "52f560272ff42dca5568b41e3d732d63215616cb03aa102243ed7dc67d25ace0",
+    "workerVideoScail2": "49e53adb08ea322e674150e6f2d6eb7183e915d6df2b6eb3e5ffd3c6acaa24a2",
     "workerVideoSeedvr2": "632d4afe9649858e8f73d226c46276a3222a2c129f2a3afabd24b0640727e0cf",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
-    "workerVideoWan": "3ed36c07dd84ed016735ead3aaf0377164be134359e268c729fa975e20c67e83"
+    "workerVideoWan": "3585d72cb36e80b9dd13e66942a9ac8be6fc7a3064c781f9976e816b1635d3fd"
   },
   "models": [
     {
@@ -2589,29 +2589,17 @@
         {
           "capability": "extend_clip",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "first_last_frame",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "image_to_video",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "multi_video_to_video",
@@ -2631,11 +2619,7 @@
         {
           "capability": "replace_person",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "text_to_video",
@@ -2645,11 +2629,7 @@
         {
           "capability": "video_bridge",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "video_to_video",
@@ -2661,42 +2641,22 @@
         {
           "capability": "controlClip",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "keyframe",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "reference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "videoClip",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         }
       ],
       "userAdapters": [
@@ -2708,11 +2668,7 @@
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -2724,12 +2680,7 @@
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
@@ -2780,29 +2731,17 @@
         {
           "capability": "extend_clip",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "first_last_frame",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "image_to_video",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "multi_video_to_video",
@@ -2822,11 +2761,7 @@
         {
           "capability": "replace_person",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "text_to_video",
@@ -2836,11 +2771,7 @@
         {
           "capability": "video_bridge",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "video_to_video",
@@ -2852,42 +2783,22 @@
         {
           "capability": "controlClip",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "keyframe",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "reference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "videoClip",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         }
       ],
       "userAdapters": [
@@ -2899,11 +2810,7 @@
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -2911,16 +2818,6 @@
           "capability": "bf16",
           "mlx": true,
           "candle": true
-        },
-        {
-          "capability": "q4",
-          "mlx": false,
-          "candle": false
-        },
-        {
-          "capability": "q8",
-          "mlx": false,
-          "candle": false
         }
       ],
       "preview": {
@@ -5340,20 +5237,12 @@
         {
           "capability": "first_last_frame",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "image_to_video",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "multi_video_to_video",
@@ -5400,12 +5289,7 @@
         {
           "capability": "keyframe",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "reference",
@@ -5417,20 +5301,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -5442,22 +5318,12 @@
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "preview": {
@@ -5583,22 +5449,12 @@
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "preview": {
@@ -5725,22 +5581,12 @@
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "preview": {
@@ -5811,11 +5657,7 @@
         {
           "capability": "replace_person",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "text_to_video",
@@ -5837,54 +5679,31 @@
         {
           "capability": "controlClip",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "reference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-8588"
-          }
+          "candle": true
         }
       ],
       "userAdapters": [
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",
@@ -5910,7 +5729,7 @@
       "preview": {
         "capability": "live_preview",
         "mlx": false,
-        "candle": null
+        "candle": false
       }
     },
     {
@@ -6372,12 +6191,8 @@
       "requests": [
         {
           "capability": "representative_request",
-          "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18480",
-            "url": "https://app.shortcut.com/trefry/story/18480"
-          }
+          "mlx": false,
+          "candle": false
         }
       ]
     },
@@ -6453,12 +6268,8 @@
       "requests": [
         {
           "capability": "representative_request",
-          "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18480",
-            "url": "https://app.shortcut.com/trefry/story/18480"
-          }
+          "mlx": false,
+          "candle": false
         }
       ]
     },
@@ -6468,12 +6279,8 @@
       "requests": [
         {
           "capability": "representative_request",
-          "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18480",
-            "url": "https://app.shortcut.com/trefry/story/18480"
-          }
+          "mlx": false,
+          "candle": false
         }
       ]
     },

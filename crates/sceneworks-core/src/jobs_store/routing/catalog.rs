@@ -878,19 +878,21 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
 /// Legend for the [`VideoModelCaps::new`] positional args:
 /// `new(id, video_mlx_routed, candle_video_routed, candle_video_i2v, candle_video_vace)`.
 pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
-    // LTX-2.3 base + eros (sc-3035 MLX; sc-5097 / sc-5495 candle): txt2video on both backends.
+    // LTX-2.3 base + eros (sc-18478): both native backends serve T2V, I2V, FLF, extend, bridge,
+    // replacement, and user adapters. These are dual-mode models, so they remain outside the legacy
+    // `candle_video_i2v` column, whose meaning is I2V-only; the per-mode gate owns the richer shape.
     VideoModelCaps::new("ltx_2_3", true, true, false, false),
     VideoModelCaps::new("ltx_2_3_eros", true, true, false, false),
-    // Wan2.2 TI2V-5B (sc-3034 MLX; sc-5097 candle): txt2video + VACE advanced modes on candle.
+    // Wan2.2 TI2V-5B (sc-18478): T2V plus native I2V/FLF and user adapters on both backends. Its
+    // legacy VACE membership remains for the established extend/bridge fallback.
     VideoModelCaps::new("wan_2_2", true, true, false, true),
     // Wan2.2 14B MoE (sc-5175): T2V-14B is text-only; I2V-14B is image→video ONLY (candle_video_i2v).
     // Both are VACE-capable on candle.
     VideoModelCaps::new("wan_2_2_t2v_14b", true, true, false, true),
     VideoModelCaps::new("wan_2_2_i2v_14b", true, true, true, true),
-    // Wan2.2 VACE-Fun A14B (sc-3459 / sc-6604): the shipped dual-expert model is a dedicated
-    // MLX replace-person engine. The worker resolves it before the generic Wan-VACE fallback and
-    // fails loudly off-Mac, so only the MLX column is true; its sole admitted mode is pinned by
-    // `video_mode_is_mlx_eligible`.
+    // Wan2.2 VACE-Fun A14B (sc-18478): dedicated dual-expert replace-person providers on both native
+    // backends. Like SCAIL-2 below, this is deliberately absent from the base Candle and generic
+    // single-expert VACE columns: its dedicated predicate admits PersonReplace only.
     VideoModelCaps::new("wan_2_2_vace_fun_14b", true, false, false, false),
     // SVD (`svd` → `svd_xt`, sc-3523 MLX; sc-5493 candle): image→video ONLY. Not a VACE model.
     VideoModelCaps::new("svd", true, true, true, false),

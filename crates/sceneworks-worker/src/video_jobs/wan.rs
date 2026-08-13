@@ -1,17 +1,21 @@
-#[cfg(target_os = "macos")]
-use super::ltx::resolve_clip_media_path;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use super::ltx::resolve_keyframe_conditioning;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::{
     bernini::{bernini_engine_id, resolve_bernini_model_dir},
     krea_realtime::{krea_realtime_engine_id, resolve_krea_realtime_tier_dir_and_quant},
-    ltx::{ltx_engine_id, resolve_keyframe_conditioning, resolve_ltx_model_dir},
+    ltx::{ltx_engine_id, resolve_ltx_model_dir},
     mochi::{mochi_engine_id, resolve_mochi_model_dir},
     scail2::{resolve_scail2_model_dir, scail2_engine_id},
     svd::{resolve_svd_model_dir, svd_engine_id},
-    vace::FRAME_PAD_COLOR,
 };
+#[cfg(target_os = "macos")]
+use super::{ltx::resolve_clip_media_path, vace::FRAME_PAD_COLOR};
 
 // ---------------------------------------------------------------------------
 // Real MLX Wan2.2 generation (macOS, via mlx-gen-wan, sc-3034): T2V/TI2V (5B
@@ -622,7 +626,7 @@ pub(super) fn resolve_wan_adapters(
         )));
     }
     let is_wan_a14b = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
-    let is_moe = is_wan_a14b || engine_id == "bernini";
+    let is_moe = is_wan_a14b || matches!(engine_id, "bernini" | "wan2_2_vace_fun_14b");
     let mut specs: Vec<AdapterSpec> = Vec::new();
 
     // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied per-expert at
@@ -738,7 +742,10 @@ pub(super) fn resolve_scail2_adapters(
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
 /// the TI2V-5B (present → image-conditioned mask-blend, absent → pure T2V), and ignored
 /// by the T2V-14B (text-only). Loads `source_asset_id` to an in-memory RGB8 image.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_wan_conditioning(
     settings: &Settings,
     request: &VideoRequest,
@@ -756,7 +763,27 @@ pub(super) fn resolve_wan_conditioning(
         }
         return resolve_keyframe_conditioning(settings, request, project_path);
     }
-    let required = engine_id == "wan2_2_i2v_14b";
+    if engine_id == "wan2_2_ti2v_5b" {
+        match request.mode.as_str() {
+            "text_to_video"
+                if request.source_asset_id.is_some() || request.last_frame_asset_id.is_some() =>
+            {
+                return Err(WorkerError::InvalidPayload(
+                    "wan_2_2 text-to-video must not carry sourceAssetId or lastFrameAssetId; select image_to_video or first_last_frame explicitly."
+                        .to_owned(),
+                ));
+            }
+            "image_to_video" if request.last_frame_asset_id.is_some() => {
+                return Err(WorkerError::InvalidPayload(
+                    "wan_2_2 image-to-video must not carry lastFrameAssetId; select first_last_frame explicitly."
+                        .to_owned(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let required = engine_id == "wan2_2_i2v_14b"
+        || (engine_id == "wan2_2_ti2v_5b" && request.mode == "image_to_video");
     let accepts = required || engine_id == "wan2_2_ti2v_5b";
     if !accepts {
         return Ok(Vec::new());
@@ -783,9 +810,10 @@ pub(super) fn resolve_wan_conditioning(
                 strength: None,
             }])
         }
-        None if required => Err(WorkerError::InvalidPayload(
-            "wan_2_2_i2v_14b: image-to-video requires a source image (sourceAssetId).".to_owned(),
-        )),
+        None if required => Err(WorkerError::InvalidPayload(format!(
+            "{}: image-to-video requires a source image (sourceAssetId).",
+            request.model
+        ))),
         None => Ok(Vec::new()),
     }
 }
@@ -1289,7 +1317,8 @@ pub(super) struct VideoGenInput {
     /// sc-14625 for its conditioner → UNet → VAE lifecycle.
     pub(super) offload_policy: OffloadPolicy,
     /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
-    /// SCAIL Candle sets it; every other video family leaves it `None`. It is deliberately outside
+    /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
+    /// it `None`. It is deliberately outside
     /// `LoadSpec`/the cache key: request-time free VRAM must be re-evaluated for a miss, while an exact
     /// resident key (including precision/adapters/layout) bypasses the cold-load gate.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

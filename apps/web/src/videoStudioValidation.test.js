@@ -66,7 +66,7 @@ describe("videoGenerateValidation", () => {
 
   it("surfaces the LTX IC-LoRA requirement only when required and absent", () => {
     expect(summarize(videoGenerateValidation({ ...whole, requiresLtxIcLora: true, hasLtxIcLora: false })).surfaced[0].message).toContain(
-      "IC-LoRA preset",
+      "selected IC-LoRA adapter",
     );
     // Required but present → no issue.
     expect(summarize(videoGenerateValidation({ ...whole, requiresLtxIcLora: true, hasLtxIcLora: true })).ready).toBe(true);

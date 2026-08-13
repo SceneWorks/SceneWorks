@@ -2,7 +2,10 @@
 use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{
-    ltx::resolve_ltx_user_adapters,
+    ltx::{
+        resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
+        resolve_video_clip_conditioning,
+    },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
         mochi_vram_precheck, resolve_mochi_model_dir, validate_mochi_mode, MOCHI_REPO,
@@ -16,15 +19,15 @@ use super::{
     },
     wan::{
         advanced_opt_f32, advanced_opt_u32, ensure_wan_lightning_present, generate_video,
-        generate_video_using, resolve_scail2_adapters, resolve_wan_adapters, scail2_sampling,
-        wan_lightning_on, wan_sampling, ClipFramePosition, ComfyuiWanExperts, VideoGenInput,
+        generate_video_using, resolve_scail2_adapters, resolve_wan_adapters,
+        resolve_wan_conditioning, scail2_sampling, video_load_spec, wan_lightning_on, wan_sampling,
+        ClipFramePosition, ComfyuiWanExperts, VideoGenInput,
     },
 };
 
 // ---------------------------------------------------------------------------
-// Candle (Windows/CUDA) video lane (sc-5097, epic 5095). The candle wan/ltx providers serve a narrow
-// **txt2video-only** first slice (no image/VACE conditioning or on-the-fly quant). LTX and Wan-14B
-// accept provider-native user LoRAs; Wan-5B, SVD, and Mochi do not. This is the
+// Candle (Windows/CUDA) video lane. LTX/Eros and Wan5 serve their native conditioned modes and
+// adapters; Wan14 keeps its existing T2V/I2V surfaces; SVD and Mochi remain adapter-free. This is the
 // video sibling of the candle image lane (image_jobs.rs `generate_candle_stream`): it builds a
 // `VideoGenInput` and drives the SAME neutral streaming harness (`generate_video` →
 // `run_loaded_video_generation` → the registry-resolved candle generator), reusing the shared
@@ -35,6 +38,8 @@ use super::{
 /// the MLX `mlx_wan` / `mlx_ltx` labels (sc-5097).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_WAN_ADAPTER: &str = "candle_wan";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) const CANDLE_WAN_VACE_FUN_ADAPTER: &str = "candle_wan_vace_fun";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_ADAPTER: &str = "candle_ltx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -348,8 +353,23 @@ pub(super) fn candle_wan_tier_subdir(
 /// the spec; the provider no longer reads process-global env itself. Best-effort: if neither source
 /// resolves, the provider emits its required-`LoadSpec::text_encoder` error.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
+pub(super) fn complete_ltx_bundle_gemma_dir(bundle: Option<PathBuf>) -> Option<PathBuf> {
+    let gemma = bundle?.join("gemma");
+    super::ltx::ltx_gemma_dir_is_complete(&gemma).then_some(gemma)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
     super::ltx::ltx_gemma_override_path(std::env::var_os("LTX_GEMMA_DIR"))
+        // Both native backends consume the same manifest-managed bundle. A fresh Eros install puts
+        // Gemma at `<SceneWorks/ltx-2.3-mlx snapshot>/gemma`, not in the Eros checkpoint or the
+        // separate Google repo, so resolve that co-requisite before the legacy standalone fallback.
+        .or_else(|| {
+            complete_ltx_bundle_gemma_dir(huggingface_snapshot_dir(
+                &settings.data_dir,
+                CANDLE_LTX_REPO,
+            ))
+        })
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO))
 }
 
@@ -365,14 +385,11 @@ pub(super) fn candle_video_raw_settings(request: &VideoRequest, repo: &str) -> V
     Value::Object(raw)
 }
 
-/// Per-request conditioning for a candle video generation. The Wan2.2 **14B I2V** engine
-/// (sc-5174 / sc-5175) and **SVD-XT** (sc-5493) are conditioned: each requires a source image, loaded
-/// to a single [`Conditioning::Reference`] — for Wan, the channel-concat first frame the provider
-/// VAE-encodes into its `y` (`in_dim=36`); for SVD, the CLIP-encoded + noise-aug VAE-encoded driving
-/// frame. The candle analog of the MLX i2v / SVD conditioning ([`resolve_wan_conditioning`]).
-/// Every other candle video engine (5B, T2V-14B, ltx) is txt2video-only, so this returns an empty set.
-/// The router's `video_request_candle_eligible` already guarantees the i2v shape carries a source and
-/// the txt2video ids do not, but the source is required here too so a mis-routed job fails clearly.
+/// Per-request conditioning for a Candle video generation. LTX/Eros and Wan TI2V-5B share the native
+/// Reference/Keyframe helpers with MLX; Wan 14B I2V and SVD-XT each require one Reference. Clip and
+/// masked replacement conditioning is asynchronous and is resolved in [`generate_candle_video_using`]
+/// before this helper is reached. The provider seam repeats the router's shape checks so a mis-routed
+/// request fails clearly instead of silently dropping its source.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn resolve_candle_video_conditioning(
     settings: &Settings,
@@ -380,8 +397,14 @@ pub(super) fn resolve_candle_video_conditioning(
     project_path: &Path,
     engine_id: &str,
 ) -> WorkerResult<Vec<Conditioning>> {
-    // The Wan2.2 14B I2V engine (sc-5175) and SVD-XT (sc-5493) condition on a single source image; every
-    // other candle video engine (5B, T2V-14B, ltx) is txt2video-only (empty conditioning).
+    if engine_id == "ltx_2_3_distilled" {
+        return resolve_ltx_conditioning(settings, request, project_path);
+    }
+    if engine_id == "wan2_2_ti2v_5b" {
+        return resolve_wan_conditioning(settings, request, project_path, engine_id);
+    }
+    // The Wan2.2 14B I2V engine (sc-5175) and SVD-XT (sc-5493) condition on a single source image;
+    // the remaining engines are unconditioned in this synchronous branch.
     if engine_id != "wan2_2_i2v_14b" && engine_id != "svd_xt" {
         return Ok(Vec::new());
     }
@@ -689,6 +712,156 @@ fn wan_user_adapter_resident_bytes(
     Ok(additive_bytes(&shared)?.saturating_add(additive_bytes(&high)?.max(additive_bytes(&low)?)))
 }
 
+/// Adapter source bytes co-resident with one VACE-Fun expert during its sequential dense merge.
+/// Untargeted factors apply to either expert and are counted once; explicit high/low tails alternate,
+/// so only the larger expert-local tail contributes to the peak stage.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn vace_fun_adapter_stage_bytes(adapters: &[AdapterSpec]) -> WorkerResult<u64> {
+    let additive_bytes = |stack: &[AdapterSpec]| {
+        gen_core::adapter_stack_resident_bytes(stack, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Wan2.2 VACE-Fun cannot determine the size of the requested adapter stack."
+                        .to_owned(),
+                )
+            })
+    };
+    let shared: Vec<_> = adapters
+        .iter()
+        .filter(|adapter| adapter.moe_expert.is_none())
+        .cloned()
+        .collect();
+    let high: Vec<_> = adapters
+        .iter()
+        .filter(|adapter| adapter.moe_expert == Some(gen_core::MoeExpert::High))
+        .cloned()
+        .collect();
+    let low: Vec<_> = adapters
+        .iter()
+        .filter(|adapter| adapter.moe_expert == Some(gen_core::MoeExpert::Low))
+        .cloned()
+        .collect();
+    additive_bytes(&shared)?
+        .checked_add(additive_bytes(&high)?.max(additive_bytes(&low)?))
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Wan2.2 VACE-Fun adapter footprint overflowed u64.".to_owned(),
+            )
+        })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn vace_fun_cold_load_admission(
+    model_dir: PathBuf,
+    adapters: &[AdapterSpec],
+    gpu_id: &str,
+) -> WorkerResult<crate::generator_cache::GeneratorColdLoadAdmission> {
+    let adapter_stage_bytes = vace_fun_adapter_stage_bytes(adapters)?;
+    let gpu_id = gpu_id.to_owned();
+    Ok(crate::generator_cache::GeneratorColdLoadAdmission::new(
+        move || {
+            let weight_bytes = crate::vram_gate::wan_vace_fun_sequential_weight_bytes(
+                &model_dir,
+                adapter_stage_bytes,
+            )?;
+            let budget = crate::vram_gate::apply_vram_cap(
+                crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
+                crate::vram_gate::cuda_vram_cap_gb(),
+            )
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Wan2.2 VACE-Fun admission could not read free GPU VRAM from nvidia-smi; refusing the uncalibrated dual-expert load."
+                        .to_owned(),
+                )
+            })?;
+            match crate::vram_gate::video_weights_fit_error(
+                "wan2_2_vace_fun_14b",
+                weight_bytes,
+                &gpu_id,
+                Some(budget),
+            ) {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        },
+    ))
+}
+
+/// Provider-owned resident-weight floor for Candle LTX/Eros. The inference registry resolves the
+/// exact selected dense checkpoint or packed component files, including the external Gemma encoder
+/// and the VAE encoder required by every conditioned mode. LTX adapters remain additive on both
+/// dense and packed hosts, so their source tensors are charged on top of that base footprint.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn ltx_resident_weight_bytes(input: &VideoGenInput) -> WorkerResult<u64> {
+    let spec = video_load_spec(input);
+    let Some(footprint) = crate::inference_runtime::media()
+        .footprint(input.engine_id, &spec)
+        .ok()
+        .flatten()
+    else {
+        return Err(WorkerError::InvalidPayload(
+            "LTX admission cannot verify the provider-owned component footprint; update the pinned inference runtime before loading this model."
+                .to_owned(),
+        ));
+    };
+    let packed_components = [
+        "transformer.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+    ];
+    let packed_tier = packed_components
+        .iter()
+        .any(|component| input.model_dir.join(component).exists());
+    if footprint.text_encoder == 0
+        || footprint.dit == 0
+        || (packed_tier
+            && (footprint.vae == 0
+                || packed_components
+                    .iter()
+                    .any(|component| !input.model_dir.join(component).is_file())))
+    {
+        return Err(WorkerError::InvalidPayload(
+            "LTX admission received an incomplete provider footprint (Gemma, DiT, or conditioned VAE component is missing); repair the model install before retrying."
+                .to_owned(),
+        ));
+    }
+    let base = footprint
+        .text_encoder
+        .checked_add(footprint.dit)
+        .and_then(|bytes| bytes.checked_add(footprint.vae))
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("LTX provider footprint overflowed u64.".to_owned())
+        })?;
+    let adapters = gen_core::adapter_stack_resident_bytes(
+        &input.adapters,
+        gen_core::AdapterResidencyMode::Additive,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "LTX cannot determine the resident size of the requested adapter stack.".to_owned(),
+        )
+    })?;
+    base.checked_add(adapters).ok_or_else(|| {
+        WorkerError::InvalidPayload("LTX resident footprint overflowed u64.".to_owned())
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn admit_candle_ltx(
+    engine_id: &'static str,
+    bytes: u64,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    let budget = candle_video_vram_budget(settings).await;
+    if let Some(error) =
+        crate::vram_gate::video_weights_fit_error(engine_id, bytes, &settings.gpu_id, budget)
+    {
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// The candle video lane's live VRAM budget: the real `nvidia-smi` reading, the
 /// `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation folded over it, then this process's reclaimable
 /// cudarc pool added back (sc-11023).
@@ -744,6 +917,7 @@ pub(super) struct Scail2ColdLoadPlan {
 pub(super) fn scail2_cold_load_plan(
     manifest_entry: &JsonObject,
     model_dir: PathBuf,
+    adapter_bytes: u64,
     gpu_id: &str,
 ) -> Scail2ColdLoadPlan {
     let manifest_entry = manifest_entry.clone();
@@ -756,7 +930,12 @@ pub(super) fn scail2_cold_load_plan(
             crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
             crate::vram_gate::cuda_vram_cap_gb(),
         );
-        match crate::vram_gate::scail2_video_fit_error(&manifest_entry, &gpu_id, budget) {
+        match crate::vram_gate::scail2_video_fit_error_with_adapter_bytes(
+            &manifest_entry,
+            adapter_bytes,
+            &gpu_id,
+            budget,
+        ) {
             Some(error) => Err(error),
             None => Ok(()),
         }
@@ -775,8 +954,8 @@ pub(super) fn scail2_cold_load_plan(
 /// Admission is family-specific and happens before load: Mochi's frame-dependent decode gate
 /// (sc-12306), SVD's 32 GB / long-burst gate (sc-14492), and the Wan gate — the tier's MEASURED
 /// `candle.vramGbByTier` peak where the manifest carries one (sc-12402), else sc-12344's on-disk
-/// weights floor. LTX remains exempt because its on-disk bytes are not its loaded set and no measured
-/// peak exists; a byte-derived floor would wall-reject working cards.
+/// weights floor. LTX uses its provider-owned exact component footprint rather than a recursive
+/// directory sum, including the external Gemma encoder and conditioned VAE encoder.
 ///
 /// Mochi keeps its own gate rather than joining the Wan one: its AsymmVAE decode is UNTILED, so its peak
 /// grows linearly in clip length and no per-tier constant can express it (sc-12306). Wan's decode is
@@ -791,7 +970,7 @@ pub(super) async fn generate_candle_video(
     request: &VideoRequest,
     project_path: &Path,
     backend: &str,
-) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+) -> WorkerResult<(DecodedVideo, &'static str, Value, Option<Value>)> {
     generate_candle_video_using(
         api,
         settings,
@@ -823,7 +1002,7 @@ pub(super) async fn generate_candle_video_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+) -> WorkerResult<(DecodedVideo, &'static str, Value, Option<Value>)> {
     let engine_id = candle_video_engine_id(&request.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("{} is not a candle video engine", request.model))
     })?;
@@ -943,10 +1122,30 @@ pub(super) async fn generate_candle_video_using(
     } else {
         None
     };
-    // Wan 14B I2V conditions on a source image (`Conditioning::Reference`); every other candle video
-    // engine is txt2video-only (empty conditioning).
-    let conditioning =
-        resolve_candle_video_conditioning(settings, request, project_path, engine_id)?;
+    // Resolve the exact native conditioning lane: LTX replace/clip modes are asynchronous; I2V/FLF
+    // and the older Wan14/SVD reference lanes use the synchronous helper.
+    let (conditioning, replacement_status) = if is_ltx && request.mode == "replace_person" {
+        let (conditioning, status) = resolve_ltx_replace_conditioning(
+            api,
+            settings,
+            job,
+            request,
+            project_path,
+            CANDLE_LTX_ADAPTER,
+        )
+        .await?;
+        (conditioning, Some(status))
+    } else if is_ltx && matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
+        (
+            resolve_video_clip_conditioning(api, settings, job, request, project_path).await?,
+            None,
+        )
+    } else {
+        (
+            resolve_candle_video_conditioning(settings, request, project_path, engine_id)?,
+            None,
+        )
+    };
 
     // SVD-XT (sc-5493): image→video only — no prompt / negative / guidance (the engine uses its
     // frame-wise CFG ramp), a model-fixed burst (≤25 frames), the user `fps` as the playback cadence,
@@ -975,7 +1174,7 @@ pub(super) async fn generate_candle_video_using(
             load_generator,
         )
         .await?;
-        return Ok((decoded, adapter, raw_settings));
+        return Ok((decoded, adapter, raw_settings, replacement_status));
     }
 
     let is_wan = engine_id == "wan2_2_ti2v_5b"
@@ -991,7 +1190,7 @@ pub(super) async fn generate_candle_video_using(
         ensure_wan_lightning_present(api, settings, job, request, engine_id).await?;
         resolve_wan_adapters(settings, request, engine_id)?
     } else if is_ltx {
-        resolve_ltx_user_adapters(settings, request)?
+        resolve_ltx_adapters(settings, request)?
     } else {
         Vec::new()
     };
@@ -1075,6 +1274,13 @@ pub(super) async fn generate_candle_video_using(
         offload_policy: candle_video_offload_policy(engine_id),
         ..VideoGenInput::default()
     };
+    if is_ltx {
+        // Resolve every field from `input` before the async budget read. `VideoGenInput` also owns a
+        // one-shot cold-load admission closure, which is `Send` but intentionally not `Sync`; an
+        // async helper taking `&VideoGenInput` would therefore make the worker loop future non-`Send`.
+        let resident_bytes = ltx_resident_weight_bytes(&input)?;
+        admit_candle_ltx(input.engine_id, resident_bytes, settings).await?;
+    }
     let raw_settings = candle_video_raw_settings(request, &repo);
     let decoded = generate_video_using(
         api,
@@ -1086,7 +1292,7 @@ pub(super) async fn generate_candle_video_using(
         load_generator,
     )
     .await?;
-    Ok((decoded, adapter, raw_settings))
+    Ok((decoded, adapter, raw_settings, replacement_status))
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,19 +1786,29 @@ pub(super) async fn generate_candle_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+    // Resolve and size adapters before constructing the cold-load gate. Dense SCAIL folds factors,
+    // but their source tensors coexist during the merge and were not part of the measured base peak.
+    let adapters = resolve_scail2_adapters(settings, request)?;
+    let adapter_bytes =
+        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "SCAIL-2 cannot determine the size of the requested adapter stack.".to_owned(),
+                )
+            })?;
     let Scail2ColdLoadPlan {
         model_dir,
         admission,
     } = scail2_cold_load_plan(
         &request.model_manifest_entry,
         resolve_candle_scail2_model_dir(settings)?,
+        adapter_bytes,
         &settings.gpu_id,
     );
     let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_candle_scail2_conditioning(api, settings, job, request, project_path).await?;
     // Inference adapters (DPO / lightning / user LoRA) + the lightning step-distill recipe.
-    let adapters = resolve_scail2_adapters(settings, request)?;
     let lightning = candle_scail2_adapters_have_lightning(&adapters);
     let (steps, guidance, scheduler_shift) = scail2_sampling(request, lightning);
     let input = VideoGenInput {
@@ -1749,24 +1965,36 @@ pub(super) async fn generate_candle_scail2_replace(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<(DecodedVideo, Value)> {
+) -> WorkerResult<(DecodedVideo, Value, bool)> {
+    let adapters = resolve_scail2_adapters(settings, request)?;
+    let adapter_bytes =
+        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "SCAIL-2 cannot determine the size of the requested adapter stack.".to_owned(),
+                )
+            })?;
     let Scail2ColdLoadPlan {
         model_dir,
         admission,
     } = scail2_cold_load_plan(
         &request.model_manifest_entry,
         resolve_candle_scail2_model_dir(settings)?,
+        adapter_bytes,
         &settings.gpu_id,
     );
     let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_candle_scail2_replace_conditioning(api, settings, job, request, project_path)
             .await?;
+    let lightning = candle_scail2_adapters_have_lightning(&adapters);
+    let (steps, guidance, scheduler_shift) = scail2_sampling(request, lightning);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
         model_dir,
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -1774,13 +2002,16 @@ pub(super) async fn generate_candle_scail2_replace(
         height: request.height,
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
+        steps,
+        guidance,
+        scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some("replacement".to_owned()),
         cold_load_admission: Some(admission),
         ..VideoGenInput::default()
     };
     let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
-    Ok((decoded, status))
+    Ok((decoded, status, lightning))
 }
 
 /// Resolve the candle Wan-VACE diffusers snapshot dir (sc-5494): `SCENEWORKS_CANDLE_WAN_VACE_DIR`
@@ -1795,6 +2026,28 @@ fn resolve_candle_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBu
         }
     }
     candle_video_snapshot_dir(settings, CANDLE_WAN_VACE_REPO)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_wan_vace_fun_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_WAN_VACE_FUN_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if path.join("transformer/config.json").is_file()
+            && path.join("transformer_2/config.json").is_file()
+        {
+            return Ok(path);
+        }
+    }
+    let path = candle_video_snapshot_dir(settings, "linoyts/Wan2.2-VACE-Fun-14B-diffusers")?;
+    if !path.join("transformer/config.json").is_file()
+        || !path.join("transformer_2/config.json").is_file()
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "wan_2_2_vace_fun_14b: the dedicated dual-expert snapshot is incomplete at {} (both transformer/ and transformer_2/ are required)",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 /// Windows/CUDA candle Wan-VACE `replace_person` (sc-5494): the candle sibling of the MLX
@@ -1812,7 +2065,59 @@ pub(super) async fn generate_candle_wan_vace(
     project_path: &Path,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    let model_dir = resolve_candle_wan_vace_model_dir(settings)?;
+    generate_candle_wan_vace_engine(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        backend,
+        "wan_vace",
+        resolve_candle_wan_vace_model_dir(settings)?,
+        CANDLE_WAN_VACE_ADAPTER,
+        Vec::new(),
+    )
+    .await
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) async fn generate_candle_wan_vace_fun(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    generate_candle_wan_vace_engine(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        backend,
+        "wan2_2_vace_fun_14b",
+        resolve_candle_wan_vace_fun_model_dir(settings)?,
+        CANDLE_WAN_VACE_FUN_ADAPTER,
+        resolve_wan_adapters(settings, request, "wan2_2_vace_fun_14b")?,
+    )
+    .await
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+async fn generate_candle_wan_vace_engine(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+    engine_id: &'static str,
+    model_dir: PathBuf,
+    adapter: &'static str,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<(DecodedVideo, Value)> {
     let track_id = request.person_track_id.as_deref().ok_or_else(|| {
         WorkerError::InvalidPayload(
             "replace_person requires a person track (personTrackId).".to_owned(),
@@ -1847,11 +2152,21 @@ pub(super) async fn generate_candle_wan_vace(
         replacement_mode_from(&request.replacement_mode),
     )?;
     let negative_prompt = non_empty_negative_prompt(request);
+    let cold_load_admission = if engine_id == "wan2_2_vace_fun_14b" {
+        Some(vace_fun_cold_load_admission(
+            model_dir.clone(),
+            &adapters,
+            &settings.gpu_id,
+        )?)
+    } else {
+        None
+    };
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
-        engine_id: "wan_vace",
+        engine_id,
         model_dir,
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -1863,6 +2178,12 @@ pub(super) async fn generate_candle_wan_vace(
         guidance: advanced_opt_f32(request, "guidanceScale"),
         seed: resolve_video_seed(request) as u64,
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
+        offload_policy: if engine_id == "wan2_2_vace_fun_14b" {
+            OffloadPolicy::Sequential
+        } else {
+            OffloadPolicy::Resident
+        },
+        cold_load_admission,
         ..VideoGenInput::default()
     };
     let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
@@ -1873,7 +2194,7 @@ pub(super) async fn generate_candle_wan_vace(
         masking_strength,
         reference_count,
         frame_total,
-        CANDLE_WAN_VACE_ADAPTER,
+        adapter,
     );
     Ok((decoded, status))
 }

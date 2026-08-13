@@ -737,6 +737,37 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !video_mode_is_mlx_eligible(model, mode) {
         return false;
     }
+    if model == "wan_2_2" {
+        let has_source = job
+            .payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_last = job
+            .payload
+            .get("lastFrameAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let shape_is_exact = match mode {
+            "text_to_video" => !has_source && !has_last,
+            "image_to_video" => has_source && !has_last,
+            "first_last_frame" => has_source && has_last,
+            _ => true,
+        };
+        if !shape_is_exact {
+            return false;
+        }
+    }
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+        && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
+        && !job
+            .payload
+            .get("loras")
+            .and_then(Value::as_array)
+            .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
+    {
+        return false;
+    }
     true
 }
 

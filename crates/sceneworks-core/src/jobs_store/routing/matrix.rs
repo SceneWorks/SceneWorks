@@ -444,7 +444,7 @@ fn model_row(
         }
     } else if is_video {
         for mode in &manifest_operations {
-            let payload = video_payload(mode);
+            let payload = video_payload(&model.id, mode);
             let job_type = video_job_type(mode);
             let job = probe_job(job_type, &model.id, payload)?;
             operation_and_mode.push(routed_cell(
@@ -1165,7 +1165,7 @@ fn conditioning_payload(
         }
         "reference" if model.model_type == "video" => {
             job_type = JobType::VideoGenerate;
-            payload = video_payload("image_to_video");
+            payload = video_payload(&model.id, "image_to_video");
         }
         "reference"
             if (model.id.starts_with("sensenova_")
@@ -1220,15 +1220,15 @@ fn conditioning_payload(
         }
         "keyframe" => {
             job_type = JobType::VideoGenerate;
-            payload = video_payload("first_last_frame");
+            payload = video_payload(&model.id, "first_last_frame");
         }
         "videoClip" => {
             job_type = JobType::VideoExtend;
-            payload = video_payload("extend_clip");
+            payload = video_payload(&model.id, "extend_clip");
         }
         "controlClip" | "videoSync" => {
             job_type = JobType::VideoGenerate;
-            payload = video_payload("animate_character");
+            payload = video_payload(&model.id, "animate_character");
         }
         "conversationHistory" => {
             job_type = JobType::ImageInterleave;
@@ -1731,8 +1731,8 @@ fn shortcut_url(work_item: &str) -> String {
     }
 }
 
-fn video_payload(mode: &str) -> Value {
-    let mut job = super::canonical_video_route_probe("capability-matrix-probe", mode)
+fn video_payload(model: &str, mode: &str) -> Value {
+    let mut job = super::canonical_video_route_probe(model, mode)
         .expect("VIDEO_UI_MODES contains only canonical production modes");
     job.payload.remove("model");
     Value::Object(job.payload)
@@ -2879,6 +2879,26 @@ mod tests {
             "the shipped matrix must retain explicit MLX-only video parity obligations"
         );
 
+        // LTX clip append/control routes require the IC-LoRA carried by the canonical probe. The
+        // operation matrix must evaluate that complete runnable shape, not rebuild a bare payload
+        // that both production routers correctly reject.
+        for model_id in ["ltx_2_3", "ltx_2_3_eros"] {
+            let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
+            for mode in ["extend_clip", "video_bridge", "replace_person"] {
+                let cell = row
+                    .operation_and_mode
+                    .iter()
+                    .find(|cell| cell.capability == mode)
+                    .unwrap_or_else(|| panic!("{model_id}/{mode} is represented"));
+                assert_eq!(
+                    (cell.mlx, cell.candle),
+                    (Some(true), Some(true)),
+                    "{model_id}/{mode} uses the complete IC-LoRA probe on both backends"
+                );
+                assert!(cell.parity_obligation.is_none());
+            }
+        }
+
         let vace_fun = matrix
             .models
             .iter()
@@ -2889,14 +2909,14 @@ mod tests {
             .iter()
             .find(|cell| cell.capability == "replace_person")
             .expect("VACE-Fun replace_person operation is represented");
-        assert_eq!((replace.mlx, replace.candle), (Some(true), Some(false)));
+        assert_eq!((replace.mlx, replace.candle), (Some(true), Some(true)));
         for shape in ["controlClip", "reference"] {
             let cell = vace_fun
                 .conditioning_shape
                 .iter()
                 .find(|cell| cell.capability == shape)
                 .expect("VACE-Fun descriptor conditioning is represented");
-            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
         }
         for capability in ["lora", "lokr"] {
             let cell = vace_fun
@@ -2904,15 +2924,19 @@ mod tests {
                 .iter()
                 .find(|cell| cell.capability == capability)
                 .expect("VACE-Fun adapter axis is represented");
-            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
         }
-        for tier in ["bf16", "q4", "q8"] {
+        for (tier, expected) in [
+            ("bf16", (Some(true), Some(true))),
+            ("q4", (Some(true), Some(false))),
+            ("q8", (Some(true), Some(false))),
+        ] {
             let cell = vace_fun
                 .precision_tier
                 .iter()
                 .find(|cell| cell.capability == tier)
                 .expect("VACE-Fun precision axis is represented");
-            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
+            assert_eq!((cell.mlx, cell.candle), expected);
         }
 
         // Bernini's `both` descriptor also advertises singular Reference for its still-image
@@ -2976,8 +3000,7 @@ mod tests {
             }
         }
 
-        // SCAIL's first canonical route is replace_person, which deliberately rejects user LoRAs;
-        // animate_character accepts them on both engines. The model-level adapter axis is the union
+        // Both SCAIL production modes accept user adapters. The model-level adapter axis is the union
         // of descriptor-backed production modes, not an accident of mode ordering.
         let scail = matrix
             .models
@@ -3300,8 +3323,8 @@ mod tests {
         let adapter = adapter_cell(scail, "lora", &original, &no_candle_animation).unwrap();
         assert_eq!(
             adapter.candle,
-            Some(false),
-            "replace_person alone must not falsely claim SCAIL LoRA support"
+            Some(true),
+            "replace_person independently preserves SCAIL LoRA support"
         );
 
         let mut bad_mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();

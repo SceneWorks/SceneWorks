@@ -1251,7 +1251,7 @@ fn boogu_base_and_turbo_img2img_route_to_candle() {
 }
 
 #[test]
-fn explicit_quantization_falls_back_to_torch_image_and_video() {
+fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
     // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
     // explicit `advanced.mlxQuantize > 0` is refused rather than silently running dense. chroma1_hd
     // is such a dense-only candle family (contrast the SDXL family, sc-10767, which now advertises
@@ -1263,8 +1263,14 @@ fn explicit_quantization_falls_back_to_torch_image_and_video() {
     // NOTE: qwen_image USED to be a dense-only counter-example here; sc-11020 moved it to
     // CANDLE_QUANT_MODELS (its turnkey q4/q8 packed tiers load off-Mac), so its quant tier-select now
     // STAYS on candle — covered by `qwen_image_quant_and_lora_stay_on_candle`.
-    assert!(!video_request_candle_eligible(
+    // sc-18478: Wan TI2V-5B now owns native Candle q4/q8 tiers as well as dense.
+    assert!(video_request_candle_eligible(
         "wan_2_2",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
+    ));
+    // Mochi remains a dense-only Candle video family and is still a negative counter-example.
+    assert!(!video_request_candle_eligible(
+        "mochi_1",
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
     ));
     // Dense (<= 0) or absent quant leaves a dense candle family on its native path → still eligible.
@@ -2139,9 +2145,15 @@ fn unsupported_pose_is_owned_by_candle_declined_by_torch_served_by_mlx() {
 
 /// A queued `video_generate` job carrying `payload`.
 fn video_generate_job(payload: Value) -> JobSnapshot {
+    video_job("video_generate", payload)
+}
+
+/// A queued video job carrying `payload`, with its API-stamped type preserved so the full claim
+/// gate derives advanced modes from the job type rather than trusting a stale payload mode.
+fn video_job(job_type: &str, payload: Value) -> JobSnapshot {
     serde_json::from_value(json!({
         "id": "job_v",
-        "type": "video_generate",
+        "type": job_type,
         "status": "queued",
         "payload": payload,
         "result": {},
@@ -2201,11 +2213,15 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
         "ltx_2_3_eros text_to_video must route to the candle lane"
     );
     assert!(
-        !video_request_candle_eligible(
+        video_request_candle_eligible(
             "ltx_2_3_eros",
-            &object(json!({ "mode": "first_last_frame" }))
+            &object(json!({
+                "mode": "first_last_frame",
+                "sourceAssetId": "first",
+                "lastFrameAssetId": "last"
+            }))
         ),
-        "a conditioned ltx_2_3_eros shape must fall back to the Python worker"
+        "a complete conditioned ltx_2_3_eros shape must stay on candle"
     );
     // A genuinely non-candle video model is refused and remains queued.
     assert!(
@@ -2218,10 +2234,9 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
     // Wan-5B in any conditioned shape (default/i2v mode, a source, or a LoRA) is refused.
     let cases = [
         json!({ "prompt": "p" }), // no mode → defaults to i2v
-        json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
         json!({ "mode": "first_last_frame" }),
         json!({ "mode": "text_to_video", "sourceAssetId": "a" }), // txt mode but conditioned
-        json!({ "mode": "text_to_video", "loras": [{ "name": "x" }] }),
+        json!({ "mode": "image_to_video" }),
     ];
     for case in cases {
         assert!(
@@ -2320,21 +2335,152 @@ fn candle_video_models_with_provider_slots_accept_user_loras() {
             "{model} text_to_video + user LoRA must stay on candle"
         );
     }
+    assert!(video_request_candle_eligible(
+        "wan_2_2",
+        &object(json!({ "mode": "text_to_video", "loras": [{ "id": "wan_style" }] }))
+    ));
     // Families whose candle provider advertises no LoRA slot still refuse a LoRA.
-    for (model, payload) in [
-        (
-            "wan_2_2",
-            json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
-        ),
-        (
-            "svd",
-            json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] }),
-        ),
-    ] {
+    let model = "svd";
+    let payload =
+        json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] });
+    assert!(
+        !video_request_candle_eligible(model, &object(payload.clone())),
+        "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
+    );
+}
+
+#[test]
+fn candle_ltx_and_wan5_serve_new_conditioning_shapes() {
+    for model in ["ltx_2_3", "ltx_2_3_eros", "wan_2_2"] {
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({ "mode": "image_to_video", "sourceAssetId": "first" }))
+        ));
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({
+                "mode": "first_last_frame",
+                "sourceAssetId": "first",
+                "lastFrameAssetId": "last"
+            }))
+        ));
+    }
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({
+                "mode": "extend_clip",
+                "sourceClipAssetId": "left",
+                "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+            }))
+        ));
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({
+                "mode": "video_bridge",
+                "sourceClipAssetId": "left",
+                "bridgeRightClipAssetId": "right",
+                "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+            }))
+        ));
+    }
+}
+
+#[test]
+fn candle_video_tier_selects_match_published_platform_tiers() {
+    for model in ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
+        let payload = if model == "wan_2_2_i2v_14b" {
+            json!({ "mode": "image_to_video", "sourceAssetId": "first", "advanced": { "mlxQuantize": 8 } })
+        } else {
+            json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } })
+        };
+        assert!(video_request_candle_eligible(model, &object(payload)));
+    }
+    assert!(video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
+    ));
+    assert!(!video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
+    ));
+    assert!(!video_request_candle_eligible(
+        "ltx_2_3_eros",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
+    ));
+
+    let explicit_torch = video_generate_job(json!({
+        "model": "wan_2_2",
+        "mode": "text_to_video",
+        "advanced": { "quantization": "gguf-q4_k_m" }
+    }));
+    assert!(!video_request_candle_eligible(
+        "wan_2_2",
+        &explicit_torch.payload
+    ));
+    assert!(
+        !video_job_is_candle_eligible(&explicit_torch),
+        "Candle must reject rather than silently discard an explicit Torch GGUF selection"
+    );
+
+    for neutral in ["auto", " Auto ", ""] {
+        let payload = object(json!({
+            "model": "wan_2_2",
+            "mode": "text_to_video",
+            "advanced": { "quantization": neutral }
+        }));
         assert!(
-            !video_request_candle_eligible(model, &object(payload.clone())),
-            "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
+            video_request_candle_eligible("wan_2_2", &payload),
+            "neutral Torch quantization marker {neutral:?} must not eject a native Candle request"
         );
+    }
+}
+
+#[test]
+fn candle_ltx_replace_is_model_native_and_requires_its_ic_adapter() {
+    let shape = json!({
+        "sourceClipAssetId": "clip",
+        "personTrackId": "track",
+        "characterId": "character",
+        "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+    });
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        assert!(ltx_replace_candle_eligible(model, &object(shape.clone())));
+        let mut payload = object(shape.clone());
+        payload.insert("model".into(), json!(model));
+        assert!(video_job_is_candle_eligible(&person_replace_job(
+            Value::Object(payload)
+        )));
+    }
+    let mut missing_adapter = object(shape);
+    missing_adapter.remove("loras");
+    assert!(!ltx_replace_candle_eligible("ltx_2_3", &missing_adapter));
+    let ordinary_adapter = object(json!({
+        "sourceClipAssetId": "clip",
+        "personTrackId": "track",
+        "characterId": "character",
+        "loras": [{ "id": "ordinary_ltx_style" }]
+    }));
+    assert!(
+        !ltx_replace_candle_eligible("ltx_2_3", &ordinary_adapter),
+        "any LoRA is not enough: native replacement requires the recognizable IC-LoRA"
+    );
+}
+
+#[test]
+fn candle_ltx_clip_modes_require_a_recognizable_ic_lora() {
+    for mode in ["extend_clip", "video_bridge"] {
+        let mut payload = object(json!({
+            "mode": mode,
+            "sourceClipAssetId": "left",
+            "loras": [{ "id": "ordinary_ltx_style" }]
+        }));
+        if mode == "video_bridge" {
+            payload.insert("bridgeRightClipAssetId".into(), json!("right"));
+        }
+        assert!(!video_request_candle_eligible("ltx_2_3", &payload));
+        payload.insert("loras".into(), json!([{ "conditioningRole": "ic_lora" }]));
+        assert!(video_request_candle_eligible("ltx_2_3", &payload));
     }
 }
 
@@ -2362,6 +2508,54 @@ fn candle_vace_modes_eligible_with_required_assets() {
         &object(json!({ "sourceClipAssetId": "l", "bridgeRightClipAssetId": "r" })),
         &JobType::VideoBridge
     ));
+    // sc-18478: VACE-Fun is an exact dual-expert provider and accepts its own user adapter stack.
+    assert!(video_request_candle_vace_eligible(
+        "wan_2_2_vace_fun_14b",
+        &object(json!({
+            "sourceClipAssetId": "clip_1",
+            "personTrackId": "track_1",
+            "characterId": "char_1",
+            "loras": [{ "name": "vace-fun-style" }]
+        })),
+        &JobType::PersonReplace
+    ));
+}
+
+#[test]
+fn candle_vace_fun_is_dedicated_to_person_replace() {
+    let model = "wan_2_2_vace_fun_14b";
+    assert!(video_job_is_candle_eligible(&person_replace_job(json!({
+        "model": model,
+        "sourceClipAssetId": "clip_1",
+        "personTrackId": "track_1",
+        "characterId": "char_1"
+    }))));
+
+    let unsupported = [
+        (
+            "video_generate",
+            json!({ "model": model, "mode": "text_to_video" }),
+        ),
+        (
+            "video_extend",
+            json!({ "model": model, "mode": "extend_clip", "sourceClipAssetId": "clip_1" }),
+        ),
+        (
+            "video_bridge",
+            json!({
+                "model": model,
+                "mode": "video_bridge",
+                "sourceClipAssetId": "left",
+                "bridgeRightClipAssetId": "right"
+            }),
+        ),
+    ];
+    for (job_type, payload) in unsupported {
+        assert!(
+            !video_job_is_candle_eligible(&video_job(job_type, payload)),
+            "VACE-Fun must not cross-route {job_type} onto a base or single-expert VACE engine"
+        );
+    }
 }
 
 #[test]
@@ -2464,6 +2658,15 @@ fn scail2_candle_serves_animation_and_replace_in_native_shape() {
             "sourceClipAssetId": "clip_1",
             "personTrackId": "track_1",
             "characterId": "char_1"
+        }))
+    ));
+    assert!(scail2_replace_candle_eligible(
+        "scail2_14b",
+        &object(json!({
+            "sourceClipAssetId": "clip_1",
+            "personTrackId": "track_1",
+            "characterId": "char_1",
+            "loras": [{ "name": "scail2-dpo" }]
         }))
     ));
     // Through the full video claim gate: animate_character (VideoGenerate) + replace (PersonReplace).
@@ -2642,7 +2845,7 @@ fn scail2_candle_rejects_incomplete_or_wrong_shape() {
 }
 
 #[test]
-fn candle_worker_claims_txt2video_but_refuses_other_video_shapes() {
+fn candle_worker_claims_native_video_shapes_and_refuses_invalid_ones() {
     let candle = gpu_worker(CANDLE_VIDEO_CAPS);
     // Claims wan + ltx + the 14B T2V plain txt2video.
     for model in ["wan_2_2", "ltx_2_3", "wan_2_2_t2v_14b"] {
@@ -2683,11 +2886,15 @@ fn candle_worker_claims_txt2video_but_refuses_other_video_shapes() {
         &candle,
         &video_generate_job(json!({ "model": "svd", "mode": "text_to_video" }))
     ));
-    assert!(!worker_supports_job(
+    assert!(worker_supports_job(
         &candle,
         &video_generate_job(
             json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "a" })
         )
+    ));
+    assert!(!worker_supports_job(
+        &candle,
+        &video_generate_job(json!({ "model": "wan_2_2", "mode": "image_to_video" }))
     ));
     assert!(!worker_supports_job(
         &candle,

@@ -4174,12 +4174,22 @@ fn mac_rust_supported_names_advanced_video_and_svd() {
     // (sc-3522 / sc-3357).
     let wan_extend = job_of(&store, JobType::VideoExtend, json!({ "model": "wan_2_2" }));
     assert!(mac_rust_supported(&wan_extend).is_ok());
-    let ltx_extend = job_of(&store, JobType::VideoExtend, json!({ "model": "ltx_2_3" }));
+    let ltx_extend = job_of(
+        &store,
+        JobType::VideoExtend,
+        json!({
+            "model": "ltx_2_3",
+            "loras": [{ "conditioningRole": "ic_lora" }],
+        }),
+    );
     assert!(mac_rust_supported(&ltx_extend).is_ok());
     let ltx_bridge = job_of(
         &store,
         JobType::VideoBridge,
-        json!({ "model": "ltx_2_3_eros" }),
+        json!({
+            "model": "ltx_2_3_eros",
+            "loras": [{ "conditioningRole": "ic_lora" }],
+        }),
     );
     assert!(mac_rust_supported(&ltx_bridge).is_ok());
     // SVD image→video is now MLX-supported (sc-3523: `svd`→`svd_xt`, image-conditioned only).
@@ -6048,12 +6058,16 @@ fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
             register_gpu_worker(&store, "worker-torch", "mps", video_caps());
             register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
+            let loras = model
+                .starts_with("ltx_")
+                .then(|| json!([{ "conditioningRole": "ic_lora" }]));
             let job = store
                 .create_job(video_job_typed(
                     job_type.clone(),
                     json!({
                         "model": model, "mode": mode,
-                        "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right"
+                        "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right",
+                        "loras": loras,
                     }),
                     "auto",
                 ))

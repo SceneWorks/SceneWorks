@@ -2427,7 +2427,9 @@ fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() 
         },
     );
 
-    let (_decoded, adapter, _raw_settings) = out.expect("the candle mochi arm runs to completion");
+    let (_decoded, adapter, _raw_settings, status) =
+        out.expect("the candle mochi arm runs to completion");
+    assert!(status.is_none(), "plain generation has no mode status");
     assert_eq!(
         probe.engine_frames(),
         151,
@@ -4872,12 +4874,42 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         CandleVideoRoute::Stub,
     );
 
-    // Enabled: `replace_person` on the candle SCAIL-2 model → the SCAIL-2 replacement variant;
-    // any other replace-capable model → candle Wan-VACE.
+    // Enabled: each native replacement family keeps its exact provider.
     settings.backend_candle_enabled = true;
     assert_eq!(
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
+    );
+    let vace_fun = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&vace_fun, &settings),
+        CandleVideoRoute::ReplacePersonWanVaceFun,
+    );
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        for mode in ["replace_person", "extend_clip", "video_bridge"] {
+            let native = request(json!({ "projectId": "p", "model": model, "mode": mode }));
+            assert_eq!(
+                resolve_candle_video_route(&native, &settings),
+                CandleVideoRoute::CandleVideo,
+                "{model} {mode} must stay on the native LTX provider",
+            );
+            assert_eq!(
+                runtime_descriptor_engine_ids(model, mode),
+                vec!["ltx_2_3_distilled"],
+                "runtime facts must report the same native LTX engine",
+            );
+        }
+    }
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
+        vec!["wan2_2_vace_fun_14b"],
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2", "replace_person"),
+        vec!["wan_vace"],
+        "generic Wan replacement must describe the single-expert VACE route, not the base TI2V provider",
     );
     let extend = request(json!({
         "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
@@ -4886,6 +4918,62 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&extend, &settings),
         CandleVideoRoute::WanVaceExtendBridge,
     );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
+    let mut settings = Settings::from_env();
+    settings.backend_candle_enabled = true;
+
+    let replacement = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&replacement, &settings),
+        CandleVideoRoute::ReplacePersonWanVaceFun,
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
+        vec!["wan2_2_vace_fun_14b"],
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2", "replace_person"),
+        vec!["wan_vace"],
+        "generic Wan replacement must describe the single-expert VACE route, not the base TI2V provider",
+    );
+
+    for mode in ["text_to_video", "extend_clip", "video_bridge"] {
+        let unsupported = request(json!({
+            "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": mode,
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&unsupported, &settings),
+            CandleVideoRoute::Stub,
+            "VACE-Fun {mode} must not cross-route to a base or single-expert VACE engine",
+        );
+        assert!(
+            runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", mode).is_empty(),
+            "VACE-Fun {mode} must expose no dispatch descriptor",
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_vace_fun_attaches_fail_closed_sequential_cold_admission() {
+    const SOURCE: &str = include_str!("candle.rs");
+    let arm = SOURCE
+        .split_once("async fn generate_candle_wan_vace_engine(")
+        .expect("shared VACE engine")
+        .1
+        .split_once("/// Windows/CUDA candle Wan-VACE `extend_clip`")
+        .expect("VACE engine boundary")
+        .0;
+    assert!(arm.contains("vace_fun_cold_load_admission("));
+    assert!(arm.contains("cold_load_admission,"));
+    assert!(SOURCE.contains("wan_vace_fun_sequential_weight_bytes("));
+    assert!(SOURCE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
 }
 
 /// sc-10997 (epic 6562): the candle Bernini VIDEO lane routes t2v + every editing/reference/
@@ -10031,7 +10119,10 @@ fn keyframe_conditioning_requires_both_frame_assets() {
 
 /// FLF on a 14B Wan MoE engine is rejected at the conditioning resolver (defence-in-depth
 /// behind the routing gate, which already restricts FLF to `wan_2_2`/TI2V-5B).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn wan_flf_rejected_on_non_ti2v_engine() {
     let settings = Settings::from_env();
@@ -10048,6 +10139,54 @@ fn wan_flf_rejected_on_non_ti2v_engine() {
 
 /// A 1×1 RGB [`Image`] for clip-conditioning construction tests (the engine resizes; the
 /// content is irrelevant — only the variant / frame_idx / strength mapping is under test).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn wan5_conditioning_rejects_stale_media_before_asset_io() {
+    let settings = Settings::from_env();
+    for payload in [
+        json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "a fox",
+            "mode": "text_to_video", "sourceAssetId": "stale"
+        }),
+        json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "a fox",
+            "mode": "image_to_video", "sourceAssetId": "first", "lastFrameAssetId": "stale"
+        }),
+    ] {
+        let req = request(payload);
+        let error = resolve_wan_conditioning(
+            &settings,
+            &req,
+            Path::new("/definitely/not/read"),
+            "wan2_2_ti2v_5b",
+        )
+        .expect_err("contradictory media must fail before asset loading")
+        .to_string();
+        assert!(error.contains("must not carry"), "got: {error}");
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_eros_resolves_the_manifest_managed_bundle_gemma() {
+    let bundle_guard = tempfile::Builder::new()
+        .prefix("sw_candle_eros_bundle_")
+        .tempdir()
+        .expect("temp dir");
+    let gemma = bundle_guard.path().join("gemma");
+    write_complete_gemma_dir(&gemma);
+    assert_eq!(
+        complete_ltx_bundle_gemma_dir(Some(bundle_guard.path().to_path_buf())).as_deref(),
+        Some(gemma.as_path()),
+        "fresh Eros installs must consume SceneWorks/ltx-2.3-mlx/gemma"
+    );
+    std::fs::remove_file(gemma.join("model-00002-of-00002.safetensors")).unwrap();
+    assert!(complete_ltx_bundle_gemma_dir(Some(bundle_guard.path().to_path_buf())).is_none());
+}
+
 #[cfg(target_os = "macos")]
 fn pixel(n: u8) -> Image {
     Image {
@@ -10554,6 +10693,48 @@ mod candle_video_label_tests {
     }
 
     #[test]
+    fn candle_ltx_admission_uses_provider_footprint_and_adapter_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let tier = root.path().join("q4");
+        let gemma = root.path().join("gemma");
+        std::fs::create_dir_all(&tier).unwrap();
+        std::fs::create_dir_all(&gemma).unwrap();
+        // The footprint registry counts exact safetensors files. Sparse-set lengths keep the fixture
+        // tiny while proving the live arithmetic across DiT/connector/encoder/decoder/Gemma.
+        for (path, bytes) in [
+            (tier.join("transformer.safetensors"), 1024),
+            (tier.join("connector.safetensors"), 2048),
+            (tier.join("vae_decoder.safetensors"), 4096),
+            (tier.join("vae_encoder.safetensors"), 8192),
+            (gemma.join("model.safetensors"), 16384),
+        ] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_len(bytes).unwrap();
+        }
+        std::fs::write(
+            tier.join("quantize_config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .unwrap();
+        let adapter = root.path().join("style.safetensors");
+        let file = std::fs::File::create(&adapter).unwrap();
+        file.set_len(32768).unwrap();
+
+        let input = VideoGenInput {
+            engine_id: "ltx_2_3_distilled",
+            model_dir: tier,
+            text_encoder_dir: Some(gemma),
+            adapters: vec![AdapterSpec::new(adapter, 1.0, gen_core::AdapterKind::Lora)],
+            ..VideoGenInput::default()
+        };
+        assert_eq!(
+            ltx_resident_weight_bytes(&input).unwrap(),
+            1024 + 2048 + 4096 + 8192 + 16384 + 32768,
+            "conditioned LTX must charge the provider-selected VAE encoder and additive adapter"
+        );
+    }
+
+    #[test]
     fn candle_video_adapter_labels_are_per_family() {
         // Every wan engine (5B + 14B T2V/I2V) reports the shared `candle_wan` adapter.
         for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
@@ -10796,24 +10977,29 @@ mod candle_video_label_tests {
     }
 
     #[test]
-    fn candle_video_conditioning_only_for_i2v() {
+    fn candle_video_conditioning_matches_each_native_request_shape() {
         let settings = crate::Settings::from_env();
         let project_path = std::path::Path::new("");
-        // txt2video engines never build conditioning (even if a stray source asset is present).
+        // Text-to-video requests never build conditioning.
         for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "ltx_2_3_distilled"] {
-            let payload = json!({ "sourceAssetId": "asset_1" });
+            let payload = json!({ "mode": "text_to_video" });
             let request = VideoRequest::from_payload(payload.as_object().expect("object"));
             let conditioning =
                 resolve_candle_video_conditioning(&settings, &request, project_path, engine_id)
                     .expect("txt2video conditioning resolves");
             assert!(
                 conditioning.is_empty(),
-                "{engine_id} must be txt2video-only"
+                "{engine_id} text_to_video must be unconditioned"
             );
         }
         // The 14B I2V + SVD-XT require a source image — a request without one errors before touching
         // disk (sc-5175 / sc-5493).
-        for engine_id in ["wan2_2_i2v_14b", "svd_xt"] {
+        for engine_id in [
+            "wan2_2_ti2v_5b",
+            "wan2_2_i2v_14b",
+            "ltx_2_3_distilled",
+            "svd_xt",
+        ] {
             let payload = json!({ "mode": "image_to_video" });
             let no_source = VideoRequest::from_payload(payload.as_object().expect("object"));
             assert!(
