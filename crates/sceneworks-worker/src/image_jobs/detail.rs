@@ -91,6 +91,7 @@ fn detail_spec(
 }
 
 trait DetailTileRefiner {
+    #[allow(clippy::too_many_arguments)]
     fn refine_tile(
         &self,
         tile: Image,
