@@ -152,6 +152,30 @@
       ]
     },
     {
+      "id": "ltx-2.3-ic-loras",
+      "models": [],
+      "name": "LTX-2.3 IC-LoRA HDR and LipDub",
+      "publisher": "Lightricks Ltd. (redistributed unmodified by SceneWorks)",
+      "license": "LTX-2 Community License",
+      "homepage": "https://huggingface.co/SceneWorks/ltx-2.3-ic-loras",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "LTX-2.3 HDR and LipDub/DubIt IC-LoRA adapters downloaded on first use from the immutable public SceneWorks/ltx-2.3-ic-loras rehost. The rehost contains the exact unmodified upstream HDR adapter, its companion scene embedding, and the LipDub/DubIt adapter; SceneWorks currently downloads the two adapters and does not consume the scene embedding. These derivatives remain subject to the complete LTX-2 Community License, including its use restrictions and paid-license requirement for entities at or above its annual-revenue threshold.",
+      "documents": [
+        {
+          "label": "LTX-2 Community License",
+          "key": "ltx-2.3-license"
+        },
+        {
+          "label": "SceneWorks redistribution notice and immutable provenance",
+          "key": "ltx-2.3-ic-loras-notice"
+        }
+      ]
+    },
+    {
       "id": "kokoro-82m",
       "models": [
         "kokoro_82m"

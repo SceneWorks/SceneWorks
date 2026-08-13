@@ -342,8 +342,8 @@ Two things follow, and both are now enforced rather than remembered:
 
   🔴 **In this mode the exit code carries that verdict and nothing else** (sc-18854 review). The
   live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner —
-  today's tree prints `ACCESS-GATED (2)` and `SERVED BY A DIFFERENT REPO (1)` on every clean run,
-  and since sc-18917 no `ZERO-MATCH PATTERNS` line at all — but they deliberately do not move the
+  today's tree prints `SERVED BY A DIFFERENT REPO (1)` on every clean run, with no
+  `ACCESS-GATED` or `ZERO-MATCH PATTERNS` line — but they deliberately do not move the
   exit status, because an anti-tamper mode that reds unconditionally signals nothing. Grade those
   lists with `npm run check:download-patterns:offline`; that is the gate CI runs.
 
@@ -363,18 +363,19 @@ Two things follow, and both are now enforced rather than remembered:
   Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
   `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to
   run. The recorder never evaluates a pattern — it only transcribes — so you cannot record your way
-  out of a real zero-match. 84 of the 96 keys are pinned to immutable 40-hex revisions, whose
-  listings cannot go stale. **The other 12 are unrevisioned and that immutability argument does not
+  out of a real zero-match. 84 of the 95 keys are pinned to immutable 40-hex revisions, whose
+  listings cannot go stale. **The other 11 are unrevisioned and that immutability argument does not
   cover them** — they read a moving default branch, and while each records the `resolvedSha` it
   actually read so drift is visible in a re-record diff, nothing forces a re-record. **sc-18924
-  tracks pinning the rest**, which is what closes that window; sc-18917 already pinned one as a side
-  effect of its own fix (it was 13 before) and sc-18923 owns another.
+  tracks pinning the rest**, which is what closes that window; sc-18917 pinned the renamed
+  LipDub/DubIt entry and sc-18923 pinned/rehosted HDR plus DubIt.
 
   Each recorded key also carries `gated` and `servedRepo`, and the gate hard-fails on both
   (`evidence-gated`, `evidence-repo-id-mismatch`) with tracked waivers in `KNOWN_REPO_CONDITIONS`.
   A green metadata listing does **not** mean a repo is fetchable: `gated: "auto"` answers 200 and
-  then 401s the actual download unless the token's account has accepted that repo's licence. Two
-  catalog entries are in that state today (sc-18923, sc-18917).
+  then 401s the actual download unless the token's account has accepted that repo's licence.
+  sc-18923 removed the two catalog instances by pinning checksum-identical public rehosts; any new
+  gated source fails the offline gate unless it receives an explicit tracked waiver.
 - **A tier that lands at a different revision is a resolution problem too.** The cache then holds two
   `snapshots/<rev>/` dirs with the tiers split across them, and `huggingface_snapshot_dir` selects
   exactly one. `ltx_bundle_subdir_across_revisions` (sc-18809) scans siblings with tier preference

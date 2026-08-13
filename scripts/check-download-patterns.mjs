@@ -46,17 +46,17 @@
 // The usual objection to a recorded fixture is decay. It does not apply here, for two
 // structural reasons:
 //
-//  1. **84 of 96 keys are pinned to an immutable 40-hex revision.** A git SHA's file listing
+//  1. **84 of 95 keys are pinned to an immutable 40-hex revision.** A git SHA's file listing
 //     is timeless — re-reading it in a year returns the same bytes. There is nothing to
 //     decay.
 //
-//     The other **12 keys are unrevisioned** and this argument does NOT cover them. They read a
+//     The other **11 keys are unrevisioned** and this argument does NOT cover them. They read a
 //     moving default branch, and while each records the `resolvedSha` it actually read — so drift
 //     is VISIBLE in a re-record diff — nothing forces anyone to re-record. That is a real
-//     stale-green window, and it is 12 keys wide, not one. **sc-18924 tracks pinning all of them**,
-//     which is what converts them onto the immutability argument above. sc-18917 already pinned one
-//     (the LipDub/DubIt rename, as a side effect of fixing that entry — it was 13 before) and
-//     sc-18923 owns another; the remaining eleven have no other owner and are sc-18924's alone.
+//     stale-green window, and it is 11 keys wide, not one. **sc-18924 tracks pinning all of them**,
+//     which is what converts them onto the immutability argument above. sc-18917 pinned the renamed
+//     LipDub/DubIt entry and sc-18923 pinned/rehosted HDR plus DubIt; the remaining eleven are
+//     sc-18924's scope.
 //  2. **Coverage is graded as a set, in both directions.** Adding an entry, or re-pinning
 //     one, changes its `repo@revision` key, and a key with no recorded listing is a hard
 //     failure naming the re-record command. Conversely a recorded key that nothing claims
@@ -94,39 +94,31 @@
 // `repoFiles` was already parsing that body — it simply kept `sha` and `siblings` and threw the
 // rest away. The impossibility was an artefact of what we chose to record, not of the API.
 //
-// The cost of that false claim was a live catalog entry grading green while being unfetchable.
-// Measured across all 96 recorded keys, TWO are gated:
-//
-//   Lightricks/LTX-2.3-22b-IC-LoRA-HDR@main       gated:"auto"   (sc-18923)
-//   Lightricks/LTX-2.3-22b-IC-LoRA-DubIt@1456334c gated:"auto"   (sc-18923; was LipDub@main until
-//                                                                 sc-18917 repointed and pinned it)
-//
-// For HDR: `HEAD .../resolve/main/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors` returns **401**
-// unauthenticated, and this gate graded it green. `gated:"auto"` means terms are auto-approved ON
-// ACCEPTANCE — it still needs a per-repo licence acceptance by the token's account, and the token
-// is optional in the first place (`resolve_hf_token(&Settings) -> Option<String>`,
-// credentials_ipc.rs:127). There is no gated-repo handling anywhere in the worker or core, so the
-// user gets a bare 401 on a LoRA the catalog offered them — exactly the "cost lands on the user as
-// a failed download" failure this script's header (above) exists to prevent.
+// The cost of that false claim was two live catalog entries grading green while being unfetchable:
+// the Lightricks HDR and DubIt IC-LoRA repos answered `gated:"auto"` and returned 401 to an
+// unauthenticated weight fetch. sc-18923 removed both instances by publishing the exact unmodified
+// files, complete frozen license, attribution and provenance at the immutable public
+// `SceneWorks/ltx-2.3-ic-loras` rehost, then repointing both manifest entries. The gate now proves
+// those replacements are ungated instead of carrying either historical waiver.
 //
 // So `gated` is now RECORDED per key and `evidence-gated` is a HARD FAILURE by default, waivable
-// through `KNOWN_REPO_CONDITIONS` on the same terms as a zero-match. See that list for why the
-// two existing instances are waived rather than red.
+// through `KNOWN_REPO_CONDITIONS` on the same terms as a zero-match.
 //
 // The same body also carries `id` — the repo HF ACTUALLY served. `fetch` follows the 307 a renamed
 // repo issues, so an entry naming a dead repo resolves silently; `evidence-repo-id-mismatch`
 // catches that. ONE live instance remains, waived and tracked (sc-18926); the other — LipDub ->
 // DubIt — was fixed at the source by sc-18917 rather than waived onward.
 //
-// What a green run still does NOT prove: that the token's account has accepted the licence, or
-// that the bytes download. Those need a real authenticated fetch. The ceiling is real — it is just
-// one rung higher than this header used to claim.
+// What a green run still does NOT prove is that the bytes download. Public replacements such as
+// sc-18923's rehost need a real ANONYMOUS fetch at the exact revision; a deliberately gated source
+// would instead need an authenticated fetch by an account that accepted its terms. The ceiling is
+// real — it is just one rung higher than this header used to claim.
 //
 // The LIVE modes deliberately ignore `KNOWN_ZERO_MATCHES` and report the raw truth, so `--write`
 // exits 1 on any tracked zero-match gap. There is none today — sc-18917 fixed the last one — so
-// `--write` currently exits 0, but do NOT read that as the modes agreeing: the gated and redirect
-// lists still print above and are still waived in `--check`. Policy lives in the gate; the
-// pre-flight is for a human who wants the unfiltered picture. Do not "fix" that exit code by
+// `--write` currently exits 0, but do NOT read that as the modes agreeing: the remaining redirect
+// condition still prints above and is waived only by the offline gate. Policy lives in the gate;
+// the pre-flight is for a human who wants the unfiltered picture. Do not "fix" that exit code by
 // teaching the recorder about waivers — a recorder that knows which failures are acceptable is one
 // step from a recorder that records them as passing.
 
@@ -181,50 +173,18 @@ export const KNOWN_ZERO_MATCHES = [];
 // that is the last moment the cost is cheap. What is waived is only the instances that ALREADY
 // SHIP.
 //
-// The alternative — make them unconditionally fatal — was considered and rejected. HDR, LipDub and
-// the mmaudio DFN5B entry are in the catalog today, so an unconditional failure would red the
-// required `parity` lane on every PR in flight for a defect none of them introduced. That is the
-// identical "a required context reds for a reason unrelated to this PR" failure mode that the
-// KNOWN_ZERO_MATCHES comment above rejects date-based expiry for, and it would push people toward
-// deleting the guard rather than fixing the entries.
+// The alternative — make known instances unconditionally fatal — was considered and rejected. It
+// would red the required `parity` lane on every unrelated PR while a defect was being repaired,
+// which pushes people toward deleting the guard rather than fixing its source.
 //
 // Waiving costs nothing in detection: the semantics land on "green means no NEW gated repo and no
 // NEW redirect", which is exactly the guarantee zero-match already provides. And unlike a silent
 // pass, each instance now has an owner, a reason, and a story that CANNOT be closed without
 // deleting its waiver — the gate reds if the condition clears and reds if the entry moves.
 //
-// The counter-argument is real and worth stating: a waiver keeps shipping a LoRA that returns 401
-// to users who have not accepted its licence. Waiving is a decision to track that, not to accept
-// it — sc-18923 owns making it work or withdrawing it. If it stalls, the honest escalation is to
-// pull the entry from the catalog, not to widen this list.
+// sc-18923 paid both gated-LoRA debts, so no `evidence-gated` waiver remains. New gated catalog
+// sources hard-fail unless a new live owner and explicit rationale are added here.
 export const KNOWN_REPO_CONDITIONS = [
-  {
-    kind: "evidence-gated",
-    repo: "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
-    revision: null,
-    story: "sc-18923",
-    reason:
-      "Ships today and is unfetchable without a token whose account has accepted the licence: " +
-      "the metadata API answers 200 with gated:\"auto\" while HEAD on the weight file returns 401. " +
-      "Was invisible until this gate started recording `gated`. sc-18923 must surface licence " +
-      "acceptance, re-host, or withdraw the LoRA — and delete this waiver in the same change.",
-  },
-  {
-    kind: "evidence-gated",
-    repo: "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
-    revision: "1456334c3d69924de5083e553733b108ed1147f2",
-    story: "sc-18923",
-    reason:
-      "Re-keyed by sc-18917 from Lightricks/LTX-2.3-22b-IC-LoRA-LipDub@main when that entry was " +
-      "repointed onto the renamed repo and pinned; the gate forced it, reporting " +
-      "repo-waiver-stale-unclaimed on the old key. The rename is fixed and the GATING is not: " +
-      "the pinned revision answers 200 with gated:\"auto\" while HEAD on " +
-      "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors returns 401 unauthenticated — the identical " +
-      "posture as the HDR sibling above. It is deliberately owned by sc-18923 rather than by " +
-      "sc-18917: sc-18917 fixed a rename and is done, so naming it here would leave a waiver whose " +
-      "owner is closed. sc-18923 owns the gated-IC-LoRA class (surface licence acceptance, re-host, " +
-      "or withdraw) and must delete BOTH its waivers — HDR's and this one — in the same change.",
-  },
   {
     kind: "evidence-repo-id-mismatch",
     repo: "apple/DFN5B-CLIP-ViT-H-14-384",
@@ -761,10 +721,10 @@ async function runLive({ only, write, dryRun }) {
 
   // The live verdicts below accumulate into a flag instead of writing straight to
   // `process.exitCode`, because `--write --dry-run` publishes an ANTI-TAMPER verdict and has to
-  // own its exit code outright (sc-18854 review). Folding the live verdicts in made the mode
-  // exit 1 on a clean tree — the tracked LipDub zero-match fires on every run — so a reviewer
-  // following the runbook would see a non-zero exit, find no re-record diff to explain it, and
-  // conclude the artifact had been hand-edited. A tamper detector that reds unconditionally
+  // own its exit code outright (sc-18854 review). Folding the live verdicts in historically made
+  // the mode exit 1 whenever a tracked live defect was present even if the re-record was exact, so a
+  // reviewer would see a non-zero exit, find no artifact diff to explain it, and conclude the
+  // artifact had been hand-edited. A tamper detector whose result is masked by a different verdict
   // detects nothing.
   let liveFailure = false;
   let dryRunVerdict = null;

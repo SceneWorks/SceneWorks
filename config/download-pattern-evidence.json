@@ -104,34 +104,6 @@
       ]
     },
     {
-      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt@1456334c3d69924de5083e553733b108ed1147f2",
-      "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
-      "revision": "1456334c3d69924de5083e553733b108ed1147f2",
-      "resolvedSha": "1456334c3d69924de5083e553733b108ed1147f2",
-      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
-      "gated": "auto",
-      "files": [
-        ".gitattributes",
-        "LICENSE",
-        "README.md",
-        "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors"
-      ]
-    },
-    {
-      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR@main",
-      "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
-      "revision": null,
-      "resolvedSha": "577ab50f447358d00ba68ef204648dfe05646300",
-      "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
-      "gated": "auto",
-      "files": [
-        ".gitattributes",
-        "README.md",
-        "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
-        "ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"
-      ]
-    },
-    {
       "key": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control@main",
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
       "revision": null,
@@ -2338,6 +2310,22 @@
         "q8/transformer/diffusion_pytorch_model.safetensors",
         "q8/vae/config.json",
         "q8/vae/diffusion_pytorch_model.safetensors"
+      ]
+    },
+    {
+      "key": "SceneWorks/ltx-2.3-ic-loras@ca287bbae91f939481b3b36764d1e8b2cfb6160b",
+      "repo": "SceneWorks/ltx-2.3-ic-loras",
+      "revision": "ca287bbae91f939481b3b36764d1e8b2cfb6160b",
+      "resolvedSha": "ca287bbae91f939481b3b36764d1e8b2cfb6160b",
+      "servedRepo": "SceneWorks/ltx-2.3-ic-loras",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "LICENSE.md",
+        "README.md",
+        "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+        "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
+        "ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"
       ]
     },
     {
