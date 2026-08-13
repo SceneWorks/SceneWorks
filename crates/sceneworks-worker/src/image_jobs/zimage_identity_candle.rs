@@ -3,11 +3,11 @@ use super::zimage_edit_candle::{
     resolve_zimage_edit_candle_base, zimage_edit_candle_steps, ZIMAGE_EDIT_CANDLE_DEFAULT_REPO,
 };
 use super::{
-    admit_conditioning_paths, consume_gen_events, drive_gen_items_scored, fit_engine_image,
-    load_reference_image, pose_entries, resolve_character_image_likeness_source, resolve_seed,
-    stage_likeness, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, Settings, Value, WorkerError, WorkerResult, ZImageEdit, ZImageEditPaths,
-    ZImageEditRequest,
+    admit_conditioning_paths, attach_manifest_text_encoder, consume_gen_events,
+    drive_gen_items_scored, fit_engine_image, load_reference_image, pose_entries,
+    resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
+    ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, Settings, Value,
+    WorkerError, WorkerResult, ZImageEdit, ZImageEditPaths, ZImageEditRequest,
 };
 use serde_json::json;
 
@@ -222,6 +222,16 @@ pub(super) async fn generate_candle_zimage_identity_stream(
         .collect();
     let total = work.len();
 
+    // Finalize the selected encoder before the lane's admission and provider load. Retain the full
+    // prepared spec through `ZImageEdit::load_with_spec`; reducing it to `ZImageEditPaths.text_encoder`
+    // would discard the exact config/shard/tokenizer receipt and permit fresh path revalidation.
+    let selected_spec = attach_manifest_text_encoder(
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone())),
+        "z_image_turbo",
+        request,
+        settings,
+    )?;
+
     // Conditioning VRAM admission (sc-16069, epic 15448). This lane is diverted by
     // `resolve_candle_image_route` before the generic txt2img arm and loads through the UNcached
     // `start_gen_stream`, so it reaches neither the `generate_candle_stream` `vram_gate` nor the
@@ -230,21 +240,57 @@ pub(super) async fn generate_candle_zimage_identity_stream(
     // Unlike its sibling conditioning lanes this one overlays NO second network: identity-init is an
     // img2img reconditioning of the Z-Image base (`ZImageEditPaths { base }`), so the floor is the base
     // weights alone and the rejection says so rather than pricing a phantom overlay.
-    admit_conditioning_paths(
-        settings,
-        "Z-Image",
-        "identity-init reference conditioning",
-        &base,
-        &[],
-    )
-    .await?;
+    if let Some(text_encoder) = selected_spec.text_encoder.as_ref() {
+        let transformer = base.join("transformer");
+        let vae = base.join("vae");
+        if transformer.is_dir() && vae.is_dir() {
+            admit_conditioning_paths(
+                settings,
+                "Z-Image",
+                "identity-init reference conditioning",
+                &transformer,
+                &[
+                    crate::conditioning_fit::weights_source_path(text_encoder),
+                    vae.as_path(),
+                ],
+            )
+            .await?;
+        } else {
+            // An opaque/custom snapshot layout cannot be decomposed without a scan. Preserve the
+            // existing safe lower-bound floor instead of inventing or double-counting components.
+            admit_conditioning_paths(
+                settings,
+                "Z-Image",
+                "identity-init reference conditioning",
+                &base,
+                &[],
+            )
+            .await?;
+        }
+    } else {
+        admit_conditioning_paths(
+            settings,
+            "Z-Image",
+            "identity-init reference conditioning",
+            &base,
+            &[],
+        )
+        .await?;
+    }
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "zimage_identity",
         0,
         move || {
-            let model = ZImageEdit::load(&ZImageEditPaths { base }).map_err(|error| {
+            let model = ZImageEdit::load_with_spec(
+                &ZImageEditPaths {
+                    base,
+                    text_encoder: None,
+                },
+                &selected_spec,
+            )
+            .map_err(|error| {
                 WorkerError::Engine(format!("Z-Image identity load failed: {error}"))
             })?;
             Ok((model, source))

@@ -133,6 +133,7 @@ fn qwen_edit_worker_lane_gpu_smoke() {
     // transformer/config.json (group_size 64).
     let model_engine = QwenEdit::load(&QwenEditPaths {
         root: dir.clone(),
+        text_encoder: None,
         adapters: Vec::new(),
         offload_policy: OffloadPolicy::Resident,
     })
@@ -394,6 +395,7 @@ fn qwen_edit_warm_reclaim_gpu_smoke() {
     let render = |tag: &str| {
         let engine = QwenEdit::load(&QwenEditPaths {
             root: dir.clone(),
+            text_encoder: None,
             adapters: Vec::new(),
             offload_policy: OffloadPolicy::Resident,
         })

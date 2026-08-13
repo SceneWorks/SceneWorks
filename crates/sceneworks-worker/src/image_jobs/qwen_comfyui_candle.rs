@@ -1,10 +1,10 @@
 use super::huggingface_snapshot_dir;
 use super::{
     consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
-    ApiClient, ColdLoadAdmission, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot,
-    JsonObject, LoadSpec, Path, PathBuf, PreparedFileDispatch, Settings, Value, WeightsSource,
-    WorkerError, WorkerResult,
+    prepare_manifest_text_encoder_with_file_pins, resolve_advanced_or_manifest_u32, resolve_seed,
+    start_cached_gen_stream_after_cold_admission, ApiClient, ColdLoadAdmission, GenerationOutput,
+    GenerationRequest, ImageRequest, JobSnapshot, JsonObject, LoadSpec, Path, PathBuf,
+    PreparedFileDispatch, Settings, Value, WeightsSource, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -203,10 +203,14 @@ fn qwen_comfyui_raw_settings(
     raw
 }
 
-/// Finalize the route-owned File tokens on the exact provider spec and retain the structural snapshot
-/// facts admission needs. This is the production selection-to-load boundary used by regression tests.
-pub(super) fn prepare_qwen_comfyui_load_spec(
+/// The imported transformer/VAE tokens and descriptor-validated text-encoder receipt are finalized
+/// together, before cache admission or provider load. An absent/default choice preserves the legacy
+/// snapshot encoder.
+pub(super) fn prepare_qwen_comfyui_load_spec_for_request(
     paths: ComfyuiQwenPaths,
+    request: &ImageRequest,
+    settings: &Settings,
+    engine_id: &str,
 ) -> WorkerResult<(LoadSpec, PathBuf, bool)> {
     let snapshot_dir = paths.snapshot_dir;
     let has_imported_vae = paths.vae.is_some();
@@ -225,8 +229,11 @@ pub(super) fn prepare_qwen_comfyui_load_spec(
     }
     let mut pins = vec![paths.transformer];
     pins.extend(paths.vae);
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
+    spec = prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        engine_id,
+        request,
+        settings,
         pins,
         "ComfyUI Qwen-Image source preparation failed",
     )?;
@@ -276,12 +283,17 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
             "this runtime has no registered ComfyUI Qwen-Image generate route".to_owned(),
         )
     })?;
-    let (spec, snapshot_dir, has_imported_vae) = prepare_qwen_comfyui_load_spec(paths)?;
+    let (spec, snapshot_dir, has_imported_vae) =
+        prepare_qwen_comfyui_load_spec_for_request(paths, request, settings, descriptor.id)?;
     // Price finalized File tokens plus only the companion directories the provider consumes. The
     // snapshot transformer is replaced; an imported VAE also replaces the snapshot VAE.
+    let selected_text_encoder = spec.text_encoder.is_some();
     let snapshot_text_encoder = snapshot_dir.join("text_encoder");
     let snapshot_vae = snapshot_dir.join("vae");
-    let mut companion_paths = vec![snapshot_text_encoder];
+    let mut companion_paths = Vec::new();
+    if !selected_text_encoder {
+        companion_paths.push(snapshot_text_encoder);
+    }
     if !has_imported_vae {
         companion_paths.push(snapshot_vae);
     }

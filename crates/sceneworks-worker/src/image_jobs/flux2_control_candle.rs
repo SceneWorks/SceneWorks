@@ -1,6 +1,6 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    apply_candle_image_load_shape, candle_certified_artifact_path,
+    apply_candle_image_load_shape, attach_manifest_text_encoder, candle_certified_artifact_path,
     candle_certified_hf_artifact_path, candle_quant_for_resolved_tier, candle_resolved_tier_key,
     pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, resolve_pid_weights, run_candle_strict_control,
@@ -314,6 +314,20 @@ impl CandleStrictControl for Flux2StrictControl {
     fn conditioning_admission(&self) -> ConditioningAdmission {
         let mut overlays = vec![self.control.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        if let Some(text_encoder) = self.memory_spec.text_encoder.as_ref() {
+            let transformer = self.base.join("transformer");
+            let vae = self.base.join("vae");
+            if transformer.is_dir() && vae.is_dir() {
+                overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+                overlays.push(vae.as_path());
+                return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+                    "FLUX.2-dev",
+                    "strict-pose Fun-Controlnet-Union branch",
+                    &transformer,
+                    &overlays,
+                ));
+            }
+        }
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "FLUX.2-dev",
             "strict-pose Fun-Controlnet-Union branch",
@@ -334,7 +348,12 @@ impl CandleStrictControl for Flux2StrictControl {
                 &self.memory_spec,
                 context,
             ),
-            None => Flux2Control::load_with_memory(&paths, self.quant, self.memory),
+            None => Flux2Control::load_with_memory_spec(
+                &paths,
+                self.quant,
+                &self.memory_spec,
+                self.memory,
+            ),
         };
         let model = loaded.map_err(|error| {
             WorkerError::Engine(format!(
@@ -449,7 +468,16 @@ pub(super) async fn generate_candle_flux2_control_stream(
         .with_control(gen_core::WeightsSource::File(control.clone()))
         .with_offload_policy(gen_core::OffloadPolicy::Sequential);
     strategy_spec.quantize = quant;
+    if let Some(pid) = pid_weights.as_ref() {
+        strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
     let strategy_spec = apply_candle_image_load_shape("flux2_dev", strategy_spec);
+    let strategy_spec = attach_manifest_text_encoder(
+        strategy_spec,
+        FLUX2_CONTROL_CANDLE_ENGINE_ID,
+        request,
+        settings,
+    )?;
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),

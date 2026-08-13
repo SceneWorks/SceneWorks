@@ -856,6 +856,7 @@ mod tests {
                 supports_preview,
                 ..Default::default()
             },
+            encoder_contract: None,
             required_components: &[],
             control_kinds: None,
         }

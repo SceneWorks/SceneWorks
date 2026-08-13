@@ -5098,7 +5098,17 @@ mod krea_base_tests {
     }
 
     fn fixture_spec(root: &std::path::Path) -> LoadSpec {
-        for component in ["text_encoder", "transformer", "vae"] {
+        let encoder_contract = mlx_gen_krea::provider_registry()
+            .unwrap()
+            .provider_encoder_contract(KREA_BASE_PROVIDER)
+            .expect("the pinned Krea base encoder contract");
+        gen_core_testkit::write_encoder_contract_fixture_with_quant(
+            &root.join("text_encoder"),
+            encoder_contract,
+            Some(4),
+        )
+        .expect("registry-owned Krea text encoder fixture");
+        for component in ["transformer", "vae"] {
             let directory = root.join(component);
             std::fs::create_dir_all(&directory).unwrap();
             let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
@@ -5107,13 +5117,11 @@ mod krea_base_tests {
             bytes.extend_from_slice(&0_f32.to_le_bytes());
             std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
         }
-        for component in ["text_encoder", "transformer"] {
-            std::fs::write(
-                root.join(component).join("config.json"),
-                r#"{"quantization":{"bits":4,"group_size":64}}"#,
-            )
-            .unwrap();
-        }
+        std::fs::write(
+            root.join("transformer").join("config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .unwrap();
         LoadSpec::new(WeightsSource::Dir(root.to_owned()))
             .with_quant(Quant::Q4)
             .with_offload_policy(OffloadPolicy::Sequential)

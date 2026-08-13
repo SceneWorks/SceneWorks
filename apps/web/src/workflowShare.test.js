@@ -475,9 +475,10 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
     // prompt is restored as prose instead, and the row says so). Pose coordinates now hydrate
     // session-only picker records through the ordinary pose-selection path (sc-16132).
     //
-    // The eleven video keys (sc-15956) are here for the first reason, not the second: they travel
-    // intact in a shared MP4 and replay in Video Studio, which is a different panel. A row that
-    // said "restored" here would be claiming this studio had put them somewhere.
+    // The remaining video-only keys (sc-15956) are here for the first reason, not the second: they
+    // travel intact in a shared MP4 and replay in Video Studio, which is a different panel.
+    // `textEncoderModel` is no longer in that set because Image Studio now has the same authored
+    // selector and restores its opaque id.
     expect(
       rows
         .filter((row) => !row.restored)
@@ -494,7 +495,6 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "motion",
       "structuredPrompt",
       "systemMessage",
-      "textEncoderModel",
       "timelineAction",
       "videoCfgGuidanceScale",
       "videoConditioningStrength",

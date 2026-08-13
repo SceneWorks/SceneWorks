@@ -47,7 +47,9 @@ pub(crate) async fn create_image_job(
         .and_then(Value::as_str)
         .unwrap_or(payload.model.as_str())
         .to_owned();
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    let mut model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    resolve_selected_image_text_encoder(&state, &job_payload, &model_id, &mut model_manifest_entry)
+        .await?;
     // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
     // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
@@ -127,7 +129,7 @@ pub(crate) async fn create_image_job(
     if let Some(caption_request) = caption_request {
         crate::ideogram::spawn_ideogram_caption_watcher(state, job.id.clone(), caption_request);
     }
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
@@ -231,7 +233,7 @@ pub(crate) async fn create_vqa_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
@@ -275,7 +277,7 @@ pub(crate) async fn create_interleave_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
@@ -736,7 +738,7 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the
@@ -811,7 +813,7 @@ pub(crate) async fn create_audio_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an

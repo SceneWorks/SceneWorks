@@ -1,15 +1,15 @@
 #[cfg(test)]
 use super::standard_tier_subdir_gated;
 use super::{
-    apply_candle_qwen_load_shape, apply_request_scoped_candle_residency, consume_gen_events,
-    drive_gen_items, gate_tier_key, gate_with_evict_reclaim, installed_tier_keys,
-    load_reference_image, load_spec, non_empty, nvfp4_host_eligible, nvfp4_selected,
-    read_safetensors_header, requested_receipt_variant, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_seed,
-    standard_tier_subdir, start_gen_stream, tier_key_from_resolved_dir, vram_reject_tail_for_tier,
-    AdapterKind, AdapterSpec, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, QwenEdit, QwenEditPaths, QwenEditRequest, Settings, Value, WorkerError,
-    WorkerResult,
+    apply_candle_qwen_load_shape, apply_request_scoped_candle_residency,
+    attach_manifest_text_encoder, consume_gen_events, drive_gen_items, gate_tier_key,
+    gate_with_evict_reclaim, installed_tier_keys, load_reference_image, load_spec, non_empty,
+    nvfp4_host_eligible, nvfp4_selected, read_safetensors_header, requested_receipt_variant,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with,
+    resolve_seed, standard_tier_subdir, start_gen_stream, tier_key_from_resolved_dir,
+    vram_reject_tail_for_tier, AdapterKind, AdapterSpec, ApiClient, Image, ImagePlan, ImageRequest,
+    JobSnapshot, JsonObject, Path, PathBuf, QwenEdit, QwenEditPaths, QwenEditRequest, Settings,
+    Value, WorkerError, WorkerResult,
 };
 use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use serde_json::json;
@@ -94,6 +94,8 @@ const QWEN_EDIT_CANDLE_LIGHTNING_STEPS: u32 = 4;
 const QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle Qwen-Image-Edit assets + telemetry.
 pub(super) const QWEN_EDIT_CANDLE_ENGINE: &str = "candle_qwen_edit";
+/// Inference descriptor/provider id. Keep distinct from the SceneWorks telemetry adapter label.
+const QWEN_EDIT_PROVIDER_ID: &str = "qwen_image_edit";
 /// The SceneWorks pre-packed Qwen-Image-Edit-2511 quant-matrix turnkey (sc-8669, epic 8506): self-
 /// contained `q4/` (manifest default) + `q8/` + `bf16/` subdirs, only the transformer packed (the
 /// Qwen2.5-VL TE + VAE stay dense bf16 in every tier). Shared by all four edit ids + the Lightning
@@ -525,6 +527,12 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         .collect();
     let total = work.len();
     let negative = request.negative_prompt.clone();
+    let prepared_provider_spec = attach_manifest_text_encoder(
+        load_spec(qwen_base.clone(), None, adapters.clone(), None),
+        "qwen_image_edit",
+        request,
+        settings,
+    )?;
 
     // VRAM fit-gate for the Qwen-Image-Edit lane (epic 10765 Phase 1c follow-up, sc-10968) — the edit
     // sibling of the txt2img gate (base.rs `generate_candle_stream`). The edit lane routes through THIS
@@ -602,11 +610,14 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             _ => None,
         };
         let strategy_spec = apply_candle_qwen_load_shape(
-            QWEN_EDIT_CANDLE_ENGINE,
-            load_spec(qwen_base.clone(), quant, adapters.clone(), None),
+            QWEN_EDIT_PROVIDER_ID,
+            match quant {
+                Some(quant) => prepared_provider_spec.clone().with_quant(quant),
+                None => prepared_provider_spec.clone(),
+            },
         );
         if let Some(evaluation) = crate::candle_memory_strategy::evaluate_shared_image(
-            QWEN_EDIT_CANDLE_ENGINE,
+            QWEN_EDIT_PROVIDER_ID,
             &request.model,
             &strategy_spec,
             // `artifact_is_certified` (sc-17054). The z-image caller passes a real check that the
@@ -739,13 +750,17 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         "qwen_edit",
         adapter_count,
         move || {
-            let model = QwenEdit::load(&QwenEditPaths {
-                root: qwen_base,
-                adapters,
-                // Compatibility-only load field. The fit gate's lifecycle decision is carried by
-                // each request below so one loaded provider can serve both residency modes.
-                offload_policy: gen_core::OffloadPolicy::Resident,
-            })
+            let model = QwenEdit::load_with_spec(
+                &QwenEditPaths {
+                    root: qwen_base,
+                    text_encoder: None,
+                    adapters,
+                    // Compatibility-only load field. The fit gate's lifecycle decision is carried by
+                    // each request below so one loaded provider can serve both residency modes.
+                    offload_policy: gen_core::OffloadPolicy::Resident,
+                },
+                &prepared_provider_spec,
+            )
             .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
             Ok((model, reference))
         },

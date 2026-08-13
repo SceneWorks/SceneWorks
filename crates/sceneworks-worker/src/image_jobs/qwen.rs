@@ -340,6 +340,7 @@ async fn generate_qwen_control_stream(
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
     spec = apply_measured_mlx_load_shape(QWEN_CONTROL_ENGINE_ID, spec);
+    spec = attach_manifest_text_encoder(spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         QWEN_CONTROL_ENGINE_ID,
@@ -844,6 +845,7 @@ async fn generate_qwen_edit_stream(
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
     spec = apply_measured_mlx_load_shape(engine_id, spec);
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
