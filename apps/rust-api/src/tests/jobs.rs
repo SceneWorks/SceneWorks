@@ -1169,6 +1169,95 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
     assert_eq!(count, 1, "only the supported imported Pose request queues");
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "finetune_mage",
+            "name": "Fine-tuned Mage",
+            "type": "image",
+            "family": "mage-flow",
+            "importSourceShape": "transformer_directory",
+            "paths": { "model": "/probe/finetune-mage" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for (label, extra) in [
+        (
+            "edit",
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+        ),
+        ("reference", json!({ "referenceAssetId": "reference-1" })),
+        (
+            "multi-phase",
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ),
+        (
+            "unsupported quant tier",
+            json!({ "advanced": { "quantTier": "nvfp4" } }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(extra.as_object().expect("extra object").clone());
+        let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("imported_unsupported")),
+            "{label} must fail at exact imported-provider admission: {error}"
+        );
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the exact registered generate shape queues");
+}
+
 /// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.
 /// Retry and duplicate therefore reject until the caller reduces `advanced.poses` to the current
 /// product ceiling. This makes the compatibility policy executable instead of an incidental side

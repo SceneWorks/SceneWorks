@@ -4403,19 +4403,28 @@ fn project_imported_operation_surface(
         }
     }
 
-    let compatibility = object
-        .entry("loraCompatibility".to_owned())
-        .or_insert_with(|| json!({}));
-    if let Some(compatibility) = compatibility.as_object_mut() {
-        if let Some(types) = compatibility.get_mut("types").and_then(Value::as_array_mut) {
-            types.retain(|value| value.as_str() != Some("acceleration"));
-        }
-        if multi_phase {
-            let types = compatibility
-                .entry("types".to_owned())
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Some(types) = types.as_array_mut() {
-                types.push(Value::String("acceleration".to_owned()));
+    // An empty route set means this backend has no opinion about adapter compatibility. Do not
+    // manufacture an empty object: catalog consumers distinguish abstention from an explicit
+    // provider-owned compatibility surface. Once at least one exact route exists, keep the existing
+    // object-shaped projection so supported routes retain a stable schema even when they expose no
+    // acceleration adapter.
+    if routes.is_empty() {
+        object.remove("loraCompatibility");
+    } else {
+        let compatibility = object
+            .entry("loraCompatibility".to_owned())
+            .or_insert_with(|| json!({}));
+        if let Some(compatibility) = compatibility.as_object_mut() {
+            if let Some(types) = compatibility.get_mut("types").and_then(Value::as_array_mut) {
+                types.retain(|value| value.as_str() != Some("acceleration"));
+            }
+            if multi_phase {
+                let types = compatibility
+                    .entry("types".to_owned())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(types) = types.as_array_mut() {
+                    types.push(Value::String("acceleration".to_owned()));
+                }
             }
         }
     }
@@ -8323,6 +8332,10 @@ mod imported_lora_advertisement_tests {
         assert!(mage_on_candle["capabilities"]
             .as_array()
             .is_some_and(|values| !values.contains(&json!("text_to_image"))));
+        assert!(
+            mage_on_candle.get("loraCompatibility").is_none(),
+            "an empty route set must abstain instead of manufacturing compatibility metadata"
+        );
         assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
     }
 }
