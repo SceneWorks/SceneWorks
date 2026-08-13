@@ -1859,7 +1859,7 @@ mod tests {
     /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
     /// mirrored here — the guardrail that a family is never silently added to the import surface.
     const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
-    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
+    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
 
     #[test]
     fn mlx_routed_families_match_snapshot() {
@@ -2336,14 +2336,12 @@ mod tests {
             imported_image_model_lora_advertisement("user_import", family, false, true)
         };
 
-        // krea_2 — THE REPORTED BUG. The MLX single-file entrypoint takes adapters (inference #211);
-        // the candle one does not yet (sc-14135), so a candle-only host must not advertise them.
+        // krea_2 — both native single-file entrypoints now take adapters.
         assert_eq!(mlx("krea_2"), Some(true));
         assert_eq!(
             candle("krea_2"),
-            Some(false),
-            "an imported Krea 2 checkpoint renders t2i on candle but CANNOT take a LoRA — \
-             advertising one is the hang this oracle exists to prevent"
+            Some(true),
+            "an imported Krea 2 checkpoint advertises the adapter lane Candle can claim"
         );
 
         // sdxl — a fused checkpoint; both native loaders accept UNet adapters, so the
@@ -2351,8 +2349,8 @@ mod tests {
         assert_eq!(mlx("sdxl"), Some(true));
         assert_eq!(candle("sdxl"), Some(true));
 
-        // mage-flow — adapters refused on EVERY backend (`mlx_gen_mage::load_finetuned`), and there
-        // is no candle Mage engine at all, so it is not even routable there.
+        // mage-flow — full fine-tunes are routed on both native backends, but their provider seam
+        // rejects adapters on every backend.
         assert_eq!(
             mlx("mage-flow"),
             Some(false),
@@ -2360,8 +2358,8 @@ mod tests {
         );
         assert_eq!(
             candle("mage-flow"),
-            None,
-            "mage-flow is absent from CANDLE_ROUTED_FAMILIES — not routable, so no opinion"
+            Some(false),
+            "a Mage fine-tune renders t2i on Candle but still refuses adapters"
         );
 
         // A family the route-by-family path does not serve at all: no opinion, entry untouched.

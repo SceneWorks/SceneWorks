@@ -20,10 +20,8 @@
 //    `is_diffusers_snapshot_dir` exists specifically to REJECT a dir carrying `config.json`, which
 //    is precisely this shape.
 //
-// macOS/MLX only, deliberately: the Mage generator descriptor is `mac_only`, there is no candle
-// Mage engine to route a fine-tune to, and `mage-flow` is correspondingly absent from
-// `CANDLE_ROUTED_FAMILIES`. This file is `include!`d into the `image_jobs` module, sharing its
-// imports.
+// Both native backends serve this lane through their runtime bundle's Mage full-fine-tune loader.
+// This file is `include!`d into the `image_jobs` module, sharing its imports.
 //
 // Scope: plain **txt2img**. The non-edit Mage variants advertise no conditioning at all, and
 // `load_finetuned` refuses adapters outright, so the scheduler's `mage-flow` arm in
@@ -237,6 +235,21 @@ async fn generate_mage_finetuned_stream(
     // Require the base's shared components before any compute — a clear "install the Mage-Flow
     // Base model first" error rather than a deep load failure.
     let components = resolve_mage_finetuned_components(settings)?;
+    // `spec.weights` is the fine-tuned TRANSFORMER dir itself (not a snapshot root): a training run
+    // emits the DiT alone, so both shared components MUST be staged and there is deliberately no
+    // flat-layout fallback engine-side.
+    let spec = components.into_iter().fold(
+        LoadSpec::new(WeightsSource::Dir(transformer)),
+        |spec, (id, source)| spec.with_component(id, source),
+    );
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    admit_candle_load_spec_floor(
+        &request.model,
+        "Mage-Flow fine-tuned base",
+        settings,
+        &spec,
+    )
+    .await?;
 
     let (width, height) = (request.width, request.height);
     let steps =
@@ -261,13 +274,6 @@ async fn generate_mage_finetuned_stream(
         MAGE_FINETUNED_ENGINE,
         0,
         move || {
-            // `spec.weights` is the fine-tuned TRANSFORMER dir itself (not a snapshot root): a
-            // training run emits the DiT alone, so both shared components MUST be staged and there
-            // is deliberately no flat-layout fallback engine-side.
-            let spec = components.into_iter().fold(
-                LoadSpec::new(WeightsSource::Dir(transformer)),
-                |spec, (id, source)| spec.with_component(id, source),
-            );
             #[cfg(target_os = "macos")]
             let loaded = runtime_macos::providers::mage::load_finetuned(
                 // The published checkpoint the fine-tune started from — the ONLY Mage generation

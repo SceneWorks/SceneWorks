@@ -17,6 +17,13 @@ struct DetailParams {
     seed: i64,
 }
 
+/// Events emitted by the blocking tiled-detail pass. Tile completion is load-bearing progress;
+/// previews are decorative and use a non-blocking send so a slow API consumer cannot stall denoise.
+enum DetailEvent {
+    Tile { done: usize, total: usize },
+    Preview(gen_core::PreviewFrame),
+}
+
 fn resolve_detail_params(request: &ImageRequest) -> DetailParams {
     DetailParams {
         strength: advanced::f32_clamped(&request.advanced, "strength", 0.55, 0.2..=1.0),
@@ -91,11 +98,15 @@ trait DetailTileRefiner {
         eng_h: u32,
         params: &DetailParams,
         seed: i64,
+        preview: &gen_core::PreviewSink,
         cancel: &CancelFlag,
     ) -> WorkerResult<Vec<u8>>;
 }
 
-impl DetailTileRefiner for dyn Generator {
+// A cached MLX generator is borrowed only for the duration of `with_cached_generator`'s callback.
+// Do not inherit the trait-object default `'static` bound here: doing so makes that valid callback
+// borrow appear to escape on macOS (E0521).
+impl DetailTileRefiner for dyn Generator + '_ {
     fn refine_tile(
         &self,
         tile: Image,
@@ -103,9 +114,10 @@ impl DetailTileRefiner for dyn Generator {
         eng_h: u32,
         params: &DetailParams,
         seed: i64,
+        preview: &gen_core::PreviewSink,
         cancel: &CancelFlag,
     ) -> WorkerResult<Vec<u8>> {
-        detail_refine_tile_generator(self, tile, eng_w, eng_h, params, seed, cancel)
+        detail_refine_tile_generator(self, tile, eng_w, eng_h, params, seed, preview, cancel)
     }
 }
 
@@ -118,6 +130,7 @@ impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
         eng_h: u32,
         params: &DetailParams,
         seed: i64,
+        preview: &gen_core::PreviewSink,
         cancel: &CancelFlag,
     ) -> WorkerResult<Vec<u8>> {
         let request = runtime_cuda::providers::sdxl::SdxlDetailRequest {
@@ -131,7 +144,7 @@ impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
             control_scale: params.cn_scale,
             seed: seed as u64,
             cancel: cancel.clone(),
-            ..Default::default()
+            preview: preview.clone(),
         };
         self.generate(&request, &tile, &tile, &mut |_| {})
             .map(|image| image.pixels)
@@ -149,6 +162,7 @@ fn detail_refine_tile_generator(
     eng_h: u32,
     params: &DetailParams,
     seed: i64,
+    preview: &gen_core::PreviewSink,
     cancel: &CancelFlag,
 ) -> WorkerResult<Vec<u8>> {
     let mut noop = |_progress: Progress| {};
@@ -173,6 +187,7 @@ fn detail_refine_tile_generator(
                 scale: Some(params.cn_scale),
             },
         ],
+        preview: preview.clone(),
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -196,6 +211,7 @@ fn refine_tiled_detail(
     generator: &(impl DetailTileRefiner + ?Sized),
     source: &image::RgbImage,
     params: &DetailParams,
+    preview: &gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_tile: &mut dyn FnMut(usize, usize),
 ) -> WorkerResult<(image::RgbImage, usize)> {
@@ -242,6 +258,7 @@ fn refine_tiled_detail(
                 eng_h,
                 params,
                 params.seed + done as i64,
+                preview,
                 cancel,
             )?;
             let refined = image::RgbImage::from_raw(eng_w, eng_h, refined_px).ok_or_else(|| {
@@ -497,44 +514,11 @@ pub(crate) async fn run_image_detail_job(
                     .to_owned(),
             ));
         }
-        let root = settings
-            .data_dir
-            .join("cache")
-            .join("sdxl-imported-components");
-        let clip_l = root.join("clip-l");
-        let clip_bigg = root.join("clip-bigg");
-        let vae = root.join("vae-fp16-fix");
-        for (repo, revision, file, destination) in [
-            (
-                SDXL_CLIP_L_REPO,
-                SDXL_CLIP_L_REVISION,
-                "tokenizer.json",
-                clip_l.join("tokenizer.json"),
-            ),
-            (
-                SDXL_CLIP_BIGG_REPO,
-                SDXL_CLIP_BIGG_REVISION,
-                "tokenizer.json",
-                clip_bigg.join("tokenizer.json"),
-            ),
-            (
-                SDXL_VAE_REPO,
-                SDXL_VAE_REVISION,
-                "diffusion_pytorch_model.safetensors",
-                vae.join("diffusion_pytorch_model.safetensors"),
-            ),
-        ] {
-            stage_sdxl_component_file(
-                api,
-                settings,
-                job,
-                repo,
-                revision,
-                file,
-                &destination,
-            )
-            .await?;
-        }
+        // Resolve the exact three descriptor-declared SDXL co-requisites from the Model Manager's
+        // installed cache. Detail jobs must never create an ad-hoc cache or download model weights;
+        // a missing component fails here, before provider load, with the shared actionable error.
+        let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
+            resolve_sdxl_components(&request.model_manifest_entry, settings)?;
         admit_candle_base_floor(
             &model,
             "SDXL detail",
@@ -542,15 +526,15 @@ pub(crate) async fn run_image_detail_job(
             &[
                 weights_dir.as_path(),
                 control_file.as_path(),
-                vae.as_path(),
+                crate::conditioning_fit::weights_source_path(&vae_fp16_fix),
             ],
         )
         .await?;
         runtime_cuda::providers::sdxl::SdxlDetailPaths {
             sdxl_base: weights_dir.clone(),
-            tokenizer_clip_l: WeightsSource::Dir(clip_l),
-            tokenizer_clip_bigg: WeightsSource::Dir(clip_bigg),
-            vae_fp16_fix: WeightsSource::Dir(vae),
+            tokenizer_clip_l,
+            tokenizer_clip_bigg,
+            vae_fp16_fix,
             tile_controlnet: WeightsSource::File(control_file.clone()),
             adapters: adapters.clone(),
         }
@@ -586,7 +570,7 @@ pub(crate) async fn run_image_detail_job(
     let media_rel = format!("assets/images/{genset_id}/{filename}");
 
     let cancel = CancelFlag::new();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(usize, usize)>(16);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<DetailEvent>(64);
     let blocking = {
         let params_ref = params.clone();
         let cancel = cancel.clone();
@@ -599,15 +583,26 @@ pub(crate) async fn run_image_detail_job(
                 spec,
                 "sdxl detail load failed",
                 move |generator| {
+                    let preview_tx = tx.clone();
+                    let preview = gen_core::PreviewSink::new(move |frame| {
+                        let _ = preview_tx.try_send(DetailEvent::Preview(frame));
+                    });
                     let mut on_tile = |done: usize, total: usize| {
                         // A closed channel means the consumer loop returned early (POST failure /
                         // 409); trip the engine flag so refinement bails instead of grinding
                         // unheard (sc-8804, F-003 — the swallowed-closed-channel leak).
-                        if tx.blocking_send((done, total)).is_err() {
+                        if tx.blocking_send(DetailEvent::Tile { done, total }).is_err() {
                             cancel.cancel();
                         }
                     };
-                    refine_tiled_detail(generator, &source, &params_ref, &cancel, &mut on_tile)
+                    refine_tiled_detail(
+                        generator,
+                        &source,
+                        &params_ref,
+                        &preview,
+                        &cancel,
+                        &mut on_tile,
+                    )
                 },
             )
             .await
@@ -617,12 +612,23 @@ pub(crate) async fn run_image_detail_job(
         let blocking = tokio::task::spawn_blocking(move || {
             let detail = runtime_cuda::providers::sdxl::SdxlDetail::load(&candle_paths)
                 .map_err(|error| WorkerError::Engine(format!("SDXL detail load failed: {error}")))?;
+            let preview_tx = tx.clone();
+            let preview = gen_core::PreviewSink::new(move |frame| {
+                let _ = preview_tx.try_send(DetailEvent::Preview(frame));
+            });
             let mut on_tile = |done: usize, total: usize| {
-                if tx.blocking_send((done, total)).is_err() {
+                if tx.blocking_send(DetailEvent::Tile { done, total }).is_err() {
                     cancel.cancel();
                 }
             };
-            refine_tiled_detail(&detail, &source, &params_ref, &cancel, &mut on_tile)
+            refine_tiled_detail(
+                &detail,
+                &source,
+                &params_ref,
+                &preview,
+                &cancel,
+                &mut on_tile,
+            )
         });
         blocking
     };
@@ -635,6 +641,7 @@ pub(crate) async fn run_image_detail_job(
     let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut last_cancel_check = Instant::now();
     let mut canceled = false;
+    let mut latest_preview: Option<PreviewSlot> = None;
     // Heartbeat + cancel-poll on a fixed interval, not only when the blocking thread
     // finishes a tile. The cold SDXL+tile-ControlNet load and each full multi-step tile
     // refine emit nothing, so without an interval arm the worker posts no Busy heartbeat
@@ -650,13 +657,37 @@ pub(crate) async fn run_image_detail_job(
     let loop_result: WorkerResult<()> = async {
         loop {
         tokio::select! {
-            maybe_tile = rx.recv() => {
-                let Some((done, total)) = maybe_tile else {
+            maybe_event = rx.recv() => {
+                let Some(event) = maybe_event else {
                     break;
                 };
                 if canceled {
                     continue; // drain so the blocking sender never blocks; terminal posts after stop.
                 }
+                let (done, total) = match event {
+                    DetailEvent::Tile { done, total } => (done, total),
+                    DetailEvent::Preview(frame) => {
+                        // Match the shared image stream's latest-wins preview contract. Encoding stays
+                        // off the async runtime; the data URL rides the next tile progress POST.
+                        let encoded = tokio::task::spawn_blocking(move || {
+                            let data_url = encode_preview_data_url(&frame)?;
+                            Some(PreviewSlot {
+                                index: 0,
+                                current: frame.current,
+                                total: frame.total,
+                                data_url,
+                            })
+                        })
+                        .await
+                        .map_err(|error| {
+                            crate::task_join_error("detail preview encode task", error)
+                        })?;
+                        if let Some(slot) = encoded {
+                            latest_preview = Some(slot);
+                        }
+                        continue;
+                    }
+                };
                 // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
                 // so a quit stops the tile pass at this step, matching a user cancel.
                 if shutdown_requested()
@@ -677,7 +708,19 @@ pub(crate) async fn run_image_detail_job(
                         ProgressStage::Generating,
                         0.45 + 0.5 * (done as f64 / total.max(1) as f64),
                         &format!("Refining detail tile {done}/{total}."),
-                        None,
+                        latest_preview.as_ref().map(|slot| {
+                            json!({
+                                "previewFrame": {
+                                    "imageIndex": slot.index,
+                                    "current": slot.current,
+                                    "total": slot.total,
+                                    "dataUrl": slot.data_url,
+                                }
+                            })
+                            .as_object()
+                            .cloned()
+                            .expect("detail preview result is an object")
+                        }),
                         backend,
                     ),
                 )

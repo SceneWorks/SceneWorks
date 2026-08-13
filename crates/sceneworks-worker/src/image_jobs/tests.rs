@@ -10786,6 +10786,7 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
             eng_h: u32,
             _params: &DetailParams,
             seed: i64,
+            _preview: &gen_core::PreviewSink,
             _cancel: &CancelFlag,
         ) -> WorkerResult<Vec<u8>> {
             self.calls
@@ -10812,10 +10813,12 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
         calls: Mutex::new(Vec::new()),
     };
     let mut progress = Vec::new();
+    let preview = gen_core::PreviewSink::default();
     let (output, total) = refine_tiled_detail(
         &refiner,
         &source,
         &params,
+        &preview,
         &CancelFlag::new(),
         &mut |done, total| progress.push((done, total)),
     )
@@ -16799,6 +16802,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             include_str!("krea_control_candle.rs"),
             "admit_conditioning_paths(",
         ),
+        (
+            "KreaImportedControl",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+            "admit_conditioning_paths(",
+        ),
     ];
 
     // Routes that overlay NO second network, so the conditioning gate does not apply to them. Each is
@@ -16832,6 +16841,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "KreaMultiPhase",
         // Imported / in-place external bases: a single user-supplied checkpoint.
         "KreaImported",
+        "MageFinetuned",
         "SdxlImported",
         "ZimageComfyui",
         "QwenImageComfyui",
@@ -16895,6 +16905,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "SdxlImported",
             "sdxl_imported.rs",
             include_str!("sdxl_imported.rs"),
+            "admit_candle_load_spec_floor(",
+        ),
+        (
+            "MageFinetuned",
+            "mage_finetuned.rs",
+            include_str!("mage_finetuned.rs"),
             "admit_candle_load_spec_floor(",
         ),
         (

@@ -101,7 +101,7 @@ fn imported_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     request
         .reference_asset_id
         .as_deref()
-        .or_else(|| request.source_asset_id.as_deref())
+        .or(request.source_asset_id.as_deref())
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(|id| vec![id.to_owned()])
@@ -572,6 +572,25 @@ async fn generate_krea_imported_control_stream(
     // Job LoRA/LoKr adapters ride additively on the imported DiT (path-confined by the shared
     // helper); the pose control branch is never adapted.
     let adapters = resolve_adapters(request, settings)?;
+
+    // Candle conditioning-overlay admission (sc-16069): this imported route is diverted around the
+    // generic generator cache and holds a full dense Krea trunk, the pose-control branch, and every
+    // job adapter co-resident. The installed dense base tier is the honest footprint proxy for the
+    // native file-loaded DiT (same validated geometry/dtype); count the actual overlay + adapters on
+    // top, and gate before `start_gen_stream` can allocate anything.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let mut overlays = vec![control_weights.as_path()];
+        overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
+        admit_conditioning_paths(
+            settings,
+            &request.model,
+            "imported Krea 2 pose ControlNet",
+            &base_dir,
+            &overlays,
+        )
+        .await?;
+    }
 
     #[cfg(target_os = "macos")]
     let steps = krea_control_steps(request);
