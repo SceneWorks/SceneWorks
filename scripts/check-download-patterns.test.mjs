@@ -174,52 +174,66 @@ test("the recorded evidence carries servedRepo and gated on every key", async ()
   }
 });
 
-// THE sc-18923 REGRESSION TEST, on real data, in both directions.
+// THE sc-18923 REGRESSION TEST, on the real immutable public rehost.
 //
-// The whole MAJOR finding was that a gated repo graded green. This asserts the opposite verdict on
-// the real recorded HDR entry with the waiver removed, and the waived verdict with it present — so
-// the guard cannot quietly stop firing, and the waiver cannot quietly stop absorbing.
-test("evidence-gated: the real HDR entry reds without its waiver and is tracked with it", async () => {
+// The original defect was two gated repos grading green behind waivers. Both manifest claims must
+// now resolve to the same exact public revision, each declared file must exist, and there must be
+// no waiver capable of absorbing a future gate. Mutating that real listing back to gated must red.
+test("the HDR and LipDub claims share one ungated immutable rehost with no gating waiver", async () => {
   const { claims, evidence } = await realInputs();
 
   const hdr = claims.find((claim) => claim.label === "lora:ltx_2_3_ic_hdr");
+  const lipdub = claims.find((claim) => claim.label === "lora:ltx_2_3_ic_lipdub");
   assert.ok(hdr, "lora:ltx_2_3_ic_hdr must exist for this regression test to mean anything");
+  assert.ok(lipdub, "lora:ltx_2_3_ic_lipdub must exist for this regression test to mean anything");
+  assert.equal(hdr.repo, "SceneWorks/ltx-2.3-ic-loras");
+  assert.equal(lipdub.repo, hdr.repo);
+  assert.match(hdr.revision, /^[0-9a-f]{40}$/u);
+  assert.equal(lipdub.revision, hdr.revision);
   const entry = evidence.repos.find((row) => row.key === claimKey(hdr.repo, hdr.revision));
-  assert.ok(entry, "the HDR entry must have a recorded listing");
-  // Guard the fixture: a flip must come from the guard, not from the data being the wrong shape.
-  assert.equal(entry.gated, "auto", "upstream HDR must genuinely still be gated for this to bind");
-  assert.ok(
-    entry.files.includes(hdr.declared[0]),
-    "HDR's declared file must genuinely be present — the point is that it 401s ANYWAY",
+  assert.ok(entry, "the shared IC-LoRA rehost must have a recorded listing");
+  assert.equal(entry.servedRepo, hdr.repo, "the public rehost must not resolve through a rename");
+  assert.equal(entry.resolvedSha, hdr.revision, "the recorded listing must bind the manifest SHA");
+  assert.equal(entry.gated, false, "the replacement must remain publicly downloadable");
+  for (const claim of [hdr, lipdub]) {
+    assert.ok(entry.files.includes(claim.declared[0]), `${claim.label} file must exist at the pin`);
+  }
+  for (const file of [
+    "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
+    "ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors",
+    "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+    "LICENSE.md",
+    "README.md",
+  ]) {
+    assert.ok(entry.files.includes(file), `the immutable public rehost must retain ${file}`);
+  }
+  assert.equal(
+    KNOWN_REPO_CONDITIONS.filter(
+      (waiver) => waiver.kind === "evidence-gated" && waiver.repo === hdr.repo,
+    ).length,
+    0,
+    "the public replacement must never carry forward a gating waiver",
   );
 
-  // Direction 1 — the defect: no waiver, so it is a hard failure.
-  const unwaived = gradeRecordedEvidence({
-    claims: [hdr],
+  const clean = gradeRecordedEvidence({
+    claims: [hdr, lipdub],
     evidence: { repos: [entry] },
     waivers: [],
     repoConditions: [],
   });
-  assert.deepEqual(
-    unwaived.problems.map((problem) => problem.kind),
-    ["evidence-gated"],
-    `expected exactly evidence-gated, got ${JSON.stringify(unwaived.problems)}`,
-  );
+  assert.deepEqual(clean.problems, []);
 
-  // Direction 2 — the shipped posture: waived, tracked, zero problems.
-  const gradedWaiver = KNOWN_REPO_CONDITIONS.filter(
-    (waiver) => waiver.kind === "evidence-gated" && waiver.repo === hdr.repo,
-  );
-  assert.equal(gradedWaiver.length, 1, "HDR must carry exactly one evidence-gated waiver");
-  const waivedRun = gradeRecordedEvidence({
-    claims: [hdr],
-    evidence: { repos: [entry] },
+  const regated = gradeRecordedEvidence({
+    claims: [hdr, lipdub],
+    evidence: { repos: [{ ...entry, gated: "auto" }] },
     waivers: [],
-    repoConditions: gradedWaiver,
+    repoConditions: [],
   });
-  assert.deepEqual(waivedRun.problems, []);
-  assert.equal(waivedRun.waived.length, 1);
-  assert.match(waivedRun.waived[0], /sc-18923/);
+  assert.deepEqual(
+    regated.problems.map((problem) => problem.kind),
+    ["evidence-gated"],
+    `expected exactly evidence-gated, got ${JSON.stringify(regated.problems)}`,
+  );
 });
 
 // The repo-id guard's reason for existing: it catches what the sha check structurally cannot.
