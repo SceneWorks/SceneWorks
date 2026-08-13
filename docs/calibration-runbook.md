@@ -337,8 +337,7 @@ Two things follow, and both are now enforced rather than remembered:
     byte-identical to what a re-record produces. That is what distinguishes an honest re-record
     from a hand edit.
   - `=== ARTIFACT VERDICT: WOULD CHANGE — exit 1 ===` — it is not. Re-record and **read the diff
-    before concluding anything**: an unrevisioned key whose upstream default branch has moved since
-    the last record reds this way harmlessly, and so does a hand edit.
+    before concluding anything**: a manifest/evidence change or a hand edit both red this mode.
 
   🔴 **In this mode the exit code carries that verdict and nothing else** (sc-18854 review). The
   live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner —
@@ -363,12 +362,10 @@ Two things follow, and both are now enforced rather than remembered:
   Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
   `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to
   run. The recorder never evaluates a pattern — it only transcribes — so you cannot record your way
-  out of a real zero-match. 84 of the 95 keys are pinned to immutable 40-hex revisions, whose
-  listings cannot go stale. **The other 11 are unrevisioned and that immutability argument does not
-  cover them** — they read a moving default branch, and while each records the `resolvedSha` it
-  actually read so drift is visible in a re-record diff, nothing forces a re-record. **sc-18924
-  tracks pinning the rest**, which is what closes that window; sc-18917 pinned the renamed
-  LipDub/DubIt entry and sc-18923 pinned/rehosted HDR plus DubIt.
+  out of a real zero-match. All 95 of 95 keys are pinned to immutable lowercase 40-hex revisions,
+  whose listings cannot go stale. sc-18924 closed the last 11-key moving-default-branch window and
+  made missing, branch, or tag revisions a hard offline-gate failure, so a new manifest entry cannot
+  silently reopen it.
 
   Each recorded key also carries `gated` and `servedRepo`, and the gate hard-fails on both
   (`evidence-gated`, `evidence-repo-id-mismatch`) with tracked waivers in `KNOWN_REPO_CONDITIONS`.

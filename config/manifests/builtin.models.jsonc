@@ -7142,6 +7142,7 @@
           // avoids a ~73 GB whole-repo download.
           "provider": "huggingface",
           "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
+          "revision": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
           "files": ["Flux2-Klein-9B-True-v2-bf16.safetensors"],
           "estimatedSizeBytes": 18253611008
         }
@@ -11062,6 +11063,7 @@
         {
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3-10Eros",
+          "revision": "84a05a13610d78dbe4340d1be23fd8185e10f697",
           // Community LTX-2.3 merge (Sulphur-2-base, I2V-tuned). The repo also ships
           // fp8 and fp8-transformer variants; we only need the bf16 all-in-one, which
           // shares the official ltx-2.3-22b-distilled key layout (model.diffusion_model.*
@@ -11076,6 +11078,7 @@
           // produces usable text-to-video. Only the cond_safe variant is fetched.
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+          "revision": "9c3548954510182827d7bfc872fd7cceb64230fd",
           // Co-requisite (sc-9696): the cond_safe distill LoRA is a required runtime component
           // (auto-injected per-pass; see mlx.autoDistillLora), so it must download alongside the
           // 10Eros checkpoint rather than being a pick-one alternate.
@@ -11545,6 +11548,7 @@
         {
           "provider": "huggingface",
           "repo": "lightx2v/Wan2.2-Lightning",
+          "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
           "coRequisite": true,
           "files": [
             "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/high_noise_model.safetensors",
@@ -11833,6 +11837,7 @@
         {
           "provider": "huggingface",
           "repo": "lightx2v/Wan2.2-Lightning",
+          "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
           "coRequisite": true,
           "files": [
             "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
@@ -13291,6 +13296,7 @@
           // fal/AuraSR checkpoint is CC-BY-SA-4.0 and is intentionally not used.
           "provider": "huggingface",
           "repo": "fal/AuraSR-v2",
+          "revision": "ff452185a7c8b51206dd62c21c292e7baad5c3a3",
           "files": ["model.safetensors", "config.json", "LICENSE.md", "README.md"],
           "estimatedSizeBytes": 2470000000
         }
@@ -13529,6 +13535,7 @@
         {
           "provider": "huggingface",
           "repo": "xinsir/controlnet-tile-sdxl-1.0",
+          "revision": "1ae8d9529efe58f7362a987363ff86a7904dc84f",
           "files": ["diffusion_pytorch_model.safetensors", "config.json"],
           "estimatedSizeBytes": 2500000000
         }
