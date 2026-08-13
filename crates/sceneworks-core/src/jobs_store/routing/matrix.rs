@@ -1710,7 +1710,9 @@ fn gap_for(model: &str, category: &str, capability: &str) -> ParityObligation {
             ("sc-18474", None)
         }
         "operation" => ("sc-18476", None),
-        "training" => ("sc-18479", None),
+        // sc-18479 closes the current matrix. Future residual training gaps belong to the
+        // parity-closure story rather than the completed implementation story.
+        "training" => ("sc-18481", None),
         "utility" => ("sc-18480", None),
         _ => ("sc-18480", None),
     };
@@ -2810,6 +2812,17 @@ mod tests {
             records: vec![incomplete],
         };
         assert!(validate_exceptions(&register).is_err());
+    }
+
+    #[test]
+    fn future_training_gaps_are_attributed_to_the_closure_story() {
+        let obligation = gap_for("synthetic_training_base", "training", "synthetic_lora");
+        assert_eq!(obligation.work_item, "sc-18481");
+        assert_eq!(
+            obligation.url,
+            "https://app.shortcut.com/trefry/story/18481"
+        );
+        assert_ne!(obligation.work_item, "sc-18479");
     }
 
     #[test]

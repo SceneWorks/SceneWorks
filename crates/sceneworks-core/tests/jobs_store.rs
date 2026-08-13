@@ -5528,7 +5528,17 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("lens_lora", "lens", "lora"),
         ("krea_lora", "krea_2_raw", "lokr"),
         ("ltx_mlx_lora", "ltx_2_3", "lora"),
+        ("kolors_lora", "kolors", "lokr"),
+        ("sd3_lora", "sd3_5_large", "lora"),
+        ("sd3_lora", "sd3_5_medium", "lokr"),
+        ("wan_lora", "wan_2_2", "lora"),
         ("wan_moe_lora", "wan_2_2_t2v_14b", "lora"),
+        ("wan_moe_lora", "wan_2_2_t2v_14b", "lokr"),
+        ("wan_moe_lora", "wan_2_2_i2v_14b", "lora"),
+        ("anima_lora", "anima_base", "lokr"),
+        ("mage_flow_lora", "mage_flow_base", "lora"),
+        ("mage_flow_lora", "mage_flow_base", "lokr"),
+        ("mage_flow_lora", "mage_flow_base", "full"),
     ];
     for (kernel, base_model, network_type) in cases {
         let store = store(&format!("candle-training-{kernel}-{base_model}"));
@@ -5551,36 +5561,39 @@ fn candle_worker_claims_candle_native_training_kernels() {
 }
 
 #[test]
-fn candle_worker_refuses_torch_served_training_kernels() {
-    // Kernels with no candle trainer must be refused by candle because the
-    // `lora_train_execute` advertisement is coarse; production leaves them queued instead of
-    // mis-claiming and failing terminally. The generic descriptor below is a synthetic compatibility
-    // check. Covers Kolors, the dense Wan 5B, and the I2V A14B.
-    let cases: &[(&str, &str)] = &[
-        ("kolors_lora", "kolors"),
-        ("wan_lora", "wan_2_2"),
-        ("wan_moe_lora", "wan_2_2_i2v_14b"),
+fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("kolors_lora", "not_kolors", "lora"),
+        ("sd3_lora", "sd3_5_large_turbo", "lora"),
+        ("sd3_lora", "sd3_5_large", "full"),
+        ("wan_lora", "wan_2_2", "lokr"),
+        ("wan_moe_lora", "wan_2_2_i2v_14b", "lokr"),
+        ("wan_moe_lora", "wan_2_2_unknown", "lora"),
+        ("anima_lora", "anima_turbo", "lora"),
+        ("mage_flow_lora", "mage_flow_edit_base", "lora"),
+        ("mage_flow_lora", "mage_flow_base", "mystery"),
     ];
-    for (kernel, base_model) in cases {
-        let store = store(&format!("candle-refuse-{kernel}-{base_model}"));
+    for (kernel, base_model, network_type) in cases {
+        let store = store(&format!(
+            "candle-refuse-{kernel}-{base_model}-{network_type}"
+        ));
         register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
-        let job = store
-            .create_job(mlx_training_job(kernel, base_model, "lora", false, "auto"))
+        store
+            .create_job(mlx_training_job(
+                kernel,
+                base_model,
+                network_type,
+                false,
+                "auto",
+            ))
             .expect("job creates");
         assert!(
             store
                 .claim_next_job("worker-candle")
                 .unwrap_or_else(|error| panic!("candle claim ok ({kernel}): {error:?}"))
                 .is_none(),
-            "candle must refuse {kernel}/{base_model} (no candle trainer)"
+            "candle must refuse unsupported {kernel}/{base_model}/{network_type}"
         );
-        // A synthetic generic training descriptor can claim it in this isolated routing test.
-        register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
-        let claimed = store
-            .claim_next_job("worker-torch")
-            .expect("torch claim ok")
-            .unwrap_or_else(|| panic!("torch should claim {kernel}/{base_model}"));
-        assert_eq!(claimed.id, job.id, "kernel={kernel} base={base_model}");
     }
 }
 
@@ -5611,8 +5624,6 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
         // A generic (non-Rust) training descriptor must still defer: there is no torch Mage trainer,
         // so claiming would fail the job terminally instead of leaving it for the mlx worker.
         register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
-        // Nor a candle worker: `mlx-gen-mage` has no candle twin.
-        register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
 
         let job = store
             .create_job(mlx_training_job(
@@ -5632,15 +5643,6 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
             "a generic worker must defer mage_flow_lora ({base_model}/{network_type}) — it has no \
              Mage trainer"
         );
-        assert!(
-            store
-                .claim_next_job("worker-candle")
-                .expect("candle claim ok")
-                .is_none(),
-            "a candle worker must defer mage_flow_lora ({base_model}/{network_type}) — mlx-gen-mage \
-             has no candle twin"
-        );
-
         // …and the mlx worker DOES claim it. This is the half that was broken: without
         // `mage_flow_lora` in `MLX_ROUTED_TRAINING_KERNELS` the job queues forever.
         register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());

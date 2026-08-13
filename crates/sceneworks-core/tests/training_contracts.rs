@@ -149,7 +149,9 @@ fn builtin_targets_gate_network_types() {
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
             "anima_base_lora",
-            "wan_lora",
+            // T2V-14B retains its existing Candle LoKr path. The single-DiT TI2V-5B and I2V-14B
+            // generated-matrix obligations remain LoRA-only.
+            "wan_t2v_14b_lora",
             // Mage-Flow (sc-14055, offered in sc-14056): the `mlx-gen-mage` trainer reports
             // `supports_lokr` and has a real LoKr branch, and Mage inference installs LoKr through
             // the same strict adapter seam as LoRA (`apply_mage_adapters`). It was absent from this
@@ -755,12 +757,8 @@ fn builtin_registry_exposes_sd3_targets() {
             Some(&serde_json::json!(["lora", "lokr"])),
             "{id} advertises lora + lokr"
         );
-        // Apple-Silicon/MLX-only (off-Mac/candle is epic 7982).
-        assert_eq!(
-            target.limits.get("appleSiliconOnly"),
-            Some(&serde_json::Value::Bool(true)),
-            "{id} is Apple-Silicon only"
-        );
+        assert!(target.limits.get("appleSiliconOnly").is_none(), "{id}");
+        assert!(target.limits.get("requiresBackend").is_none(), "{id}");
     }
 }
 
@@ -866,8 +864,7 @@ fn builtin_registry_exposes_wan_target() {
     assert_eq!(target.kernel, "wan_lora");
     assert_eq!(target.defaults.rank, 32);
     assert_eq!(target.defaults.resolution, 512);
-    // Cross-platform plan default: plain AdamW. The native MLX trainer serves this target on macOS;
-    // the unsupported off-Mac shape remains queued (sc-13878).
+    // Cross-platform plan default: plain AdamW.
     assert_eq!(target.defaults.optimizer, "adamw");
     // Wan transformer attention projections drive the LoRA injection.
     assert_eq!(
@@ -884,6 +881,7 @@ fn builtin_registry_exposes_wan_target() {
     // off-Mac work remains queued. The macOS base-weight resolution lives in the rust-api
     // `macos_wan_*` gate/resolver, guarded by `macos_wan_targets_have_a_macos_installable_mlx_turnkey_base`.
     assert_eq!(target.limits.get("appleSiliconOnly"), None);
+    assert_eq!(target.limits["networkTypes"], serde_json::json!(["lora"]));
 }
 
 #[test]
@@ -939,6 +937,12 @@ fn builtin_registry_exposes_wan_moe_targets() {
         assert_eq!(target.kernel, "wan_moe_lora");
         assert_eq!(target.defaults.rank, 32);
         assert_eq!(target.defaults.resolution, 512);
+        let expected = if id == "wan_t2v_14b_lora" {
+            serde_json::json!(["lora", "lokr"])
+        } else {
+            serde_json::json!(["lora"])
+        };
+        assert_eq!(target.limits["networkTypes"], expected, "{id}");
     }
 }
 
@@ -1036,6 +1040,162 @@ fn build_training_plan_derives_the_output_kind_from_the_run_not_the_target() {
         "a full base fine-tune produces a base checkpoint; the plan is what the worker and the \
          completion registrar read to decide where the artifact goes"
     );
+}
+
+#[test]
+fn build_training_plan_preserves_platform_effective_mage_full_requirements() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.base_model == "mage_flow_base")
+        .expect("Mage-Flow Base target");
+    let mut config = target.defaults.clone();
+    config
+        .advanced
+        .insert("networkType".to_owned(), json!("full"));
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_mage_full",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "finetune_mage",
+        base_model_path: "/data/models/mage_flow_base".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/models/finetunes/finetune_mage"),
+        file_name: "mage.safetensors".to_owned(),
+        created_at: "2026-08-13T00:00:00Z".to_owned(),
+    })
+    .expect("Mage full plan resolves");
+
+    assert_eq!(plan.target.output_kind, TrainingOutputKind::BaseCheckpoint);
+    assert_eq!(plan.config.advanced["mixedPrecision"], json!("bf16"));
+    assert_eq!(plan.config.advanced["gradientCheckpointing"], json!(true));
+    assert_eq!(
+        plan.provenance.config_snapshot["advanced"]["mixedPrecision"],
+        json!("bf16"),
+        "the MLX plan retains the platform catalog's submitted full-tune dtype"
+    );
+    assert_eq!(
+        plan.provenance.config_snapshot["advanced"]["gradientCheckpointing"],
+        json!(true),
+        "the MLX plan retains its pre-existing checkpointing default"
+    );
+
+    let mut candle_target = target.clone();
+    candle_target.defaults.advanced.insert(
+        "fullFinetuneConfig".to_owned(),
+        json!({
+            "mixedPrecision": "f32",
+            "gradientCheckpointing": false
+        }),
+    );
+
+    for (field, value) in [
+        ("mixedPrecision", json!("bf16")),
+        ("gradientCheckpointing", json!(true)),
+    ] {
+        let mut invalid = candle_target.defaults.clone();
+        invalid
+            .advanced
+            .insert("networkType".to_owned(), json!("full"));
+        invalid
+            .advanced
+            .insert("mixedPrecision".to_owned(), json!("f32"));
+        invalid
+            .advanced
+            .insert("gradientCheckpointing".to_owned(), json!(false));
+        invalid.advanced.insert(field.to_owned(), value);
+        let error = build_training_plan(BuildTrainingPlan {
+            job_id: "job_mage_full_invalid",
+            target: &candle_target,
+            dataset: &dataset,
+            config: invalid,
+            preset: None,
+            lora_id: "finetune_mage",
+            base_model_path: "/data/models/mage_flow_base".to_owned(),
+            dataset_root: Path::new("/data/training/ds_abc123"),
+            output_dir: Path::new("/data/models/finetunes/finetune_mage"),
+            file_name: "mage.safetensors".to_owned(),
+            created_at: "2026-08-13T00:00:00Z".to_owned(),
+        })
+        .expect_err("unsupported Mage full execution config must fail before queueing");
+        assert!(
+            matches!(error, TrainingPlanError::InvalidConfig(_)),
+            "{field}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn build_training_plan_rejects_network_types_outside_the_target_surface() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    for (target_id, network_type) in [
+        ("wan_lora", "lokr"),
+        ("wan_i2v_14b_lora", "lokr"),
+        ("mage_flow_base_lora", "mystery"),
+        ("sd3_5_large_lora", "full"),
+    ] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .unwrap_or_else(|| panic!("target {target_id}"));
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("networkType".to_owned(), json!(network_type));
+        let error = build_training_plan(BuildTrainingPlan {
+            job_id: "job_network_reject",
+            target,
+            dataset: &dataset,
+            config,
+            preset: None,
+            lora_id: "out",
+            base_model_path: "/data/models/base".to_owned(),
+            dataset_root: Path::new("/data/training/ds_abc123"),
+            output_dir: Path::new("/data/loras/out"),
+            file_name: "out.safetensors".to_owned(),
+            created_at: "2026-08-13T00:00:00Z".to_owned(),
+        })
+        .expect_err("unadvertised network type must fail before queueing");
+        let TrainingPlanError::InvalidConfig(detail) = error else {
+            panic!("expected InvalidConfig for {target_id}/{network_type}");
+        };
+        assert!(detail.contains("does not support networkType"), "{detail}");
+    }
+}
+
+#[test]
+fn core_targets_preserve_the_preexisting_mlx_checkpoint_and_preview_defaults() {
+    let registry = builtin_training_targets();
+    for target_id in [
+        "kolors_lora",
+        "mage_flow_base_lora",
+        "sd3_5_large_lora",
+        "sd3_5_medium_lora",
+    ] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .unwrap_or_else(|| panic!("target {target_id}"));
+        assert_eq!(
+            target.defaults.advanced["gradientCheckpointing"],
+            json!(true),
+            "{target_id} keeps its MLX checkpointing default; the API projects Candle defaults"
+        );
+        assert!(
+            target.defaults.advanced["sampleEvery"]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "{target_id} keeps its MLX preview cadence; the API projects Candle defaults"
+        );
+    }
 }
 
 fn dataset_fixture() -> TrainingDataset {

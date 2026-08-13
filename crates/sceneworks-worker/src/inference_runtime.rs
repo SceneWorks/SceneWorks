@@ -81,6 +81,15 @@ pub(crate) fn media() -> &'static ProviderRegistry {
     }
 }
 
+/// A registered trainer descriptor without loading model weights. Used by the training dry-run and
+/// real-run shared preflight so both paths validate the active backend's exact network surface.
+pub(crate) fn trainer_descriptor(id: &str) -> Option<gen_core::TrainerDescriptor> {
+    media()
+        .trainers()
+        .map(|registration| (registration.descriptor)())
+        .find(|descriptor| descriptor.id == id)
+}
+
 /// The runtime's dedicated **candle audio** provider registry (SceneWorks Audio Studio, epic 13400 /
 /// sc-13404), or `None` when this build ships no audio lane. Audio is candle-native on every platform
 /// and rides a separate registry from [`media`] (the mlx media graph on macOS): the `runtime-macos`
