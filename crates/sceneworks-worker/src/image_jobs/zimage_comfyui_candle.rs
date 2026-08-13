@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
     ApiClient, ColdLoadAdmission, Conditioning, GenerationOutput, GenerationRequest, ImageRequest,
     JobSnapshot, JsonObject, LoadSpec, Path, PathBuf, PreparedAdapters, PreparedFileDispatch,
@@ -259,8 +259,8 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         .into_iter()
         .collect::<Vec<_>>();
 
-    // Per-image work items: (seed, prompt) — `request.count` renders.
-    let work: Vec<(i64, String)> = (0..request.count as usize)
+    // Per-image work items retain the exact resolved conditioning beside each seed/prompt.
+    let work: Vec<(i64, String, Vec<Conditioning>)> = (0..request.count as usize)
         .map(|index| {
             (
                 resolve_seed(request, index),

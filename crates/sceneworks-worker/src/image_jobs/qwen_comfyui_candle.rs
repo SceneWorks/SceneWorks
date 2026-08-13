@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
     ApiClient, ColdLoadAdmission, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot,
     JsonObject, LoadSpec, Path, PathBuf, PreparedFileDispatch, Settings, Value, WeightsSource,

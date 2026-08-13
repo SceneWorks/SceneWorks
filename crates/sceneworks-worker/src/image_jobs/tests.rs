@@ -9685,7 +9685,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     let PreparedCandleImageRoute::KreaImported(sources) = route else {
         panic!("Krea route lost its source bundle")
     };
-    let PreparedKreaImportedSources { dit_pin } = *sources;
+    let PreparedKreaImportedSources { dit_pin, .. } = *sources;
     let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()));
     assert!(
         crate::paths::prepare_load_spec_with_file_pins(&mut spec, [dit_pin], "test Krea route")
