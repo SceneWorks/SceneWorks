@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "8428c64dc15e8331225d17e7c0def25ddc4551a0",
+    "inferenceRevision": "cb8e61c90c1b313c2b9a71a4916c0aad52781cc4",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -125,13 +125,6 @@
     },
     {
       "modelId": "ltx_2_3",
-      "mode": "extend_clip",
-      "engineIds": [
-        "ltx_2_3"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3",
       "mode": "first_last_frame",
       "engineIds": [
         "ltx_2_3"
@@ -146,28 +139,7 @@
     },
     {
       "modelId": "ltx_2_3",
-      "mode": "replace_person",
-      "engineIds": [
-        "wan_vace"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3",
       "mode": "text_to_video",
-      "engineIds": [
-        "ltx_2_3"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3",
-      "mode": "video_bridge",
-      "engineIds": [
-        "ltx_2_3"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "mode": "extend_clip",
       "engineIds": [
         "ltx_2_3"
       ]
@@ -188,21 +160,7 @@
     },
     {
       "modelId": "ltx_2_3_eros",
-      "mode": "replace_person",
-      "engineIds": [
-        "wan_vace"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
       "mode": "text_to_video",
-      "engineIds": [
-        "ltx_2_3"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "mode": "video_bridge",
       "engineIds": [
         "ltx_2_3"
       ]

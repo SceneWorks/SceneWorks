@@ -2340,15 +2340,13 @@ fn candle_video_models_with_provider_slots_accept_user_loras() {
         &object(json!({ "mode": "text_to_video", "loras": [{ "id": "wan_style" }] }))
     ));
     // Families whose candle provider advertises no LoRA slot still refuse a LoRA.
-    for (model, payload) in [(
-        "svd",
-        json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] }),
-    )] {
-        assert!(
-            !video_request_candle_eligible(model, &object(payload.clone())),
-            "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
-        );
-    }
+    let model = "svd";
+    let payload =
+        json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] });
+    assert!(
+        !video_request_candle_eligible(model, &object(payload.clone())),
+        "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
+    );
 }
 
 #[test]
