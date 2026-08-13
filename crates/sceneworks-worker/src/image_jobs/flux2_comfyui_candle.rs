@@ -306,33 +306,10 @@ fn flux2_comfyui_raw_settings(
     raw
 }
 
-/// Finalize the route-owned transformer token on the exact provider spec while retaining the
-/// structural companion snapshot for admission. Regression tests call this same production seam.
-pub(super) fn prepare_flux2_comfyui_load_spec(
-    paths: ComfyuiFlux2Paths,
-    quant: Quant,
-) -> WorkerResult<(LoadSpec, PathBuf)> {
-    let snapshot_dir = paths.snapshot_dir;
-    let mut spec = LoadSpec::new(WeightsSource::File(
-        paths.transformer.loader_path().to_path_buf(),
-    ))
-    .with_component(
-        gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(snapshot_dir.clone()),
-    )
-    .with_quant(quant);
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        [paths.transformer],
-        "ComfyUI FLUX.2 source preparation failed",
-    )?;
-    Ok((spec, snapshot_dir))
-}
-
-/// Production counterpart to [`prepare_flux2_comfyui_load_spec`]. Finalizes the imported DiT token
-/// and any selected descriptor-validated encoder receipt on the same spec consumed by admission and
-/// the registered provider. Default/absence keeps the snapshot encoder implicit.
-fn prepare_flux2_comfyui_load_spec_for_request(
+/// Finalizes the imported DiT token and any selected descriptor-validated encoder receipt on the same
+/// spec consumed by admission and the registered provider. Default/absence keeps the snapshot encoder
+/// implicit.
+pub(super) fn prepare_flux2_comfyui_load_spec_for_request(
     paths: ComfyuiFlux2Paths,
     quant: Quant,
     request: &ImageRequest,

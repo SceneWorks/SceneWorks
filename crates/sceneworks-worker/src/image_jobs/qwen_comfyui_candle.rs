@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
     prepare_manifest_text_encoder_with_file_pins, resolve_advanced_or_manifest_u32, resolve_seed,
     start_cached_gen_stream_after_cold_admission, ApiClient, ColdLoadAdmission, GenerationOutput,
     GenerationRequest, ImageRequest, JobSnapshot, JsonObject, LoadSpec, Path, PathBuf,
@@ -203,40 +203,10 @@ fn qwen_comfyui_raw_settings(
     raw
 }
 
-/// Finalize the route-owned File tokens on the exact provider spec and retain the structural snapshot
-/// facts admission needs. This is the production selection-to-load boundary used by regression tests.
-pub(super) fn prepare_qwen_comfyui_load_spec(
-    paths: ComfyuiQwenPaths,
-) -> WorkerResult<(LoadSpec, PathBuf, bool)> {
-    let snapshot_dir = paths.snapshot_dir;
-    let has_imported_vae = paths.vae.is_some();
-    let mut spec = LoadSpec::new(WeightsSource::File(
-        paths.transformer.loader_path().to_path_buf(),
-    ))
-    .with_component(
-        gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(snapshot_dir.clone()),
-    );
-    if let Some(vae) = paths.vae.as_ref() {
-        spec = spec.with_component(
-            gen_core::COMFYUI_VAE_COMPONENT,
-            WeightsSource::File(vae.loader_path().to_path_buf()),
-        );
-    }
-    let mut pins = vec![paths.transformer];
-    pins.extend(paths.vae);
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        pins,
-        "ComfyUI Qwen-Image source preparation failed",
-    )?;
-    Ok((spec, snapshot_dir, has_imported_vae))
-}
-
-/// Production counterpart to [`prepare_qwen_comfyui_load_spec`]. The imported transformer/VAE
-/// tokens and the descriptor-validated text-encoder receipt are finalized together, before cache
-/// admission or provider load. An absent/default choice preserves the legacy snapshot encoder.
-fn prepare_qwen_comfyui_load_spec_for_request(
+/// The imported transformer/VAE tokens and descriptor-validated text-encoder receipt are finalized
+/// together, before cache admission or provider load. An absent/default choice preserves the legacy
+/// snapshot encoder.
+pub(super) fn prepare_qwen_comfyui_load_spec_for_request(
     paths: ComfyuiQwenPaths,
     request: &ImageRequest,
     settings: &Settings,

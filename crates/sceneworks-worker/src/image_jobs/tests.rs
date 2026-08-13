@@ -10044,8 +10044,20 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
         replace(&z_vae);
         assert!(pins[2].ensure_unchanged().is_err(), "Z VAE replacement");
     }
+    let z_descriptor = crate::inference_runtime::imported_model_descriptor(
+        "z-image",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("Z-Image ComfyUI descriptor");
     assert!(
-        zimage_comfyui_candle::prepare_zimage_comfyui_load_spec(*sources).is_err(),
+        zimage_comfyui_candle::prepare_zimage_comfyui_load_spec_for_request(
+            *sources,
+            &request_z,
+            &settings,
+            z_descriptor.id,
+        )
+        .is_err(),
         "Z-Image dispatch must reject replaced payload-selected components"
     );
 
@@ -10082,8 +10094,20 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
             "Qwen optional VAE replacement"
         );
     }
+    let qwen_descriptor = crate::inference_runtime::imported_model_descriptor(
+        "qwen-image",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("Qwen-Image ComfyUI descriptor");
     assert!(
-        qwen_comfyui_candle::prepare_qwen_comfyui_load_spec(*sources).is_err(),
+        qwen_comfyui_candle::prepare_qwen_comfyui_load_spec_for_request(
+            *sources,
+            &request_qwen,
+            &settings,
+            qwen_descriptor.id,
+        )
+        .is_err(),
         "Qwen dispatch must reject replaced payload-selected components"
     );
 
@@ -10104,10 +10128,19 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     let PreparedCandleImageRoute::Flux2Comfyui(sources) = route else {
         panic!("FLUX.2 route lost its source bundle")
     };
+    let flux2_descriptor = crate::inference_runtime::imported_model_descriptor(
+        "flux2",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("FLUX.2 ComfyUI descriptor");
     assert!(
-        flux2_comfyui_candle::prepare_flux2_comfyui_load_spec(
+        flux2_comfyui_candle::prepare_flux2_comfyui_load_spec_for_request(
             *sources,
             flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+            &request_flux,
+            &settings,
+            flux2_descriptor.id,
         )
         .is_err(),
         "FLUX.2 dispatch must reject the replacement"

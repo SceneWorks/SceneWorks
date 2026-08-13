@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, has_authored_text_encoder, pose_entries,
+    consume_gen_events, drive_gen_items, has_authored_text_encoder,
     prepare_cached_candle_base_floor, prepare_manifest_text_encoder_with_file_pins,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
     ApiClient, ColdLoadAdmission, Conditioning, GenerationOutput, GenerationRequest, ImageRequest,
@@ -178,48 +178,10 @@ fn zimage_comfyui_raw_settings(
     raw
 }
 
-/// Finalize the route-owned File tokens on the exact provider spec. Kept separate from generation so
-/// selection-to-dispatch retarget tests exercise the same boundary as production.
-pub(super) fn prepare_zimage_comfyui_load_spec(
-    paths: ComfyuiZImagePaths,
-) -> WorkerResult<LoadSpec> {
-    let PreparedAdapters {
-        specs: adapters,
-        pins: adapter_pins,
-    } = paths.adapters;
-    let mut spec = LoadSpec::new(WeightsSource::File(
-        paths.transformer.loader_path().to_path_buf(),
-    ))
-    .with_component(
-        gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(paths.tokenizer_dir),
-    )
-    .with_component(
-        gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
-        WeightsSource::File(paths.text_encoder.loader_path().to_path_buf()),
-    )
-    .with_component(
-        gen_core::COMFYUI_VAE_COMPONENT,
-        WeightsSource::File(paths.vae.loader_path().to_path_buf()),
-    );
-    if !adapters.is_empty() {
-        spec = spec.with_adapters(adapters);
-    }
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        [paths.transformer, paths.text_encoder, paths.vae]
-            .into_iter()
-            .chain(adapter_pins),
-        "ComfyUI Z-Image source preparation failed",
-    )?;
-    Ok(spec)
-}
-
-/// Production counterpart to [`prepare_zimage_comfyui_load_spec`]. A selected encoder replaces the
-/// legacy ComfyUI text-encoder component (the provider rejects dual sources); default/absence keeps
-/// the imported encoder byte-for-byte. All still-consumed File tokens and the contract receipt are
-/// finalized atomically on the spec used by admission and load.
-fn prepare_zimage_comfyui_load_spec_for_request(
+/// A selected encoder replaces the legacy ComfyUI text-encoder component (the provider rejects dual
+/// sources); default/absence keeps the imported encoder byte-for-byte. All still-consumed File tokens
+/// and the contract receipt are finalized atomically on the spec used by admission and load.
+pub(super) fn prepare_zimage_comfyui_load_spec_for_request(
     paths: ComfyuiZImagePaths,
     request: &ImageRequest,
     settings: &Settings,
