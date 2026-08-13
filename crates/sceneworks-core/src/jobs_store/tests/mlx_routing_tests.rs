@@ -1,8 +1,8 @@
 use super::{
     flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible, image_request_mlx_eligible,
     instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-    sdxl_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job, z_image_mlx_eligible,
-    JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
+    sdxl_mlx_eligible, video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
+    z_image_mlx_eligible, JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use serde_json::{json, Map, Value};
 
@@ -27,6 +27,25 @@ fn image_generate_job(payload: Value) -> JobSnapshot {
         "updatedAt": "2026-07-23T00:00:00Z"
     }))
     .expect("valid image job")
+}
+
+fn video_job(job_type: &str, payload: Value) -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job_video_ltx_ic",
+        "type": job_type,
+        "status": "queued",
+        "payload": payload,
+        "result": {},
+        "requestedGpu": "auto",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-07-23T00:00:00Z",
+        "updatedAt": "2026-07-23T00:00:00Z"
+    }))
+    .expect("valid video job")
 }
 
 fn mlx_worker() -> WorkerSnapshot {
@@ -834,6 +853,32 @@ fn sd3_5_text_to_image_routes_to_mlx() {
 }
 
 #[test]
+fn wan5_mlx_routing_requires_an_exact_source_shape_for_each_base_mode() {
+    for payload in [
+        json!({ "model": "wan_2_2", "mode": "text_to_video", "sourceAssetId": "stale" }),
+        json!({ "model": "wan_2_2", "mode": "text_to_video", "lastFrameAssetId": "stale" }),
+        json!({ "model": "wan_2_2", "mode": "image_to_video" }),
+        json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "first", "lastFrameAssetId": "stale" }),
+        json!({ "model": "wan_2_2", "mode": "first_last_frame", "sourceAssetId": "first" }),
+    ] {
+        assert!(
+            !video_job_is_mlx_eligible(&video_job("video_generate", payload.clone())),
+            "malformed Wan5 media shape must not be reinterpreted by the MLX worker: {payload}"
+        );
+    }
+    for payload in [
+        json!({ "model": "wan_2_2", "mode": "text_to_video" }),
+        json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "first" }),
+        json!({ "model": "wan_2_2", "mode": "first_last_frame", "sourceAssetId": "first", "lastFrameAssetId": "last" }),
+    ] {
+        assert!(
+            video_job_is_mlx_eligible(&video_job("video_generate", payload.clone())),
+            "valid Wan5 media shape must remain MLX-eligible: {payload}"
+        );
+    }
+}
+
+#[test]
 fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its
     // renderer is Wan2.2-T2V, no still-image-to-video), SCAIL-2 (animate_character only) and
@@ -1126,5 +1171,27 @@ fn krea_realtime_is_mlx_routed_and_serves_exactly_its_advertised_modes() {
             Some(&false),
             "Video Studio must disable {mode} for krea_realtime_14b"
         );
+    }
+}
+
+#[test]
+fn mlx_ltx_clip_and_replace_jobs_require_the_same_ic_lora_as_execution() {
+    for (job_type, mode) in [
+        ("video_extend", "extend_clip"),
+        ("video_bridge", "video_bridge"),
+        ("person_replace", "replace_person"),
+    ] {
+        let mut payload = json!({
+            "model": "ltx_2_3",
+            "mode": mode,
+            "loras": [{ "id": "ordinary_ltx_style" }]
+        });
+        let job = video_job(job_type, payload.clone());
+        assert!(
+            !video_job_is_mlx_eligible(&job),
+            "routing must not claim {mode} with an ordinary LoRA that execution rejects"
+        );
+        payload["loras"] = json!([{ "source": { "file": "ltx-2-3-ic-union.safetensors" } }]);
+        assert!(video_job_is_mlx_eligible(&video_job(job_type, payload)));
     }
 }

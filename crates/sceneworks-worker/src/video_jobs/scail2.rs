@@ -546,7 +546,7 @@ pub(super) async fn generate_scail2_replace(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<(DecodedVideo, Value)> {
+) -> WorkerResult<(DecodedVideo, Value, bool)> {
     let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_scail2_replace_conditioning(api, settings, job, request, project_path).await?;
@@ -555,6 +555,9 @@ pub(super) async fn generate_scail2_replace(
     // + load-time quant for a legacy snapshot.
     ensure_scail2_tier_present(api, settings, job, request).await?;
     let (model_dir, quant) = resolve_scail2_tier_dir_and_quant(settings, request)?;
+    let adapters = resolve_scail2_adapters(settings, request)?;
+    let lightning = scail2_adapters_have_lightning(&adapters);
+    let (steps, guidance, scheduler_shift) = scail2_sampling(request, lightning);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -568,10 +571,14 @@ pub(super) async fn generate_scail2_replace(
         height: request.height,
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
+        steps,
+        guidance,
+        scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
+        adapters,
         ..VideoGenInput::default()
     };
     let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
-    Ok((decoded, status))
+    Ok((decoded, status, lightning))
 }

@@ -11002,6 +11002,18 @@
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
       "downloads": [
         {
+          // Candle and MLX both require the external Gemma-3-12B encoder. Provision the same pinned
+          // shared bundle component as base LTX so a fresh Eros install is runnable without relying on
+          // a previously-installed sibling model or an ambient Hugging Face cache.
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "coRequisite": true,
+          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
+          "files": ["gemma/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 26427894918
+        },
+        {
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3-10Eros",
           // Community LTX-2.3 merge (Sulphur-2-base, I2V-tuned). The repo also ships
@@ -11013,8 +11025,8 @@
           "estimatedSizeBytes": 46139885750
         },
         {
-          // Recommended cond_safe distill LoRA. Required runtime component on the MLX
-          // path: it is auto-injected per-pass (see mlx.autoDistillLora) so 10Eros
+          // Recommended cond_safe distill LoRA. Required runtime component on both native
+          // paths: it is auto-injected per-pass (see mlx.autoDistillLora) so 10Eros
           // produces usable text-to-video. Only the cond_safe variant is fetched.
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
@@ -12015,19 +12027,15 @@
           "estimatedSizeBytes": 81200000000
         },
         {
-          // Windows/Linux candle (sc-8613): the candle `wan_vace` provider serves replace_person off a
-          // DIFFERENT, single-expert checkpoint — `Wan-AI/Wan2.1-VACE-14B-diffusers` (transformer/ +
-          // text_encoder/ + vae/ + tokenizer/), matching the provider's `WanVaceConfig::vace_14b` dims
-          // (dim 5120, 40 layers). The candle worker resolves this repo by string from the HF cache
-          // (`CANDLE_WAN_VACE_REPO`, video_jobs.rs; overridable via SCENEWORKS_CANDLE_WAN_VACE_DIR),
-          // independent of `paths.model`. Without this entry the off-Mac VACE lane dead-ended with no
-          // way to install the snapshot. Per-OS `install_state` reads the retained download's repo
-          // (models.rs), so macOS still resolves the MLX checkpoint above.
+          // Windows/Linux Candle (sc-18478): the dedicated `wan2_2_vace_fun_14b` provider loads this
+          // same dual-expert checkpoint (`transformer/` high-noise + `transformer_2/` low-noise), not
+          // the unrelated single-expert Wan2.1 VACE model. The worker resolves the exact repo from the
+          // HF cache and fails closed unless both expert configs are present.
           "provider": "huggingface",
-          "repo": "Wan-AI/Wan2.1-VACE-14B-diffusers",
+          "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
           "files": [],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 50000000000
+          "estimatedSizeBytes": 81200000000
         }
       ],
       "paths": {
@@ -12067,8 +12075,8 @@
         "maxPixels": 921600,
         "fps": [16],
         "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
-        // Epic 7114 curated menu (sc-7296). mlx-only model (no candle/Torch backend) — the native
-        // dual-expert VACE-Fun engine over Wan's flow σ schedule exposes the native curated set.
+        // Epic 7114 curated menu (sc-7296). Both native backends expose the dedicated dual-expert
+        // VACE-Fun engine over Wan's flow σ schedule.
         // No scheduler axis (flow shift = `scheduler_shift`).
         "samplers": ["default", "uni_pc", "euler", "dpmpp_2m"],
         "schedulers": ["default"]
@@ -12087,6 +12095,14 @@
         // 64 GB floor keeps a 128 GB Mac eligible while staying honest about the dual-expert load.
         "minMemoryGb": 64,
         "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers"
+      },
+      "candle": {
+        "minMemoryGb": 96,
+        "measured": false,
+        "limits": {
+          "samplers": ["default", "uni_pc", "euler"],
+          "schedulers": ["default"]
+        }
       },
       "ui": {
         "label": "Wan2.2 VACE-Fun (A14B)",
