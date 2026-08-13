@@ -2998,10 +2998,6 @@ fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
         redact_selected_text_encoder_paths_in_map(&mut job.payload, &selected_paths);
         redact_selected_text_encoder_paths_in_map(&mut job.result, &selected_paths);
         redact_selected_text_encoder_paths_in_btree_map(&mut job.extra, &selected_paths);
-        if matches!(job.status, JobStatus::Failed | JobStatus::Interrupted) || job.error.is_some() {
-            redact_private_text_encoder_diagnostics_in_map(&mut job.result);
-            redact_private_text_encoder_diagnostics_in_btree_map(&mut job.extra);
-        }
     }
     job
 }
@@ -3010,14 +3006,28 @@ fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
 struct PrivatePathSpelling {
     value: String,
     directory: bool,
+    case_insensitive: bool,
 }
 
 fn private_text_encoder_path_spellings(
     path: &str,
     source_kind: Option<&str>,
 ) -> Vec<PrivatePathSpelling> {
-    let directory = source_kind == Some("directory");
-    let mut spellings = vec![path.to_owned(), path.replace('\\', "/")];
+    // Missing/unknown private metadata is not expected, but public projection must fail closed:
+    // directory semantics are the safe superset because they also scrub admitted descendants.
+    let directory = source_kind != Some("file");
+    let path_bytes = path.as_bytes();
+    let case_insensitive = (path_bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && path_bytes.get(1) == Some(&b':')
+        && path_bytes
+            .get(2)
+            .is_some_and(|separator| matches!(separator, b'/' | b'\\')))
+        || path.starts_with("\\\\");
+    let mut spellings = vec![path.to_owned()];
+    if case_insensitive {
+        spellings.push(path.replace('\\', "/"));
+        spellings.push(path.replace('/', "\\"));
+    }
     if directory {
         for spelling in &mut spellings {
             while spelling.len() > 1
@@ -3034,7 +3044,11 @@ fn private_text_encoder_path_spellings(
     spellings.dedup();
     spellings
         .into_iter()
-        .map(|value| PrivatePathSpelling { value, directory })
+        .map(|value| PrivatePathSpelling {
+            value,
+            directory,
+            case_insensitive,
+        })
         .collect()
 }
 
@@ -3063,42 +3077,56 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
             .get(index..index.saturating_add(needle.len()))
             .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
     };
+    let url_boundary = |index: usize| {
+        index == 0
+            || original[index - 1].is_ascii_whitespace()
+            || matches!(
+                original[index - 1],
+                b'(' | b'[' | b'{' | b'=' | b',' | b';' | b'\'' | b'"' | b'`' | b'<'
+            )
+    };
     let is_web_url = |index: usize| {
-        starts_with_ignore_ascii_case(index, b"http://")
-            || starts_with_ignore_ascii_case(index, b"https://")
-            || ((index == 0
-                || !matches!(
-                    original[index - 1],
-                    b':' | b'/' | b'\\' | b'.' | b'-' | b'_'
-                ))
+        (url_boundary(index)
+            && (starts_with_ignore_ascii_case(index, b"http://")
+                || starts_with_ignore_ascii_case(index, b"https://")))
+            || ((index == 0 || url_boundary(index))
                 && original.get(index..index + 2) == Some(b"//")
                 && original
                     .get(index + 2)
                     .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'['))
+    };
+    let is_file_url = |index: usize| {
+        url_boundary(index)
+            && starts_with_ignore_ascii_case(index, b"file:")
+            && original
+                .get(index + 5)
+                .is_some_and(|separator| matches!(separator, b'/' | b'\\'))
     };
 
     let mut output = String::with_capacity(value.len());
     let mut copied_through = 0;
     let mut index = 0;
     while index < original.len() {
-        if is_web_url(index) {
-            index += 1;
+        if is_file_url(index) {
+            output.push_str(&value[copied_through..index]);
+            output.push_str(REDACTED);
+            index += 5;
             while index < original.len() && !is_url_end(original[index]) {
                 index += 1;
             }
+            copied_through = index;
             continue;
         }
+        let after_scheme_slashes = || {
+            let mut cursor = index;
+            while cursor > 0 && matches!(original[cursor - 1], b'/' | b'\\') {
+                cursor -= 1;
+            }
+            cursor > 0 && original[cursor - 1] == b':'
+        };
         let Some(spelling) = spellings.iter().find(|spelling| {
             (index == 0
-                || original
-                    .get(index.saturating_sub(7)..index)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"file://"))
-                || original
-                    .get(index.saturating_sub(8)..index)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"file:///"))
-                || original
-                    .get(index.saturating_sub(6)..index)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"file:/"))
+                || after_scheme_slashes()
                 || !matches!(
                     original[index - 1],
                     b'.' | b'-' | b'_' | b'/' | b'\\' | b'0'..=b'9' | b'A'..=b'Z'
@@ -3106,10 +3134,16 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
                 ))
                 && original
                     .get(index..index.saturating_add(spelling.value.len()))
-                    .is_some_and(|candidate| candidate == spelling.value.as_bytes())
+                    .is_some_and(|candidate| {
+                        if spelling.case_insensitive {
+                            candidate.eq_ignore_ascii_case(spelling.value.as_bytes())
+                        } else {
+                            candidate == spelling.value.as_bytes()
+                        }
+                    })
                 && original
                     .get(index + spelling.value.len())
-                    .is_none_or(|next| {
+                    .map_or(true, |next| {
                         if spelling.directory {
                             matches!(next, b'/' | b'\\')
                                 || next.is_ascii_whitespace()
@@ -3131,6 +3165,25 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
                                         | b'#'
                                         | b'&'
                                 )
+                        } else if *next == b'.' {
+                            original
+                                .get(index + spelling.value.len() + 1)
+                                .map_or(true, |after| {
+                                    after.is_ascii_whitespace()
+                                        || matches!(
+                                            after,
+                                            b'"' | b'\''
+                                                | b'`'
+                                                | b'<'
+                                                | b'>'
+                                                | b'|'
+                                                | b')'
+                                                | b']'
+                                                | b'}'
+                                                | b','
+                                                | b';'
+                                        )
+                                })
                         } else {
                             next.is_ascii_whitespace()
                                 || matches!(
@@ -3150,10 +3203,18 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
                                         | b'?'
                                         | b'#'
                                         | b'&'
+                                        | b'!'
                                 )
                         }
                     })
         }) else {
+            if is_web_url(index) {
+                index += 1;
+                while index < original.len() && !is_url_end(original[index]) {
+                    index += 1;
+                }
+                continue;
+            }
             index += 1;
             continue;
         };
@@ -3341,67 +3402,6 @@ fn redact_selected_text_encoder_paths_in_btree_map(
         }
     }
     *object = redacted;
-}
-
-fn redact_private_text_encoder_diagnostics_in_map(object: &mut serde_json::Map<String, Value>) {
-    let original = std::mem::take(object);
-    let mut redacted = serde_json::Map::with_capacity(original.len());
-    let mut collisions = std::collections::HashSet::new();
-    for (mut key, mut value) in original {
-        redact_private_text_encoder_diagnostic(&mut key);
-        redact_private_text_encoder_diagnostics_in_value(&mut value);
-        if collisions.contains(&key) {
-            continue;
-        }
-        if redacted.contains_key(&key) {
-            redacted.insert(
-                key.clone(),
-                Value::String("[redacted collision]".to_owned()),
-            );
-            collisions.insert(key);
-        } else {
-            redacted.insert(key, value);
-        }
-    }
-    *object = redacted;
-}
-
-fn redact_private_text_encoder_diagnostics_in_btree_map(
-    object: &mut std::collections::BTreeMap<String, Value>,
-) {
-    let original = std::mem::take(object);
-    let mut redacted = std::collections::BTreeMap::new();
-    let mut collisions = std::collections::HashSet::new();
-    for (mut key, mut value) in original {
-        redact_private_text_encoder_diagnostic(&mut key);
-        redact_private_text_encoder_diagnostics_in_value(&mut value);
-        if collisions.contains(&key) {
-            continue;
-        }
-        if redacted.contains_key(&key) {
-            redacted.insert(
-                key.clone(),
-                Value::String("[redacted collision]".to_owned()),
-            );
-            collisions.insert(key);
-        } else {
-            redacted.insert(key, value);
-        }
-    }
-    *object = redacted;
-}
-
-fn redact_private_text_encoder_diagnostics_in_value(value: &mut Value) {
-    match value {
-        Value::String(value) => redact_private_text_encoder_diagnostic(value),
-        Value::Array(values) => {
-            for value in values {
-                redact_private_text_encoder_diagnostics_in_value(value);
-            }
-        }
-        Value::Object(object) => redact_private_text_encoder_diagnostics_in_map(object),
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
 }
 
 fn redact_selected_text_encoder_paths_in_value(

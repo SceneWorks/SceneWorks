@@ -169,7 +169,7 @@ pub(super) fn prepare_qwen_comfyui_sources(
         gen_core::ImportedModelSource::ComfyUiTree,
     );
     if !request.model.starts_with("external_base_")
-        || descriptor.as_ref().is_none_or(|descriptor| {
+        || descriptor.as_ref().map_or(true, |descriptor| {
             super::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image").is_err()
         })
     {

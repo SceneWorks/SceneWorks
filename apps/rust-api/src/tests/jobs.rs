@@ -960,12 +960,15 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     let mut raw_with_extra = raw.clone();
     raw_with_extra.status = sceneworks_core::contracts::JobStatus::Failed;
     raw_with_extra.extra.insert(
-        distinct_canonical_target.display().to_string(),
-        Value::String(format!("extra value at {}", distinct_server_root.display())),
+        "partialAssetPath".to_owned(),
+        Value::String("/public/outputs/partial.png".to_owned()),
     );
     let projected_extra =
         serde_json::to_value(crate::public_job_snapshot(raw_with_extra)).expect("job serializes");
-    assert_public("flattened extra key/value projection", &projected_extra);
+    assert_eq!(
+        projected_extra["partialAssetPath"], "/public/outputs/partial.png",
+        "unrelated partial output paths remain public contract data"
+    );
 
     for expected in ["job.updated", "queue.updated"] {
         let event = tokio::time::timeout(Duration::from_secs(1), events.next())
@@ -1121,26 +1124,10 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         selected.display(),
         distinct_canonical_target.display()
     );
-    let private_result = Value::Object(
-        [
-            (
-                distinct_canonical_target.display().to_string(),
-                Value::String(format!("receipt source: {}", selected.display())),
-            ),
-            (
-                distinct_server_root
-                    .join("second-target")
-                    .display()
-                    .to_string(),
-                Value::String(format!(
-                    "canonical parent: {}",
-                    distinct_server_root.display()
-                )),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let private_result = json!({
+        "partialAssetPath": "/public/outputs/partial.png",
+        "selectedReceipt": selected.display().to_string()
+    });
     let (status, failed) = request(
         app.clone(),
         "POST",
@@ -1164,9 +1151,14 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     assert!(failed["error"]
         .as_str()
         .is_some_and(|error| error.contains("[selected text encoder]")));
-    assert!(failed["result"]
-        .as_object()
-        .is_some_and(|result| result.values().any(|value| value == "[redacted collision]")));
+    assert_eq!(
+        failed["result"]["partialAssetPath"],
+        "/public/outputs/partial.png"
+    );
+    assert_eq!(
+        failed["result"]["selectedReceipt"],
+        "[selected text encoder]"
+    );
     let raw_failed = state
         .jobs_store
         .get_job(claimed_id)
@@ -1175,15 +1167,10 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     assert!(raw_failed
         .message
         .contains(selected.to_string_lossy().as_ref()));
-    assert!(raw_failed
-        .result
-        .contains_key(distinct_canonical_target.to_string_lossy().as_ref()));
-    assert!(raw_failed.result.contains_key(
-        distinct_server_root
-            .join("second-target")
-            .to_string_lossy()
-            .as_ref()
-    ));
+    assert_eq!(
+        raw_failed.result["selectedReceipt"],
+        selected.display().to_string()
+    );
     let failed_event = tokio::time::timeout(Duration::from_secs(1), events.next())
         .await
         .expect("failed job.updated arrives")
@@ -1375,7 +1362,16 @@ fn selected_encoder_path_token_scrubber_handles_wrappers_and_preserves_web_urls(
 fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() {
     let file = crate::private_text_encoder_path_spellings("/models/x.safetensors", Some("file"));
     let windows_file =
-        crate::private_text_encoder_path_spellings("C:/Models/x.safetensors", Some("file"));
+        crate::private_text_encoder_path_spellings("C:/Models/X.safetensors", Some("file"));
+    let windows_unc = crate::private_text_encoder_path_spellings(
+        r"\\Server\Share\Encoder.safetensors",
+        Some("file"),
+    );
+    let encoded_file = crate::private_text_encoder_path_spellings(
+        "/Volumes/External Models/x.safetensors",
+        Some("file"),
+    );
+    let unix_backslash = crate::private_text_encoder_path_spellings(r"/models/a\b", Some("file"));
     let directory =
         crate::private_text_encoder_path_spellings("/models/encoder", Some("directory"));
     let trailing_directory =
@@ -1385,22 +1381,54 @@ fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() 
         (
             &file,
             "file:///models/x.safetensors",
-            "file://[selected text encoder]",
+            "[selected text encoder]",
         ),
         (
             &windows_file,
-            "file:///C:/Models/x.safetensors",
-            "file:///[selected text encoder]",
+            "file:///C:/Models/X.safetensors",
+            "[selected text encoder]",
         ),
         (
             &windows_file,
-            "file:/C:/Models/x.safetensors",
-            "file:/[selected text encoder]",
+            "file:/c:/models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            r"c:\models\x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_unc,
+            "//server/share/encoder.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/External%20Models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/%e2%98%83/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "/Volumes/External%20Models/x.safetensors",
+            "/Volumes/External%20Models/x.safetensors",
         ),
         (
             &file,
             "/models/x.safetensors.backup",
             "/models/x.safetensors.backup",
+        ),
+        (&file, "/models/x.safetensors.", "[selected text encoder]."),
+        (&file, "/models/x.safetensors!", "[selected text encoder]!"),
+        (
+            &file,
+            "xhttp:///models/x.safetensors",
+            "xhttp://[selected text encoder]",
         ),
         (
             &directory,
@@ -1428,6 +1456,7 @@ fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() 
             "https://example.com/models/encoder",
             "https://example.com/models/encoder",
         ),
+        (&unix_backslash, "/models/a/b", "/models/a/b"),
     ];
 
     for (spellings, input, expected) in cases {
@@ -1435,6 +1464,20 @@ fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() 
         crate::redact_selected_text_encoder_paths(&mut actual, spellings);
         assert_eq!(actual, expected, "input: {input}");
     }
+
+    let unknown_directory = crate::private_text_encoder_path_spellings("/models/unknown", None);
+    let mut unknown_descendant = "/models/unknown/shard.safetensors".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut unknown_descendant, &unknown_directory);
+    assert_eq!(
+        unknown_descendant,
+        "[selected text encoder]/shard.safetensors"
+    );
+
+    let posix_double_slash =
+        crate::private_text_encoder_path_spellings("//mnt/Encoder", Some("file"));
+    let mut case_distinct_posix = "//mnt/encoder".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut case_distinct_posix, &posix_double_slash);
+    assert_eq!(case_distinct_posix, "//mnt/encoder");
 }
 
 #[test]
@@ -1834,6 +1877,95 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
         .query_row("select count(*) from jobs", [], |row| row.get(0))
         .expect("job count reads");
     assert_eq!(count, 1, "only the supported imported Pose request queues");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "finetune_mage",
+            "name": "Fine-tuned Mage",
+            "type": "image",
+            "family": "mage-flow",
+            "importSourceShape": "transformer_directory",
+            "paths": { "model": "/probe/finetune-mage" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for (label, extra) in [
+        (
+            "edit",
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+        ),
+        ("reference", json!({ "referenceAssetId": "reference-1" })),
+        (
+            "multi-phase",
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ),
+        (
+            "unsupported quant tier",
+            json!({ "advanced": { "quantTier": "nvfp4" } }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(extra.as_object().expect("extra object").clone());
+        let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("imported_unsupported")),
+            "{label} must fail at exact imported-provider admission: {error}"
+        );
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the exact registered generate shape queues");
 }
 
 /// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.

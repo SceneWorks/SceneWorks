@@ -249,6 +249,7 @@ fn resolve_image_route_with_imported_availability(
     imported_control_available: bool,
     imported_available: bool,
     sdxl_imported_available: bool,
+    mage_finetuned_available: bool,
 ) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
@@ -321,7 +322,7 @@ fn resolve_image_route_with_imported_availability(
         Some(ImageRoute::KreaImported)
     } else if sdxl_imported_available {
         Some(ImageRoute::SdxlImported)
-    } else if mage_finetuned_available(request, settings) {
+    } else if mage_finetuned_available {
         // A fine-tuned Mage-Flow base (sc-15036). The fine-tune's id is in no `MODEL_TABLE`, so
         // `mlx_available` is `false` for it — this arm is what routes it to real MLX generation at
         // all. A builtin Mage id is claimed by the generic `mlx_available` arm below, unchanged.
@@ -382,6 +383,7 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         krea_imported_control_available(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
+        mage_finetuned_available(request, settings),
     )
 }
 
@@ -391,6 +393,7 @@ enum PreparedImageRoute {
     KreaImported(Box<PreparedKreaImportedSources>),
     KreaImportedControl(Box<PreparedKreaImportedControlSources>),
     SdxlImported(Box<PreparedSdxlImportedSources>),
+    MageFinetuned(Box<PreparedMageFinetunedTransformer>),
 }
 
 #[cfg(target_os = "macos")]
@@ -401,6 +404,7 @@ impl PreparedImageRoute {
             Self::KreaImported(_) => ImageRoute::KreaImported,
             Self::KreaImportedControl(_) => ImageRoute::KreaImportedControl,
             Self::SdxlImported(_) => ImageRoute::SdxlImported,
+            Self::MageFinetuned(_) => ImageRoute::MageFinetuned,
         }
     }
 }
@@ -420,12 +424,14 @@ fn prepare_image_route(
         None
     };
     let sdxl = prepare_sdxl_imported_sources(request, settings)?;
+    let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         settings,
         imported_control.is_some(),
         imported.is_some(),
         sdxl.is_some(),
+        mage_finetuned.is_some(),
     ) else {
         return Ok(None);
     };
@@ -438,6 +444,9 @@ fn prepare_image_route(
         )),
         ImageRoute::SdxlImported => PreparedImageRoute::SdxlImported(Box::new(
             sdxl.expect("prepared SDXL imported route lost its sources"),
+        )),
+        ImageRoute::MageFinetuned => PreparedImageRoute::MageFinetuned(Box::new(
+            mage_finetuned.expect("prepared Mage fine-tuned route lost its transformer"),
         )),
         route => PreparedImageRoute::Plain(route),
     }))

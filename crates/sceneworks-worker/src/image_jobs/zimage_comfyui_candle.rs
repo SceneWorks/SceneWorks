@@ -143,7 +143,7 @@ pub(super) fn prepare_zimage_comfyui_sources(
         gen_core::ImportedModelSource::ComfyUiTree,
     );
     if !request.model.starts_with("external_base_")
-        || descriptor.as_ref().is_none_or(|descriptor| {
+        || descriptor.as_ref().map_or(true, |descriptor| {
             super::imported_model_quant(request, descriptor, "ComfyUI Z-Image").is_err()
         })
     {
@@ -312,8 +312,8 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         .into_iter()
         .collect::<Vec<_>>();
 
-    // Per-image work items: (seed, prompt) — `request.count` renders.
-    let work: Vec<(i64, String)> = (0..request.count as usize)
+    // Per-image work items retain the exact resolved conditioning beside each seed/prompt.
+    let work: Vec<(i64, String, Vec<Conditioning>)> = (0..request.count as usize)
         .map(|index| {
             (
                 resolve_seed(request, index),

@@ -9,6 +9,13 @@ const SDXL_IMPORTED_ENGINE: &str = "candle_sdxl_imported";
 
 const SDXL_IMPORTED_DEFAULT_STEPS: u32 = 30;
 const SDXL_IMPORTED_DEFAULT_GUIDANCE: f32 = 7.0;
+// On macOS these shared defaults are supplied by the advanced SDXL route included in the same
+// module. The Windows Candle build does not include that MLX-only file, so keep its imported SDXL
+// conditioning defaults explicit and byte-identical here.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SDXL_EDIT_STRENGTH: f32 = 0.6;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SDXL_INPAINT_STRENGTH: f32 = 0.85;
 const SDXL_CLIP_L_REPO: &str = "openai/clip-vit-large-patch14";
 const SDXL_CLIP_L_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -23,15 +30,6 @@ const SDXL_VAE_REVISION: &str = "207b116dae70ace3637169f1ddd2434b91b3a8cd";
 struct PreparedSdxlImportedSources {
     checkpoint: gen_core::PinnedWeightsFile,
     adapters: PreparedAdapters,
-}
-
-#[cfg(test)]
-fn resolve_imported_sdxl_file(
-    request: &ImageRequest,
-    settings: &Settings,
-) -> WorkerResult<Option<PathBuf>> {
-    Ok(resolve_imported_sdxl_pin(request, settings)?
-        .map(|pin| pin.loader_path().to_path_buf()))
 }
 
 fn resolve_imported_sdxl_pin(
@@ -153,6 +151,15 @@ fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+fn resolve_imported_sdxl_file(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    Ok(resolve_imported_sdxl_pin(request, settings)?
+        .map(|pin| pin.loader_path().to_path_buf()))
 }
 
 #[cfg(test)]

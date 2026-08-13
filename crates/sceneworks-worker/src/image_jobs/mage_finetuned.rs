@@ -205,20 +205,33 @@ fn resolve_mage_finetuned_components(
 /// installed — a missing one surfaces as the loud
 /// [`resolve_mage_finetuned_components`] error in the handler rather than a silent fall-through to
 /// the stub. Mirrors the shape of the other `…_available` predicates.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool {
+    matches!(
+        prepare_mage_finetuned_transformer(request, settings),
+        Ok(Some(_))
+    )
+}
+
+/// Validate the exact registered Mage generate shape and retain its pinned transformer files for
+/// dispatch. Production moves this value through [`PreparedImageRoute`] so async admission work
+/// cannot retarget the payload-selected directory between route selection and provider load.
+#[cfg(target_os = "macos")]
+fn prepare_mage_finetuned_transformer(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
     let Some(descriptor) = imported_generate_request_supported(
         request,
         "mage-flow",
         gen_core::ImportedModelSource::TransformerDirectory,
     ) else {
-        return false;
+        return Ok(None);
     };
-    imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow").is_ok()
-        && matches!(
-        resolve_mage_finetuned_transformer(request, settings),
-        Ok(Some(_))
-    )
+    if imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow").is_err() {
+        return Ok(None);
+    }
+    resolve_mage_finetuned_transformer(request, settings)
 }
 
 /// Flat telemetry recorded on assets rendered from a fine-tuned base.
@@ -261,19 +274,13 @@ async fn generate_mage_finetuned_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    transformer: PreparedMageFinetunedTransformer,
     plan: &ImagePlan,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let transformer = resolve_mage_finetuned_transformer(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "The fine-tuned Mage-Flow checkpoint could not be resolved — its recorded path is not \
-             a complete transformer directory (config.json + diffusion_pytorch_model.safetensors)."
-                .to_owned(),
-        )
-    })?;
     // Require the base's shared components before any compute — a clear "install the Mage-Flow
     // Base model first" error rather than a deep load failure.
     let components = resolve_mage_finetuned_components(settings)?;

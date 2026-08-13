@@ -132,9 +132,9 @@ pub(crate) async fn create_image_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Refuse material imported-control intent unless the selected native topology has an exact Pose
-/// provider route for this source. On a required Candle topology the existing full imported-shape
-/// preflight still applies. Builtins retain their id-keyed routing and are out of this family gate.
+/// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
+/// source shape and operation select one provider registration; family identity alone never admits
+/// a request. Builtins retain their id-keyed routing and are out of this family gate.
 fn validate_imported_submission(
     state: &AppState,
     model_id: &str,
@@ -153,11 +153,6 @@ fn validate_imported_submission(
         .get("advanced")
         .and_then(Value::as_object)
         .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
-    // Preserve the existing Mac behavior for ordinary imported requests. Material control is the
-    // exception: it must be proved against the MLX Pose registration before the job is queued.
-    if !candle_required && !has_material_control {
-        return Ok(());
-    }
     let backend = if candle_required { "candle" } else { "mlx" };
     let family = entry
         .get("family")
@@ -208,8 +203,10 @@ fn validate_imported_submission(
     };
     let code = if candle_required {
         "candle_unsupported"
-    } else {
+    } else if has_material_control {
         "imported_control_unsupported"
+    } else {
+        "imported_unsupported"
     };
     Err(ApiError::bad_request(format!(
         "{code}: imported {family} {feature} is not supported by the resolved {backend} provider \

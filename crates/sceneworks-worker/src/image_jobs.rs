@@ -584,10 +584,14 @@ pub(crate) async fn run_image_generate_job(
                 // A full base fine-tune's own checkpoint (sc-15036): pair the trained transformer
                 // with the installed Mage-Flow base's shared text encoder + VAE and render through
                 // `load_finetuned`. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::MageFinetuned(transformer) = route else {
+                    unreachable!("Mage fine-tuned route missing its prepared transformer")
+                };
                 generate_mage_finetuned_stream(
                     api,
                     settings,
                     job,
+                    *transformer,
                     &plan,
                     &project_path,
                     backend,
@@ -1503,8 +1507,7 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 /// child symlink cannot inherit trust from its parent.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_prepared_adapter_file(
     lora: &Value,

@@ -10001,7 +10001,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     let PreparedCandleImageRoute::KreaImported(sources) = route else {
         panic!("Krea route lost its source bundle")
     };
-    let PreparedKreaImportedSources { dit_pin } = *sources;
+    let PreparedKreaImportedSources { dit_pin, .. } = *sources;
     let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()));
     assert!(
         crate::paths::prepare_load_spec_with_file_pins(&mut spec, [dit_pin], "test Krea route")
@@ -16879,6 +16879,49 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             "{label} must not route to the fine-tuned lane"
         );
     }
+}
+
+/// Route preparation owns the exact fine-tuned transformer config/weights across the async worker
+/// preamble. Replacing either file after selection must invalidate the retained token rather than
+/// letting dispatch silently re-resolve and load different bytes.
+#[cfg(target_os = "macos")]
+#[test]
+fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
+    let dir = tempfile::tempdir().expect("data root");
+    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    let selected = request(json!({
+        "projectId": "p",
+        "model": "finetune_9f3c0a11",
+        "modelManifestEntry": {
+            "family": "mage-flow",
+            "paths": { "model": checkpoint.display().to_string() }
+        }
+    }));
+    let prepared = prepare_image_route(&selected, &settings)
+        .expect("route preparation succeeds")
+        .expect("Mage fine-tuned route selected");
+    assert_eq!(prepared.kind(), ImageRoute::MageFinetuned);
+
+    std::thread::yield_now();
+    let weights =
+        checkpoint.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE);
+    std::fs::write(&weights, b"replacement-transformer-is-different")
+        .expect("replace selected weights");
+
+    let PreparedImageRoute::MageFinetuned(transformer) = prepared else {
+        panic!("prepared route lost its Mage transformer")
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.directory));
+    let error = crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        [transformer.config, transformer.weights],
+        "test Mage fine-tuned route",
+    )
+    .expect_err("dispatch rejects a retargeted prepared transformer");
+    assert!(
+        error.to_string().contains("changed") || error.to_string().contains("identity"),
+        "unexpected validation error: {error}"
+    );
 }
 
 /// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint

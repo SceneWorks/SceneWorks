@@ -76,10 +76,11 @@ pub(crate) fn probe_payload(model: &str, entries: &[(&str, Value)]) -> Map<Strin
 /// the model from a picker. Same source of truth as [`mac_rust_supported`].
 ///
 /// `family` is the model's catalog-declared architecture family (`None` for a builtin whose routing
-/// is purely id-keyed). It is consulted only for the image route-by-family path (sc-14019): a
-/// non-builtin (imported/user) image model whose family is MLX-routed is Mac-routable even though
-/// its novel id is in no routing table. Builtin routing is unaffected (a builtin short-circuits on
-/// its id).
+/// is purely id-keyed). It cannot by itself select an imported loader: this core-level probe is
+/// therefore authoritative for builtins only and leaves novel imported ids unsupported. The API's
+/// catalog projection has the full manifest entry and, after applying these builtin defaults,
+/// overwrites an imported row's `macSupport` from the exact family + `importSourceShape` provider
+/// facts. This prevents a family sibling with a different filesystem shape from inheriting a route.
 pub fn model_mac_support(
     model_id: &str,
     model_type: &str,
@@ -96,6 +97,9 @@ pub fn model_mac_support(
     }
 }
 
+/// Builtin image support probe. Imported rows require their full source-shaped manifest entry, so
+/// the API replaces this provisional verdict with exact provider-derived support during catalog
+/// projection; the family argument is intentionally insufficient here.
 pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> ModelMacSupport {
     if !MLX_ROUTED_MODELS.contains(&model) {
         // A family token is not enough to choose an imported loader: source shape is mandatory.
@@ -929,30 +933,21 @@ derive_model_list! {
     pub(crate) MLX_ROUTED_MODELS, IMAGE_MODEL_CAPS, mlx_routed
 }
 
-/// Architecture families whose MLX-routed builtins define an in-process image engine that a
-/// **non-builtin (imported/user) same-family model reuses** (sc-14019, epic 14015). A builtin's
-/// routing is decided by its id ([`MLX_ROUTED_MODELS`]); an imported checkpoint carries a novel id
-/// that is in no table, so [`image_model_mac_support`] falls back to its declared *family* — if the
-/// family is one of these, it routes to that family's existing MLX engine. Seeded with `krea_2`
-/// (its builtins `krea_2_turbo` / `krea_2_raw` already route to the Krea MLX engine). This is an
-/// explicit allow-list, not derived from the id table, because the routing catalog is keyed on ids
-/// alone and has no id→family map; keep it aligned with the same-family builtins above and with the
-/// import gate (`sceneworks_core::base_weights::IMPORT_SUPPORTED_FAMILIES`). Pinned by the
-/// `EXPECTED_MLX_ROUTED_FAMILIES` snapshot test.
+/// Historical architecture-family surface retained only for test oracles that compare the former
+/// family gate with the import compatibility allow-list. Production imported routing does not read
+/// this list: it selects an exact backend + family + `importSourceShape` + operation row from the
+/// checked-in provider facts below. Builtins remain id-routed through [`MLX_ROUTED_MODELS`]. Keep
+/// this test fixture aligned with the importable families and with at least one exact MLX provider
+/// registration for each listed family.
 ///
-/// `mage-flow` (sc-15036, epic 14034 F6) joins for a different reason than the other two: its
-/// non-builtin ids are not community imports but this app's OWN full base fine-tunes — the
-/// `transformer/`-shaped checkpoint a `networkType: "full"` training run produces, registered into
-/// the model catalog and loaded by `image_jobs::mage_finetuned` against the installed base's shared
-/// text encoder + VAE. It is deliberately absent from [`CANDLE_ROUTED_FAMILIES`]: the Mage engine is
-/// MLX-only (`mac_only: true`), and there is no candle Mage generator to route a fine-tune to.
-/// The token is the MANIFEST family spelling (`mage-flow`), matching the builtin entries — not the
-/// underscored id prefix.
+/// `mage-flow` still names this app's full base fine-tunes in that test fixture, but production
+/// admits one only when the stamped source is the registered `transformer_directory` shape. It is
+/// absent from [`CANDLE_ROUTED_FAMILIES`] because no Candle Mage provider is registered.
 #[cfg(test)]
 pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
 
-/// Whether an image `family` string routes to an in-process MLX engine via the route-by-family path
-/// (sc-14019) — i.e. it is a member of [`MLX_ROUTED_FAMILIES`]. Consulted only for non-builtin ids.
+/// Test oracle for whether the generated provider facts contain at least one MLX route for a
+/// family. It does not authorize a request without an exact source-shaped provider match.
 #[cfg(test)]
 pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
     imported_provider_routes("mlx", family).next().is_some()
@@ -1694,12 +1689,12 @@ mod tests {
     use super::{
         image_family_is_mlx_routed, image_model_mac_support, imported_control_intent_is_material,
         imported_image_model_lora_advertisement, imported_image_request_family_eligible,
-        is_builtin_image_model, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
-        CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
-        CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
-        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
-        MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS,
-        VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
+        imported_image_request_provider_eligible, imported_provider_routes, is_builtin_image_model,
+        CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS,
+        CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
+        CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
+        IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES,
+        MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
     };
 
     #[test]
@@ -2216,29 +2211,43 @@ mod tests {
     }
 
     #[test]
-    fn imported_same_family_model_routes_via_family_path() {
-        // An imported model id that is in NO routing table, declaring family krea_2, resolves as
-        // Mac-routable (supported) via the family path — not hidden behind "not available on Mac".
+    fn imported_same_family_model_requires_an_exact_provider_source() {
+        // A novel imported id plus a family token is not enough to select a loader. The catalog
+        // projection has the full manifest entry and applies the exact provider surface; this
+        // family-only core probe must stay fail-closed.
         let imported_id = "user_kreamania_variant5"; // a novel id, never a builtin
         assert!(!is_builtin_image_model(imported_id));
         assert!(!MLX_ROUTED_MODELS.contains(&imported_id));
 
         let support = image_model_mac_support(imported_id, Some("krea_2"));
-        assert!(
-            support.supported,
-            "an imported krea_2-family model should route via the family path"
-        );
-        assert!(support.reason.is_none());
-        // The MLX imported lane serves job LoRAs (sc-14111) and the Kontext edit surface (sc-14119)
-        // via the native single-file loader's adapter path, plus strict-pose sets via the native
-        // control entrypoint (the trained pose branch folds onto the file-loaded DiT), so
-        // `lycoris` + `edit` + `pose` are advertised. IP-Adapter/character `reference` stays
-        // unclaimed (identity conditioning needs base-tier components this lane does not stage;
-        // img2img is a separate `ui.img2img` flag, not `reference`).
-        assert!(support.features.lycoris);
-        assert!(support.features.edit);
-        assert!(support.features.pose);
-        assert!(!support.features.reference);
+        assert!(!support.supported);
+        assert!(support.reason.is_some());
+
+        let exact = serde_json::json!({
+            "model": imported_id,
+            "modelManifestEntry": {
+                "id": imported_id,
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "paths": { "model": "/app/models/imports/kreamania_variant5" }
+            }
+        });
+        assert!(imported_image_request_provider_eligible(
+            imported_id,
+            exact.as_object().expect("probe is an object"),
+            "mlx"
+        ));
+
+        let mut missing_source = exact;
+        missing_source["modelManifestEntry"]
+            .as_object_mut()
+            .expect("manifest entry is an object")
+            .remove("importSourceShape");
+        assert!(!imported_image_request_provider_eligible(
+            imported_id,
+            missing_source.as_object().expect("probe is an object"),
+            "mlx"
+        ));
     }
 
     #[test]
@@ -2392,29 +2401,40 @@ mod tests {
         }
     }
 
-    /// The imported model's Mac-support badge derives its pose affordance from the SAME claim gate
-    /// the scheduler runs (never a hardcoded feature flag): a `krea_2`-family import lights the pose
-    /// picker (the MLX native control entrypoint assembles the branch around the file-loaded DiT);
-    /// an `sdxl`- or `mage-flow`-family import keeps it dark (no control lane composes with those).
+    /// The imported model projection derives its affordances from the exact registered source,
+    /// never from a family-wide hardcoded feature flag. Krea transformer files expose the MLX pose
+    /// route; the registered SDXL fused checkpoint and Mage directory sources do not.
     #[test]
-    fn imported_family_badge_pose_follows_the_claim_gate() {
-        let krea = image_model_mac_support("user_kreamania_variant5", Some("krea_2"));
-        assert!(krea.supported);
-        assert!(krea.features.pose, "krea_2 import lights the pose picker");
-        assert!(krea.features.edit && krea.features.lycoris);
+    fn imported_provider_pose_surface_follows_the_exact_registry() {
+        let krea = imported_provider_routes("mlx", "krea_2")
+            .filter(|route| route.source == "transformer_file")
+            .collect::<Vec<_>>();
+        assert!(!krea.is_empty());
+        assert!(krea.iter().any(|route| {
+            route.operation == "pose" && route.conditioning.iter().any(|kind| kind == "control")
+        }));
+        assert!(krea.iter().any(|route| route.operation == "edit"));
+        assert!(krea
+            .iter()
+            .any(|route| route.supports_lora || route.supports_lokr));
 
-        for family in ["sdxl", "mage-flow"] {
-            let support = image_model_mac_support("user_other_import", Some(family));
-            assert!(support.supported);
+        for (family, source) in [
+            ("sdxl", "fused_checkpoint"),
+            ("mage-flow", "transformer_directory"),
+        ] {
+            let routes = imported_provider_routes("mlx", family)
+                .filter(|route| route.source == source)
+                .collect::<Vec<_>>();
+            assert!(!routes.is_empty(), "{family} exact source is registered");
             assert!(
-                !support.features.pose,
-                "{family} import must keep the pose picker dark"
+                routes.iter().all(|route| route.operation != "pose"),
+                "{family} exact source must keep the pose picker dark"
             );
         }
     }
 
-    /// sc-15036 (epic 14034 F6) — a full base fine-tune's catalog entry must be Mac-routable and
-    /// claimable for plain txt2img, and REFUSED for every shape the fine-tuned lane cannot serve.
+    /// sc-15036 (epic 14034 F6) — a full base fine-tune's exact transformer-directory source must
+    /// be claimable for plain txt2img and REFUSED for every shape that lane cannot serve.
     ///
     /// This is the routing half of "selectable at generation": before this, a `mage-flow`-family
     /// non-builtin id fell through `image_model_mac_support` to "not available on Mac", so the
@@ -2425,7 +2445,7 @@ mod tests {
     /// (the generic Krea-shaped arm) would pass the first assertion and fail the LoRA one, because
     /// `mlx_gen_mage::load_finetuned` refuses adapters outright on EVERY backend.
     #[test]
-    fn a_fine_tuned_mage_flow_base_is_mac_routable_and_claims_txt2img_only() {
+    fn a_fine_tuned_mage_flow_directory_claims_txt2img_only() {
         let finetune_id = "finetune_9f3c";
         let payload = |extra: serde_json::Value| {
             let mut value = serde_json::json!({
@@ -2433,6 +2453,7 @@ mod tests {
                 "modelManifestEntry": {
                     "id": finetune_id,
                     "family": "mage-flow",
+                    "importSourceShape": "transformer_directory",
                     "paths": { "model": "/app/models/finetunes/finetune_9f3c" }
                 }
             });
@@ -2443,22 +2464,14 @@ mod tests {
             value.as_object().unwrap().clone()
         };
         let mlx = |p: &serde_json::Map<String, serde_json::Value>| {
-            imported_image_request_family_eligible(
-                finetune_id,
-                p,
-                MLX_ROUTED_FAMILIES,
-                MLX_IMPORTED_CAPS,
-            )
+            imported_image_request_provider_eligible(finetune_id, p, "mlx")
         };
 
-        // The novel id is in NO routing table; the family path is what makes it Mac-routable.
+        // The family-only probe stays closed because it cannot select a source. The exact stamped
+        // manifest entry is what admits this provider route.
         assert!(
-            image_model_mac_support(finetune_id, Some("mage-flow")).supported,
-            "a fine-tuned Mage base must not be hidden behind \"not available on Mac\""
-        );
-        assert!(
-            !image_model_mac_support(finetune_id, None).supported,
-            "...and it is the DECLARED FAMILY that admits it, not the id"
+            !image_model_mac_support(finetune_id, Some("mage-flow")).supported,
+            "family identity alone must not invent a Mage loader"
         );
 
         assert!(
@@ -2505,20 +2518,18 @@ mod tests {
             !CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
             "there is no candle Mage engine to route a fine-tune to"
         );
-        assert!(!imported_image_request_family_eligible(
+        assert!(!imported_image_request_provider_eligible(
             finetune_id,
             &payload(serde_json::json!({ "mode": "text_to_image" })),
-            CANDLE_ROUTED_FAMILIES,
-            CANDLE_IMPORTED_CAPS
+            "candle"
         ));
 
         // A BUILTIN Mage id keeps its id-keyed routing — the family path applies only to
         // non-builtins, so the tiered snapshot lane is untouched.
-        assert!(!imported_image_request_family_eligible(
+        assert!(!imported_image_request_provider_eligible(
             "mage_flow_base",
             &payload(serde_json::json!({ "mode": "text_to_image" })),
-            MLX_ROUTED_FAMILIES,
-            MLX_IMPORTED_CAPS
+            "mlx"
         ));
     }
 
