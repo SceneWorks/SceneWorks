@@ -2036,12 +2036,27 @@ async fn completed_training_job_registers_lora_with_provenance() {
             && item["provenance"]["trainingJobId"] == json!(job_id)));
 }
 
+fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let snapshot = materialize_snapshot(
+            data_dir,
+            "SceneWorks/wan2.2-i2v-a14b-mlx",
+            "test-wan-i2v-a14b-training",
+        );
+        seed_wan_mlx_tier(&snapshot.join("bf16"), true);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    seed_installed_training_base(data_dir, "wan_2_2_i2v_14b");
+}
+
 #[tokio::test]
 async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
-    seed_installed_training_base(&settings.data_dir, "wan_2_2_i2v_14b");
+    seed_installed_wan_i2v_a14b_training_base(&settings.data_dir);
     let app = create_app(settings).expect("app creates");
     let (_, project) = request(
         app.clone(),
