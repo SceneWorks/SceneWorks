@@ -9627,6 +9627,7 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
         CandleImageRoute::Flux2Control,
         CandleImageRoute::Flux1Control,
         CandleImageRoute::KreaControl,
+        CandleImageRoute::KreaImportedControl,
     ] {
         assert_eq!(route.image_count(&zimage_pose, &settings), 3);
     }
@@ -9659,6 +9660,9 @@ fn sc18477_every_named_bespoke_lane_declares_real_adapter_application() {
         CandleImageRoute::Flux2Control,
         CandleImageRoute::Flux2Comfyui,
         CandleImageRoute::Bernini,
+        CandleImageRoute::KreaImported,
+        CandleImageRoute::KreaImportedControl,
+        CandleImageRoute::SdxlImported,
     ] {
         assert!(
             route.applies_request_loras(&request),
@@ -9699,6 +9703,16 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
             CandleImageRoute::KreaImported,
             "external_krea",
             "candle_krea_imported",
+        ),
+        (
+            CandleImageRoute::KreaImportedControl,
+            "external_krea",
+            "candle_krea_imported",
+        ),
+        (
+            CandleImageRoute::MageFinetuned,
+            "finetune_mage",
+            "candle_mage_finetuned",
         ),
         (
             CandleImageRoute::SdxlImported,
@@ -10676,7 +10690,10 @@ fn sdxl_sub_mode_classifies_advanced_shapes() {
     assert!(sdxl_sub_mode(&request(json!({ "model": "sdxl", "mode": "edit_image" }))).is_none());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(1024), 1024); // already valid
@@ -10686,7 +10703,10 @@ fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(3000), 2048); // clamps to the engine maximum
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn detail_feather_ramps_over_overlap() {
     // No overlap → a flat field of ones (every pixel contributes fully).
@@ -10705,7 +10725,10 @@ fn detail_feather_ramps_over_overlap() {
     assert!((at(8, 0) - at(8, 15)).abs() < 1e-6);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn compose_feathered_no_boundary_vignette() {
     // sc-8229: a single edge tile covers the whole frame; its raised-cosine feather ramps
@@ -10741,6 +10764,82 @@ fn compose_feathered_no_boundary_vignette() {
             "pixel ({x},{y}) = {px:?} darkened toward the border (expected ~{SRC})"
         );
     }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
+    use std::sync::Mutex;
+
+    struct RecordingRefiner {
+        calls: Mutex<Vec<(u32, u32, i64)>>,
+    }
+
+    impl DetailTileRefiner for RecordingRefiner {
+        fn refine_tile(
+            &self,
+            tile: Image,
+            eng_w: u32,
+            eng_h: u32,
+            _params: &DetailParams,
+            seed: i64,
+            _cancel: &CancelFlag,
+        ) -> WorkerResult<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("recording lock")
+                .push((eng_w, eng_h, seed));
+            Ok(tile.pixels)
+        }
+    }
+
+    let source = image::RgbImage::from_pixel(700, 540, image::Rgb([73, 101, 149]));
+    let params = DetailParams {
+        strength: 0.55,
+        cn_scale: 0.7,
+        steps: 24,
+        guidance: 5.0,
+        tile: 512,
+        overlap: 64,
+        prompt: "detail".to_owned(),
+        negative: "blur".to_owned(),
+        seed: 11,
+    };
+    let refiner = RecordingRefiner {
+        calls: Mutex::new(Vec::new()),
+    };
+    let mut progress = Vec::new();
+    let (output, total) = refine_tiled_detail(
+        &refiner,
+        &source,
+        &params,
+        &CancelFlag::new(),
+        &mut |done, total| progress.push((done, total)),
+    )
+    .expect("provider-neutral detail refinement");
+
+    assert_eq!(total, 4);
+    assert_eq!(progress, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+    assert_eq!(
+        *refiner.calls.lock().expect("recording lock"),
+        vec![
+            (512, 512, 11),
+            (512, 512, 12),
+            (512, 512, 13),
+            (512, 512, 14)
+        ]
+    );
+    assert_eq!(output.dimensions(), source.dimensions());
+    assert!(output.pixels().all(|pixel| {
+        pixel
+            .0
+            .into_iter()
+            .zip([73, 101, 149])
+            .all(|(actual, expected)| actual.abs_diff(expected) <= 1)
+    }));
 }
 
 /// sc-3625 real-Mac E2E (epic 3621): drive the WORKER's FLUX.1 XLabs IP-Adapter reference path
@@ -15149,16 +15248,44 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     );
     assert!(krea_imported_available(&imported, &settings));
     assert_eq!(KREA_IMPORTED_ENGINE, "candle_krea_imported");
+
+    let with_lora = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "loras": [{ "id": "style", "path": file.to_str().unwrap() }],
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&with_lora, &settings),
+        Some(CandleImageRoute::KreaImported),
+        "an imported Krea adapter request must reach the adapter-capable native-file lane"
+    );
+
+    let strict_pose = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "advanced": { "poses": [{ "id": "pose-1" }] },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&strict_pose, &settings),
+        Some(CandleImageRoute::KreaImportedControl),
+        "strict pose must dispatch to the imported Krea control provider"
+    );
 }
 
 /// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
 /// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
-/// t2i + img2img are accepted on EVERY backend; LoRAs (sc-14111) and the Kontext edit surface
-/// (sc-14119) are accepted only on an adapter-capable backend ([`KREA_IMPORTED_SUPPORTS_ADAPTERS`]:
-/// MLX yes / candle not yet, sc-14135); the bare-transformer guards (pose, mask, character, multi-phase,
-/// a non-edit two-reference SET, a bare non-edit `sourceAssetId`) stay rejected on every backend. Runs on
-/// the cross-platform path so both the MLX and candle imported lanes are covered, asserting the
-/// per-backend split via the compile-time capability const.
+/// t2i + img2img are accepted on EVERY backend; LoRAs, Kontext edit, and strict pose follow the
+/// backend's explicit provider capabilities. The current MLX and Candle pins advertise all three.
+/// Base-tier-only shapes (mask, character, multi-phase, a non-edit reference set, bare source) stay
+/// rejected on every backend.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -15191,7 +15318,7 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "an img2img referenceAssetId (mode t2i) is accepted"
     );
 
-    // A LoRA stack (sc-14111) and the edit surface (sc-14119) are backend-gated: MLX yes, candle no.
+    // A LoRA stack and the edit surface are admitted wherever the native loader accepts adapters.
     let t2i_lora = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "loras": [{ "id": "adapter" }],
@@ -15245,8 +15372,8 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     );
 
     // A strict-pose set follows the backend's pose-control capability, the same shape the LoRA/edit
-    // surfaces follow above: MLX assembles the trained pose branch around the file-loaded imported
-    // DiT (`load_control_from_native_dit_file`), candle's single-file path has no control parameter.
+    // surfaces follow above: each capable provider assembles the trained pose branch around the
+    // file-loaded imported DiT (`load_control_from_native_dit_file`).
     let pose = request(json!({
         "projectId": "p", "model": "kreamania_variant4",
         "advanced": { "poses": [{ "id": "a" }] },
@@ -15257,10 +15384,6 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
             krea_imported_available(&pose, &settings),
             "a pose set is served on the pose-control-capable backend"
         );
-        // `krea_imported_control_available` (the route-claim predicate) exists only on the
-        // pose-control-capable build, so probe it under its own cfg rather than the const — the
-        // candle lane compiles this same test file and would not resolve the name.
-        #[cfg(target_os = "macos")]
         assert!(
             krea_imported_control_available(&pose, &settings),
             "...and it is claimed by the pose-control route, not the plain per-image one"
@@ -15326,13 +15449,16 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     }
 }
 
-/// On the MLX imported lane, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
+/// On both native imported lanes, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
 /// (sc-14111) and, for an `edit_image` job, enforces the R5 identity-edit-LoRA requirement (sc-14119,
 /// epic 10871) BEFORE any reference I/O — the bare transformer cannot edit without the
 /// `krea2_identity_edit` LoRA (the source conditioning is inert without it), mirroring the builtin
 /// `generate_krea_edit_stream`. A plain t2i job (no loras) resolves to an empty adapter stack + no edit
-/// conditioning. macOS-only (the adapter/edit path is MLX-only, sc-14135).
-#[cfg(target_os = "macos")]
+/// conditioning.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn imported_edit_requires_the_identity_edit_lora() {
     let dir = tempfile::tempdir().unwrap();
@@ -16015,7 +16141,10 @@ fn krea_imported_control_mlx_gpu_smoke() {
 /// Settings + a complete fine-tuned Mage transformer component dir under the app data root
 /// (sc-15036): the `config.json` + `diffusion_pytorch_model.safetensors` pair the trainer's
 /// `save_full_checkpoint` writes into `<data>/models/finetunes/<id>`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::PathBuf) {
     let checkpoint = dir
         .join("models")
@@ -16043,7 +16172,10 @@ fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::
 /// Discriminating on each of the four conditions independently: a builtin Mage id must keep its
 /// tiered-snapshot path, a wrong family is not this lane's job, and a TORN checkpoint (either
 /// component file missing) is refused here rather than failing deep inside the load.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
@@ -16064,7 +16196,7 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
     // A BUILTIN Mage id keeps loading from its own per-tier snapshot through the generic lane.
     assert!(
         mlx_model("mage_flow_base").is_some(),
-        "precondition: mage_flow_base is a builtin engine on macOS"
+        "precondition: mage_flow_base is a builtin native engine"
     );
     let builtin = request(json!({
         "projectId": "p", "model": "mage_flow_base",
@@ -16112,11 +16244,18 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
 /// else claims it).
 ///
 /// Discriminating: one entry, one flip of one field per case.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
     let dir = tempfile::tempdir().unwrap();
-    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    let (mut settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        settings.backend_candle_enabled = true;
+    }
     let path_str = checkpoint.to_str().unwrap().to_owned();
     let job = |extra: serde_json::Value| {
         let mut value = json!({
@@ -16135,11 +16274,17 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
         mage_finetuned_available(&t2i, &settings),
         "plain txt2img is the shape this lane serves"
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(
         resolve_image_route(&t2i, &settings),
         Some(ImageRoute::MageFinetuned),
-        "the router must reach the fine-tuned lane — the id is in no MODEL_TABLE, so otherwise the \
-         job stubs"
+        "the MLX router must reach the fine-tuned lane"
+    );
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert_eq!(
+        resolve_candle_image_route(&t2i, &settings),
+        Some(CandleImageRoute::MageFinetuned),
+        "the Candle router must reach the fine-tuned lane"
     );
 
     for (label, extra) in [
@@ -16167,10 +16312,17 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             !mage_finetuned_available(&shaped, &settings),
             "{label} must not be claimed by the fine-tuned lane — it would be silently dropped"
         );
+        #[cfg(target_os = "macos")]
         assert_ne!(
             resolve_image_route(&shaped, &settings),
             Some(ImageRoute::MageFinetuned),
             "{label} must not route to the fine-tuned lane"
+        );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert_ne!(
+            resolve_candle_image_route(&shaped, &settings),
+            Some(CandleImageRoute::MageFinetuned),
+            "{label} must not route to the Candle fine-tuned lane"
         );
     }
 }

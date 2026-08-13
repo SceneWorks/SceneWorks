@@ -65,20 +65,85 @@ fn detail_feather(tile_w: u32, tile_h: u32, overlap: u32) -> Vec<f32> {
 }
 
 /// Build the SDXL generator spec with the tile ControlNet overlay.
-fn detail_spec(weights_dir: PathBuf, control_file: PathBuf, quant: Option<Quant>) -> LoadSpec {
+#[cfg(target_os = "macos")]
+fn detail_spec(
+    weights_dir: PathBuf,
+    control_file: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
         .with_control(WeightsSource::File(control_file));
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
     spec
+}
+
+trait DetailTileRefiner {
+    fn refine_tile(
+        &self,
+        tile: Image,
+        eng_w: u32,
+        eng_h: u32,
+        params: &DetailParams,
+        seed: i64,
+        cancel: &CancelFlag,
+    ) -> WorkerResult<Vec<u8>>;
+}
+
+impl DetailTileRefiner for dyn Generator {
+    fn refine_tile(
+        &self,
+        tile: Image,
+        eng_w: u32,
+        eng_h: u32,
+        params: &DetailParams,
+        seed: i64,
+        cancel: &CancelFlag,
+    ) -> WorkerResult<Vec<u8>> {
+        detail_refine_tile_generator(self, tile, eng_w, eng_h, params, seed, cancel)
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
+    fn refine_tile(
+        &self,
+        tile: Image,
+        eng_w: u32,
+        eng_h: u32,
+        params: &DetailParams,
+        seed: i64,
+        cancel: &CancelFlag,
+    ) -> WorkerResult<Vec<u8>> {
+        let request = runtime_cuda::providers::sdxl::SdxlDetailRequest {
+            prompt: params.prompt.clone(),
+            negative: params.negative.clone(),
+            width: eng_w,
+            height: eng_h,
+            steps: params.steps as usize,
+            guidance: params.guidance,
+            strength: params.strength,
+            control_scale: params.cn_scale,
+            seed: seed as u64,
+            cancel: cancel.clone(),
+            ..Default::default()
+        };
+        self.generate(&request, &tile, &tile, &mut |_| {})
+            .map(|image| image.pixels)
+            .map_err(|error| WorkerError::Engine(format!("detail tile failed: {error}")))
+    }
 }
 
 /// Refine one tile (already sized to engine-valid `eng_w`×`eng_h`): img2img on the tile
 /// with the tile as the ControlNet image (control=same). Returns the refined RGB8 buffer.
 #[allow(clippy::too_many_arguments)]
-fn detail_refine_tile(
-    generator: &dyn Generator,
+fn detail_refine_tile_generator(
+    generator: &(impl Generator + ?Sized),
     tile: Image,
     eng_w: u32,
     eng_h: u32,
@@ -128,7 +193,7 @@ fn detail_refine_tile(
 /// Tiled feathered detail refine (parity with Python `_refine_tiled_detail`). Returns the
 /// recomposed image + the tile count. Runs on the blocking thread (the generator is `!Send`).
 fn refine_tiled_detail(
-    generator: &dyn Generator,
+    generator: &(impl DetailTileRefiner + ?Sized),
     source: &image::RgbImage,
     params: &DetailParams,
     cancel: &CancelFlag,
@@ -171,8 +236,7 @@ fn refine_tiled_detail(
                 height: eng_h,
                 pixels: eng_crop.into_raw(),
             };
-            let refined_px = detail_refine_tile(
-                generator,
+            let refined_px = generator.refine_tile(
                 tile_img,
                 eng_w,
                 eng_h,
@@ -223,7 +287,12 @@ fn compose_feathered(acc: &[f32], wsum: &[f32], width: u32, height: u32) -> imag
     let mut out = image::RgbImage::new(width, height);
     for gy in 0..height {
         for gx in 0..width {
-            let w = wsum[(gy * width + gx) as usize].max(f32::EPSILON);
+            let accumulated_weight = wsum[(gy * width + gx) as usize];
+            let w = if accumulated_weight > 0.0 {
+                accumulated_weight
+            } else {
+                1.0
+            };
             let base = ((gy * width + gx) * 3) as usize;
             out.put_pixel(
                 gx,
@@ -253,6 +322,7 @@ fn detail_result(
     tiles: usize,
     width: u32,
     height: u32,
+    adapter: &str,
 ) -> JsonObject {
     let source_asset_id = request.source_asset_id.clone().unwrap_or_default();
     let detail_settings = json!({
@@ -284,7 +354,7 @@ fn detail_result(
         "createdAt": created_at,
         "mode": "image_detail",
         "model": model,
-        "adapter": "mlx_sdxl",
+        "adapter": adapter,
         "prompt": params.prompt,
         "negativePrompt": params.negative,
         "loras": [],
@@ -312,7 +382,7 @@ fn detail_result(
     json!({
         "generationSetId": genset_id,
         "expectedCount": 1,
-        "adapter": "mlx_sdxl",
+        "adapter": adapter,
         "model": model,
         "generationSet": generation_set,
         "assetWrites": [fact],
@@ -366,9 +436,11 @@ pub(crate) async fn run_image_detail_job(
     } else {
         request.model.clone()
     };
-    let engine_model = sdxl_engine_model(&model).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!("{model} does not support detail enhancement."))
-    })?;
+    let engine_model = mlx_model(&model)
+        .filter(|entry| entry.engine_id() == "sdxl")
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("{model} does not support detail enhancement."))
+        })?;
     let source_id = request
         .source_asset_id
         .as_deref()
@@ -398,6 +470,7 @@ pub(crate) async fn run_image_detail_job(
     // NVFP4 tier can only be picked when it is the tier that actually resolved. Pure reorder — the
     // q4/q8/bf16 mapping reads only the request and is unaffected.
     let (quant, _) = resolve_quant(&request, Some(&weights_dir));
+    let adapters = resolve_adapters(&request, settings)?;
     let control_repo = advanced::str(
         &request.advanced,
         "tileControlNetRepo",
@@ -416,6 +489,73 @@ pub(crate) async fn run_image_detail_job(
         ))
     })?;
 
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let candle_paths = {
+        if quant.is_some() {
+            return Err(WorkerError::InvalidPayload(
+                "SDXL detail on Candle requires a dense SDXL-family base; packed/request-quantized detail is not supported"
+                    .to_owned(),
+            ));
+        }
+        let root = settings
+            .data_dir
+            .join("cache")
+            .join("sdxl-imported-components");
+        let clip_l = root.join("clip-l");
+        let clip_bigg = root.join("clip-bigg");
+        let vae = root.join("vae-fp16-fix");
+        for (repo, revision, file, destination) in [
+            (
+                SDXL_CLIP_L_REPO,
+                SDXL_CLIP_L_REVISION,
+                "tokenizer.json",
+                clip_l.join("tokenizer.json"),
+            ),
+            (
+                SDXL_CLIP_BIGG_REPO,
+                SDXL_CLIP_BIGG_REVISION,
+                "tokenizer.json",
+                clip_bigg.join("tokenizer.json"),
+            ),
+            (
+                SDXL_VAE_REPO,
+                SDXL_VAE_REVISION,
+                "diffusion_pytorch_model.safetensors",
+                vae.join("diffusion_pytorch_model.safetensors"),
+            ),
+        ] {
+            stage_sdxl_component_file(
+                api,
+                settings,
+                job,
+                repo,
+                revision,
+                file,
+                &destination,
+            )
+            .await?;
+        }
+        admit_candle_base_floor(
+            &model,
+            "SDXL detail",
+            settings,
+            &[
+                weights_dir.as_path(),
+                control_file.as_path(),
+                vae.as_path(),
+            ],
+        )
+        .await?;
+        runtime_cuda::providers::sdxl::SdxlDetailPaths {
+            sdxl_base: weights_dir.clone(),
+            tokenizer_clip_l: WeightsSource::Dir(clip_l),
+            tokenizer_clip_bigg: WeightsSource::Dir(clip_bigg),
+            vae_fp16_fix: WeightsSource::Dir(vae),
+            tile_controlnet: WeightsSource::File(control_file.clone()),
+            adapters: adapters.clone(),
+        }
+    };
+
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
         api,
@@ -431,12 +571,14 @@ pub(crate) async fn run_image_detail_job(
     )
     .await?;
 
-    let source = engine_image_to_rgb(load_reference_image(
+    let source = load_reference_image(
         &settings.data_dir,
         &request.project_id,
         &source_id,
         &project_path,
-    )?)?;
+    )?;
+    let source = image::RgbImage::from_raw(source.width, source.height, source.pixels)
+        .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
 
     let created_at = now_rfc3339();
     let asset_id = fresh_asset_id();
@@ -448,8 +590,10 @@ pub(crate) async fn run_image_detail_job(
     let blocking = {
         let params_ref = params.clone();
         let cancel = cancel.clone();
-        let spec = detail_spec(weights_dir, control_file, quant);
-        tokio::spawn(async move {
+        #[cfg(target_os = "macos")]
+        let blocking = {
+            let spec = detail_spec(weights_dir, control_file, quant, adapters);
+            tokio::spawn(async move {
             crate::generator_cache::with_cached_generator(
                 "sdxl",
                 spec,
@@ -467,7 +611,20 @@ pub(crate) async fn run_image_detail_job(
                 },
             )
             .await
-        })
+            })
+        };
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let blocking = tokio::task::spawn_blocking(move || {
+            let detail = runtime_cuda::providers::sdxl::SdxlDetail::load(&candle_paths)
+                .map_err(|error| WorkerError::Engine(format!("SDXL detail load failed: {error}")))?;
+            let mut on_tile = |done: usize, total: usize| {
+                if tx.blocking_send((done, total)).is_err() {
+                    cancel.cancel();
+                }
+            };
+            refine_tiled_detail(&detail, &source, &params_ref, &cancel, &mut on_tile)
+        });
+        blocking
     };
 
     // Bind the blocking detail-refine task to its cancel flag (sc-8804, F-003): the `update_job`/
@@ -619,6 +776,11 @@ pub(crate) async fn run_image_detail_job(
         tiles,
         out_w,
         out_h,
+        if cfg!(target_os = "macos") {
+            "mlx_sdxl"
+        } else {
+            "candle_sdxl_detail"
+        },
     );
     update_job(
         api,

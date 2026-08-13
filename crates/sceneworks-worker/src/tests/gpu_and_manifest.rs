@@ -2781,10 +2781,13 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
         WorkerCapability::VideoExtend,
         WorkerCapability::VideoBridge,
         WorkerCapability::PersonReplace,
+        WorkerCapability::ImageDetail,
+        WorkerCapability::ImageSegment,
+        WorkerCapability::DatasetAnalysis,
     ] {
         assert!(
             healthy.capabilities.contains(&capability),
-            "a healthy candle worker must advertise every advanced video dispatch capability; \
+            "a healthy candle worker must advertise every native dispatch capability; \
              missing {capability:?}"
         );
     }

@@ -338,6 +338,9 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     // Windows sc-5928, Linux sc-5160 — candle is CPU+CUDA cross-platform so Linux rides the Windows
     // port). Drives the platform-intrinsic `imageUpscaleSeedvr2` flag.
     let seedvr2_supported = is_mac || matches!(platform, "windows" | "linux");
+    // SAM3 box smart-select follows the same native-backend footprint: MLX on Mac and Candle on
+    // Windows/Linux. Other platforms have no linked native provider.
+    let image_segment_supported = is_mac || matches!(platform, "windows" | "linux");
     let mut features = BTreeMap::new();
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641:
     // core loader sc-3642/3643 + SDXL/Wan/LTX sc-3671), so it is no longer a Mac feature gap — the
@@ -425,22 +428,21 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
-        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
-        // segmentation runs in-process on the macOS Rust worker, so the Image Editor
-        // smart-select tool works on a Python-free Mac. Mac-only (no torch SAM3 image
-        // path); must agree with the ImageSegment arm of `mac_rust_supported` — what the
-        // UI shows == what routing accepts (sc-4206 / F-CORE-2).
+        // Smart-select segmentation (epic 6087, sc-6105; sc-18480): SAM3 box-prompt
+        // segmentation runs in-process on the native MLX worker on Mac and the Candle worker on
+        // Windows/Linux. This platform-intrinsic flag must agree with worker advertisement and
+        // dispatch so the UI never hides an executable lane or offers an absent one.
         "imageSegment".to_owned(),
         MacFeatureSupport {
-            supported: is_mac,
-            reason: if is_mac {
+            supported: image_segment_supported,
+            reason: if image_segment_supported {
                 None
             } else {
                 Some(UnsupportedReason::new(
                     None,
                     "image_segment (SAM3 smart-select)",
-                    "smart-select segmentation runs on the native-MLX SAM3 stack (macOS only); there is no candle SAM3 image path yet.",
-                    Some("sc-6105"),
+                    "smart-select segmentation requires the native MLX backend on macOS or the Candle backend on Windows/Linux.",
+                    Some("sc-18480"),
                 ))
             },
         },
@@ -1001,8 +1003,8 @@ derive_model_list! {
 /// non-builtin ids are not community imports but this app's OWN full base fine-tunes — the
 /// `transformer/`-shaped checkpoint a `networkType: "full"` training run produces, registered into
 /// the model catalog and loaded by `image_jobs::mage_finetuned` against the installed base's shared
-/// text encoder + VAE. It is deliberately absent from [`CANDLE_ROUTED_FAMILIES`]: the Mage engine is
-/// MLX-only (`mac_only: true`), and there is no candle Mage generator to route a fine-tune to.
+/// text encoder + VAE. The pinned MLX and Candle runtimes both expose the same `load_finetuned`
+/// seam, so this family is routed on both native backends.
 /// The token is the MANIFEST family spelling (`mage-flow`), matching the builtin entries — not the
 /// underscored id prefix.
 pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
@@ -1018,7 +1020,7 @@ pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
 /// checkpoints have novel ids and are claimed only after the scheduler validates their manifest
 /// family and supported request shape. Seeded by the descriptor-gated Krea single-file lane
 /// (sc-14023).
-pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
+pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
 
 /// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
 /// path applies only to non-builtin (imported/user) ids, so a builtin's id-keyed routing is never
@@ -1033,17 +1035,13 @@ pub(crate) fn is_builtin_image_model(id: &str) -> bool {
 /// `KREA_IMPORTED_SUPPORTS_*` constants cannot silently transpose capabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ImportedImageBackendCaps {
-    /// The backend's native single-file loader takes an `adapters` slice: the MLX entrypoint
-    /// (`mlx_gen_krea::load_from_native_dit_file`, inference #211) does, so it serves LoRAs
-    /// (sc-14111) AND the Kontext edit surface (sc-14119, whose required `krea2_identity_edit`
-    /// LoRA IS an adapter); the candle entrypoint takes no adapters yet (sc-14135), so the candle
-    /// imported lane stays **t2i / img2img only**.
+    /// The backend's native single-file loader takes an `adapters` slice, so it serves LoRAs and
+    /// the Kontext edit surface (whose required identity-edit LoRA is itself an adapter).
     pub(crate) adapters: bool,
     /// The backend can assemble the Krea pose ControlNet branch around a FILE-LOADED DiT: the MLX
     /// runtime's `load_control_from_native_dit_file` folds the trained `Krea2ControlBranch` (a
     /// `control_scale`-scaled residual, architecturally independent of the DiT's weights) onto the
-    /// imported transformer, so a same-shape fine-tune serves strict-pose sets; the candle
-    /// single-file path has no control parameter, so candle keeps rejecting pose.
+    /// imported transformer, so a same-shape fine-tune serves strict-pose sets.
     pub(crate) pose_control: bool,
 }
 
@@ -1053,11 +1051,10 @@ pub(crate) const MLX_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageBack
     pose_control: true,
 };
 
-/// The candle backend's imported-lane capabilities (candle.rs / the worker's candle constants):
-/// no adapters (sc-14135), no pose control — its native single-file entrypoint threads neither.
+/// The candle backend's imported-lane capabilities (candle.rs / the worker's candle constants).
 pub(crate) const CANDLE_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageBackendCaps {
-    adapters: false,
-    pose_control: false,
+    adapters: true,
+    pose_control: true,
 };
 
 /// Shared fail-closed request-shape gate for a non-builtin imported image id that reuses a native
@@ -1172,8 +1169,8 @@ pub(crate) fn imported_image_request_family_eligible(
             && !has_nonempty_string(payload, "sourceAssetId")
             && (!has_loras || caps.adapters);
     }
-    // LoRAs ride the native single-file loader's adapter path — MLX only today (sc-14135 is the
-    // candle follow-up), so reject them on a backend without adapter support.
+    // LoRAs ride the native single-file loader's adapter path; reject them on any backend whose
+    // provider does not advertise that load-time seam.
     if has_loras && !caps.adapters {
         return false;
     }
@@ -1989,11 +1986,9 @@ mod tests {
         assert_eq!(with_family, mismatched_family);
     }
 
-    /// The shared imported-family gate is backend-capability-aware (sc-14111 / sc-14119): LoRAs and
-    /// the Kontext edit surface are admitted ONLY when the backend's native single-file loader takes
-    /// adapters (`adapters_supported = true`, MLX / #211); with `false` (candle, until sc-14135) they
-    /// are rejected so the candle imported lane stays t2i / img2img only. img2img (a non-edit single
-    /// `referenceAssetId`) and plain t2i need no adapter, so they are admitted on BOTH.
+    /// The shared imported-family gate follows each backend's provider surface. At the current pin,
+    /// MLX and Candle both take adapters and can assemble strict Krea pose control around an imported
+    /// DiT, so t2i, img2img, adapter, edit, and pose shapes are admitted symmetrically.
     #[test]
     fn imported_family_gate_is_adapter_capability_aware() {
         let imported_id = "user_kreamania_variant5";
@@ -2037,25 +2032,22 @@ mod tests {
             assert!(candle(&p), "t2i/img2img eligible on candle");
         }
 
-        // LoRAs + edit: MLX only (the adapter path), rejected on candle.
+        // LoRAs + edit: both providers expose the adapter path.
         let t2i_lora = payload(serde_json::json!({ "loras": [{ "id": "adapter" }] }));
         assert!(mlx(&t2i_lora), "LoRA t2i eligible on MLX");
-        assert!(
-            !candle(&t2i_lora),
-            "LoRA t2i NOT eligible on candle (sc-14135)"
-        );
+        assert!(candle(&t2i_lora), "LoRA t2i eligible on candle");
 
         let edit = payload(serde_json::json!({ "mode": "edit_image", "sourceAssetId": "s" }));
         assert!(mlx(&edit), "edit eligible on MLX");
-        assert!(!candle(&edit), "edit NOT eligible on candle (sc-14135)");
+        assert!(candle(&edit), "edit eligible on candle");
 
-        // Strict pose: the imported pose-control surface — MLX assembles the pose branch around the
-        // file-loaded DiT (`load_control_from_native_dit_file`), candle has no control parameter on
-        // its single-file path, so the pose set stays candle-rejected (a candle-required deployment
-        // fails it terminally via the `candle_unsupported` sweep rather than stranding it queued).
+        // Strict pose: both providers assemble the pose branch around the file-loaded DiT.
         let pose = payload(serde_json::json!({ "advanced": { "poses": [{}] } }));
         assert!(mlx(&pose), "pose eligible on MLX (imported pose control)");
-        assert!(!candle(&pose), "pose NOT eligible on candle");
+        assert!(
+            candle(&pose),
+            "pose eligible on candle (imported pose control)"
+        );
 
         // Pose + a single reference: the Character-Studio pose-library shape (the reference is the
         // identity-likeness scoring source, the builtin `krea_control_available` semantics).
@@ -2068,15 +2060,18 @@ mod tests {
             mlx(&pose_with_reference),
             "pose + likeness reference on MLX"
         );
-        assert!(!candle(&pose_with_reference), "still candle-rejected");
+        assert!(
+            candle(&pose_with_reference),
+            "pose + likeness reference on candle"
+        );
 
-        // Pose + LoRAs: adapters install on the imported DiT under the branch (MLX only).
+        // Pose + LoRAs: adapters install on the imported DiT under the branch on both providers.
         let pose_with_lora = payload(serde_json::json!({
             "loras": [{ "id": "style" }],
             "advanced": { "poses": [{}] },
         }));
         assert!(mlx(&pose_with_lora), "pose + LoRA on MLX");
-        assert!(!candle(&pose_with_lora), "pose + LoRA candle-rejected");
+        assert!(candle(&pose_with_lora), "pose + LoRA on candle");
 
         // Shapes the pose render loop would silently drop stay rejected on EVERY backend: the
         // plural reference set, a bare source, edit mode, and the base-tier identity shapes.
@@ -2148,7 +2143,7 @@ mod tests {
     /// (the generic Krea-shaped arm) would pass the first assertion and fail the LoRA one, because
     /// `mlx_gen_mage::load_finetuned` refuses adapters outright on EVERY backend.
     #[test]
-    fn a_fine_tuned_mage_flow_base_is_mac_routable_and_claims_txt2img_only() {
+    fn a_fine_tuned_mage_flow_base_is_native_routable_and_claims_txt2img_only() {
         let finetune_id = "finetune_9f3c";
         let payload = |extra: serde_json::Value| {
             let mut value = serde_json::json!({
@@ -2173,6 +2168,14 @@ mod tests {
                 MLX_IMPORTED_CAPS,
             )
         };
+        let candle = |p: &serde_json::Map<String, serde_json::Value>| {
+            imported_image_request_family_eligible(
+                finetune_id,
+                p,
+                CANDLE_ROUTED_FAMILIES,
+                CANDLE_IMPORTED_CAPS,
+            )
+        };
 
         // The novel id is in NO routing table; the family path is what makes it Mac-routable.
         assert!(
@@ -2186,7 +2189,11 @@ mod tests {
 
         assert!(
             mlx(&payload(serde_json::json!({ "mode": "text_to_image" }))),
-            "plain txt2img is the shape the fine-tuned lane serves"
+            "plain txt2img is the shape the MLX fine-tuned lane serves"
+        );
+        assert!(
+            candle(&payload(serde_json::json!({ "mode": "text_to_image" }))),
+            "plain txt2img is the shape the Candle fine-tuned lane serves"
         );
 
         for (label, extra) in [
@@ -2217,23 +2224,16 @@ mod tests {
             ("look", serde_json::json!({ "characterLookId": "l" })),
         ] {
             assert!(
-                !mlx(&payload(extra)),
-                "{label} must keep flowing to its established route, not be flattened to t2i here"
+                !mlx(&payload(extra.clone())) && !candle(&payload(extra)),
+                "{label} must not be flattened to t2i on either native backend"
             );
         }
 
-        // Mage is MLX-only (`mac_only` descriptor, no candle Mage engine), so the candle family
-        // list must NOT admit it — otherwise a candle host would claim a job it cannot load.
+        // The generated Mage full-fine-tune seam is present on both pinned runtimes.
         assert!(
-            !CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
-            "there is no candle Mage engine to route a fine-tune to"
+            CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
+            "Candle must advertise the generated Mage full-fine-tune family"
         );
-        assert!(!imported_image_request_family_eligible(
-            finetune_id,
-            &payload(serde_json::json!({ "mode": "text_to_image" })),
-            CANDLE_ROUTED_FAMILIES,
-            CANDLE_IMPORTED_CAPS
-        ));
 
         // A BUILTIN Mage id keeps its id-keyed routing — the family path applies only to
         // non-builtins, so the tiered snapshot lane is untouched.

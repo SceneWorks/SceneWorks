@@ -35,6 +35,8 @@
 /// builtin `mage_flow*` registry ids and their `mlx_mage` label).
 #[cfg(target_os = "macos")]
 const MAGE_FINETUNED_ENGINE: &str = "mlx_mage_finetuned";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const MAGE_FINETUNED_ENGINE: &str = "candle_mage_finetuned";
 
 /// The builtin catalog id whose installed snapshot supplies the shared text encoder + VAE a
 /// fine-tuned transformer is paired with.
@@ -44,7 +46,6 @@ const MAGE_FINETUNED_ENGINE: &str = "mlx_mage_finetuned";
 /// `coRequisite` rows are what name the shared-components mirror. The components are BIT-IDENTICAL
 /// across all six Mage variants (sc-14979), so this resolves the same bytes whichever variant a
 /// user happens to have installed.
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
 
 /// The tier the shared components are staged from: **dense bf16**.
@@ -56,15 +57,12 @@ const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
 /// prompt). Pairing dense with dense is the coherent load, and it is the same `bf16` tier the
 /// training run itself resolved (`training_jobs::TRAINING_COMPONENT_TIER`), so a user who could
 /// train has the components installed by construction.
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_COMPONENT_TIER: &str = "bf16";
 
 /// Denoise-steps / guidance fallbacks — the undistilled `mage_flow_base` regime a fine-tune
 /// inherits. The Studio normally supplies both from the catalog entry's `defaults`
 /// (`apply_family_studio_surface_defaults`); these apply only when it does not.
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_DEFAULT_STEPS: u32 = 30;
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 
 /// Resolve the fine-tuned Mage-Flow transformer directory for `request`, or `None` when this is not
@@ -81,7 +79,6 @@ const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 /// The path is confined by `normalize_app_managed_model_path` (a payload can never point the
 /// checkpoint outside a declared root; LAN jobs API, epic 4484) — the same confinement
 /// `resolve_weights_dir` uses.
-#[cfg(target_os = "macos")]
 fn resolve_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
@@ -133,7 +130,6 @@ fn resolve_mage_finetuned_transformer(
 ///
 /// All-or-nothing, before any compute: a missing component fails the job with the seam's actionable
 /// error naming the component id + repo, rather than a mid-load "No such file or directory".
-#[cfg(target_os = "macos")]
 fn resolve_mage_finetuned_components(
     settings: &Settings,
 ) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>> {
@@ -176,7 +172,6 @@ fn resolve_mage_finetuned_components(
 /// installed — a missing one surfaces as the loud
 /// [`resolve_mage_finetuned_components`] error in the handler rather than a silent fall-through to
 /// the stub. Mirrors the shape of the other `…_available` predicates.
-#[cfg(target_os = "macos")]
 fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool {
     if request.mode == "edit_image"
         || !request.loras.is_empty()
@@ -202,7 +197,6 @@ fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool
 }
 
 /// Flat telemetry recorded on assets rendered from a fine-tuned base.
-#[cfg(target_os = "macos")]
 fn mage_finetuned_raw_settings(request: &ImageRequest, steps: u32, guidance: f32) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -222,7 +216,6 @@ fn mage_finetuned_raw_settings(request: &ImageRequest, steps: u32, guidance: f32
 /// image on the blocking thread. The `Box<dyn Generator>` is bespoke (not registry-cached) — the
 /// checkpoint lives at a user path under a novel id, so there is nothing to key a registry cache
 /// on, exactly like the Krea imported lane.
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 async fn generate_mage_finetuned_stream(
     api: &ApiClient,
@@ -275,13 +268,20 @@ async fn generate_mage_finetuned_stream(
                 LoadSpec::new(WeightsSource::Dir(transformer)),
                 |spec, (id, source)| spec.with_component(id, source),
             );
-            runtime_macos::providers::mage::load_finetuned(
+            #[cfg(target_os = "macos")]
+            let loaded = runtime_macos::providers::mage::load_finetuned(
                 // The published checkpoint the fine-tune started from — the ONLY Mage generation
                 // training target — which is what fixes the architecture and the undistilled
                 // sampling regime the trained weights inherit.
                 runtime_macos::providers::mage::MageVariant::Base,
                 &spec,
-            )
+            );
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let loaded = runtime_cuda::providers::mage::load_finetuned(
+                runtime_cuda::providers::mage::MageVariant::Base,
+                &spec,
+            );
+            loaded
             .map_err(|error| {
                 WorkerError::Engine(format!(
                     "Fine-tuned Mage-Flow checkpoint load failed: {error}"

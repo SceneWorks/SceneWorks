@@ -111,13 +111,14 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
     }
 }
 
-/// Does this `image_detail` job belong on the in-process Rust MLX worker? sc-3060 (epic 3041)
-/// ports the tile-ControlNet detail refine onto the engine. Detail is SDXL-family only
-/// (`sdxl` / `realvisxl`, the detail-capable backbones; the payload defaults to `realvisxl`).
+/// Does this `image_detail` job belong on an in-process native Rust worker? sc-3060 (epic 3041)
+/// ported the tile-ControlNet detail refine onto MLX; sc-18480 adds the same provider contract to
+/// Candle. Detail is SDXL-family only (`sdxl` / `realvisxl` / Illustrious; the payload defaults to
+/// `realvisxl`).
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path too (epic 3641,
-/// sc-3671), so it no longer changes eligibility. On Windows/Linux no `mlx` worker exists, so detail
-/// remains queued unless a compatible native worker registers.
-pub(crate) fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
+/// sc-3671), so it no longer changes eligibility. Both native schedulers reuse this exact gate so
+/// their advertised `image_detail` capability cannot claim a non-SDXL family.
+pub(crate) fn image_detail_native_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageDetail) {
         return false;
     }
@@ -136,7 +137,7 @@ pub(crate) fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
 
 /// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
 pub(crate) fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    image_job_is_mlx_eligible(job) || image_detail_mlx_eligible(job)
+    image_job_is_mlx_eligible(job) || image_detail_native_eligible(job)
 }
 
 /// Epic 3180 / sc-3905 routing — does this understanding job (`image_vqa` / `image_interleave`)
@@ -172,7 +173,7 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// registered; only a compatible native lane may claim the job.
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path (epic 3641,
 /// sc-3671), so every SDXL shape — including a LyCORIS-tagged job — is MLX-eligible.
-/// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
+/// `image_detail` is a separate job type with its own routing (see `image_detail_native_eligible`).
 pub(crate) fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }

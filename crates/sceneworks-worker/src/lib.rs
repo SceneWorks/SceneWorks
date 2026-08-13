@@ -691,11 +691,12 @@ mod person_segment;
 // sibling is `person_segment_sam3_candle` below.
 #[cfg(target_os = "macos")]
 mod person_segment_sam3;
-// Smart-select image segmentation (epic 6087, sc-6105): the `image_segment` job runs SAM3
-// box-prompt segmentation in-process to produce an inpaint mask asset for the Image Editor.
-// macOS-only like its `person_segment_sam3` (SAM3) dependency; there is no off-Mac standalone
-// image-segment lane.
-#[cfg(target_os = "macos")]
+// Smart-select image segmentation: native SAM3 box-PVS on both registered runtimes. Candle's
+// pinned SAM3 surface has no point-prompt API, so segment_jobs rejects points before any I/O.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod segment_jobs;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
 // Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
@@ -1831,9 +1832,12 @@ async fn run_utility_job(
                 .map_err(|error| ("Dataset upscale failed.", error)),
             // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
             // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
-            // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
-            // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
-            #[cfg(target_os = "macos")]
+            // inpaint mask asset for the Image Editor. Advertised by both native workers; Candle
+            // point prompts fail closed because the pinned provider exposes box PVS only.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
             JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Smart-select segmentation failed.", error)),

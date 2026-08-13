@@ -1254,6 +1254,30 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::KreaImportedControl => {
+                    generate_krea_imported_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::MageFinetuned => {
+                    generate_mage_finetuned_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 CandleImageRoute::SdxlImported => {
                     generate_sdxl_imported_stream(
                         api,
@@ -2023,7 +2047,11 @@ pub(crate) fn upscaled_workflow_share(
 /// Compiled under `test` everywhere for the same reason as [`upscaled_workflow_share`]:
 /// `image_jobs/detail.rs` compiles on macOS only, and the lineage contract should not go untested on
 /// every other platform.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 pub(crate) fn detail_workflow_share(
     job_payload: &JsonObject,
     model: &str,
@@ -2996,7 +3024,10 @@ include!("image_jobs/krea_imported.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 include!("image_jobs/sdxl_imported.rs");
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 // Fine-tuned Mage-Flow base checkpoint routing (sc-15036, epic 14034 F6): the `transformer/`-shaped
 // artifact a FULL base fine-tune writes, paired at load with the installed base's shared text
 // encoder + VAE and rendered through the `load_finetuned` entrypoint that skips the pinned-
@@ -3196,20 +3227,21 @@ use pulid_candle::{generate_candle_pulid_stream, pulid_candle_available};
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 // image detail tile-ControlNet routing.
 include!("image_jobs/detail.rs");
 
-/// Off macOS the in-process engine is unavailable; the capability is not advertised and
-/// `image_detail` remains queued (the `mlx` worker is macOS-only).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 pub(crate) async fn run_image_detail_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "image_detail runs on the macOS MLX worker, not this worker".to_owned(),
+        "image_detail requires either the MLX or Candle inference backend".to_owned(),
     ))
 }
 
