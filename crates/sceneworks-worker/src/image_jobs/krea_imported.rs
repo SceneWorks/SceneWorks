@@ -295,6 +295,17 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through to the stub.
 /// Mirrors the shape of the other `…_available` predicates.
 fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
+    let operation = krea_imported_operation(request);
+    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+        && operation != gen_core::ImportedModelOperation::Pose
+    {
+        return false;
+    }
+    if operation == gen_core::ImportedModelOperation::Pose
+        && !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported(&request.advanced)
+    {
+        return false;
+    }
     let Some(descriptor) = krea_imported_descriptor(request) else {
         return false;
     };
@@ -326,6 +337,13 @@ fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
             || !caps
                 .conditioning
                 .contains(&gen_core::ConditioningKind::Control)
+        {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if requested_control_kind(request)
+            .and_then(|kind| validate_control_kind(KREA_CONTROL_ENGINE_ID, &kind))
+            .is_err()
         {
             return false;
         }

@@ -434,6 +434,14 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         json!({ "maskAssetId": "mask_1" }),
         json!({ "characterId": "character_1" }),
         json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({ "advanced": { "controlImage": "control_1" } }),
+        json!({ "advanced": { "controlMode": "pose" } }),
+        json!({
+            "advanced": {
+                "phases": [{ "steps": 4 }],
+                "controlImage": "control_1"
+            }
+        }),
     ] {
         let mut payload = plain.clone();
         payload

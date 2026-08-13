@@ -94,7 +94,7 @@ pub(crate) async fn create_image_job(
         &mut job_payload,
     )
     .await?;
-    validate_imported_candle_submission(&state, &model_id, &job_payload)?;
+    validate_imported_submission(&state, &model_id, &job_payload)?;
     if payload.seed.is_none() {
         // `job_payload["count"]` is the resolved count — the block above writes the model's declared
         // `defaults.count` whenever the caller named none, so the seed batch matches what actually
@@ -130,17 +130,14 @@ pub(crate) async fn create_image_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-/// Refuse an imported source/operation combination the required Candle topology has no exact
-/// provider route for before it enters the queue. Builtins are explicitly scoped by the manifest
-/// resolver and retain their id-keyed routing.
-fn validate_imported_candle_submission(
+/// Refuse material imported-control intent unless the selected native topology has an exact Pose
+/// provider route for this source. On a required Candle topology the existing full imported-shape
+/// preflight still applies. Builtins retain their id-keyed routing and are out of this family gate.
+fn validate_imported_submission(
     state: &AppState,
     model_id: &str,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
-    if cfg!(target_os = "macos") && !state.settings.candle_required {
-        return Ok(());
-    }
     let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
         return Ok(());
     };
@@ -149,6 +146,17 @@ fn validate_imported_candle_submission(
     {
         return Ok(());
     }
+    let candle_required = !cfg!(target_os = "macos") || state.settings.candle_required;
+    let has_material_control = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
+    // Preserve the existing Mac behavior for ordinary imported requests. Material control is the
+    // exception: it must be proved against the MLX Pose registration before the job is queued.
+    if !candle_required && !has_material_control {
+        return Ok(());
+    }
+    let backend = if candle_required { "candle" } else { "mlx" };
     let family = entry
         .get("family")
         .and_then(Value::as_str)
@@ -156,11 +164,20 @@ fn validate_imported_candle_submission(
         .filter(|family| !family.is_empty())
         .unwrap_or("unknown");
     if sceneworks_core::jobs_store::imported_image_request_provider_eligible(
-        model_id, payload, "candle",
+        model_id, payload, backend,
     ) {
         return Ok(());
     }
-    let feature = if payload
+    let feature = if has_material_control
+        && !payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get("poses"))
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    {
+        "control image/mode without a supported Pose request"
+    } else if payload
         .get("advanced")
         .and_then(Value::as_object)
         .and_then(|advanced| advanced.get("poses"))
@@ -187,9 +204,14 @@ fn validate_imported_candle_submission(
     } else {
         "requested generation shape"
     };
+    let code = if candle_required {
+        "candle_unsupported"
+    } else {
+        "imported_control_unsupported"
+    };
     Err(ApiError::bad_request(format!(
-        "candle_unsupported: imported {family} {feature} is not supported by the resolved Candle \
-         provider registration for this exact source and operation; the request was not queued"
+        "{code}: imported {family} {feature} is not supported by the resolved {backend} provider \
+         registration for this exact source and operation; the request was not queued"
     )))
 }
 

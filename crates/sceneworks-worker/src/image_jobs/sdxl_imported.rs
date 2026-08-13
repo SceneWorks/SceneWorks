@@ -93,6 +93,9 @@ fn resolve_imported_sdxl_pin(
 }
 
 fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
+    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced) {
+        return false;
+    }
     let operation = if request.mode == "edit_image" {
         gen_core::ImportedModelOperation::Edit
     } else {

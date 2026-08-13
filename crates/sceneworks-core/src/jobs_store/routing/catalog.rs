@@ -1103,6 +1103,41 @@ fn imported_requested_quant(
     }
 }
 
+/// Whether an imported image request's `advanced` object carries user control intent that must be consumed by an exact
+/// Pose provider route. `controlImage` is material whenever it is present and non-null (including an
+/// invalid empty/non-string value, which must fail closed). `controlMode` is material when its string
+/// value is non-empty after trimming; an explicit non-string value is invalid and therefore material
+/// too. Empty strings and JSON null retain the historical no-control shape.
+///
+/// This helper deliberately does not infer Pose from either field. A caller must independently select
+/// Pose from a non-empty `advanced.poses` set and prove that exact source/backend operation exists.
+pub fn imported_control_intent_is_material(advanced: &Map<String, Value>) -> bool {
+    if advanced
+        .get("controlImage")
+        .is_some_and(|value| !value.is_null())
+    {
+        return true;
+    }
+    match advanced.get("controlMode") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(mode)) => !mode.trim().is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// The imported Pose surface currently assembles a pose-only Krea control branch. Omission/empty
+/// keeps that proven default; any explicit non-pose or malformed mode must fail before claim rather
+/// than reach a worker predicate that cannot consume it. When provider facts gain per-control-kind
+/// metadata this check can be derived from that registration instead.
+pub fn imported_pose_control_mode_is_supported(advanced: &Map<String, Value>) -> bool {
+    match advanced.get("controlMode") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(mode)) if mode.trim().is_empty() => true,
+        Some(Value::String(mode)) => mode.trim().eq_ignore_ascii_case("pose"),
+        Some(_) => false,
+    }
+}
+
 /// Fail-closed request gate for a non-builtin imported image model. The exact source shape and
 /// operation select one provider row; capabilities are never unioned across sibling family routes.
 pub fn imported_image_request_provider_eligible(
@@ -1166,6 +1201,25 @@ pub fn imported_image_request_provider_eligible(
     } else {
         "generate"
     };
+    // An explicit user control map/mode is semantically material. It may only accompany a selected
+    // Pose operation; never flatten it into Generate/Edit/MultiPhase. The exact route lookup and
+    // Control-conditioning check below then prove that this source/backend can consume the request.
+    if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(imported_control_intent_is_material)
+        && operation != "pose"
+    {
+        return false;
+    }
+    if operation == "pose"
+        && payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .is_some_and(|advanced| !imported_pose_control_mode_is_supported(advanced))
+    {
+        return false;
+    }
     let Some(route) = imported_provider_route(backend, family, source, operation) else {
         return false;
     };
@@ -1638,7 +1692,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        image_family_is_mlx_routed, image_model_mac_support,
+        image_family_is_mlx_routed, image_model_mac_support, imported_control_intent_is_material,
         imported_image_model_lora_advertisement, imported_image_request_family_eligible,
         is_builtin_image_model, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
         CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
@@ -1647,6 +1701,32 @@ mod tests {
         MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS,
         VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
     };
+
+    #[test]
+    fn imported_control_intent_distinguishes_material_values_without_inventing_pose() {
+        for advanced in [
+            serde_json::json!({ "controlImage": "asset" }),
+            serde_json::json!({ "controlImage": "" }),
+            serde_json::json!({ "controlImage": 7 }),
+            serde_json::json!({ "controlMode": "pose" }),
+            serde_json::json!({ "controlMode": " canny " }),
+            serde_json::json!({ "controlMode": false }),
+        ] {
+            assert!(imported_control_intent_is_material(
+                advanced.as_object().unwrap()
+            ));
+        }
+        for advanced in [
+            serde_json::json!({}),
+            serde_json::json!({ "controlImage": null }),
+            serde_json::json!({ "controlMode": null }),
+            serde_json::json!({ "controlMode": "  " }),
+        ] {
+            assert!(!imported_control_intent_is_material(
+                advanced.as_object().unwrap()
+            ));
+        }
+    }
 
     /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
     /// membership, same length (so no id was dropped, added, or duplicated). Order is intentionally

@@ -130,6 +130,63 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         }
     }))));
+    assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+        "model": "kreamania_variant4",
+        "advanced": {
+            "poses": [{ "id": "pose_1" }],
+            "controlMode": "canny"
+        },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        }
+    }))));
+    // A control map/mode is material intent, never a hint from which to invent Pose. Without a
+    // non-empty pose set it must not flatten into the Generate operation; with the exact registered
+    // Krea Pose shape it remains admitted so the worker can consume `controlImage` verbatim.
+    for advanced in [
+        json!({ "controlImage": "control_1" }),
+        json!({ "controlMode": "pose" }),
+        json!({ "controlMode": " canny " }),
+    ] {
+        assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+            "model": "kreamania_variant4",
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            }
+        }))));
+    }
+    assert!(image_job_is_mlx_eligible(&image_generate_job(json!({
+        "model": "kreamania_variant4",
+        "advanced": {
+            "poses": [{ "id": "pose_1" }],
+            "controlImage": "control_1",
+            "controlMode": "pose"
+        },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        }
+    }))));
+    for advanced in [
+        json!({ "controlImage": null }),
+        json!({ "controlMode": "  " }),
+    ] {
+        assert!(image_job_is_mlx_eligible(&image_generate_job(json!({
+            "model": "kreamania_variant4",
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            }
+        }))));
+    }
     // A shape the pose render loop would silently drop (the plural edit reference set) and a
     // manifest entry with no installed path stay ineligible.
     assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({

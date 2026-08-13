@@ -53,17 +53,8 @@ fn fit_rgb(source: &image::RgbImage, width: u32, height: u32, mode: &str) -> ima
 /// cannot execute. Source shape is part of the registry key: a sibling route for the same family is
 /// never unioned in. The ComfyUI lanes are ordinary Generate routes; only a singular Reference is
 /// admitted when that exact descriptor advertises it.
-fn imported_generate_request_supported(
-    request: &ImageRequest,
-    family: &str,
-    source: gen_core::ImportedModelSource,
-) -> Option<gen_core::ModelDescriptor> {
-    let descriptor = crate::inference_runtime::imported_model_descriptor(
-        family,
-        source,
-        gen_core::ImportedModelOperation::Generate,
-    )?;
-    if request.mode == "edit_image"
+fn imported_generate_request_has_unsupported_shape(request: &ImageRequest) -> bool {
+    request.mode == "edit_image"
         || !pose_entries(request).is_empty()
         || request.source_asset_id.is_some()
         || request.mask_asset_id.is_some()
@@ -71,13 +62,24 @@ fn imported_generate_request_supported(
         || request.character_look_id.is_some()
         || !request.reference_asset_ids.is_empty()
         || request_has_multiphase(request)
-        || request
-            .advanced
-            .get("controlImage")
-            .is_some_and(|value| !value.is_null())
-    {
+        || sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+}
+
+fn imported_generate_request_supported(
+    request: &ImageRequest,
+    family: &str,
+    source: gen_core::ImportedModelSource,
+) -> Option<gen_core::ModelDescriptor> {
+    // Reject shape before registry/path resolution so every shared Generate consumer (Mage and the
+    // three ComfyUI Candle lanes) refuses material control intent at the same admission seam.
+    if imported_generate_request_has_unsupported_shape(request) {
         return None;
     }
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        family,
+        source,
+        gen_core::ImportedModelOperation::Generate,
+    )?;
     if request.reference_asset_id.is_some()
         && !descriptor
             .capabilities

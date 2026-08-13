@@ -35,8 +35,9 @@ pub(crate) use routing::mlx::*;
 // External re-export surface: `apps/rust-api/src/lib.rs` and the integration test
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
-    candle_routed_image_models, imported_image_model_lora_advertisement,
-    imported_image_request_provider_eligible, imported_provider_routes, is_builtin_image_model,
+    candle_routed_image_models, imported_control_intent_is_material,
+    imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
+    imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
     mac_capabilities, model_mac_support, ImportedProviderSurface, MacCapabilities,
     MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };

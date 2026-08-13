@@ -18,6 +18,36 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn mage_and_comfy_shared_generate_shape_reject_material_imported_control_intent() {
+    assert!(!imported_generate_request_has_unsupported_shape(&request(
+        json!({ "model": "external_base_plain" })
+    )));
+    for advanced in [
+        json!({ "controlImage": "control-map" }),
+        json!({ "controlImage": "" }),
+        json!({ "controlMode": "pose" }),
+        json!({ "controlMode": "canny" }),
+        json!({ "poses": [{ "id": "pose" }], "controlImage": "control-map" }),
+    ] {
+        assert!(imported_generate_request_has_unsupported_shape(&request(
+            json!({ "model": "external_base_controlled", "advanced": advanced })
+        )));
+    }
+    for advanced in [
+        json!({ "controlImage": null }),
+        json!({ "controlMode": "  " }),
+    ] {
+        assert!(!imported_generate_request_has_unsupported_shape(&request(
+            json!({ "model": "external_base_plain", "advanced": advanced })
+        )));
+    }
+}
+
 #[test]
 fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
     let valid = request(json!({
@@ -15170,6 +15200,24 @@ fn resolve_image_route_sends_registered_imported_sdxl_operations_to_fused_lane()
         Some(ImageRoute::SdxlImported),
         "there is no imported SDXL Pose registration"
     );
+    for controlled in [
+        payload(json!({ "advanced": { "controlImage": "asset-1" } })),
+        payload(json!({ "advanced": { "controlMode": "pose" } })),
+        payload(json!({
+            "mode": "edit_image",
+            "sourceAssetId": "asset-1",
+            "advanced": { "controlImage": "asset-2" }
+        })),
+    ] {
+        assert!(
+            !sdxl_imported_available(&controlled, &settings),
+            "material control intent must not flatten into imported SDXL Generate/Edit"
+        );
+        assert_ne!(
+            resolve_image_route(&controlled, &settings),
+            Some(ImageRoute::SdxlImported)
+        );
+    }
 
     let ambiguous_dir = dir.path().join("models/imports/ambiguous-xl");
     std::fs::create_dir_all(&ambiguous_dir).unwrap();
@@ -15299,6 +15347,31 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
             krea_imported_available(&pose, &settings),
             "a pose set is served on the pose-control-capable backend"
         );
+        let pose_with_user_map = request(json!({
+            "projectId": "p", "model": "kreamania_variant4",
+            "advanced": {
+                "poses": [{ "id": "a" }],
+                "controlImage": "control-map",
+                "controlMode": "pose"
+            },
+            "modelManifestEntry": base.clone()
+        }));
+        assert!(
+            krea_imported_available(&pose_with_user_map, &settings),
+            "the selected Krea Pose route must retain the user control-map passthrough shape"
+        );
+        let unsupported_kind = request(json!({
+            "projectId": "p", "model": "kreamania_variant4",
+            "advanced": {
+                "poses": [{ "id": "a" }],
+                "controlMode": "canny"
+            },
+            "modelManifestEntry": base.clone()
+        }));
+        assert!(
+            !krea_imported_available(&unsupported_kind, &settings),
+            "Krea Pose supports only the shared strict-control kinds registered for that engine"
+        );
         // `krea_imported_control_available` (the route-claim predicate) exists only on the
         // pose-control-capable build, so probe it under its own cfg rather than the const — the
         // candle lane compiles this same test file and would not resolve the name.
@@ -15325,6 +15398,48 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         krea_imported_available(&multi_phase, &settings),
         "the imported MultiPhase registration selects the Raw provider"
     );
+
+    for (label, extra) in [
+        (
+            "generate + control image",
+            json!({ "advanced": { "controlImage": "control-map" } }),
+        ),
+        (
+            "generate + explicit control mode",
+            json!({ "advanced": { "controlMode": "pose" } }),
+        ),
+        (
+            "edit + control image",
+            json!({
+                "mode": "edit_image",
+                "sourceAssetId": "source",
+                "advanced": { "controlImage": "control-map" }
+            }),
+        ),
+        (
+            "multi-phase + control mode",
+            json!({
+                "advanced": {
+                    "phases": [{ "steps": 4 }],
+                    "controlMode": "pose"
+                }
+            }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "kreamania_variant4",
+            "modelManifestEntry": base.clone()
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(
+            !krea_imported_available(&request(payload), &settings),
+            "{label} must not flatten into a non-Pose Krea operation"
+        );
+    }
 
     // Bare-transformer guards stay rejected on EVERY backend: mask, character, a
     // NON-edit two-reference SET (the edit surface, only valid in edit mode), and a bare non-edit
@@ -16425,6 +16540,14 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             json!({ "advanced": { "poses": [{ "assetId": "a" }] } }),
         ),
         ("phases", json!({ "advanced": { "phases": [{}] } })),
+        (
+            "control image",
+            json!({ "advanced": { "controlImage": "control-map" } }),
+        ),
+        (
+            "control mode",
+            json!({ "advanced": { "controlMode": "pose" } }),
+        ),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
         ("look", json!({ "characterLookId": "l" })),
