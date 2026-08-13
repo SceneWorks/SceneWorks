@@ -496,18 +496,16 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
     // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B routes to the NEW dual-expert VACE engine
-    // `wan2_2_vace_fun_14b`. macOS is served natively (mlx-gen sc-6604, merged + pinned) via
-    // `generate_wan_vace_fun` in the macOS block below. The native **candle** engine (sc-6605) is
-    // not done, so on Windows/Linux (candle) and the no-backend stub path a VACE-Fun job must fail
-    // honestly here — it must NEVER fall through to the Wan2.1 `generate_candle_wan_vace` /
-    // `generate_wan_vace` backend, which would silently render with the WRONG checkpoint (the exact
-    // failure the epic forbids).
+    // `wan2_2_vace_fun_14b`. macOS is served natively via MLX and Windows/Linux via Candle. A worker
+    // binary built without either native backend must fail honestly here — it must NEVER fall
+    // through to the Wan2.1 `generate_wan_vace` backend, which would silently render with the wrong
+    // checkpoint (the exact failure the epic forbids).
     #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
     if request.model == "wan_2_2_vace_fun_14b" {
         return Err(WorkerError::InvalidPayload(
-            "wan_2_2_vace_fun_14b: the native Wan2.2 VACE-Fun engine is macOS-only for now (the \
-             candle backend is pending sc-6605). The job will not be routed to the Wan2.1 VACE \
-             backend. Choose another model on this platform."
+            "wan_2_2_vace_fun_14b requires the native MLX worker on macOS or a worker built with \
+             Candle backend support on Windows/Linux. This worker has neither backend, and the job \
+             will not be routed to the incompatible Wan2.1 VACE engine."
                 .to_owned(),
         ));
     }
