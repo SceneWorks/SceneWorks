@@ -2154,6 +2154,27 @@ fn estimate_floor_parameters(
         );
     };
     if decode.parameters.decode_geometry_policies.is_empty() {
+        if contract.decode_geometry_policy_authoritative {
+            let refusal = DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "bounded decode has a declared quality scope but no applicable row for the loaded tier/load shape"
+                    .to_owned(),
+            };
+            // The decode rung itself has no exact authority. A higher independent rung retains its
+            // own estimate with decode omitted, so request-selection-aware engagement cannot
+            // accidentally resurrect the route-blind tile domain.
+            let candidates = (strategy != MemoryStrategy::BoundedDecode)
+                .then(|| EstimateParameterCandidate {
+                    parameters: base_parameters,
+                    decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
+                })
+                .into_iter()
+                .collect();
+            return (candidates, vec![refusal]);
+        }
         let pair = decode
             .parameters
             .decode_tile_edges
@@ -8225,6 +8246,39 @@ mod tests {
             Some(512)
         );
         assert_eq!(legacy_decode.selection.parameters.decode_overlap, Some(128));
+
+        // Declared-but-empty is not legacy. This is the state produced when SceneWorks strips a
+        // packaged table after an artifact/source binding refusal while preserving its authority.
+        // Even if a future provider keeps a route-blind decode range implemented, rung 2 must not
+        // be synthesized from it; independent higher rungs remain eligible without decode.
+        let mut refused = fixture_generator();
+        let refused_contract = refused.contract.as_mut().expect("refused contract");
+        refused_contract.decode_geometry_policy_authoritative = true;
+        let refused_candidates = synthesize_estimate_ladder(
+            refused_contract,
+            &plan,
+            "text_to_image",
+            None,
+            admitted_geometry,
+            false,
+            None,
+            &[],
+        );
+        assert!(refused_candidates.estimates.iter().all(|candidate| {
+            candidate.selection.strategy != MemoryStrategy::BoundedDecode
+                && !refused_contract
+                    .engages_selection(&candidate.selection, MemoryStrategy::BoundedDecode)
+        }));
+        assert!(refused_candidates
+            .decode_quality_decisions
+            .iter()
+            .any(|decision| {
+                matches!(
+                    decision,
+                    DecodeQualityRequestDecision::Refused { reason, .. }
+                        if reason.contains("declared quality scope")
+                )
+            }));
     }
 
     #[test]
