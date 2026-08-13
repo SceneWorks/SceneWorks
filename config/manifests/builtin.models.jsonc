@@ -7778,6 +7778,11 @@
         // tier(s) the user picks, tracked once, excluded from the tier matrix, and NOT double-counted in
         // the per-tier footprint. The worker still fetches a toggled-but-not-downloaded tier on demand
         // (ensure_ltx_{q8,bf16}_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
+        //
+        // sc-18853: keep all four rows at the first immutable revision that contains `bf16/`.
+        // The former `254989c3…` pin predates that directory; `01df27d3…` is its direct child and adds
+        // only the ten bf16 files, so q4/q8/gemma remain byte-identical. Keep these rows aligned with
+        // the worker's LTX_BUNDLE_REVISION so first-install and on-demand downloads populate one pin.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
@@ -7791,7 +7796,7 @@
           // LoadSpec::text_encoder (no $LTX_GEMMA_DIR / HF-cache fallback), so it MUST be provisioned;
           // pinning keeps it reproducible + offline-resolvable.
           "coRequisite": true,
-          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "files": ["gemma/*"],
           "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 26427894918
@@ -7799,7 +7804,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -7810,7 +7815,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -7820,7 +7825,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
+          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
