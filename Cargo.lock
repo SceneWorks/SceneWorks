@@ -6319,7 +6319,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-core"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "directories",
  "fs2",
@@ -6344,7 +6344,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-desktop"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "futures-util",
  "if-addrs",
@@ -6380,7 +6380,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-image-quality"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "image",
  "image_hasher",
@@ -6392,7 +6392,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-mcp"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6409,7 +6409,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-rust-api"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "axum",
  "fs2",
@@ -6446,7 +6446,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-rust-worker"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "sceneworks-worker",
  "tokio",
@@ -6454,7 +6454,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-worker"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "axum",
  "fs2",
