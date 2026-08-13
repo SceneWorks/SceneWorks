@@ -560,7 +560,8 @@ async fn generate_candle_bernini_image_stream(
 
     // Load the resolved tier subfolder at its matching quant: `bf16/` dense (quant `None`), or the
     // packed `q4/`|`q8/` tree with `Quant::Q4`|`Quant::Q8` (sc-11003).
-    let spec = load_spec(weights_dir, quant, Vec::new(), None)
+    let adapters = resolve_adapters(request, settings)?;
+    let spec = load_spec(weights_dir, quant, adapters, None)
         .with_offload_policy(offload_policy);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),

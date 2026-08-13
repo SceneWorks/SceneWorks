@@ -2,11 +2,11 @@ use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
     apply_candle_image_load_shape, candle_certified_artifact_path,
     candle_certified_hf_artifact_path, pid_effective_dims, pid_output_tier, pose_entries,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    resolve_quant, run_candle_strict_control, trusted_control_weight_revision, ApiClient,
-    CancelFlag, CandleStrictControl, Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Image,
-    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Quant, Settings,
-    Value, WorkerError, WorkerResult,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_pid_weights, resolve_quant, run_candle_strict_control, trusted_control_weight_revision,
+    ApiClient, CancelFlag, CandleStrictControl, Flux2Control, Flux2ControlPaths,
+    Flux2ControlRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Quant, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -278,6 +278,7 @@ pub(super) struct Flux2StrictControl {
     /// load; `use_pid` on the request is `is_some()` so the two stay in lockstep (the engine rejects a
     /// mismatch). `None` ⇒ native FLUX.2 VAE decode.
     pid: Option<gen_core::PidWeights>,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -297,6 +298,7 @@ pub(super) fn flux2_strict_control_test_fixture(path: PathBuf) -> Flux2StrictCon
         memory_spec,
         memory_context: None,
         pid: None,
+        adapters: Vec::new(),
     }
 }
 
@@ -340,6 +342,7 @@ impl CandleStrictControl for Flux2StrictControl {
         let paths = Flux2ControlPaths {
             root: self.base.clone(),
             control: self.control.clone(),
+            adapters: self.adapters.clone(),
         };
         let loaded = match &self.memory_context {
             Some(context) => Flux2Control::load_with_memory_context(
@@ -542,6 +545,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         );
     }
 
+    let adapters = resolve_adapters(request, settings)?;
     let provider = Flux2StrictControl {
         base,
         control,
@@ -556,6 +560,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         memory_spec: strategy_spec,
         memory_context,
         pid: pid_weights,
+        adapters,
     };
 
     run_candle_strict_control(

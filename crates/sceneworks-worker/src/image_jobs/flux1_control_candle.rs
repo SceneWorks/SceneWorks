@@ -4,11 +4,11 @@ use super::{
     huggingface_snapshot_dir,
 };
 use super::{
-    control_kind_label, pose_entries, requested_control_kind, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
-    ApiClient, CancelFlag, CandleStrictControl, Flux1ControlPaths, Flux1ControlRequest,
-    Flux1DevControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, Settings, Value, WorkerError, WorkerResult,
+    control_kind_label, pose_entries, requested_control_kind, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, run_candle_strict_control,
+    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Flux1ControlPaths,
+    Flux1ControlRequest, Flux1DevControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -265,6 +265,7 @@ pub(super) struct Flux1StrictControl {
     /// discrete mode index). The whole pose set shares one `controlMode`, so a single label is correct.
     control_kind: String,
     memory: gen_core::GenerationMemory,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -278,6 +279,7 @@ pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictCon
         steps: 25,
         guidance: 3.5,
         control_scale: 0.7,
+        adapters: Vec::new(),
         control_kind: "pose".to_owned(),
         memory: gen_core::GenerationMemory::default(),
     }
@@ -326,6 +328,7 @@ impl CandleStrictControl for Flux1StrictControl {
         let paths = Flux1ControlPaths {
             flux_base: self.base.clone(),
             control: self.control.clone(),
+            adapters: self.adapters.clone(),
         };
         Flux1DevControl::load_with_memory(&paths, self.memory).map_err(|error| {
             WorkerError::Engine(format!("FLUX.1-dev strict-control load failed: {error}"))
@@ -499,6 +502,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         );
     }
 
+    let adapters = resolve_adapters(request, settings)?;
     let provider = Flux1StrictControl {
         base,
         control,
@@ -510,6 +514,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         control_scale,
         control_kind,
         memory: generation_memory,
+        adapters,
     };
 
     run_candle_strict_control(

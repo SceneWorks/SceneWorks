@@ -170,13 +170,6 @@ use runtime_cuda::providers::kolors::{KolorsControl, KolorsControlPaths, KolorsC
 // export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda::providers::z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
-// Z-Image img2img / edit provider (sc-6595, epic 5480) — the candle (Windows/CUDA) sibling of the MLX
-// `z_image_turbo` `Conditioning::Reference` img2img route, living in `candle-gen-z-image` (the Turbo DiT
-// + a strength-derived source-latent init). Candle-only: macOS keeps the registered MLX generator's
-// img2img path. The bespoke edit route (`image_jobs/zimage_edit_candle.rs`) uses this named runtime
-// utility export.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::z_image::{ZImageEdit, ZImageEditPaths, ZImageEditRequest};
 // PuLID-FLUX face-identity provider (sc-5492, epic 5480) — the candle (Windows/CUDA) sibling of the
 // macOS `pulid_flux` registry generator, living in `candle-gen-pulid` (the EVA02-CLIP tower + IDFormer
 // + the 20 PerceiverAttentionCA modules injected into the forked FLUX DiT via the post-block
@@ -526,6 +519,23 @@ pub(crate) async fn run_image_generate_job(
                 route.is_some_and(ImageRoute::applies_request_loras)
             }
         };
+        // sc-18477: a request-owned adapter stack is part of the generation contract, not an
+        // optional hint. Bespoke routes historically bypassed the generic LoadSpec and several of
+        // them therefore rendered successfully while silently omitting request.loras. Fail before
+        // any model/conditioning load unless the selected executable route explicitly consumes the
+        // stack. Each route moves onto the allow-list only in the same change that wires its actual
+        // provider load, which makes this guard fail closed for direct worker callers as well as API
+        // submissions.
+        if !request.loras.is_empty() && !route_applies_loras {
+            let route_label = route
+                .map(|selected| format!("{selected:?}"))
+                .unwrap_or_else(|| "unavailable".to_owned());
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} cannot apply the selected LoRA/LoKr stack through the resolved {} image route; \
+                 choose a model/request shape whose active backend supports adapters",
+                request.model, route_label,
+            )));
+        }
         if plan.workflow_source.is_some() && route_applies_loras {
             plan.loras = trusted_loras_for_share(api, settings, job, &request).await;
         }
@@ -1032,23 +1042,6 @@ pub(crate) async fn run_image_generate_job(
                 // like the MLX `generate_bernini_image_stream`.
                 CandleImageRoute::Bernini => {
                     generate_candle_bernini_image_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — the
-                // off-Mac sibling of the macOS generic lane's Z-Image identity img2img; reuses the candle
-                // ZImageEdit engine with the identity `referenceAssetId` as the source-latent init + wires
-                // the sc-4411 face-likeness scorer. Diverted before the txt2img arm (else the reference
-                // silently drops).
-                CandleImageRoute::ZimageIdentity => {
-                    generate_candle_zimage_identity_stream(
                         api,
                         settings,
                         job,
@@ -3187,17 +3180,14 @@ use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_avai
 mod flux2_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use flux2_comfyui_candle::{flux2_comfyui_available, generate_candle_flux2_comfyui_stream};
-// Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
-// epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
-// `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with
-// the identity `referenceAssetId` as the source-latent init + wires the sc-4411 face-likeness scorer.
-// Reuses the sibling `zimage_edit_candle.rs` base/steps helpers, so it is included right after it.
+// Z-Image identity-init request gate for Image Studio "With Character" (sc-8409, epic 4406). Both
+// backends now generate through their registered `z_image_turbo` provider; this candle-only helper
+// preserves the off-Mac availability/base-resolution predicate while the generic stream owns Reference
+// conditioning, adapters, provenance, and face-likeness scoring.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_identity_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_identity_candle::{
-    generate_candle_zimage_identity_stream, zimage_identity_candle_available,
-};
+use zimage_identity_candle::{zimage_identity_candle_available, zimage_identity_candle_strength};
 // PuLID-FLUX face identity — the Windows/CUDA candle lane ONLY (sc-5492). macOS keeps the
 // inventory-registered `pulid_flux` MLX generator (image_jobs/pulid.rs); the candle `PulidFlux` is a
 // bespoke provider, so this file is candle-gated and distinct from the macOS route.

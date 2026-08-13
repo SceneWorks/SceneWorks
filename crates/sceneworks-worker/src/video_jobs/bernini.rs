@@ -11,7 +11,7 @@ use super::wan::local_mlx_dir;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use super::wan::{generate_video, VideoGenInput};
+use super::wan::{generate_video, resolve_wan_adapters, VideoGenInput};
 
 // ---------------------------------------------------------------------------
 // Real MLX Bernini generation (macOS, via mlx-gen-bernini, epic 4699 / sc-4707 + sc-4703 + sc-5425):
@@ -604,12 +604,14 @@ pub(super) async fn generate_candle_bernini(
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let (model_dir, quant) =
         crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
+    let adapters = resolve_wan_adapters(settings, request, engine_id)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
         model_dir,
         quant,
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,

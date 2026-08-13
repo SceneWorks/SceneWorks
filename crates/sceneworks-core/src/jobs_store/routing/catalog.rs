@@ -606,13 +606,13 @@ impl VideoModelCaps {
 pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // Mage-Flow generation + instruction-edit (sc-14053): all six registry descriptors are linked by
     // runtime-cuda and advertise Q4/Q8 over the same complete dense snapshots (load-time DiT fold;
-    // BF16 stays dense). No inference LoRA surface.
-    ModelCaps::new("mage_flow_base", true, true, true, false, false),
-    ModelCaps::new("mage_flow", true, true, true, false, false),
-    ModelCaps::new("mage_flow_turbo", true, true, true, false, false),
-    ModelCaps::new("mage_flow_edit_base", true, true, true, false, false),
-    ModelCaps::new("mage_flow_edit", true, true, true, false, false),
-    ModelCaps::new("mage_flow_edit_turbo", true, true, true, false, false),
+    // BF16 stays dense). User LoRA/LoKr now applies on both dense and packed tiers.
+    ModelCaps::new("mage_flow_base", true, true, false, false, true),
+    ModelCaps::new("mage_flow", true, true, false, false, true),
+    ModelCaps::new("mage_flow_turbo", true, true, false, false, true),
+    ModelCaps::new("mage_flow_edit_base", true, true, false, false, true),
+    ModelCaps::new("mage_flow_edit", true, true, false, false, true),
+    ModelCaps::new("mage_flow_edit_turbo", true, true, false, false, true),
     // sc-3022 Z-Image / sc-3023 FLUX.1 / sc-3024 Qwen / sc-3025 FLUX.2 / sc-3026 SDXL — the founding
     // MLX-routed families (grows one family story at a time as each lands real generation in
     // `sceneworks-worker::image_jobs`). CANDLE: SDXL sc-3678, the four families sc-5096.
@@ -623,7 +623,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // candle-gen-z-image packed-detects those components from their config. The manifests advertise
     // `standardTierLayout` and measured candle Q4/BF16 VRAM. Keeping `candle_quant = false` therefore
     // rejected a valid Q4 tier select as `candle_unsupported` before the worker could load it.
-    ModelCaps::new("z_image_turbo", true, true, true, false, false),
+    ModelCaps::new("z_image_turbo", true, true, false, false, true),
     // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379 control + sc-8679 txt2img). MLX-routed
     // on macOS AND candle-routed off-Mac. The worker registers a real `z_image` MLX engine (MODEL_TABLE:
     // shift-6.0 / ~50-step / real CFG, `mlx_z_image` adapter) plus base strict-control on Mac
@@ -632,17 +632,16 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // here was a wiring gap left by sc-8320/sc-8251 (the base MLX engine + control landed, but this row
     // and `image_request_mlx_eligible` were never updated), so `model_mac_support` hid the model behind
     // "Not available on Mac (MLX only)" even though the Mac worker fully supports it.
-    ModelCaps::new("z_image", true, true, true, false, false),
+    ModelCaps::new("z_image", true, true, false, false, true),
     // `z_image_edit` (epic 3529 / sc-3923): MLX-only edit id on Turbo weights.
     ModelCaps::new("z_image_edit", true, false, false, false, false),
-    ModelCaps::new("flux_schnell", true, true, false, false, false),
-    ModelCaps::new("flux_dev", true, true, false, false, false),
+    ModelCaps::new("flux_schnell", true, true, false, true, false),
+    ModelCaps::new("flux_dev", true, true, false, true, false),
     // Base `qwen_image` candle txt2img is a turnkey packed-quant family (sc-8669 wired the q4/q8/bf16
     // subdirs into `STANDARD_TIER_MODELS`; sc-10969 measured the tiers), so a tier-select `mlxQuantize`
     // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
-    // which flipped krea/ideogram/boogu but not qwen). No inference LoRA on base qwen off-Mac, so NOT
-    // quant/lora-exempt.
-    ModelCaps::new("qwen_image", true, true, true, false, false),
+    // which flipped krea/ideogram/boogu but not qwen). User LoRA/LoKr applies on the packed tiers.
+    ModelCaps::new("qwen_image", true, true, false, false, true),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -677,19 +676,19 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // The load `Quant` stays `None` on klein regardless (its `mlx.denseTextEncoderTier` declaration keeps its bf16 Qwen3 text
     // encoder full-precision); `mlxQuantize` here is a turnkey tier-SELECT — which pre-quantized subdir
     // `standard_tier_subdir` descends into — not an on-the-fly quantize.
-    ModelCaps::new("flux2_klein_9b", true, true, true, false, false),
-    ModelCaps::new("flux2_klein_9b_kv", true, true, true, false, false),
+    ModelCaps::new("flux2_klein_9b", true, true, false, false, true),
+    ModelCaps::new("flux2_klein_9b_kv", true, true, false, false, true),
     // `_true_v2` stays `candle_quant = false`: it is the wikeeyang community fine-tune, installed by
     // convert-at-install from a single bf16 file into a FLAT `modelPath` dir. It ships no q4/q8/bf16
     // tier matrix (one `downloads[]` entry, `mlx.quantize: 8` on-the-fly), so there is no tier for a
     // pick to select — admitting one would only hand the dense converted tree to the legacy CPU-stage →
     // quantize-onto-GPU path on a shape nothing has validated.
-    ModelCaps::new("flux2_klein_9b_true_v2", true, true, false, false, false),
+    ModelCaps::new("flux2_klein_9b_true_v2", true, true, false, true, false),
     // FLUX.2-dev (epic 5914 MLX / epic 6564 sc-7458 candle) — the guidance-distilled 32B flagship.
     // A SEPARATE candle engine from klein (Mistral3 TE + 48/48/15360 DiT). Same sc-10222 tier-select
     // flip as klein above; its `SceneWorks/flux2-dev-mlx` turnkey is where the epic's headline
     // "packed Q4 load kills the ~105 GB dense CPU-staging peak" claim actually lands.
-    ModelCaps::new("flux2_dev", true, true, true, false, false),
+    ModelCaps::new("flux2_dev", true, true, false, false, true),
     // SDXL family (sc-10767, epic 9083 full-catalog parity): the candle lane serves the packed q4/q8
     // MLX tiers end-to-end — packed UNet (sc-9416), packed dual-CLIP (sc-9527), and LoRA/LoKr fold on a
     // packed tier (sc-9528) — and `candle-gen-sdxl` now advertises `supported_quants: [Q4, Q8]`. So
@@ -720,9 +719,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // serves it via the bespoke `pulid_flux_candle_eligible` lane, not the txt2img gate).
     ModelCaps::new("pulid_flux_dev", true, false, false, false, false),
     // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). Pure txt2img on candle.
-    ModelCaps::new("chroma1_hd", true, true, false, false, false),
-    ModelCaps::new("chroma1_base", true, true, false, false, false),
-    ModelCaps::new("chroma1_flash", true, true, false, false, false),
+    ModelCaps::new("chroma1_hd", true, true, false, true, false),
+    ModelCaps::new("chroma1_base", true, true, false, true, false),
+    ModelCaps::new("chroma1_flash", true, true, false, true, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
     //
     // sc-14249 (epic 9083): `candle_quant = true` across the whole family. `candle-gen-sensenova`
@@ -782,10 +781,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers end-to-end —
     // packed ChatGLM3 (the four GLM projections) + the vendored packed-detecting SDXL UNet, VAE dense —
     // and advertises `supported_quants: [Q4, Q8]`. So a quant tier-select stays on candle → `candle_quant`.
-    // NOT `candle_quant_lora`: kolors advertises NO candle inference LoRA (`supports_lora: false`), so a
-    // A LoRA is still refused by the candle lane and remains queued. bf16 still resolves to
-    // Quant::None (dense), verbatim.
-    ModelCaps::new("kolors", true, true, true, false, false),
+    // Kolors now applies LoRA/LoKr through the vendored adaptable SDXL UNet on dense and packed tiers;
+    // bf16 still resolves to Quant::None (dense), verbatim.
+    ModelCaps::new("kolors", true, true, false, false, true),
     // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. UNLIKE the
     // other candle families it DOES advertise on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is
     // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from quant/LoRA
@@ -802,16 +800,16 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // bespoke `generate_candle_bernini_image_stream` lane — like the MLX `bernini_image_mlx_eligible`).
     // `candle_quant = true`: the descriptor advertises Q4/Q8 and the off-Mac worker resolves the
     // published `SceneWorks/bernini` bf16/q8/q4 tier subdirectories (sc-11003) in both its still and
-    // video lanes. No inference LoRA slot, so this is quant-only rather than quant+LoRA.
-    ModelCaps::new("bernini_image", true, true, true, false, false),
+    // video lanes. User adapters route to the renderer's high/low experts on every tier.
+    ModelCaps::new("bernini_image", true, true, false, false, true),
     // Ideogram 4 + Turbo (epic 4725 MLX; sc-6597 candle): 9.3B flow DiT + Qwen3-VL-8B TE. T2I + edit on
     // MLX (sc-6303); candle serves txt2img + the in-lane edit path (sc-6598) via the generic stream.
     // Candle advertises Q4/Q8 (sc-9607 flipped `supported_quants: [Q4, Q8]`, dropping the loader's
     // `spec.quantize` reject — a no-op on the already-packed q4/q8 turnkey), so `candle_quant` is set
     // (sc-9983 — the routing half of sc-9607, previously missed): a tier-select `mlxQuantize` stays on
-    // candle. No inference LoRA on candle, so NOT quant/lora-exempt.
-    ModelCaps::new("ideogram_4", true, true, true, false, false),
-    ModelCaps::new("ideogram_4_turbo", true, true, true, false, false),
+    // candle. User LoRA/LoKr stacks after the bundled TurboTime adapter when Turbo is selected.
+    ModelCaps::new("ideogram_4", true, true, false, false, true),
+    ModelCaps::new("ideogram_4_turbo", true, true, false, false, true),
     // Boogu-Image-0.1 (epic 6387 MLX; sc-7524 candle): ~10.3B flow DiT + Qwen3-VL-8B + FLUX.1 VAE. Base +
     // Turbo are txt2img; Edit adds the instruction image-edit path. Candle advertises Q4/Q8 (sc-9607
     // flipped `supported_quants: [Q4, Q8]`, the packed-tier no-op), so `candle_quant` is set (sc-9983 —
@@ -836,11 +834,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // image-caps row.
     ModelCaps::new("krea_2_raw", true, true, false, false, true),
     // Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841 / sc-7871 MLX; sc-7880 candle):
-    // pure txt2img. Candle advertises Q4/Q8 (sc-7879) but NOT inference LoRA (`supports_lora: false`), so
-    // `candle_quant` is set — an explicit quant request stays on candle while a LoRA is refused.
-    ModelCaps::new("sd3_5_large", true, true, true, false, false),
-    ModelCaps::new("sd3_5_large_turbo", true, true, true, false, false),
-    ModelCaps::new("sd3_5_medium", true, true, true, false, false),
+    // pure txt2img. Candle advertises Q4/Q8 (sc-7879) and applies LoRA/LoKr on every tier.
+    ModelCaps::new("sd3_5_large", true, true, false, false, true),
+    ModelCaps::new("sd3_5_large_turbo", true, true, false, false, true),
+    ModelCaps::new("sd3_5_medium", true, true, false, false, true),
     // SANA 1600M (epic 8485 / sc-8489 MLX; sc-11780/sc-18475 candle): NVIDIA's 1.6B Linear-DiT
     // true-CFG txt2img plus singular-reference non-edit img2img.
     // Both backends wired — `mlx-gen-sana` (macOS, MLX-packed q4/q8/bf16 turnkey) + `candle-gen-sana`
@@ -1601,6 +1598,19 @@ mod tests {
     // few-step distilled sibling on the SAME `sdxl` engine / descriptor) joins the both-set too — quant +
     // LoRA stay on candle for its plain txt2img shape.
     const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] = &[
+        "bernini_image",
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+        "z_image_turbo",
+        "z_image",
+        "qwen_image",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_dev",
         "sdxl",
         "realvisxl",
         "illustrious_xl_v1",
@@ -1610,43 +1620,29 @@ mod tests {
         "lens_turbo",
         "krea_2_turbo",
         "krea_2_raw",
+        "kolors",
+        "ideogram_4",
+        "ideogram_4_turbo",
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
     ];
 
     // Z-Image Turbo/base select already-packed q4/q8/bf16 directories; this is not on-the-fly quant,
     // but it is still a valid `mlxQuantize` request and therefore belongs in the quant routing set.
-    // sc-9983: ideogram/boogu join SD3.5 as quant-only candle families (sc-9607 flipped their
-    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle). sc-10819: kolors joins the quant-only
-    // set — the candle `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers
-    // (packed ChatGLM3 + vendored SDXL UNet) and advertises [Q4, Q8], but NO candle inference LoRA.
+    // The adapter-capable packed families moved to `EXPECTED_CANDLE_QUANT_LORA_MODELS` above;
+    // this list retains families that accept quant requests without user adapters. Historically,
+    // these rows covered Ideogram, Kolors, Qwen, FLUX.2, SD3.5, and Z-Image as quant-only.
     const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
-        "z_image_turbo",
-        "z_image",
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        "bernini_image",
-        "ideogram_4",
-        "ideogram_4_turbo",
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
-        "kolors",
         // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
-        // the candle txt2img lane, so a tier-select stays on candle; no candle inference LoRA on base
-        // qwen. (sc-9983 flipped this for krea/ideogram/boogu but missed qwen.)
-        "qwen_image",
+        // the candle txt2img lane, so a tier-select stays on candle. Qwen now appears in the combined
+        // quant+adapter list above.
         // sc-10222: FLUX.2-klein 9B/`_kv` + FLUX.2-dev — the same missed router half, for the last
         // `STANDARD_TIER_MODELS` families still carrying it. `_true_v2` is deliberately absent (a flat
         // convert-at-install dir with no tier matrix); see the caps rows for the full reasoning.
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_dev",
         // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
         // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
         "sensenova_u1_8b",
@@ -1660,7 +1656,17 @@ mod tests {
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
     // family — the off-Mac engine dense-folds a LoRA/LoKr onto the split_files/ DiT, but advertises NO
     // candle quant (no packed tier off-Mac), so it is LoRA-only rather than BOTH.
-    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &["anima_base", "anima_aesthetic", "anima_turbo"];
+    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &[
+        "flux_schnell",
+        "flux_dev",
+        "flux2_klein_9b_true_v2",
+        "chroma1_hd",
+        "chroma1_base",
+        "chroma1_flash",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
+    ];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
         "wan_2_2",

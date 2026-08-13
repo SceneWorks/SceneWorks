@@ -34,6 +34,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
     "wan_2_2_i2v_14b",
     "ltx_2_3",
     "ltx_2_3_eros",
+    "bernini",
 ];
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
@@ -677,7 +678,7 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
 /// `ads2v`. Routed on the model id + mode, not weight availability — the worker's dedicated
 /// `CandleVideoRoute::Bernini` dispatch resolves-or-errors loudly if the `SceneWorks/bernini`
 /// snapshot is unprovisioned (sc-11003), and validates the per-mode source media when it assembles the
-/// conditioning. No LoRA (the engine reports `supports_lora=false`); an explicit `mlxQuantize` remains
+/// conditioning. User LoRA/LoKr applies to the renderer's high/low experts; an explicit `mlxQuantize` remains
 /// on Candle because the worker resolves the published bf16/q8/q4 tier subdirectories (sc-11003) —
 /// there is no torch Bernini to fall back to. Factored out so
 /// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
@@ -763,7 +764,7 @@ pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
         4,
     )
     .is_some()
-        && !conditioned_edit_has_unsupported_carrier(payload, false, false, false)
+        && !conditioned_edit_has_unsupported_carrier(payload, true, false, false)
         && !conditioned_true_cfg_is_malformed(payload)
 }
 

@@ -467,8 +467,6 @@ enum CandleImageRoute {
     /// Off-Mac twin of [`ImageRoute::SdxlImported`], loaded by candle from the fused checkpoint plus
     /// the three caller-staged SDXL components.
     SdxlImported,
-    /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
-    ZimageIdentity,
     /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
     SdxlIpAdapter,
     /// Kolors IP-Adapter-Plus reference conditioning (sc-5488).
@@ -702,13 +700,28 @@ fn kolors_edit_candle_available(request: &ImageRequest, settings: &Settings) -> 
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl CandleImageRoute {
-    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. Z-Image
-    /// edit is the registered Turbo alias and therefore participates; the remaining bespoke edit,
-    /// IP-adapter, control, ComfyUI, PuLID and Bernini lanes intentionally do not.
+    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. This is
+    /// also the provenance contract: adding a route here requires the same change to thread the
+    /// resolved stack into its inference constructor.
     fn applies_request_loras(self, request: &ImageRequest) -> bool {
         match self {
             CandleImageRoute::InstantId
+            | CandleImageRoute::SdxlEdit
+            | CandleImageRoute::SdxlIpAdapter
+            | CandleImageRoute::KolorsIpAdapter
+            | CandleImageRoute::FluxIpAdapter
+            | CandleImageRoute::Pulid
+            | CandleImageRoute::QwenControl
+            | CandleImageRoute::KolorsControl
+            | CandleImageRoute::ZimageControl
+            | CandleImageRoute::Flux2Control
+            | CandleImageRoute::Flux1Control
+            | CandleImageRoute::Flux2Edit
+            | CandleImageRoute::ZimageComfyui
+            | CandleImageRoute::Flux2Comfyui
+            | CandleImageRoute::Bernini
             | CandleImageRoute::QwenEdit
+            | CandleImageRoute::QwenImageComfyui
             | CandleImageRoute::ZimageEdit
             | CandleImageRoute::MageEdit
             | CandleImageRoute::KreaEdit
@@ -778,9 +791,6 @@ impl CandleImageRoute {
             }
             CandleImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
             CandleImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
-            CandleImageRoute::ZimageIdentity => {
-                zimage_identity_candle::ZIMAGE_IDENTITY_CANDLE_ENGINE
-            }
             CandleImageRoute::SdxlIpAdapter => sdxl_ipadapter::SDXL_IPADAPTER_ENGINE,
             CandleImageRoute::KolorsIpAdapter => kolors_ipadapter::KOLORS_IPADAPTER_ENGINE,
             CandleImageRoute::FluxIpAdapter => flux_ipadapter::FLUX_IPADAPTER_ENGINE,
@@ -867,7 +877,8 @@ fn resolve_candle_image_route(
     {
         Some(CandleImageRoute::MageEdit)
     } else if zimage_identity_candle_available(request, settings) {
-        Some(CandleImageRoute::ZimageIdentity)
+        // The registered Z-Image Turbo generator owns both Reference conditioning and adapters.
+        Some(CandleImageRoute::CandleTxt2Img)
     } else if sdxl_ipadapter_available(request, settings) {
         Some(CandleImageRoute::SdxlIpAdapter)
     } else if kolors_ipadapter_available(request, settings) {
@@ -3562,9 +3573,8 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Opt
 /// doesn't implement — e.g. (IA)³/OFT — has no `lokr_*`/`hada_*` keys, so the engine's LoRA loader
 /// finds nothing and surfaces a loud "matched nothing" error rather than mis-applying.)
 ///
-/// Shared by the MLX path and the candle Lens lane (sc-5126): candle-gen-lens's `merge_adapters`
-/// dispatches on this `kind` (a `lokr`-metadata file declared `Lora` would find no lora_A/B keys and
-/// it surfaces the mismatch loudly), so the same `networkType: lokr` classification feeds both lanes.
+/// Shared by MLX and Candle: every Candle family validates this declared kind against the selected
+/// file before application, so the same `networkType: lokr` classification feeds both backends.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3583,8 +3593,8 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     Ok(AdapterKind::Lora)
 }
 
-/// Resolve up to 3 request LoRAs into engine adapter specs (path + scale + kind).
-/// Shared by the MLX path and the candle Lens lane (sc-5126).
+/// Resolve up to [`MAX_JOB_LORAS`] request adapters into engine specs (path + scale + kind).
+/// Shared by the MLX and Candle paths so both backends enforce the same stack ceiling.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -8377,7 +8387,30 @@ async fn generate_candle_stream(
     // `Reference` — the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent).
     // Other candle edit families (sdxl/flux2/qwen/z-image) have their own bespoke streams (checked before
     // this dispatch).
-    let (edit_reference, edit_mask) = if is_ideogram {
+    let (edit_reference, edit_mask) = if zimage_identity_candle_strength(request).is_some() {
+        let reference_id = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("Z-Image identity requires a referenceAssetId".to_owned())
+            })?;
+        let reference = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            reference_id,
+            project_path,
+        )?;
+        let reference = fit_engine_image(reference, request.width, request.height, &request.fit_mode)?;
+        (
+            Some((
+                reference,
+                zimage_identity_candle_strength(request).expect("checked above"),
+            )),
+            None,
+        )
+    } else if is_ideogram {
         match resolve_ideogram_edit(request, settings, project_path)? {
             Some((source, strength, mask)) => (Some((source, strength)), mask),
             None => (None, None),

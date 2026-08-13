@@ -4,7 +4,7 @@ use super::{
     flux1_control_candle::*, flux2_comfyui_candle::*, flux2_control_candle::*,
     flux2_edit_candle::*, flux_ipadapter::*, kolors_control::*, kolors_ipadapter::*,
     krea_control_candle::*, pulid_candle::*, qwen_control::*, qwen_edit_candle::*,
-    sdxl_ipadapter::*, zimage_control::*, zimage_identity_candle::*,
+    sdxl_ipadapter::*, zimage_control::*,
 };
 use serde_json::json;
 
@@ -9639,6 +9639,36 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
+fn sc18477_every_named_bespoke_lane_declares_real_adapter_application() {
+    let request = request(json!({ "projectId": "p", "model": "z_image_turbo", "count": 1 }));
+    for route in [
+        CandleImageRoute::SdxlEdit,
+        CandleImageRoute::SdxlIpAdapter,
+        CandleImageRoute::Flux2Edit,
+        CandleImageRoute::FluxIpAdapter,
+        CandleImageRoute::Pulid,
+        CandleImageRoute::QwenEdit,
+        CandleImageRoute::QwenImageComfyui,
+        CandleImageRoute::QwenControl,
+        CandleImageRoute::KolorsIpAdapter,
+        CandleImageRoute::KolorsControl,
+        CandleImageRoute::ZimageEdit,
+        CandleImageRoute::ZimageComfyui,
+        CandleImageRoute::ZimageControl,
+        CandleImageRoute::Flux1Control,
+        CandleImageRoute::Flux2Control,
+        CandleImageRoute::Flux2Comfyui,
+        CandleImageRoute::Bernini,
+    ] {
+        assert!(
+            route.applies_request_loras(&request),
+            "{route:?} must never claim adapter provenance without applying the selected stack"
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
 fn every_generating_candle_route_has_a_real_generation_set_adapter() {
     let cases = [
         (
@@ -9674,11 +9704,6 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
             CandleImageRoute::SdxlImported,
             "external_sdxl",
             "candle_sdxl_imported",
-        ),
-        (
-            CandleImageRoute::ZimageIdentity,
-            "z_image_turbo",
-            "candle_zimage_identity",
         ),
         (
             CandleImageRoute::SdxlIpAdapter,
@@ -16424,12 +16449,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "InstantId",
             "instantid.rs",
             include_str!("instantid.rs"),
-            "admit_conditioning_paths(",
-        ),
-        (
-            "ZimageIdentity",
-            "zimage_identity_candle.rs",
-            include_str!("zimage_identity_candle.rs"),
             "admit_conditioning_paths(",
         ),
         (

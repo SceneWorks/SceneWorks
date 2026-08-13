@@ -240,6 +240,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     let model = Flux2Edit::load_dev(
         &Flux2EditPaths {
             root: weights_dir.clone(),
+            adapters: Vec::new(),
         },
         Some(Quant::Q4),
     )
@@ -347,6 +348,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
         &Flux2ControlPaths {
             root: weights_dir.clone(),
             control: control.clone(),
+            adapters: Vec::new(),
         },
         Some(Quant::Q4),
     )

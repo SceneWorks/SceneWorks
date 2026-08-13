@@ -2,10 +2,11 @@ use super::{
     admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
     candle_conditioned_edit_work, consume_gen_events, drive_gen_items_reported, fit_engine_image,
     load_reference_image, mlx_model, model_repo, pid_effective_dims, pid_output_tier,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    resolve_quant, resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
-    Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, PromptEnhance, Settings, Value, WorkerError, WorkerResult,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_pid_weights, resolve_quant, resolve_weights_dir, start_gen_stream, ApiClient,
+    CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PromptEnhance, Settings, Value,
+    WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -445,13 +446,17 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     let total = work.len();
     let negative = request.negative_prompt.clone();
     let enhance = PromptEnhance::from_advanced(&request.advanced)?;
+    let adapters = resolve_adapters(request, settings)?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "flux2_edit",
         0,
         move || {
-            let paths = Flux2EditPaths { root: flux2_base };
+            let paths = Flux2EditPaths {
+                root: flux2_base,
+                adapters,
+            };
             let model = if is_dev {
                 match &memory_context {
                     Some(context) => Flux2Edit::load_dev_with_memory_context(

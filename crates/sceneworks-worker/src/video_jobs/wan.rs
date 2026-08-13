@@ -621,7 +621,8 @@ pub(super) fn resolve_wan_adapters(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
         )));
     }
-    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    let is_wan_a14b = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    let is_moe = is_wan_a14b || engine_id == "bernini";
     let mut specs: Vec<AdapterSpec> = Vec::new();
 
     // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied per-expert at
@@ -630,7 +631,7 @@ pub(super) fn resolve_wan_adapters(
     // it on the quantized tiers, so the pair is added only when the toggle is on. When off, the
     // native multi-step CFG recipe runs ([`wan_sampling`]) with no Lightning adapter. User LoRAs
     // below are honored in both states. The subdir is resolved per architecture (not cross-compatible).
-    if is_moe && wan_lightning_on(engine_id, request) {
+    if is_wan_a14b && wan_lightning_on(engine_id, request) {
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
         specs.push(moe_adapter(
             high,

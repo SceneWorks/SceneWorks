@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
+    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries, resolve_adapters,
     resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
     GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Quant,
     Settings, Value, WorkerError, WorkerResult,
@@ -302,6 +302,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
     let guidance = flux2_comfyui_guidance(request);
     let quant = flux2_comfyui_quant(request);
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
+    let adapters = resolve_adapters(request, settings)?;
 
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -322,6 +323,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                 transformer,
                 snapshot_dir,
                 Some(quant),
+                adapters,
             )
             .map_err(|error| {
                 WorkerError::Engine(format!("ComfyUI FLUX.2-dev load failed: {error}"))
