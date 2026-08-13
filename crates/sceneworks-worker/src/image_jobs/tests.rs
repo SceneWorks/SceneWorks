@@ -693,6 +693,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                     Ok(crate::mlx_fit_gate::MlxRequestEvaluation {
                         memory: gen_core::GenerationMemory::default(),
                         context,
+                        decode_quality_decisions: Vec::new(),
                         process_limit_bytes: None,
                     })
                 },

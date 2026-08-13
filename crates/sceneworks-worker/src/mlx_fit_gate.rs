@@ -3364,10 +3364,9 @@ fn evaluate_request_with_budget_using_bundle(
         needed_gb,
         available_gb,
         optimization_authority = ?optimization_authority,
-        decode_quality_decisions = ?synthesized_ladder.decode_quality_decisions,
         "selected request-scoped MLX memory strategy"
     );
-    Ok(MlxRequestEvaluation {
+    let evaluation = MlxRequestEvaluation {
         memory: memory_for_selection(contract, selection),
         process_limit_bytes,
         decode_quality_decisions: synthesized_ladder.decode_quality_decisions,
@@ -3390,7 +3389,14 @@ fn evaluate_request_with_budget_using_bundle(
                 .or(admission.evidence_revision)
                 .unwrap_or_else(|| REQUEST_EVIDENCE_REVISION.to_owned()),
         },
-    })
+    };
+    tracing::info!(
+        event = "mlx_decode_quality_request_audit",
+        route = plan.engine_id,
+        decisions = ?evaluation.decode_quality_decisions,
+        "recorded typed request-scoped decode-quality decisions"
+    );
+    Ok(evaluation)
 }
 
 #[cfg(target_os = "macos")]
@@ -7580,12 +7586,11 @@ mod tests {
             );
             assert!(evaluation.memory.tile_vae_decode);
             assert!(matches!(
-                gen_core::standard_memory_strategy_safety_check(
+                gen_core::default_memory_strategy_safety_check(
                     generator.contract.as_ref().unwrap(),
                     &evaluation.context,
-                )
-                .unwrap(),
-                gen_core::MemorySafetyDecision::Admitted { .. }
+                ),
+                gen_core::MemorySafetyDecision::Accept
             ));
         }
     }
