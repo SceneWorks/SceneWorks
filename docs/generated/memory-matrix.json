@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d27cc5ddd6f2b72d1377bbfedf200a11d3def8bf60b27dcfd51cd817cc235c95",
+    "sceneWorksRevision": "source-tree:2198c10f4af80165a2fd11821461866815c9a30c706573f3cad5a3fb8dfc601a",
     "inferenceRevision": "fc92b21cbbf40436bc2fc49ae452d725fe23986d",
     "sources": {
       "manifest": {
@@ -38,7 +38,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "f66e636e69336293e0480de062a35f8d159ea84252113da4e04e80b34008c688"
+        "sha256": "d73dc538012b3b094afd4d54b52ac60bec9b95034618fcaa1843a28bbd8950c2"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
