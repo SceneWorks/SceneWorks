@@ -10267,8 +10267,8 @@ mod candle_label_tests {
             "the fail-closed route guard must admit ConvRot adapters before the load seam"
         );
         assert!(
-            !CandleImageRoute::KreaImported.applies_request_loras(&request),
-            "imported Krea adapters remain owned by sc-18480 and must fail closed on Candle"
+            CandleImageRoute::KreaImported.applies_request_loras(&request),
+            "the imported Krea lane must preserve the user adapters added by sc-18480"
         );
         assert!(
             CandleImageRoute::KolorsEdit.applies_request_loras(&request),

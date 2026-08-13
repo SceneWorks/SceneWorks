@@ -16304,7 +16304,9 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
 #[test]
 fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let mut settings = settings;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
         settings.backend_candle_enabled = true;

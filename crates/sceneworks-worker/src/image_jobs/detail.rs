@@ -3,6 +3,14 @@ const TILE_CONTROLNET_REPO: &str = "xinsir/controlnet-tile-sdxl-1.0";
 const DETAIL_DEFAULT_PROMPT: &str = "ultra detailed, sharp focus, fine texture, high quality";
 const DETAIL_DEFAULT_NEGATIVE: &str = "blurry, soft, lowres, smooth, plastic";
 
+// The Mac advanced-SDXL module already provides this shared-module helper. Detail is also compiled
+// for Candle, where that Mac-only include is absent, so provide the identical conversion there.
+#[cfg(not(target_os = "macos"))]
+fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
+    image::RgbImage::from_raw(image.width, image.height, image.pixels)
+        .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))
+}
+
 /// The locked detail recipe (sc-2437 round-2 spike defaults), resolved from `advanced`.
 #[derive(Clone)]
 struct DetailParams {
@@ -558,14 +566,12 @@ pub(crate) async fn run_image_detail_job(
     )
     .await?;
 
-    let source = load_reference_image(
+    let source = engine_image_to_rgb(load_reference_image(
         &settings.data_dir,
         &request.project_id,
         &source_id,
         &project_path,
-    )?;
-    let source = image::RgbImage::from_raw(source.width, source.height, source.pixels)
-        .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
+    )?)?;
 
     let created_at = now_rfc3339();
     let asset_id = fresh_asset_id();
