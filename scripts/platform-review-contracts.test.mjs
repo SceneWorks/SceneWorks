@@ -1887,7 +1887,7 @@ test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T
 // accepted keys), so this pins a product-neutral baseline only. The mutation loop is load-bearing:
 // each historically plausible drift is injected into an in-memory copy and must make this same
 // validator fail, proving the positive assertions are sensitive rather than decorative.
-test("the LTX Eros CUDA baseline is fixed, anonymous, mux-faithful, and mutation-sensitive", async () => {
+test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct", async () => {
   const documents = {
     manifestText: await source("config/manifests/builtin.models.jsonc"),
     workflow: await source(".github/workflows/windows-candle.yml"),
@@ -1972,6 +1972,11 @@ test("the LTX Eros CUDA baseline is fixed, anonymous, mux-faithful, and mutation
       /ffmpeg [^\n]*-i \$videoOnly -i \$audio[^\n]*-c:v copy[^\n]*-c:a aac[^\n]*-shortest[^\n]*-map_metadata 0[^\n]*\$mp4/,
       "the evidence MP4 must use the product's copy-video/AAC/-shortest mux contract",
     );
+    assert.match(
+      workflow,
+      /\$videoOnly = Join-Path \$out 'ltx_eros\.rendered-frames\.mp4'/,
+      "the complete 153-frame renderer output must survive beside the product-faithful MP4",
+    );
     assert.match(workflow, /stream=index,codec_name,codec_type[^'\n]+duration:format=duration/);
     assert.match(
       workflow,
@@ -1988,26 +1993,56 @@ test("the LTX Eros CUDA baseline is fixed, anonymous, mux-faithful, and mutation
       /\$wavAudio\.codec_name -ne 'pcm_s16le'/,
       "the source audio verifier must require the worker's PCM16 WAV codec",
     );
-    assert.match(workflow, /nb_read_frames -ne 153/);
-    assert.match(workflow, /\$expectedDurationSeconds = 153\.0 \/ 25\.0/);
+    assert.match(
+      workflow,
+      /\$renderedVideo\.r_frame_rate -ne '25\/1' -or \[int\]\$renderedVideo\.nb_read_frames -ne 153/,
+      "the complete renderer output must still prove all 153 frames",
+    );
+    assert.match(
+      workflow,
+      /\$productFrames -lt 150 -or \$productFrames -gt 151/,
+      "the product-faithful mux must end at the six-second audio boundary",
+    );
+    assert.match(workflow, /\$renderedDurationSeconds = 153\.0 \/ 25\.0/);
+    assert.match(workflow, /\$productDurationSeconds = 6\.0/);
     assert.match(
       workflow,
       /\$durationToleranceSeconds = 1\.0 \/ 25\.0/,
       "duration tolerance must remain exactly one output frame",
     );
-    for (const label of [
-      "source WAV container",
-      "MP4 video stream",
-      "MP4 audio stream",
-      "MP4 container",
+    for (const invocation of [
+      "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
+      "Assert-DurationNear 'complete rendered-frame container' $renderedProbe.format.duration $renderedDurationSeconds",
+      "Assert-DurationNear 'source WAV container' $wavProbe.format.duration $productDurationSeconds",
+      "Assert-DurationNear 'product MP4 video stream' $video.duration $productDurationSeconds",
+      "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productDurationSeconds",
+      "Assert-DurationNear 'product MP4 container' $probe.format.duration $productDurationSeconds",
     ]) {
-      assert.ok(
-        workflow.includes(`Assert-DurationNear '${label}'`),
-        `${label} duration must be checked against all 153 frames`,
-      );
+      assert.ok(workflow.includes(invocation), `${invocation} must remain exact`);
     }
     assert.match(workflow, /ffprobe-mp4\.json/);
+    assert.match(workflow, /ffprobe-rendered-frames\.json/);
     assert.match(workflow, /ffprobe-wav\.json/);
+    assert.match(
+      workflow,
+      /sc-18902-ltx-eros-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/ltx_eros\.rendered-frames\.mp4/,
+      "the inspected artifact must include the untrimmed renderer output",
+    );
+    assert.match(
+      workflow,
+      /"\$productHash  ltx_eros\.mp4"\s+"\$renderedHash  ltx_eros\.rendered-frames\.mp4"/,
+      "the checksum manifest must bind both inspectable MP4s",
+    );
+    assert.match(
+      workflow,
+      /\$productHash = \(Get-FileHash -Algorithm SHA256 -LiteralPath \$mp4\)\.Hash\.ToLowerInvariant\(\)/,
+      "the product checksum must hash the product-faithful MP4",
+    );
+    assert.match(
+      workflow,
+      /\$renderedHash = \(Get-FileHash -Algorithm SHA256 -LiteralPath \$videoOnly\)\.Hash\.ToLowerInvariant\(\)/,
+      "the renderer checksum must hash the complete rendered-frame MP4",
+    );
     assert.match(
       workflow,
       /\$metadata\.captureKind -ne 'current-candle-route-baseline'/,
@@ -2055,6 +2090,9 @@ test("the LTX Eros CUDA baseline is fixed, anonymous, mux-faithful, and mutation
     assert.match(harness, /adapter_reports\.is_empty\(\)/);
     assert.match(harness, /"pairDeltas": pair_deltas/);
     assert.match(harness, /"frameStats": frame_stats/);
+    assert.match(harness, /"renderedFramesDurationSeconds": RENDERED_FRAMES as f64 \/ FPS as f64/);
+    assert.match(harness, /"productDurationSeconds": DURATION_SECONDS/);
+    assert.doesNotMatch(harness, /"encodedDurationSeconds"/);
     assert.match(harness, /audio\.expect\("Candle LTX Eros must return its synchronized audio track"\)/);
     assert.match(
       workerLib,
@@ -2159,13 +2197,79 @@ test("the LTX Eros CUDA baseline is fixed, anonymous, mux-faithful, and mutation
       },
     },
     {
-      name: "MP4 audio duration verification removed",
-      expected: /MP4 audio stream duration must be checked/,
+      name: "product MP4 audio duration verification removed",
+      expected: /product MP4 audio stream.*must remain exact/,
       documents: {
         ...documents,
         workflow: documents.workflow.replace(
-          "Assert-DurationNear 'MP4 audio stream' $sound.duration",
+          "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productDurationSeconds",
           "",
+        ),
+      },
+    },
+    {
+      name: "renderer duration wired to the product timeline",
+      expected: /complete rendered-frame video stream.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
+          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $productDurationSeconds",
+        ),
+      },
+    },
+    {
+      name: "product duration wired to the renderer timeline",
+      expected: /product MP4 container.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'product MP4 container' $probe.format.duration $productDurationSeconds",
+          "Assert-DurationNear 'product MP4 container' $probe.format.duration $renderedDurationSeconds",
+        ),
+      },
+    },
+    {
+      name: "renderer checksum omitted",
+      expected: /checksum manifest must bind both inspectable MP4s/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          '            "$renderedHash  ltx_eros.rendered-frames.mp4"\n',
+          "",
+        ),
+      },
+    },
+    {
+      name: "renderer checksum hashes the product MP4",
+      expected: /renderer checksum must hash the complete rendered-frame MP4/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $videoOnly)",
+          "$renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mp4)",
+        ),
+      },
+    },
+    {
+      name: "complete renderer frame assertion weakened",
+      expected: /must still prove all 153 frames/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "[int]$renderedVideo.nb_read_frames -ne 153",
+          "[int]$renderedVideo.nb_read_frames -lt 150",
+        ),
+      },
+    },
+    {
+      name: "product mux accepts the untrimmed lattice",
+      expected: /must end at the six-second audio boundary/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$productFrames -gt 151",
+          "$productFrames -gt 153",
         ),
       },
     },

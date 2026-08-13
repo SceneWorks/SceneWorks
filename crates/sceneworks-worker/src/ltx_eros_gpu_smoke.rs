@@ -337,7 +337,8 @@ fn ltx_eros_candle_gpu_smoke() {
             "negativePrompt": null,
             "rawFrames": RAW_FRAMES,
             "renderedFrames": RENDERED_FRAMES,
-            "encodedDurationSeconds": RENDERED_FRAMES as f64 / FPS as f64,
+            "renderedFramesDurationSeconds": RENDERED_FRAMES as f64 / FPS as f64,
+            "productDurationSeconds": DURATION_SECONDS,
         },
         "artifacts": {
             "checkpoint": {
