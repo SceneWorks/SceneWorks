@@ -269,22 +269,30 @@ test("the HDR and LipDub claims share one ungated immutable rehost with no gatin
 
 // The repo-id guard's reason for existing: it catches what the sha check structurally cannot.
 //
-// This used to loop over TWO live redirects. sc-18917 fixed one of them at the source (the manifest
-// entry that named the dead `…IC-LoRA-LipDub` repo now names `…IC-LoRA-DubIt` directly), so only
-// the mmaudio DFN5B entry is still redirected. That deletion costs a shape the loop used to cover
-// — an UNREVISIONED redirected key, where `claim.revision &&` makes the sha guard inert outright
-// rather than merely satisfied — so the second half of this test rebuilds that shape from the same
-// real listing instead of letting the coverage quietly lapse with the fix.
-test("evidence-repo-id-mismatch catches the live redirect and a malformed unrevisioned shape", async () => {
+// sc-18917 and sc-18926 fixed both live redirects at their sources. Keep the guard load-bearing by
+// mutating the now-honest DFN5B listing back into its historical dead-name shape; this also proves
+// the check reaches an UNREVISIONED redirected key, where `claim.revision &&` makes the sha guard
+// inert outright rather than merely satisfied.
+test("evidence-repo-id-mismatch catches synthetic pinned and unrevisioned redirects", async () => {
   const { claims, evidence } = await realInputs();
 
+  const canonicalRepo = "apple/DFN5B-CLIP-ViT-H-14-378";
   const repo = "apple/DFN5B-CLIP-ViT-H-14-384";
   const servedBy = "apple/DFN5B-CLIP-ViT-H-14-378";
-  const claim = claims.find((row) => row.repo === repo);
-  assert.ok(claim, `a manifest entry must still declare ${repo}`);
+  const canonicalClaim = claims.find((row) => row.repo === canonicalRepo);
+  assert.ok(canonicalClaim, `a manifest entry must declare ${canonicalRepo}`);
+  const canonicalEntry = evidence.repos.find(
+    (row) => row.key === claimKey(canonicalClaim.repo, canonicalClaim.revision),
+  );
+  assert.ok(canonicalEntry, `${canonicalRepo} must have a recorded listing`);
+  assert.equal(canonicalEntry.servedRepo, canonicalRepo, "production evidence must be canonical");
+  const claim = { ...canonicalClaim, repo };
   assert.ok(claim.revision, `${repo} must still be the PINNED shape for the first half to bind`);
-  const entry = evidence.repos.find((row) => row.key === claimKey(claim.repo, claim.revision));
-  assert.ok(entry, `${repo} must have a recorded listing`);
+  const entry = {
+    ...canonicalEntry,
+    key: claimKey(repo, claim.revision),
+    repo,
+  };
   assert.equal(entry.servedRepo, servedBy, `${repo} must genuinely still be served by ${servedBy}`);
 
   // Shape 1 — PINNED. The sha check passes, because an HF rename redirect preserves the sha. So

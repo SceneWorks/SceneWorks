@@ -99,8 +99,10 @@
 //
 // The same body also carries `id` — the repo HF ACTUALLY served. `fetch` follows the 307 a renamed
 // repo issues, so an entry naming a dead repo resolves silently; `evidence-repo-id-mismatch`
-// catches that. ONE live instance remains, waived and tracked (sc-18926); the other — LipDub ->
-// DubIt — was fixed at the source by sc-18917 rather than waived onward.
+// catches that. The two instances found by sc-18854 are now fixed at their sources: LipDub ->
+// DubIt by sc-18917, and DFN5B-CLIP's stale `-384` name -> its canonical `-378` name by sc-18926.
+// The mutation suite keeps both pinned and unrevisioned redirect shapes load-bearing even though
+// the production evidence now contains no mismatch waiver.
 //
 // What a green run still does NOT prove is that the bytes download. Public replacements such as
 // sc-18923's rehost need a real ANONYMOUS fetch at the exact revision; a deliberately gated source
@@ -109,9 +111,9 @@
 //
 // The LIVE modes deliberately ignore `KNOWN_ZERO_MATCHES` and report the raw truth, so `--write`
 // exits 1 on any tracked zero-match gap. There is none today — sc-18917 fixed the last one — so
-// `--write` currently exits 0, but do NOT read that as the modes agreeing: the remaining redirect
-// condition still prints above and is waived only by the offline gate. Policy lives in the gate;
-// the pre-flight is for a human who wants the unfiltered picture. Do not "fix" that exit code by
+// `--write` currently exits 0 and reports no raw repo condition: sc-18923 paid the gated-LoRA
+// debts and sc-18926 paid the final redirect debt. Policy still lives in the offline gate; the
+// pre-flight remains the unfiltered picture. Do not "fix" a future live/offline difference by
 // teaching the recorder about waivers — a recorder that knows which failures are acceptable is one
 // step from a recorder that records them as passing.
 
@@ -167,32 +169,20 @@ export const KNOWN_ZERO_MATCHES = [];
 // SHIP.
 //
 // The alternative — make known instances unconditionally fatal — was considered and rejected. It
-// would red the required `parity` lane on every unrelated PR while a defect was being repaired,
-// which pushes people toward deleting the guard rather than fixing its source.
+// would red the required `parity` lane on every unrelated PR while a defect was being repaired:
+// the identical "a required context reds for a reason unrelated to this PR" failure mode that the
+// KNOWN_ZERO_MATCHES comment above rejects for date-based expiry. That pressure pushes people
+// toward deleting the guard rather than fixing its source.
 //
 // Waiving costs nothing in detection: the semantics land on "green means no NEW gated repo and no
 // NEW redirect", which is exactly the guarantee zero-match already provides. And unlike a silent
 // pass, each instance now has an owner, a reason, and a story that CANNOT be closed without
 // deleting its waiver — the gate reds if the condition clears and reds if the entry moves.
 //
-// sc-18923 paid both gated-LoRA debts, so no `evidence-gated` waiver remains. New gated catalog
-// sources hard-fail unless a new live owner and explicit rationale are added here.
-export const KNOWN_REPO_CONDITIONS = [
-  {
-    kind: "evidence-repo-id-mismatch",
-    repo: "apple/DFN5B-CLIP-ViT-H-14-384",
-    revision: "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
-    story: "sc-18926",
-    reason:
-      "mmaudio's `clip` co-requisite names apple/DFN5B-CLIP-ViT-H-14-384, which does not exist — " +
-      "apple publishes only …-ViT-H-14 and …-ViT-H-14-378, and the declared name 307-redirects to " +
-      "the 378 repo. Measured benign: the served repo reports image_size 378 in both " +
-      "open_clip_config.json and preprocessor_config.json, which is the CLIP upstream MMAudio " +
-      "conditions on, and the pinned sha is already that repo's. So the BYTES are right and only " +
-      "the name is stale — but it depends on HF serving a rename redirect forever. sc-18926 " +
-      "repoints both entries and deletes this waiver.",
-  },
-];
+// sc-18923 paid both gated-LoRA debts, and sc-18926 paid the last redirect debt, so there are no
+// production repo-condition waivers. New gated or redirected catalog sources hard-fail unless a
+// new live owner and explicit rationale are added here.
+export const KNOWN_REPO_CONDITIONS = [];
 
 const REPO_CONDITION_KINDS = new Set(["evidence-gated", "evidence-repo-id-mismatch"]);
 

@@ -15017,7 +15017,7 @@
       // `synchformer` / `dit` / `vae` / `vocoder` from `LoadSpec::components` via `require_component`.
       // So EACH of the five checkpoints is provisioned by its OWN `coRequisite` download tagged with the
       // matching `componentId`, and the worker's generic `resolve_co_requisites` seam (sc-13679) stages
-      // all five by id. The five span two repos: the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-384)
+      // all five by id. The five span two repos: the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-378)
       // and synchformer/dit/vae + the in-repo BigVGAN vocoder (hkchengrex/MMAudio). The install/download
       // flow requires ONE non-coRequisite primary anchor (`model_download()` returns None otherwise), yet
       // mmaudio has no primary checkpoint — so the `dit` network doubles as the anchor (the most-primary
@@ -15049,7 +15049,7 @@
         },
         {
           "provider": "huggingface",
-          "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
+          "repo": "apple/DFN5B-CLIP-ViT-H-14-378",
           "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
           "coRequisite": true,
           "componentId": "clip",
@@ -15152,7 +15152,7 @@
         },
         {
           "provider": "huggingface",
-          "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
+          "repo": "apple/DFN5B-CLIP-ViT-H-14-378",
           "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
           "coRequisite": true,
           "componentId": "clip",
