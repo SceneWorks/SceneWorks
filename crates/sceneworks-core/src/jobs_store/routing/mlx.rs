@@ -665,6 +665,14 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "svd" {
         return mode == "image_to_video";
     }
+    // Wan2.2 VACE-Fun is a dedicated dual-expert person-replacement engine. It has no base
+    // text/image-to-video path: the worker dispatches `replace_person` directly to
+    // `generate_wan_vace_fun`, and every other mode must remain ineligible. This must precede the
+    // generic Wan/LTX arm below, which would otherwise grant t2v/i2v while rejecting the model's
+    // sole shipped capability (sc-18826).
+    if model == "wan_2_2_vace_fun_14b" {
+        return mode == "replace_person";
+    }
     // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no classic
     // still-image-to-video. Beyond `text_to_video` (sc-4707) it serves the planner's
     // editing + reference-driven video tasks (sc-4703): `video_to_video` (v2v — a

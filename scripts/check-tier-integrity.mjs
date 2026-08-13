@@ -162,6 +162,10 @@ function parseJsonc(body) {
  *   - the bespoke `CANDLE_IMAGE_ROUTES` shape routes (`ModelMatch::Any` / `::Family`), which is the
  *     ONLY candle lane `instantid_realvisxl` has — it is `candle_routed: false` yet served by
  *     `instantid_candle_eligible`, so a caps-only read made a live lane look dead.
+ *   - direct model-id slice predicates used by video routing. SCAIL-2 deliberately keeps every
+ *     Candle column false in `VIDEO_MODEL_CAPS` because it is a distinct engine, then
+ *     `video_model_has_candle_video_route` unions `CANDLE_SCAIL2_VIDEO_MODELS`. Ignoring that union
+ *     made a real Candle lane look unrouted (sc-18828).
  *
  * `routingMlx` is parsed by the SAME loop but contributes NOTHING today: `mlx.rs` has no `ModelMatch`
  * table and no `is_*_family` predicate, gating instead on `MLX_ROUTED_MODELS`, which is derived from
@@ -189,6 +193,23 @@ export function routedLanes({ routingCatalog, routingCandle, routingMlx }) {
       if (match[2] === "true") add(match[1], "mlx");
       if (match[3] === "true") add(match[1], "candle");
     }
+  }
+  // Resolve direct `CONST.contains(&model)` additions in the canonical backend-existence predicate.
+  // Derived capability-table constants need no special handling because the constructor loop above
+  // already reads their source rows. This arm is for genuinely bespoke direct slices such as
+  // `CANDLE_SCAIL2_VIDEO_MODELS`, and follows the function body rather than hard-coding that name so
+  // a future sibling route is discovered by the same oracle.
+  const directSlices = new Map();
+  for (const match of (routingCatalog ?? "").matchAll(
+    /(?:pub\(crate\)\s+)?const\s+([A-Z][A-Z0-9_]*)\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]/g,
+  )) {
+    directSlices.set(match[1], [...match[2].matchAll(/"([^"]+)"/g)].map((id) => id[1]));
+  }
+  const candleVideoRouteBody = (routingCatalog ?? "").match(
+    /fn\s+video_model_has_candle_video_route\([^)]*\)[^{]*\{([\s\S]*?)\n\}/,
+  )?.[1];
+  for (const match of (candleVideoRouteBody ?? "").matchAll(/([A-Z][A-Z0-9_]*)\.contains\(&model\)/g)) {
+    for (const id of directSlices.get(match[1]) ?? []) add(id, "candle");
   }
   // `ModelMatch::Family(is_x_family_candle_model)` names a predicate whose `matches!` arm lists the
   // ids; resolve it so an SDXL/SD3 family lane is not invisible just because it is spelled as a fn.
@@ -1136,14 +1157,15 @@ async function selfTest() {
     expect("lane overlap", validate({ ...inputs, ledger }).errors, 'declared twice for "mlx"');
   }
 
-  // 7b. A row whose declared lane the ROUTER DOES NOT SERVE. `scail2_14b` is mlx-only (no `candle_routed`, no bespoke
-  //     shape route), so a fabricated candle claim on it describes a lane no job can reach.
+  // 7b. A row whose declared lane the ROUTER DOES NOT SERVE. `krea_realtime_14b` is MLX-only (no
+  //     Candle provider or bespoke route), so a fabricated Candle claim describes a lane no job can
+  //     reach. SCAIL-2 used to be this fixture, but its bespoke Candle lane is now part of the oracle.
   {
     const ledger = clone();
     const row = ledger.exceptions.find(
       (item) => item.model === "sana_1600m" && item.component === "vae",
     );
-    row.model = "scail2_14b";
+    row.model = "krea_realtime_14b";
     row.backends = ["candle"];
     expect("wrong lane", validate({ ...inputs, ledger }).errors, "only on mlx");
   }
@@ -1165,7 +1187,7 @@ async function selfTest() {
     const row = ledger.exceptions.find(
       (item) => item.model === "sana_1600m" && item.component === "vae",
     );
-    row.model = "scail2_14b";
+    row.model = "krea_realtime_14b";
     delete row.backends;
     const { errors } = validate({ ...inputs, ledger });
     expect("omitted backends still lane-checked", errors, "only on mlx");

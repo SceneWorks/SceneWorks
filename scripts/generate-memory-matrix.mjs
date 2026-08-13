@@ -234,34 +234,19 @@ assertOwnershipRegistriesAreDisjoint();
  * deleted, never quietly kept; and the cells say `surveyed: false` with this story id on them rather
  * than looking like any other `Missing`.
  */
-export const PENDING_RUNG4_SURVEYS = new Map(
-  // The owing story is DERIVED from the family's owner, never restated: the story that owns a video
-  // family IS the story that writes its survey verdict, so two literals would be two chances to
-  // disagree about one fact. `VIDEO_FAMILY_STORIES` throws on a group it does not know, which keeps
-  // a typo'd family name out of this list rather than parking it here as a permanent debt.
-  ["wan-video", "scail2", "krea-realtime", "svd"].map((group) => {
-    if (!Object.hasOwn(VIDEO_FAMILY_STORIES, group)) {
-      throw new Error(`pending rung-4 survey: ${group} is not a video family`);
-    }
-    return [group, VIDEO_FAMILY_STORIES[group]];
-  }),
-);
+// SC-18826/SC-18828 supplied the remaining video verdicts. Keep the checked debt mechanism rather
+// than deleting it: the next admitted family must still declare its owing story until its survey
+// lands, and `assertRung4SurveyCoversEveryFamily` still rejects a stale declaration.
+export const PENDING_RUNG4_SURVEYS = new Map();
 
 /**
  * Catalog entries that are IN the universe but that the routing catalog routes on NO backend, with
  * the reason and the story that owns the verdict (sc-18815).
  *
- * `wan_2_2_vace_fun_14b` is the only one, and it is a catalog defect rather than a property of the
- * model: it has a manifest entry (`builtin.models.jsonc`), a real MLX engine
- * (`engines.rs#video_engine_ids` maps it to `wan2_2_vace_fun_14b`) and a worker dispatch, but ZERO
- * rows in `VIDEO_MODEL_CAPS` (`routing/catalog.rs`), so `video_model_mac_support` reports it
- * unsupported. Backend scope comes from the routing catalog, which is this epic's stated authority,
- * so the generator does not paper over it — it resolves to zero backends and therefore zero cells.
- *
- * Declaring it is the whole point. An entry with no backends emits nothing, and "emits nothing" and
- * "is not in the catalog" look identical in the output — which is precisely the failure mode
- * (silent absence) this story exists to end. The guard below fails closed in both directions: a NEW
- * unrouted entry cannot appear without being named here, and this row cannot outlive the defect.
+ * SC-18826 closed the sole declared defect by adding the missing MLX-only
+ * `wan_2_2_vace_fun_14b` row to `VIDEO_MODEL_CAPS`. The empty map is intentional: the guard below
+ * remains fail-closed for the next wholly-unrouted catalog entry and rejects any declaration that
+ * outlives its defect.
  *
  * `mochi_1` is the inverse defect and needs no row: it has a `VIDEO_MODEL_CAPS` row and a worker
  * route but NO manifest entry, and the universe is built from the manifest, so it is excluded by
@@ -269,16 +254,7 @@ export const PENDING_RUNG4_SURVEYS = new Map(
  * and epic 18803 lists it out of scope — and `mochi_is_routed_but_not_in_the_universe` pins that the
  * exclusion is the manifest's doing rather than a coincidence of some other filter.
  */
-export const UNROUTED_CATALOG_ENTRIES = new Map([
-  [
-    "wan_2_2_vace_fun_14b",
-    {
-      reason:
-        "manifest entry + MLX engine (wan2_2_vace_fun_14b) but zero VIDEO_MODEL_CAPS rows, so the routing catalog routes it on no backend",
-      owningStory: 18826,
-    },
-  ],
-]);
+export const UNROUTED_CATALOG_ENTRIES = new Map();
 
 /**
  * Every entry that resolved to no backend must be a declared one, and every declared one must still
@@ -989,8 +965,9 @@ function parseEngineRoutes(source) {
  * two places would let the diagnostic point at the wrong file the moment a resolver is renamed.
  *
  * `bernini` (video) sits in IMAGE family 15528 — one engine, one block stack, two catalog entries —
- * so its key is that group's number. It is the only numeric key, and the only video family whose
- * candle route is mirrored from its MLX arm rather than read from `candle_video_engine_id`.
+ * so its key is that group's number. It is the only numeric key. Bernini and SCAIL-2 are the two
+ * families whose Candle dispatch is bespoke and reuses the same provider id as the MLX resolver,
+ * rather than appearing in generic `candle_video_engine_id`.
  */
 const VIDEO_ROUTE_RESOLVERS = new Map([
   ["wan-video", { body: "videoRouteWan", fn: "wan_engine_id" }],
@@ -1007,7 +984,7 @@ function videoRouteResolverName(modelId, backend) {
   // off the model id first, so its candle provider is mirrored from the MLX one. A missing candle
   // provider there is therefore a missing `bernini_engine_id` arm, and pointing at the candle file
   // would send a reader to the one place that is correct to be silent.
-  const mirroredFromMlx = modelId === "bernini";
+  const mirroredFromMlx = modelId === "bernini" || modelId === "scail2_14b";
   if (backend !== "mlx" && !mirroredFromMlx) return "candle_video_engine_id";
   const resolver = VIDEO_ROUTE_RESOLVERS.get(familyGroup(modelId));
   // A video family with no row here is itself the defect — say which one, rather than name nothing.
@@ -1196,9 +1173,9 @@ export const UNION_ONLY_MLX_ROUTES = new Set(["wan_2_2_vace_fun_14b"]);
  *
  * Backend membership is NOT decided here. This answers "which provider serves this id on this
  * backend if that backend serves it at all"; the routing catalog (`routedLanes`) decides whether it
- * does. `scail2_14b` and `krea_realtime_14b` have candle-side `*_engine_id` arms (the candle
- * `ReplacePersonScail2` dispatch) while the catalog routes them MLX-only — the catalog wins, per this
- * epic's stated backend authority.
+ * does. SCAIL-2's Candle `ReplacePersonScail2` dispatch is bespoke and is mirrored explicitly below;
+ * Krea-Realtime remains genuinely MLX-only. The catalog wins, per this epic's stated backend
+ * authority.
  */
 export function parseVideoRoutes(bodies, unionOnlyMlxRoutes = UNION_ONLY_MLX_ROUTES) {
   const union = parseVideoEngineIdUnion(bodies.engines);
@@ -1207,11 +1184,13 @@ export function parseVideoRoutes(bodies, unionOnlyMlxRoutes = UNION_ONLY_MLX_ROU
     for (const [id, engine] of parseVideoEngineIds(bodies[body], fn)) mlx.set(id, engine);
   }
   const candle = parseVideoEngineIds(bodies.videoRouteCandle, "candle_video_engine_id");
-  // The candle lane routes Bernini off the model id in `resolve_candle_video_route`, BEFORE the
-  // generic `is_candle_video_engine` arm, so it is absent from `candle_video_engine_id` by design and
-  // shares the MLX engine id. Reading only that one function would report Bernini as candle-unrouted
-  // while the routing catalog routes it — a provider hole on a shipping lane.
-  if (mlx.has("bernini")) candle.set("bernini", mlx.get("bernini"));
+  // These lanes route off the model id in `resolve_candle_video_route`, BEFORE the generic
+  // `is_candle_video_engine` arm, so they are absent from `candle_video_engine_id` by design and
+  // share the MLX resolver's engine id. Reading only the generic function would leave a provider
+  // hole on a shipping lane.
+  for (const id of ["bernini", "scail2_14b"]) {
+    if (mlx.has(id)) candle.set(id, mlx.get(id));
+  }
 
   const routes = new Map();
   for (const id of sortedUnique([...mlx.keys(), ...candle.keys(), ...union.keys()])) {
@@ -1530,7 +1509,89 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
     throw new Error("rung-4 survey: missing `families`");
   }
   const survey = new Map();
+  const unroutedBackends = new Map();
+  const modalityRelationships = new Map();
   for (const [group, family] of Object.entries(families)) {
+    for (const [backend, declaration] of Object.entries(family.unroutedBackends ?? {})) {
+      const at = `rung-4 survey ${family.name ?? group} unrouted ${backend}`;
+      if (!["mlx", "candle"].includes(backend)) {
+        throw new Error(`${at}: backend is outside the survey vocabulary`);
+      }
+      if (family.backends?.[backend]) {
+        throw new Error(`${at}: the same backend has both a routed verdict and an unrouted declaration`);
+      }
+      if (typeof declaration.reason !== "string" || declaration.reason.length < 20) {
+        throw new Error(`${at}: reason must explain why the backend is not routed`);
+      }
+      if (!Number.isInteger(declaration.owningStory)) {
+        throw new Error(`${at}: owningStory must be a Shortcut story id`);
+      }
+      if (
+        Object.hasOwn(VIDEO_FAMILY_STORIES, group) &&
+        declaration.owningStory !== VIDEO_FAMILY_STORIES[group]
+      ) {
+        throw new Error(
+          `${at}: owningStory sc-${declaration.owningStory} is not family ${group}'s owner sc-${VIDEO_FAMILY_STORIES[group]}`,
+        );
+      }
+      if (
+        !declaration.evidence?.length ||
+        declaration.evidence.some(
+          (item) =>
+            typeof item.source !== "string" ||
+            !/:\d/.test(item.source) ||
+            typeof item.reason !== "string" ||
+            item.reason.length < 20,
+        )
+      ) {
+        throw new Error(`${at}: an unrouted declaration must cite routing/provider evidence`);
+      }
+      unroutedBackends.set(`${group}:${backend}`, declaration);
+    }
+    if (family.modalityRelationship) {
+      const relationship = family.modalityRelationship;
+      const at = `rung-4 survey ${family.name ?? group} modalityRelationship`;
+      if (typeof relationship.reason !== "string" || relationship.reason.length < 20) {
+        throw new Error(`${at}: reason must explain the cross-modality relationship`);
+      }
+      if (
+        !relationship.evidence?.length ||
+        relationship.evidence.some(
+          (item) =>
+            typeof item.source !== "string" ||
+            !/:\d/.test(item.source) ||
+            typeof item.reason !== "string" ||
+            item.reason.length < 20,
+        )
+      ) {
+        throw new Error(`${at}: the relationship must cite catalog/provider evidence`);
+      }
+      if (typeof relationship.sharedProviderContract !== "boolean") {
+        throw new Error(`${at}: sharedProviderContract must state whether provider truth is shared`);
+      }
+      const entries = Object.entries(relationship.entries ?? {});
+      if (
+        !relationship.entries?.image?.length ||
+        !relationship.entries?.video?.length ||
+        entries.some(([modality, ids]) => !["image", "video"].includes(modality) || !ids?.length)
+      ) {
+        throw new Error(`${at}: entries must name at least one image and one video catalog id`);
+      }
+      for (const [modality, ids] of entries) {
+        for (const id of ids) {
+          let owner = null;
+          try {
+            owner = familyGroups?.(id);
+          } catch {
+            owner = null;
+          }
+          if (String(owner) !== group) {
+            throw new Error(`${at}: ${modality} entry ${id} belongs to another family`);
+          }
+        }
+      }
+      modalityRelationships.set(group, relationship);
+    }
     for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
       const at = `rung-4 survey ${family.name ?? group} (${backend})`;
       if (!RUNG4_APPLICABILITIES.includes(verdict.structuralApplicability)) {
@@ -1720,6 +1781,11 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
       survey.set(`${group}:${backend}`, verdict);
     }
   }
+  // Maps may carry metadata without changing their key/value iteration contract. Keeping these
+  // declarations attached to the parsed survey means coverage validation cannot accidentally read
+  // verdicts from one parse and topology declarations from another.
+  survey.unroutedBackends = unroutedBackends;
+  survey.modalityRelationships = modalityRelationships;
   return survey;
 }
 
@@ -1846,6 +1912,7 @@ export function assertRung4SurveyCoversEveryFamily(
   const advertised = new Set(
     models.flatMap((model) => model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`)),
   );
+  const groupsInUniverse = new Set(models.map((model) => String(familyGroup(model.id))));
   for (const key of advertised) {
     if (!survey.has(key)) {
       const [group, backend] = key.split(":");
@@ -1877,6 +1944,47 @@ export function assertRung4SurveyCoversEveryFamily(
       throw new Error(
         `rung-4 survey: family ${familyLabel(group)} carries a ${backend} verdict, but the catalog advertises no ${backend} entry in that family — the verdict reaches no cell (SC-15969)`,
       );
+    }
+  }
+  if (survey.unroutedBackends) {
+    // Video survey ownership is family-scoped. For every owned video family present in the universe,
+    // each absent backend must be declared explicitly — absence is a route fact, never five
+    // implementation verdicts. The declaration self-expires if the route appears later.
+    for (const group of Object.keys(VIDEO_FAMILY_STORIES).filter((key) => groupsInUniverse.has(key))) {
+      for (const backend of ["mlx", "candle"]) {
+        const key = `${group}:${backend}`;
+        if (!advertised.has(key) && !survey.unroutedBackends.has(key)) {
+          throw new Error(
+            `rung-4 survey: family ${group} has no ${backend} route — declare it in unroutedBackends so absence is not misread as five Missing rungs`,
+          );
+        }
+      }
+    }
+    for (const [key, declaration] of survey.unroutedBackends) {
+      const [group, backend] = key.split(":");
+      if (!groupsInUniverse.has(group)) {
+        throw new Error(`rung-4 survey: unrouted ${key} names no family in the model universe`);
+      }
+      if (advertised.has(key) || catalogFamilyBackends?.has(key)) {
+        throw new Error(
+          `rung-4 survey: ${key} is declared unrouted (sc-${declaration.owningStory}) but the routing catalog now advertises it — delete the declaration`,
+        );
+      }
+      if (!["mlx", "candle"].includes(backend)) {
+        throw new Error(`rung-4 survey: unrouted ${key} names an unknown backend`);
+      }
+    }
+  }
+  for (const [group, relationship] of survey.modalityRelationships ?? []) {
+    for (const [modality, ids] of Object.entries(relationship.entries)) {
+      for (const id of ids) {
+        const model = models.find((candidate) => candidate.id === id);
+        if (!model || model.modality !== modality || String(familyGroup(id)) !== group) {
+          throw new Error(
+            `rung-4 survey: ${group} modalityRelationship says ${id} is ${modality}, but the admitted catalog does not`,
+          );
+        }
+      }
     }
   }
 }

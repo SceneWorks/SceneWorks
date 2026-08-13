@@ -7716,35 +7716,54 @@ mod ltx_tests {
     /// two rows bracket it to within 0.1 GiB and neither can pass by being trivially true.
     #[test]
     fn an_injected_budget_just_above_the_smoke_geometrys_accumulator_floor_is_accepted() {
-        let before = get_memory_limit();
-        drop(LtxInjectedBudget::install(5.3));
-        assert_eq!(get_memory_limit(), before);
+        // Capture the prior limit only after `install` owns the injection lock. Reading it before
+        // the lock is a TOCTOU race: another test may temporarily expose its 32 GiB injection,
+        // restore the real host limit, and then let this test acquire the lock. CI caught exactly
+        // that 32 GiB -> 7.14 GB transition.
+        let budget = LtxInjectedBudget::install(5.3);
+        let previous = budget.previous;
+        drop(budget);
+
+        // Reacquire before observing the process-global limit. An intervening injection is allowed
+        // to run, but must finish and restore `previous` before this assertion reads the value.
+        let _restoration_guard = LTX_BUDGET_INJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(get_memory_limit(), previous);
     }
 
     /// The injected limit is process-global, so failing to restore it leaks into every later test.
     #[test]
     fn an_injected_budget_is_restored_on_the_normal_and_the_unwind_path() {
-        let before = get_memory_limit();
-        {
-            let _budget = LtxInjectedBudget::install(32.0);
-            assert_eq!(
-                get_memory_limit(),
-                (32.0 * ltx_decode_cost::GIB) as usize,
-                "the budget must actually be installed while the guard lives"
-            );
-        }
-        assert_eq!(get_memory_limit(), before, "restored on the normal path");
+        let budget = LtxInjectedBudget::install(32.0);
+        let previous = budget.previous;
+        assert_eq!(
+            get_memory_limit(),
+            (32.0 * ltx_decode_cost::GIB) as usize,
+            "the budget must actually be installed while the guard lives"
+        );
+        drop(budget);
+        let restoration_guard = LTX_BUDGET_INJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(get_memory_limit(), previous, "restored on the normal path");
+        drop(restoration_guard);
         // The path a trailing `set_memory_limit(previous)` statement misses entirely — and which
         // `unwrap_or_else(PoisonError::into_inner)` would then hide, because the poisoned lock is
         // the only signal the leak leaves behind.
+        let unwind_budget = LtxInjectedBudget::install(32.0);
+        let unwind_previous = unwind_budget.previous;
         let outcome = std::panic::catch_unwind(|| {
-            let _budget = LtxInjectedBudget::install(32.0);
+            let _budget = unwind_budget;
             panic!("the selector blew up mid-plan");
         });
         assert!(outcome.is_err(), "the closure must actually have panicked");
+        let _restoration_guard = LTX_BUDGET_INJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
             get_memory_limit(),
-            before,
+            unwind_previous,
             "the injected limit leaked past a panic"
         );
     }

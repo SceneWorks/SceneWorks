@@ -1,8 +1,8 @@
 use super::{
     flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible, image_request_mlx_eligible,
     instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-    sdxl_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job, z_image_mlx_eligible,
-    JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
+    sdxl_mlx_eligible, video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
+    z_image_mlx_eligible, JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use serde_json::{json, Map, Value};
 
@@ -27,6 +27,25 @@ fn image_generate_job(payload: Value) -> JobSnapshot {
         "updatedAt": "2026-07-23T00:00:00Z"
     }))
     .expect("valid image job")
+}
+
+fn person_replace_job(payload: Value) -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job_vace_fun_replace",
+        "type": "person_replace",
+        "status": "queued",
+        "payload": payload,
+        "result": {},
+        "requestedGpu": "auto",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-08-13T00:00:00Z",
+        "updatedAt": "2026-08-13T00:00:00Z"
+    }))
+    .expect("valid person-replace job")
 }
 
 fn mlx_worker() -> WorkerSnapshot {
@@ -618,19 +637,22 @@ fn sd3_5_text_to_image_routes_to_mlx() {
 #[test]
 fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its
-    // renderer is Wan2.2-T2V, no still-image-to-video), SCAIL-2 (animate_character only) and
-    // Mochi (text_to_video only — `conditioning: []` on both descriptors, sc-11991);
-    // text_to_video on every routed model EXCEPT SVD (image-conditioned only, sc-3523) and
-    // SCAIL-2 (animate_character only — sc-5448).
+    // renderer is Wan2.2-T2V, no still-image-to-video), SCAIL-2 (animation/person replacement),
+    // Mochi (text_to_video only — `conditioning: []` on both descriptors, sc-11991), and VACE-Fun
+    // (person replacement only); text_to_video on every routed model EXCEPT SVD (image-conditioned
+    // only, sc-3523), SCAIL-2, and VACE-Fun.
     for model in VIDEO_MLX_ROUTED_MODELS {
         assert_eq!(
             video_mode_is_mlx_eligible(model, "image_to_video"),
-            *model != "bernini" && *model != "scail2_14b" && *model != "mochi_1",
+            *model != "bernini"
+                && *model != "scail2_14b"
+                && *model != "mochi_1"
+                && *model != "wan_2_2_vace_fun_14b",
             "image_to_video eligibility for {model}"
         );
         assert_eq!(
             video_mode_is_mlx_eligible(model, "text_to_video"),
-            *model != "svd" && *model != "scail2_14b",
+            *model != "svd" && *model != "scail2_14b" && *model != "wan_2_2_vace_fun_14b",
             "text_to_video eligibility for {model}"
         );
     }
@@ -787,8 +809,76 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     assert!(video_mode_is_mlx_eligible("ltx_2_3", "replace_person"));
     assert!(video_mode_is_mlx_eligible("ltx_2_3_eros", "replace_person"));
     assert!(video_mode_is_mlx_eligible("wan_2_2", "replace_person"));
+    assert!(video_mode_is_mlx_eligible(
+        "wan_2_2_vace_fun_14b",
+        "replace_person"
+    ));
     // Unknown modes are never eligible.
     assert!(!video_mode_is_mlx_eligible("ltx_2_3", "nonsense"));
+}
+
+/// SC-18826 closes both halves of the VACE-Fun routing gap: catalog membership and the exact
+/// mode-level claim. The dedicated engine implements only person replacement, so accepting a base
+/// video mode is just as wrong as rejecting `PersonReplace`.
+#[test]
+fn wan_vace_fun_is_mlx_routed_and_serves_only_replace_person() {
+    const MODEL: &str = "wan_2_2_vace_fun_14b";
+    assert!(
+        VIDEO_MLX_ROUTED_MODELS.contains(&MODEL),
+        "the real VACE-Fun MLX engine must be reachable from the scheduler"
+    );
+    assert!(video_mode_is_mlx_eligible(MODEL, "replace_person"));
+    for mode in [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "animate_character",
+        "video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "multi_video_to_video",
+        "ads2v",
+        "nonsense",
+    ] {
+        assert!(
+            !video_mode_is_mlx_eligible(MODEL, mode),
+            "VACE-Fun has no {mode} engine path"
+        );
+    }
+
+    // Advanced job types derive their mode from the type, not from a possibly absent/stale payload
+    // field. This is the scheduler boundary that was still rejecting the real engine after the
+    // VIDEO_MODEL_CAPS row was added.
+    assert!(video_job_is_mlx_eligible(&person_replace_job(json!({
+        "model": MODEL,
+        "mode": "text_to_video",
+    }))));
+
+    let support = model_mac_support(MODEL, "video", None);
+    assert!(support.supported, "VACE-Fun must be visible on Mac");
+    assert!(support.reason.is_none());
+    for (mode, expected) in [
+        ("replace_person", true),
+        ("text_to_video", false),
+        ("image_to_video", false),
+        ("first_last_frame", false),
+        ("extend_clip", false),
+        ("video_bridge", false),
+        ("animate_character", false),
+        ("video_to_video", false),
+        ("reference_to_video", false),
+        ("reference_video_to_video", false),
+        ("multi_video_to_video", false),
+        ("ads2v", false),
+    ] {
+        assert_eq!(
+            support.features.video_modes.get(mode),
+            Some(&expected),
+            "Mac support mode {mode} must match the dedicated VACE-Fun surface"
+        );
+    }
 }
 
 /// sc-8444 (epic 8431) — Krea Realtime 14B is MLX-ROUTED and serves exactly the three modes its

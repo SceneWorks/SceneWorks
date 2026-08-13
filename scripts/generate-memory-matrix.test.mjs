@@ -899,6 +899,11 @@ test("backend scopes follow real routing even when manifest tuning blocks are ab
   assert.deepEqual(backendScopes(byId.get("anima_base"), lanes), ["mlx", "candle"]);
   assert.deepEqual(
     backendScopes({ id: "scail2_14b" }, lanes),
+    ["mlx", "candle"],
+    "the bespoke Candle SCAIL-2 route is part of the canonical backend predicate",
+  );
+  assert.deepEqual(
+    backendScopes({ id: "krea_realtime_14b" }, lanes),
     ["mlx"],
     "the routing oracle must not collapse to both lanes for every model",
   );
@@ -1386,6 +1391,146 @@ test("every advertised family/backend has a rung-4 verdict, and it reaches its c
       assert.ok(Number.isInteger(cell.rung4Survey.pendingSurveyStory));
     }
   }
+});
+
+test("video surveys distinguish an unrouted backend from five Missing rungs (sc-18828)", async () => {
+  const survey = await surveyFixture();
+  assert.deepEqual(Object.keys(survey.families["krea-realtime"].backends), ["mlx"]);
+  assert.equal(survey.families["krea-realtime"].unroutedBackends.candle.owningStory, 18828);
+
+  const undeclared = structuredClone(survey);
+  delete undeclared.families["krea-realtime"].unroutedBackends;
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(undeclared) } }),
+    /family krea-realtime has no candle route — declare it in unroutedBackends/,
+  );
+
+  const stale = structuredClone(survey);
+  stale.families.scail2.unroutedBackends = {
+    candle: structuredClone(survey.families["krea-realtime"].unroutedBackends.candle),
+  };
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(stale) } }),
+    /SCAIL-2 unrouted candle: the same backend has both a routed verdict and an unrouted declaration/,
+  );
+
+  const wrongOwner = structuredClone(survey);
+  wrongOwner.families["krea-realtime"].unroutedBackends.candle.owningStory = 18826;
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(wrongOwner) } }),
+    /owningStory sc-18826 is not family krea-realtime's owner sc-18828/,
+  );
+});
+
+test("Bernini's shared provider relationship adds video truth without changing a published image cell (sc-18827)", async () => {
+  const survey = await surveyFixture();
+  assert.deepEqual(survey.families["15528"].modalityRelationship.entries, {
+    image: ["bernini_image"],
+    video: ["bernini"],
+  });
+
+  const beforeSurvey = structuredClone(survey);
+  const previousMlxVerdict = beforeSurvey.families["15528"].backends.mlx;
+  previousMlxVerdict.implementation = "none";
+  delete previousMlxVerdict.implementedEntries;
+  delete previousMlxVerdict.implementedOverlays;
+  delete previousMlxVerdict.strategyParameters;
+  const [before, after] = await Promise.all([
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(beforeSurvey) } }),
+    buildMatrix(),
+  ]);
+  assert.deepEqual(
+    after.cells.filter((cell) => cell.modelId === "bernini_image"),
+    before.cells.filter((cell) => cell.modelId === "bernini_image"),
+    "SC-18827 may reconcile the shared provider row, but it may not move a published image cell",
+  );
+
+  const wrongModality = structuredClone(survey);
+  wrongModality.families["15528"].modalityRelationship.entries.video = ["bernini_image"];
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(wrongModality) } }),
+    /says bernini_image is video, but the admitted catalog does not/,
+  );
+
+  const missingVideo = structuredClone(survey);
+  delete missingVideo.families["15528"].modalityRelationship.entries.video;
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(missingVideo) } }),
+    /entries must name at least one image and one video catalog id/,
+  );
+});
+
+test("video staged-residency findings preserve selectable versus unconditional truth", async () => {
+  const survey = await surveyFixture();
+  const findings = (family, backend) =>
+    survey.families[family].backends[backend].findings.join("\n");
+  assert.match(
+    findings("15528", "mlx"),
+    /corrected SC-18816 descriptor tuple is `supports_sequential_offload = false`, `unconditionally_engages_staged_residency = true`/,
+  );
+  assert.match(findings("scail2", "mlx"), /corrected tuple is `\(false, true\)`/);
+  assert.match(findings("krea-realtime", "mlx"), /corrected tuple is `\(false, true\)`/);
+  assert.match(
+    findings("wan-video", "mlx"),
+    /`\(supports_sequential_offload, unconditionally_engages_staged_residency\) = \(true, true\)`/,
+  );
+});
+
+test("every video survey assertion is pinned to source lines", async () => {
+  const survey = await surveyFixture();
+  const sources = [];
+  for (const family of ["15528", "wan-video", "scail2", "krea-realtime", "svd"]) {
+    const entry = survey.families[family];
+    for (const verdict of Object.values(entry.backends ?? {})) {
+      for (const section of ["structural", "evidence"]) {
+        sources.push(...(verdict[section] ?? []).map((item) => item.source));
+      }
+    }
+    for (const declaration of Object.values(entry.unroutedBackends ?? {})) {
+      sources.push(...declaration.evidence.map((item) => item.source));
+    }
+    sources.push(...(entry.modalityRelationship?.evidence ?? []).map((item) => item.source));
+  }
+  assert.ok(sources.length > 0);
+  for (const source of sources) {
+    assert.match(source, /:\d/, `${source}: video survey evidence must cite exact source lines`);
+  }
+});
+
+test("SVD is partial on both lanes because its U-Net contains 16 paired nested stacks (sc-18828)", async () => {
+  const survey = await surveyFixture();
+  for (const backend of ["mlx", "candle"]) {
+    const verdict = survey.families.svd.backends[backend];
+    assert.equal(verdict.structuralApplicability, "partial", `${backend}: not Structurally N/A`);
+    assert.equal(verdict.implementation, "none", `${backend}: no block-window path is wired`);
+    assert.deepEqual(
+      verdict.blockStacks.map(({ blocks, windowable }) => ({ blocks, windowable })),
+      [
+        { blocks: "16 × 1 BasicBlock", windowable: true },
+        { blocks: "16 × 1 TemporalBlock", windowable: true },
+        { blocks: "4 down + 1 mid + 4 up stages", windowable: false },
+      ],
+      `${backend}: inventory must retain both nested transformer stacks and the non-windowable trunk`,
+    );
+    assert.ok(
+      verdict.structural.some((item) => /3 × 2 \+ 1 \+ 3 × 3 = 16/.test(item.reason)),
+      `${backend}: the 16-module count must be source-derived`,
+    );
+  }
+
+  const matrix = await buildMatrix({ publish: false });
+  const rows = matrix.rung4SurveyRows.filter((row) => row.familyStory === "svd");
+  assert.deepEqual(rows.map((row) => row.backend).sort(), ["candle", "mlx"]);
+  assert.ok(rows.every((row) => row.structuralApplicability === "partial"));
+  assert.ok(rows.every((row) => row.implementation === "none"));
+
+  const cells = matrix.cells.filter(
+    (cell) => cell.modelId === "svd" && cell.rung === "bounded_transformer_residency",
+  );
+  assert.equal(cells.length, 4, "two lanes × two overlay coordinates must be resolved");
+  assert.ok(cells.every((cell) => cell.state === "Missing"));
+  assert.ok(cells.every((cell) => cell.rung4Survey.structuralApplicability === "partial"));
+  assert.ok(cells.every((cell) => cell.rung4Survey.implementation === "none"));
 });
 
 test("the two rung-4 findings stay separate: structural applicability never implies the peak moved", async () => {
@@ -1943,10 +2088,13 @@ test("overlay incompatibility is a provider fact, applied where evidenced and no
   // Krea is a windowable 28-block trunk however its adapters are installed.
   assert.ok(na.every((cell) => cell.rung4Survey.overlayIncompatible === true));
   assert.ok(na.every((cell) => cell.rung4Survey.structuralApplicability === "partial"));
-  assert.equal(
-    matrix.cells.filter((cell) => cell.rung4Survey?.structuralApplicability === "none").length,
-    0,
-    "no family in the catalog is architecturally inapplicable, so no cell may publish `none`",
+  const structurallyInapplicable = matrix.cells.filter(
+    (cell) => cell.rung4Survey?.structuralApplicability === "none",
+  );
+  assert.deepEqual(
+    structurallyInapplicable,
+    [],
+    "no surveyed family is architecturally inapplicable; per-provider overlay exemptions remain separate",
   );
 
   // The contrast that makes this a provider fact rather than a rung fact: MLX Z-Image replays
@@ -3826,20 +3974,16 @@ test("the two ownership registries are disjoint, in the silent direction too (sc
   );
 });
 
-test("an entry the routing catalog routes nowhere is NAMED, not silently empty (sc-18815)", async () => {
-  // `wan_2_2_vace_fun_14b`: manifest entry + real MLX engine, ZERO `VIDEO_MODEL_CAPS` rows. It
-  // resolves to no backend and therefore no cells — and "emits nothing" is indistinguishable from
-  // "is not in the catalog" unless the artifact says so. sc-18826 owns the verdict; the universe has
-  // to behave correctly either way.
+test("the VACE-Fun routing defect is closed and the wholly-unrouted guard stays fail-closed (sc-18826)", async () => {
+  // The manifest and engine were always real. SC-18826 adds the missing MLX-only VideoModelCaps row,
+  // so the old temporary exception must disappear and the route must now produce coordinates.
   const matrix = await buildMatrix({ publish: false });
-  assert.deepEqual(
-    matrix.summary.unroutedEntries.map((entry) => entry.id),
-    ["wan_2_2_vace_fun_14b"],
-  );
+  assert.deepEqual(matrix.summary.unroutedEntries, []);
+  assert.deepEqual([...UNROUTED_CATALOG_ENTRIES], []);
   const vace = matrix.models.find((model) => model.id === "wan_2_2_vace_fun_14b");
-  assert.deepEqual(vace.backends, []);
-  assert.deepEqual(vace.axes, {});
-  assert.equal(matrix.cells.filter((cell) => cell.modelId === vace.id).length, 0);
+  assert.deepEqual(vace.backends, ["mlx"]);
+  assert.ok(Object.keys(vace.axes).length > 0);
+  assert.ok(matrix.cells.some((cell) => cell.modelId === vace.id));
 
   // A NEW unrouted entry cannot appear undeclared...
   assert.throws(
@@ -3850,14 +3994,17 @@ test("an entry the routing catalog routes nowhere is NAMED, not silently empty (
       ),
     /brand_new_entry: the routing catalog routes it on no backend/,
   );
-  // ...and the declaration cannot outlive the defect it explains.
+  // ...and a synthetic declaration cannot outlive the defect it explains.
   assert.throws(
     () =>
       assertUnroutedEntriesAreDeclared(
-        matrix.models.map((model) =>
-          model.id === "wan_2_2_vace_fun_14b" ? { ...model, backends: ["mlx"] } : model,
-        ),
-        UNROUTED_CATALOG_ENTRIES,
+        matrix.models,
+        new Map([
+          [
+            "wan_2_2_vace_fun_14b",
+            { reason: "fixture: stale declaration", owningStory: 18826 },
+          ],
+        ]),
       ),
     /declared unrouted .* but the catalog now routes mlx/,
   );
@@ -3940,34 +4087,23 @@ test("video cells name no per-entry story, and their family owner is the real on
   );
 });
 
-test("an unsurveyed family is admitted, tracked, and says so on its cells (sc-18815)", async () => {
-  // The honest third state. Admitting a modality one story at a time means a family can be in the
-  // universe before its rung-4 verdict is written (sc-18826/18827/18828 follow this story). The two
-  // alternatives both publish something false: no marker makes those cells read as surveyed and
-  // found wanting, and holding the family out of the universe is the silent absence this story
-  // removes. So it is a declared DEBT, checked in both directions.
+test("the video survey debt is closed while its fail-closed lifecycle remains enforced", async () => {
   const matrix = await buildMatrix({ publish: false });
   const pending = matrix.summary.rung4Survey.pendingFamilyBackends;
-  assert.deepEqual(
-    pending.map((row) => `${row.family}:${row.backend}`).sort(),
-    ["krea-realtime:mlx", "scail2:mlx", "svd:candle", "svd:mlx", "wan-video:candle", "wan-video:mlx"],
-  );
-  assert.ok(pending.every((row) => Number.isInteger(row.pendingSurveyStory)));
-  // A pending family publishes no survey ROW — a verdict-shaped object full of nulls sitting beside
-  // twenty real ones is worse than an absence the summary names.
-  assert.ok(
-    matrix.rung4SurveyRows.every((row) => !PENDING_RUNG4_SURVEYS.has(row.familyStory)),
-  );
-
-  // And it may make NO rung-4 claim, whichever way the missing evidence would have pointed.
+  assert.deepEqual(pending, []);
+  assert.deepEqual([...PENDING_RUNG4_SURVEYS], []);
+  for (const family of ["wan-video", "scail2", "krea-realtime", "svd"]) {
+    assert.ok(
+      matrix.rung4SurveyRows.some((row) => row.familyStory === family),
+      `${family} must now have a real survey row`,
+    );
+  }
   const unsurveyedCells = matrix.cells.filter(
     (cell) => cell.rung === "bounded_transformer_residency" && cell.rung4Survey.surveyed === false,
   );
-  assert.ok(unsurveyedCells.length > 0);
-  assert.ok(unsurveyedCells.every((cell) => cell.state === "Missing"));
+  assert.deepEqual(unsurveyedCells, []);
 
-  // The debt is not an exemption: a family that is neither surveyed nor declared pending still
-  // fails generation, which is what keeps the third state from becoming a hole.
+  // The mechanism stays checked even though the current debt set is empty.
   assert.throws(
     () =>
       assertRung4SurveyCoversEveryFamily(
