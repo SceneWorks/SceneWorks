@@ -66,21 +66,17 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     assert len(matrix["models"]) == len(matrix["modelSlices"]) == 63
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
 
-    # sc-18815: `wan_2_2_vace_fun_14b` has a manifest entry and a real MLX engine but ZERO rows in
-    # `VIDEO_MODEL_CAPS`, so the routing catalog — this epic's backend authority — routes it nowhere
-    # and it resolves to no coordinates. It must still be NAMED: an entry that emits nothing and an
-    # entry that is not in the catalog look identical here otherwise, which is the silent absence
-    # this story exists to end.
-    assert [entry["id"] for entry in matrix["summary"]["unroutedEntries"]] == [
-        "wan_2_2_vace_fun_14b"
-    ]
+    # SC-18826 closes the only wholly-unrouted defect: VACE-Fun already had a manifest entry and real
+    # native engine, and now has the missing MLX-only VideoModelCaps row. It may still have no
+    # published cells while every coordinate is unplanned Missing, but the model-level axes and lane
+    # must be present — publication elision is not routing.
+    assert matrix["summary"]["unroutedEntries"] == []
     vace = next(model for model in matrix["models"] if model["id"] == "wan_2_2_vace_fun_14b")
-    assert vace["backends"] == []
-    assert vace["axes"] == {}
+    assert vace["backends"] == ["mlx"]
+    assert vace["resolvedRoutes"] == {"mlx": "wan2_2_vace_fun_14b"}
+    assert vace["axes"]
     assert matrix["modelSlices"]["wan_2_2_vace_fun_14b"] == []
-    assert all(
-        model["backends"] for model in matrix["models"] if model["id"] != "wan_2_2_vace_fun_14b"
-    )
+    assert all(model["backends"] for model in matrix["models"])
 
     # Video providers are genuinely per-backend, and a scalar route cannot express that: getting it
     # wrong binds a cell's calibration evidence, plan row and closure digest to a provider that never
@@ -1013,24 +1009,15 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         for backend in model["backends"]
     }
     surveyed = {(row["familyStory"], row["backend"]) for row in rows}
-    # sc-18815: surveyed and pending PARTITION what the catalog advertises. A family that is in the
-    # universe, carries no verdict and is not declared pending is a hole the generator throws on;
-    # asserting the partition is stronger than asserting either half, and unlike the old equality it
-    # does not freeze this epic's story ordering into the test.
+    # SC-18826/SC-18828 close the current survey debt. The partition machinery remains published for
+    # future families, but at this revision every advertised family/backend has a real verdict.
     pending = {
         (row["family"], row["backend"])
         for row in matrix["summary"]["rung4Survey"]["pendingFamilyBackends"]
     }
     assert not (surveyed & pending)
     assert surveyed | pending == advertised
-    assert pending == {
-        ("krea-realtime", "mlx"),
-        ("scail2", "mlx"),
-        ("svd", "candle"),
-        ("svd", "mlx"),
-        ("wan-video", "candle"),
-        ("wan-video", "mlx"),
-    }
+    assert pending == set()
     assert all(
         isinstance(row["pendingSurveyStory"], int)
         for row in matrix["summary"]["rung4Survey"]["pendingFamilyBackends"]
@@ -1050,13 +1037,9 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
             assert cell["rung4Survey"]["implementation"] is None
             assert isinstance(cell["rung4Survey"]["pendingSurveyStory"], int)
     assert any(cell["rung4Survey"]["surveyed"] for cell in rung4)
-    # Stated rather than assumed: today EVERY published rung-4 cell is surveyed, because the four
-    # pending families are also entirely unplanned and unmeasured, so sc-18099's predicate elides all
-    # of their coordinates. The pending set is therefore only visible through `summary` here — which
-    # is exactly why it is published there and not left to be inferred from the cells. The generator
-    # suite asserts the unsurveyed cells against the PRE-publication cross-product, where they exist.
+    # Today every published rung-4 cell is surveyed and the summary confirms there is no hidden debt.
     assert all(cell["rung4Survey"]["surveyed"] for cell in rung4)
-    assert pending, "the pending set must be non-empty, or the assertion above is vacuous"
+    assert not pending
 
     # The two findings stay separate: an architecture that CAN be windowed is never, by itself,
     # evidence that windowing it moves the request peak.
@@ -1191,6 +1174,33 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
     stacks = sdxl_rows[0]["blockStacks"]
     assert any(stack["windowable"] for stack in stacks)
     assert any(not stack["windowable"] for stack in stacks)
+
+    # SC-18828's SVD correction exercises the same distinction on video: the U-Net is
+    # heterogeneous, but each lane contains 16 separately indexed one-block spatial stacks and 16
+    # one-block temporal stacks. The conv/ResNet/skip trunk stays resident, so both twins are
+    # `partial`; with no materializer implemented, their resolved rung-4 coordinates are Missing.
+    svd_rows = [
+        row for row in matrix["rung4SurveyRows"] if row["familyStory"] == "svd"
+    ]
+    assert {row["backend"] for row in svd_rows} == {"mlx", "candle"}
+    assert all(row["structuralApplicability"] == "partial" for row in svd_rows)
+    assert all(row["implementation"] == "none" for row in svd_rows)
+    for row in svd_rows:
+        assert [
+            (stack["blocks"], stack["windowable"]) for stack in row["blockStacks"]
+        ] == [
+            ("16 × 1 BasicBlock", True),
+            ("16 × 1 TemporalBlock", True),
+            ("4 down + 1 mid + 4 up stages", False),
+        ]
+    svd_rung4 = [
+        row
+        for key, row in coverage.items()
+        if key[0] == "svd" and key[2] == "bounded_transformer_residency"
+    ]
+    assert {row["backend"] for row in svd_rung4} == {"mlx", "candle"}
+    assert all(row["states"] == {"Missing": row["coordinates"]} for row in svd_rung4)
+    assert all(row["implemented"] == 0 for row in svd_rung4)
 
     for cell in matrix["cells"]:
         if cell["rung"] != "bounded_transformer_residency":

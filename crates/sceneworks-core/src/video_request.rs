@@ -849,30 +849,18 @@ pub struct VideoAdmissionSurface {
 /// | `wan_2_2` (TI2V-5B) | routed | routed (t2v + VACE) |
 /// | `wan_2_2_t2v_14b` | routed | routed (t2v + VACE) |
 /// | `wan_2_2_i2v_14b` | routed | routed (**i2v only** + VACE) |
+/// | `wan_2_2_vace_fun_14b` | routed (replace-person, native VACE-Fun) | **no candle engine exists** |
 /// | `svd` | routed | routed (**i2v only**, `catalog.rs:894`) |
 /// | `bernini` | routed | routed via `bernini_video_candle_eligible` (distinct engine) |
 /// | `scail2_14b` | routed | **`candle_video_routed = false`** (`catalog.rs:908`) — reachable only via `scail2_{animate,replace}_candle_eligible`, its own distinct engine |
 /// | `krea_realtime_14b` | routed | **no candle engine exists at all** (`catalog.rs:936`) |
-/// | `wan_2_2_vace_fun_14b` | **UNROUTED** | **UNROUTED** — see below |
 ///
 /// `routed` is answered from those predicates rather than re-derived; the per-family table above
 /// is pinned against them by `video_admission_surface_matches_the_routing_catalog`.
 ///
-/// ## `wan_2_2_vace_fun_14b` — unrouted **by catalog**, pending sc-18826
-///
-/// It is a shipped `builtin.models.jsonc` video model with a real z16 VAE entry in
-/// [`vae_full_res_channels`], yet it has **no row in `VIDEO_MODEL_CAPS` at all**, so both
-/// `video_model_is_mlx_video_routed` and `video_model_has_candle_video_route` answer `false` and
-/// this gate makes no decision for it on either lane. It is the sole shipped video id in that
-/// state.
-///
-/// This is a **disagreement inside the catalog, not a choice of this gate**:
-/// `video_mode_is_mlx_eligible`'s generic arm (`mlx.rs:718`) grants it `text_to_video` /
-/// `image_to_video` because it matches no earlier per-model arm, while the table it is absent from
-/// says it is not MLX-routed. `video_admission_surface_matches_the_routing_catalog` pins that
-/// disagreement explicitly rather than skipping the id, so whichever side sc-18826 corrects goes
-/// RED here and the gate's surface is re-derived on evidence. Until then it is unrouted, which is
-/// [`VideoAdmission::NotRouted`] — a no-decision, never a refusal.
+/// SC-18826 closed the former VACE-Fun disagreement by adding its missing MLX-only
+/// `VIDEO_MODEL_CAPS` row. The manifest, native provider, worker dispatch, eligibility predicate and
+/// backend-membership table now agree; Candle remains deliberately absent.
 pub fn video_admission_surface(model: &str, lane: VideoLane) -> VideoAdmissionSurface {
     VideoAdmissionSurface {
         routed: match lane {
@@ -3230,11 +3218,11 @@ mod tests {
     /// coverage entirely (sc-18814 review).
     const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 10;
 
-    /// Every video model id in the shipped `builtin.models.jsonc`, in manifest order, guarded by
-    /// [`EXPECTED_SHIPPED_VIDEO_COUNT`]. THE list this module's per-family tests are driven from —
-    /// the surface tests and the VAE channel table both read it, so a model cannot be covered by
-    /// one and missed by the other.
-    fn shipped_video_model_ids() -> Vec<String> {
+    /// Every video model id plus its declared generation modes in the shipped manifest. Keeping the
+    /// modes beside the id is load-bearing for the routing-surface check: probing arbitrary generic
+    /// modes let VACE-Fun look reachable through an unsupported t2v path while its only declared
+    /// `replace_person` path was still rejected (SC-18826 review).
+    fn shipped_video_models() -> Vec<(String, Vec<String>)> {
         let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -3242,34 +3230,56 @@ mod tests {
             .expect("builtin.models.jsonc present in BUILTIN_MANIFESTS");
         let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw))
             .expect("builtin.models.jsonc parses as JSON");
-        let ids: Vec<String> = manifest
+        let models: Vec<(String, Vec<String>)> = manifest
             .get("models")
             .and_then(Value::as_array)
             .expect("builtin.models.jsonc has a models array")
             .iter()
             .filter(|model| model.get("type").and_then(Value::as_str) == Some("video"))
             .map(|model| {
-                model
+                let id = model
                     .get("id")
                     .and_then(Value::as_str)
                     .expect("every shipped video model declares an id")
-                    .to_owned()
+                    .to_owned();
+                let modes = model
+                    .get("capabilities")
+                    .and_then(Value::as_array)
+                    .expect("every shipped video model declares capabilities")
+                    .iter()
+                    .map(|mode| {
+                        mode.as_str()
+                            .expect("every video capability is a string")
+                            .to_owned()
+                    })
+                    .collect();
+                (id, modes)
             })
             .collect();
+        let ids: Vec<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(
-            ids.len(),
+            models.len(),
             EXPECTED_SHIPPED_VIDEO_COUNT,
             "a video model was added/removed in builtin.models.jsonc — update \
              EXPECTED_SHIPPED_VIDEO_COUNT, give it a `vae_full_res_channels` entry (or name it \
              unmodelled), and confirm its routing surface; do not let it go uncovered: {ids:?}"
         );
-        ids
+        models
+    }
+
+    /// Every video model id in manifest order. The admission/geometry tests share this projection
+    /// with the exact-mode routing check above, so neither can silently lose a shipped entry.
+    fn shipped_video_model_ids() -> Vec<String> {
+        shipped_video_models()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Every catalog video family this gate answers for: the shipped set, plus `mochi_1`.
     ///
-    /// `mochi_1` is the one asymmetry and it runs the other way from `wan_2_2_vace_fun_14b`: it has
-    /// a real `VIDEO_MODEL_CAPS` row (both lanes routed) but **no shipped manifest entry**, so it
+    /// `mochi_1` is the one asymmetry: it has a real `VIDEO_MODEL_CAPS` row (both lanes routed) but
+    /// **no shipped manifest entry**, so it
     /// is reachable through the routing predicates and must stay covered by the surface tests even
     /// though the manifest-derived list cannot produce it.
     fn all_video_families() -> Vec<String> {
@@ -3295,22 +3305,17 @@ mod tests {
             .map(|model| video_admission_surface(model, VideoLane::Candle).routed)
             .collect();
 
-        // Every catalog video family is MLX-routed EXCEPT `wan_2_2_vace_fun_14b`, which has no
-        // `VIDEO_MODEL_CAPS` row at all and is therefore unrouted on both lanes (sc-18826; see the
-        // `video_admission_surface` doc). Naming it rather than relaxing the assertion keeps the
-        // column's shape pinned: if sc-18826 adds the row, this goes RED and the exception is
-        // reconsidered on evidence instead of quietly persisting.
+        // Every catalog video family is MLX-routed. SC-18826 closed VACE-Fun's missing-row defect,
+        // so no exception remains to hide a future omission.
         for (model, routed) in families.iter().zip(&mlx) {
-            assert_eq!(
+            assert!(
                 *routed,
-                model != "wan_2_2_vace_fun_14b",
                 "{model}: MLX routing surface is not what the catalog states"
             );
         }
         assert!(
             !video_admission_surface("wan_2_2_vace_fun_14b", VideoLane::Candle).routed,
-            "wan_2_2_vace_fun_14b is absent from VIDEO_MODEL_CAPS, so it is unrouted on BOTH \
-             lanes — not an MLX-only gap"
+            "wan_2_2_vace_fun_14b is intentionally MLX-only; no Candle provider exists"
         );
         // The candle column is NOT uniform. If it ever becomes so, this test must be re-derived
         // rather than relaxed.
@@ -3340,24 +3345,33 @@ mod tests {
     /// The surface is not re-derived: it agrees with the routing predicates the worker actually
     /// dispatches on, driven with realistic payloads over the shipped-manifest-derived family list.
     ///
-    /// **One shipped id disagrees, and it is pinned rather than skipped.**
-    /// `wan_2_2_vace_fun_14b` has no `VIDEO_MODEL_CAPS` row, so the table-membership surface says
-    /// unrouted, while `video_mode_is_mlx_eligible`'s GENERIC arm (`mlx.rs:718`) grants it
-    /// `text_to_video` / `image_to_video` because it matches no earlier per-model arm. That is a
-    /// disagreement inside the catalog (sc-18826), not a choice this gate makes, and asserting it
-    /// explicitly means whichever side sc-18826 corrects turns this test RED.
+    /// SC-18826 closed the former VACE-Fun disagreement. The retained empty set is a tripwire: a
+    /// future mismatch between table membership and mode eligibility must be explained rather than
+    /// absorbed as a new exception.
     #[test]
     fn video_admission_surface_matches_the_routing_catalog() {
         /// The shipped video ids whose catalog answer is internally inconsistent, with the story
         /// that owns the inconsistency. Empty is the goal state.
-        const CATALOG_MLX_DISAGREEMENTS: &[&str] = &["wan_2_2_vace_fun_14b"];
+        const CATALOG_MLX_DISAGREEMENTS: &[&str] = &[];
 
+        let shipped = shipped_video_models();
         let mut observed_disagreements = Vec::new();
         for model in all_video_families() {
             let model = model.as_str();
-            let mlx_predicate = ["text_to_video", "image_to_video", "animate_character"]
-                .iter()
-                .any(|mode| crate::jobs_store::video_mode_is_mlx_eligible(model, mode));
+            let mlx_predicate = if model == "mochi_1" {
+                // The sole routed-but-unshipped family is t2v-only by its provider descriptor.
+                crate::jobs_store::video_mode_is_mlx_eligible(model, "text_to_video")
+            } else {
+                let (_, declared_modes) = shipped
+                    .iter()
+                    .find(|(id, _)| id == model)
+                    .unwrap_or_else(|| {
+                        panic!("{model}: unexpected routed model outside the manifest")
+                    });
+                declared_modes
+                    .iter()
+                    .any(|mode| crate::jobs_store::video_mode_is_mlx_eligible(model, mode))
+            };
             let mlx_surface = video_admission_surface(model, VideoLane::Mlx).routed;
             if mlx_surface == mlx_predicate {
                 assert!(
@@ -3368,10 +3382,7 @@ mod tests {
                 );
             } else {
                 observed_disagreements.push(model.to_owned());
-                // The gate follows the TABLE, which is the backend authority; the generic
-                // eligibility arm is the side that over-grants here.
-                assert!(!mlx_surface, "{model}");
-                assert!(mlx_predicate, "{model}");
+                panic!("{model}: the MLX table and mode predicates disagree");
             }
 
             let t2v = payload(json!({ "model": model, "mode": "text_to_video" }));
