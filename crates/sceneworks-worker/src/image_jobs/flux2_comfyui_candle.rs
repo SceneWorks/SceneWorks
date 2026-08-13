@@ -1,10 +1,10 @@
 use super::huggingface_snapshot_dir;
 use super::{
     consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
-    ApiClient, ColdLoadAdmission, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot,
-    JsonObject, LoadSpec, Path, PathBuf, PreparedFileDispatch, Quant, Settings, Value,
-    WeightsSource, WorkerError, WorkerResult,
+    prepare_manifest_text_encoder_with_file_pins, resolve_advanced_or_manifest_u32, resolve_seed,
+    start_cached_gen_stream_after_cold_admission, ApiClient, ColdLoadAdmission, GenerationOutput,
+    GenerationRequest, ImageRequest, JobSnapshot, JsonObject, LoadSpec, Path, PathBuf,
+    PreparedFileDispatch, Quant, Settings, Value, WeightsSource, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -329,6 +329,36 @@ pub(super) fn prepare_flux2_comfyui_load_spec(
     Ok((spec, snapshot_dir))
 }
 
+/// Production counterpart to [`prepare_flux2_comfyui_load_spec`]. Finalizes the imported DiT token
+/// and any selected descriptor-validated encoder receipt on the same spec consumed by admission and
+/// the registered provider. Default/absence keeps the snapshot encoder implicit.
+fn prepare_flux2_comfyui_load_spec_for_request(
+    paths: ComfyuiFlux2Paths,
+    quant: Quant,
+    request: &ImageRequest,
+    settings: &Settings,
+    engine_id: &str,
+) -> WorkerResult<(LoadSpec, PathBuf)> {
+    let snapshot_dir = paths.snapshot_dir;
+    let spec = LoadSpec::new(WeightsSource::File(
+        paths.transformer.loader_path().to_path_buf(),
+    ))
+    .with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(snapshot_dir.clone()),
+    )
+    .with_quant(quant);
+    let spec = prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        engine_id,
+        request,
+        settings,
+        [paths.transformer],
+        "ComfyUI FLUX.2 source preparation failed",
+    )?;
+    Ok((spec, snapshot_dir))
+}
+
 /// Real candle in-place ComfyUI FLUX.2-dev txt2img generation through the registered `flux2_dev`
 /// provider. `request.count` images, each its own seed. FLUX.2-dev is guidance-distilled (embedded
 /// scalar, single forward — NO negative prompt / true-CFG pass).
@@ -362,17 +392,32 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
     let guidance = flux2_comfyui_guidance(request);
     let quant = paths.quant;
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
-    let (spec, snapshot_dir) = prepare_flux2_comfyui_load_spec(paths, quant)?;
+    let (spec, snapshot_dir) = prepare_flux2_comfyui_load_spec_for_request(
+        paths,
+        quant,
+        request,
+        settings,
+        descriptor.id,
+    )?;
     // The companion snapshot supplies TE/VAE/tokenizer/config only. Its own transformer is replaced;
     // finalized File bytes and only the consumed companion dirs feed admission.
+    let selected_text_encoder = spec.text_encoder.is_some();
     let snapshot_text_encoder = snapshot_dir.join("text_encoder");
     let snapshot_vae = snapshot_dir.join("vae");
+    let mut companion_paths = vec![snapshot_vae];
+    if !selected_text_encoder {
+        companion_paths.push(snapshot_text_encoder);
+    }
+    let companion_refs = companion_paths
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
     let cold_admission = prepare_cached_candle_base_floor(
         &request.model,
         "ComfyUI FLUX.2",
         settings,
         &spec,
-        &[snapshot_text_encoder.as_path(), snapshot_vae.as_path()],
+        &companion_refs,
     )?;
 
     // Per-image work items: (seed, prompt) — `request.count` renders.

@@ -449,6 +449,20 @@ export function ImageStudio() {
   const batchObservedJobsRef = useRef(new Map());
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
+  const [textEncoderSelection, setTextEncoderSelection] = useState({
+    modelId: saved.model ?? null,
+    id: saved.textEncoderModel ?? null,
+  });
+  const textEncoderModel =
+    textEncoderSelection.modelId === model ? textEncoderSelection.id : null;
+  const setTextEncoderModel = (next, modelId = model) =>
+    setTextEncoderSelection((current) => {
+      const currentId = current.modelId === modelId ? current.id : null;
+      return {
+        modelId,
+        id: typeof next === "function" ? next(currentId) : next,
+      };
+    });
   const [seed, setSeed] = useState(saved.seed ?? "");
   const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
   const [resolution, setResolution] = useState(saved.resolution ?? "1024x1024");
@@ -784,6 +798,31 @@ export function ImageStudio() {
   // effective model for either rendering defaults or submitting a job.
   const selectedModel = availableModels.find((item) => item.id === model);
   const selectedModelServesMode = Boolean(selectedModel);
+  const catalogTextEncoderOptions = selectedModel?.textEncoderOptions ?? [];
+  // A replayed/saved authored id remains a real control value even if the refreshed catalog can no
+  // longer advertise this surface. Keep it visible and submit it unchanged so the server rejects a
+  // stale choice; never make disappearance look like an implicit switch to the model encoder.
+  const supportsTextEncoderSelection =
+    catalogTextEncoderOptions.length > 0 || Boolean(textEncoderModel);
+  const textEncoderOptions =
+    catalogTextEncoderOptions.length > 0
+      ? catalogTextEncoderOptions
+      : [
+          {
+            id: "default",
+            label: "Model encoder (default)",
+            description: "Uses the encoder paired with this model.",
+            isDefault: true,
+          },
+        ];
+  const defaultTextEncoderId =
+    textEncoderOptions.find((option) => option.isDefault)?.id ??
+    textEncoderOptions[0]?.id ??
+    "default";
+  const selectedTextEncoderModel = textEncoderModel ?? defaultTextEncoderId;
+  const selectedTextEncoderAvailable = textEncoderOptions.some(
+    (option) => option.id === selectedTextEncoderModel,
+  );
   const modeLabel =
     mode === "edit_image" ? "Edit" : mode === "character_image" ? "With character" : "Text";
   // Booru-convention prompt hint (sc-10760): non-null for danbooru-tag models (Anima, Illustrious)
@@ -1710,6 +1749,7 @@ export function ImageStudio() {
         ? fallback
         : (finiteRecipeNumber(value) ?? fallback);
     setEnhancePrompt(rawSettings.enhancePrompt === true);
+    setTextEncoderModel(rawSettings.textEncoderModel ?? null, recipe.model ?? model);
     setUsePid(rawSettings.usePid === true);
     setPidTarget(rawSettings.pidTarget === "2k" ? "2k" : "4k");
     setFaceRestore(rawSettings.faceRestore === true);
@@ -1924,6 +1964,7 @@ export function ImageStudio() {
       ["scheduler", setScheduler],
       ["schedulerShift", setSchedulerShift],
       ["guidanceMethod", setGuidanceMethod],
+      ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
       ["img2imgStrength", setImg2imgStrength],
       ["textStyleGain", setTextStyleGain],
@@ -1976,6 +2017,10 @@ export function ImageStudio() {
       scheduler,
       schedulerShift,
       guidanceMethod,
+      ...(supportsTextEncoderSelection &&
+      selectedTextEncoderModel !== defaultTextEncoderId
+        ? { textEncoderModel: selectedTextEncoderModel }
+        : {}),
       upscaleEnabled,
       upscaleFactor,
       upscaleEngine,
@@ -2003,6 +2048,7 @@ export function ImageStudio() {
     count,
     advancedOpen,
     model,
+    textEncoderModel,
     seed,
     negativePrompt,
     resolution,
@@ -2286,6 +2332,9 @@ export function ImageStudio() {
       // suppressed — which is the path that really leaks a stale scale onto a CFG-free engine.
       guidanceOverride: supportsGuidance ? guidanceOverride : "",
       guidanceMethod,
+      supportsTextEncoderSelection,
+      textEncoderModel: selectedTextEncoderModel,
+      defaultTextEncoderId,
       flashAttn,
       promptEnhance,
       enhancePrompt,
@@ -3614,6 +3663,38 @@ export function ImageStudio() {
                   />
                   <span>{Number(textStyleGain).toFixed(2)}</span>
                 </label>
+              ) : null}
+              {supportsTextEncoderSelection ? (
+                <>
+                  <label>
+                    Text encoder model
+                    <select
+                      aria-label="Text encoder model"
+                      onChange={(event) => setTextEncoderModel(event.target.value)}
+                      value={selectedTextEncoderModel}
+                    >
+                      {textEncoderOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                      {!selectedTextEncoderAvailable &&
+                      selectedTextEncoderModel !== defaultTextEncoderId ? (
+                        <option disabled value={selectedTextEncoderModel}>
+                          Previously selected encoder (not staged)
+                        </option>
+                      ) : null}
+                    </select>
+                  </label>
+                  <p className="helper-copy">
+                    {!selectedTextEncoderAvailable &&
+                    selectedTextEncoderModel !== defaultTextEncoderId
+                      ? "The recorded encoder is no longer staged. Choose the model default or restore that encoder before generating."
+                      : textEncoderOptions.length > 1
+                        ? "Only compatible installed encoders verified by this model's engine contract are listed."
+                        : "The model encoder is the default. Compatible built-in, imported, and external choices appear after Models is refreshed."}
+                  </p>
+                </>
               ) : null}
               {showGuidanceMethodPicker ? (
                 <label>

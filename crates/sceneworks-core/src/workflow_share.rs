@@ -1538,10 +1538,11 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
     allow_from(
         "textEncoderModel",
         AdvancedShape::Scalar,
-        AdvancedKeySource::VideoStudioBuilder,
+        AdvancedKeySource::StudioBuilder,
         "Authored text-encoder pick. It changes what the model SEES of the prompt, so a replay \
-         without it is a different run. A catalog-global model slug, not an install-local id — the \
-         same class as `styleId` and unlike `controlWeights`, which carries a resolved path.",
+         without it is a different run. Only the opaque selection id travels; the server-owned \
+         source path does not. A missing choice stays authored and fails closed on replay instead \
+         of silently substituting the bundled encoder.",
     ),
     allow_from(
         "lightning",

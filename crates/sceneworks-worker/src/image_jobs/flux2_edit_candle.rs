@@ -1,12 +1,12 @@
 use super::{
-    admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
-    candle_quant_for_resolved_tier, candle_resolved_tier_key, consume_gen_events, drive_gen_items,
-    fit_engine_image, load_reference_image, mlx_model, model_repo, pid_effective_dims,
-    pid_output_tier, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    resolve_pid_weights, resolve_seed, resolve_weights_dir, start_gen_stream, ApiClient,
-    CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
-    WorkerResult,
+    admit_candle_base, apply_candle_image_load_shape, attach_manifest_text_encoder,
+    candle_certified_artifact_path, candle_quant_for_resolved_tier, candle_resolved_tier_key,
+    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
+    model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_seed, resolve_weights_dir,
+    start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest,
+    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value,
+    WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -335,7 +335,12 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     } else {
         "flux2_klein_9b"
     };
+    if let Some(pid) = pid_weights.as_ref() {
+        strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
     let strategy_spec = apply_candle_image_load_shape(memory_provider, strategy_spec);
+    let strategy_spec =
+        attach_manifest_text_encoder(strategy_spec, memory_provider, request, settings)?;
     let mut generation_memory = gen_core::GenerationMemory::default();
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
@@ -438,14 +443,23 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         &strategy_spec,
                         context,
                     ),
-                    None => Flux2Edit::load_dev_with_memory(&paths, quant, generation_memory),
+                    None => Flux2Edit::load_dev_with_memory_spec(
+                        &paths,
+                        quant,
+                        &strategy_spec,
+                        generation_memory,
+                    ),
                 }
             } else {
                 match &memory_context {
                     Some(context) => {
                         Flux2Edit::load_klein_with_memory_context(&paths, &strategy_spec, context)
                     }
-                    None => Flux2Edit::load(&paths),
+                    None => Flux2Edit::load_klein_with_memory_spec(
+                        &paths,
+                        &strategy_spec,
+                        generation_memory,
+                    ),
                 }
             }
             .map_err(|error| WorkerError::Engine(format!("FLUX.2 edit load failed: {error}")))?;

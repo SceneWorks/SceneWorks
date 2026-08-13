@@ -220,6 +220,17 @@ pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
         .find(|descriptor| descriptor.id == id)
 }
 
+/// Resolve the provider-owned text-encoder contract for an ordinary generator or an explicitly
+/// registered bespoke/composed route. Missing is fail-closed: consumers must never infer a sibling
+/// base id or hardcode a family contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn media_encoder_contract(id: &str) -> Option<gen_core::EncoderContract> {
+    media().provider_encoder_contract(id)
+}
+
 // Only the macOS prompt-refine tests iterate the TextLlm registry; on the Windows/candle build
 // nothing calls this, so gate it to match its callers and stay warning-clean under -D warnings.
 #[cfg(all(test, target_os = "macos"))]

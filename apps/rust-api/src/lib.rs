@@ -200,7 +200,8 @@ mod models;
 use models::{
     create_model_convert_job, create_model_download_job, create_model_import_job, delete_model,
     delete_model_variant, list_models, model_catalog, model_is_installed,
-    resolve_model_manifest_entry, ModelCatalogCache, ModelSizeCache,
+    resolve_model_manifest_entry, resolve_selected_image_text_encoder, ModelCatalogCache,
+    ModelSizeCache,
 };
 #[cfg(test)]
 use models::{

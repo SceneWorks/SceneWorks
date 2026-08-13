@@ -770,6 +770,100 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     );
 }
 
+/// SC-18314: the browser authors only an opaque encoder id. Every image-create boundary must
+/// discard caller/persisted resolution metadata, resolve the id against current server state, and
+/// reject an id that has disappeared instead of silently substituting the model encoder.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_closed() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
+    let base_payload = json!({
+        "projectId": "project-1",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "model": "krea_2_turbo",
+        "count": 1,
+        "width": 1024,
+        "height": 1024
+    });
+    let mut stale_create = base_payload.clone();
+    stale_create["advanced"] = json!({ "textEncoderModel": stale_id });
+    // A typed create must ignore any client attempt to carry the private resolution and reject the
+    // unavailable authored id from a fresh catalog lookup.
+    stale_create["modelManifestEntry"] = json!({
+        "resolvedTextEncoder": {
+            "selectionId": stale_id,
+            "sourceKind": "directory",
+            "path": temp_dir.path().join("attacker-selected")
+        }
+    });
+    let (status, body) = request(app.clone(), "POST", "/api/v1/image/jobs", stale_create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("is unavailable")));
+
+    let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", base_payload).await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    assert!(original["payload"]["modelManifestEntry"]
+        .get("resolvedTextEncoder")
+        .is_none());
+    let job_id = original["id"].as_str().expect("job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": { "textEncoderModel": stale_id },
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("is unavailable")));
+
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        assert!(body["payload"]["modelManifestEntry"]
+            .get("resolvedTextEncoder")
+            .is_none());
+    }
+}
+
 #[test]
 fn serialize_job_lora_carries_network_type_to_payload() {
     // A trained LoKr adapter records networkType (epic 2193); the generation

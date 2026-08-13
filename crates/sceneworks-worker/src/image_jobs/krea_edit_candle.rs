@@ -1,10 +1,11 @@
 use super::resolve_seed;
 use super::{
-    admit_candle_base, consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image,
-    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    resolve_text_style_gain, resolve_weights_dir, safetensors_tensor_bytes_with_prefixes,
-    start_gen_stream, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, Settings, Value, WorkerError, WorkerResult,
+    admit_candle_base, attach_manifest_text_encoder, consume_gen_events, drive_gen_items,
+    fit_engine_image, load_reference_image, resolve_adapters, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_text_style_gain, resolve_weights_dir,
+    safetensors_tensor_bytes_with_prefixes, start_gen_stream, ApiClient, CandleBaseEvidence, Image,
+    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, Settings, Value, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -238,6 +239,24 @@ pub(super) async fn generate_candle_krea_edit_stream(
     // The selected LoRAs → adapter specs (the edit LoRA + any user LoRAs), folded into the DiT at load.
     let adapters = resolve_adapters(request, settings)?;
     let adapter_count = adapters.len();
+    let descriptor_id = if distilled {
+        "krea_2_turbo_edit"
+    } else {
+        "krea_2_edit"
+    };
+    let strategy_spec = attach_manifest_text_encoder(
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(weights_dir.clone()))
+            .with_adapters(adapters.clone()),
+        descriptor_id,
+        request,
+        settings,
+    )?;
+    let selected_text_encoder_bytes = strategy_spec.text_encoder.as_ref().map_or(0, |source| {
+        let path = match source {
+            gen_core::WeightsSource::File(path) | gen_core::WeightsSource::Dir(path) => path,
+        };
+        gen_core::safetensors_path_bytes(path)
+    });
     let adapter_resident_bytes = adapters
         .iter()
         .fold(0_u64, |total, adapter| {
@@ -255,7 +274,11 @@ pub(super) async fn generate_candle_krea_edit_stream(
         .saturating_add(safetensors_tensor_bytes_with_prefixes(
             &weights_dir.join("vae"),
             &["encoder.", "quant_conv."],
-        ));
+        ))
+        // A substituted decoder is additional to the catalog's default-artifact estimate. This is
+        // deliberately conservative (the bundled decoder is not subtracted) and preserves the
+        // estimated fallback when no route-specific evidence exists.
+        .saturating_add(selected_text_encoder_bytes);
     admit_candle_base(
         request,
         settings,
@@ -299,11 +322,10 @@ pub(super) async fn generate_candle_krea_edit_stream(
                 .map_err(|error| WorkerError::Engine(format!("Krea edit device init: {error}")))?;
             // Load the Krea Raw components with the edit LoRA merged into the DiT (R5), plus the edit-only
             // components (Qwen3-VL vision tower + VAE encoder) — both cached for the whole batch.
-            let comps = runtime_cuda::providers::krea::pipeline::load_components(
+            let comps = runtime_cuda::providers::krea::pipeline::load_components_with_spec(
                 &weights_dir,
+                &strategy_spec,
                 &device,
-                &adapters,
-                None,
             )
             .map_err(|error| WorkerError::Engine(format!("Krea edit load failed: {error}")))?;
             let edit = runtime_cuda::providers::krea::pipeline::load_edit_components(

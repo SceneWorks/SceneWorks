@@ -81,6 +81,10 @@ pub(crate) struct LoadIdentity {
     text_encoder: Option<CacheWeightsSource>,
     /// `LoadSpec::components` is a `BTreeMap`, so iteration preserves the stable component-id order.
     components: Vec<(String, CacheWeightsSource)>,
+    /// The complete prepared receipt participates in warm identity even when a contract-owned
+    /// companion (for example a File encoder's sibling config or selected tokenizer) is not nested
+    /// beneath any `WeightsSource` slot.
+    prepared_files: Vec<PinnedWeightsFile>,
 }
 
 /// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
@@ -235,6 +239,11 @@ impl LoadIdentity {
                 .iter()
                 .map(|(id, source)| Ok((id.clone(), CacheWeightsSource::from_spec(spec, source)?)))
                 .collect::<gen_core::Result<_>>()?,
+            prepared_files: spec
+                .prepared_file_pins()
+                .iter()
+                .map(|(_, pin)| pin.clone())
+                .collect(),
         })
     }
 }
@@ -1725,6 +1734,79 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_includes_text_encoder_substitution() {
+        let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
+        let first = base
+            .clone()
+            .with_text_encoder(WeightsSource::Dir(PathBuf::from("/encoders/qwen-a")));
+        let second = base
+            .clone()
+            .with_text_encoder(WeightsSource::File(PathBuf::from(
+                "/encoders/qwen-b.safetensors",
+            )));
+
+        assert_ne!(
+            LoadIdentity::from_load_spec("z_image_turbo", &base),
+            LoadIdentity::from_load_spec("z_image_turbo", &first)
+        );
+        assert_ne!(
+            LoadIdentity::from_load_spec("z_image_turbo", &first),
+            LoadIdentity::from_load_spec("z_image_turbo", &second)
+        );
+    }
+
+    #[test]
+    fn cache_key_includes_every_prepared_encoder_companion() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let selected = dir.path().join("selected-encoder");
+        let tokenizer = selected.join("tokenizer");
+        std::fs::create_dir_all(&tokenizer).expect("create selected encoder");
+        let shard = selected.join("model-00001-of-00001.safetensors");
+        let config = selected.join("config.json");
+        let tokenizer_json = tokenizer.join("tokenizer.json");
+        std::fs::write(&shard, b"shard-v1").expect("write shard");
+        std::fs::write(&config, br#"{"model_type":"qwen3"}"#).expect("write config");
+        std::fs::write(&tokenizer_json, br#"{"model":{"vocab":{}}}"#).expect("write tokenizer");
+
+        let make_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(dir.path().join("base")))
+                .with_text_encoder(WeightsSource::Dir(selected.clone()));
+            spec.prepare_with_file_pins(
+                [&shard, &config, &tokenizer_json]
+                    .into_iter()
+                    .map(|path| PinnedWeightsFile::pin(path).expect("pin encoder receipt")),
+            )
+            .expect("prepare exact encoder receipt");
+            spec
+        };
+
+        let prepared_v1 = make_spec();
+        let key_v1 = LoadIdentity::try_from_load_spec("qwen_image", &prepared_v1)
+            .expect("first prepared encoder identity");
+        assert_eq!(key_v1.prepared_files.len(), 3);
+
+        std::fs::write(&config, br#"{"model_type":"qwen3","revision":2}"#).expect("replace config");
+        LoadIdentity::try_from_load_spec("qwen_image", &prepared_v1)
+            .expect_err("a mutated companion must fail before a warm cache lookup");
+
+        let key_v2 = LoadIdentity::try_from_load_spec("qwen_image", &make_spec())
+            .expect("replacement receipt identity");
+        assert_ne!(
+            key_v1, key_v2,
+            "changing only the encoder config must invalidate the warm generator"
+        );
+
+        std::fs::write(&tokenizer_json, br#"{"model":{"vocab":{"replacement":1}}}"#)
+            .expect("replace tokenizer");
+        let key_v3 = LoadIdentity::try_from_load_spec("qwen_image", &make_spec())
+            .expect("replacement tokenizer identity");
+        assert_ne!(
+            key_v2, key_v3,
+            "changing only the selected tokenizer must invalidate the warm generator"
+        );
+    }
+
+    #[test]
     fn cache_key_fingerprints_primary_file_and_named_companions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dit = dir.path().join("dit.safetensors");
@@ -1883,6 +1965,7 @@ mod tests {
         assert_exact(identity.face_dir.as_ref().expect("identity face"));
         assert_exact(key_v1.text_encoder.as_ref().expect("text encoder"));
         assert_exact(&key_v1.components[0].1);
+        assert_eq!(key_v1.prepared_files, vec![pin_v1.clone()]);
 
         std::fs::write(&path, b"prepared-v2-is-longer").expect("replace weights");
         LoadIdentity::try_from_load_spec("provider", &spec)
@@ -2002,6 +2085,7 @@ mod tests {
             backend: "stub",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
             required_components: &[],
             control_kinds: None,
         }

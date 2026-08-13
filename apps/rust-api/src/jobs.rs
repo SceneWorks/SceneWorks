@@ -438,6 +438,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
             &mut merged,
         )
         .await?;
+
+        // Retry and duplicate are image-job creation boundaries too. Discard any persisted or
+        // caller-supplied path-bearing resolution and rebuild it from the current catalog plus the
+        // authored opaque id, so a removed/retargeted choice fails before the queue transaction.
+        let model_id = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?
+            .to_owned();
+        let mut manifest_entry = resolve_model_manifest_entry(state, &model_id).await?;
+        resolve_selected_image_text_encoder(state, &merged, &model_id, &mut manifest_entry).await?;
+        merged.insert("modelManifestEntry".to_owned(), manifest_entry);
     }
     Ok(merged)
 }

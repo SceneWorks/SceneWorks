@@ -2255,8 +2255,9 @@ fn wants_krea_convrot(request: &ImageRequest) -> bool {
 
 /// Resolve the INT8-ConvRot LoadSpec inputs for a Krea 2 request (sc-9300): the canonical bf16 Krea 2
 /// snapshot DIR (the LoadSpec `weights` root — tokenizer / Qwen3-VL TE / Qwen-Image VAE / config + the
-/// non-quantized surface) and the downloaded ConvRot DiT single-file (the LoadSpec `text_encoder`
-/// `File`, which the candle-gen krea engine's `convrot_selector` routes to `load_components_convrot`).
+/// non-quantized surface) and the downloaded ConvRot DiT single-file (the named
+/// `krea_convrot_dit` component, leaving `LoadSpec::text_encoder` exclusively for
+/// real encoder substitution).
 ///
 /// `None` when the request didn't select ConvRot, OR either artifact isn't present yet (the bf16
 /// `bf16/` subdir of the `krea-2-turbo-mlx` turnkey, or the ConvRot DiT `.safetensors`) — the caller
@@ -3773,6 +3774,75 @@ fn load_spec(
     spec
 }
 
+/// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
+/// the exact prepared source receipt before any planner, fit gate, or provider loader sees the spec.
+/// Default/absent selection is an exact no-op.
+pub(super) fn attach_manifest_text_encoder(
+    spec: LoadSpec,
+    engine_id: &str,
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<LoadSpec> {
+    crate::text_encoder_selection::prepare_selected_text_encoder(
+        spec,
+        engine_id,
+        &request.advanced,
+        &request.model_manifest_entry,
+        settings,
+    )
+}
+
+/// Whether the request carries a non-default authored encoder id. Kept beside the attachment seam
+/// so bespoke File routes make the same default/invalid-shape decision as registry routes.
+pub(super) fn has_authored_text_encoder(request: &ImageRequest) -> WorkerResult<bool> {
+    match request.advanced.get("textEncoderModel") {
+        None => Ok(false),
+        Some(Value::String(id)) if id == "default" => Ok(false),
+        Some(Value::String(id)) if !id.trim().is_empty() => Ok(true),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.textEncoderModel must be a non-empty string option id returned by GET /api/v1/models"
+                .to_owned(),
+        )),
+    }
+}
+
+/// Finalize a complete bespoke File-route spec. A selected encoder's contract export prepares every
+/// configured File slot plus its shard/config/tokenizer receipt atomically; the default path keeps
+/// the route's existing explicit tokens. Pre-resolved route tokens are compared against the
+/// contract-prepared set so a mutation between dispatch resolution and attachment fails closed.
+pub(super) fn prepare_manifest_text_encoder_with_file_pins(
+    mut spec: LoadSpec,
+    engine_id: &str,
+    request: &ImageRequest,
+    settings: &Settings,
+    pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
+    label: &str,
+) -> WorkerResult<LoadSpec> {
+    let selected = has_authored_text_encoder(request)?;
+    let pins = pins.into_iter().collect::<Vec<_>>();
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    if !selected {
+        crate::paths::prepare_load_spec_with_file_pins(&mut spec, pins, label)?;
+        return Ok(spec);
+    }
+
+    for expected in pins {
+        expected
+            .ensure_unchanged()
+            .map_err(|error| crate::classify_engine_error(label, error))?;
+        let received = spec
+            .prepared_file_pin_for(expected.loader_path())
+            .map_err(|error| crate::classify_engine_error(label, error))?;
+        if received != Some(&expected) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{label}: source changed while the selected text encoder receipt was prepared: {}",
+                expected.loader_path().display()
+            )));
+        }
+    }
+    Ok(spec)
+}
+
 /// Select deferred materialization for the native Candle/CUDA Qwen routes. Only the uniform
 /// base/edit transformer trunk can be reopened one window at a time: control/IP/PiD and adapter
 /// overlays keep the established eager shape and therefore make rung 4 explicitly unavailable.
@@ -4002,6 +4072,7 @@ mod candle_image_load_shape_tests {
                     backend: "candle",
                     modality: gen_core::Modality::Image,
                     capabilities: Default::default(),
+                    encoder_contract: None,
                     required_components: &[],
                     control_kinds: None,
                 },
@@ -6841,6 +6912,9 @@ async fn generate_stream(
         && ideogram_edit_mask.is_none()
         && hires_fix.is_none();
     spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
+    // Finalize the full load shape before exporting the encoder receipt: preparation covers every
+    // configured File slot (PiD, adapters, named components) and the same spec then drives fit/load.
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         engine_id,
         &request.model,
@@ -8930,6 +9004,16 @@ async fn generate_candle_stream(
         &request.model_manifest_entry,
         settings,
     )?;
+    if let Some((_, convrot_dit)) = convrot.as_ref() {
+        shared_contract_spec = shared_contract_spec.with_component(
+            gen_core::KREA_CONVROT_DIT_COMPONENT,
+            WeightsSource::File(convrot_dit.clone()),
+        );
+    }
+    // Export the selected encoder receipt only after the entire load shape is complete; this exact
+    // prepared spec is reused by the selector and eventual provider/cache load.
+    shared_contract_spec =
+        attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
@@ -9413,15 +9497,6 @@ async fn generate_candle_stream(
         // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
         spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
     }
-    // INT8-ConvRot LoadSpec seam (sc-9300, epic 9083): ride the ConvRot DiT single-file on the shared,
-    // already-optional `LoadSpec::text_encoder` as a `WeightsSource::File` while `spec.weights` stays the
-    // canonical Krea 2 bf16 snapshot `Dir` (set as `weights_dir` above). The candle-gen krea engine's
-    // `convrot_selector` decodes a `File` here → `load_components_convrot` (which enforces the sm_89
-    // compute-cap floor); a `Dir`/`None` there is the normal dense/packed path. Other engines ignore it.
-    if let Some((_, convrot_dit)) = convrot {
-        spec.text_encoder = Some(WeightsSource::File(convrot_dit));
-    }
-
     // Surface the decision before model execution, while the reason for a slow render is still clear,
     // then keep the same compact note on subsequent progress updates. The structured event is the
     // statistics trace; the tracing event remains useful in the worker log. Neither changes admission

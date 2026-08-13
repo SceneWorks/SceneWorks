@@ -747,8 +747,11 @@ async fn generate_krea_imported_control_stream(
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
+    spec = prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
         std::iter::once(dit_pin)
             .chain(std::iter::once(control_pin))
             .chain(adapter_pins),
@@ -1563,8 +1566,11 @@ async fn generate_krea_imported_stream(
     if !prepared_adapters.specs.is_empty() {
         spec = spec.with_adapters(prepared_adapters.specs);
     }
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
+    spec = prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        engine_id,
+        request,
+        settings,
         std::iter::once(dit_pin).chain(prepared_adapters.pins),
         "Krea 2 imported source preparation failed",
     )?;
@@ -1572,15 +1578,24 @@ async fn generate_krea_imported_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let cold_admission = {
         // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
-        // not be double-priced. Admit exactly the prepared primary plus the companion component dirs.
+        // not be double-priced. A selected encoder is already represented by the spec's prepared
+        // contract receipt, so only admit the bundled encoder dir for the default path.
         let text_encoder = base_dir.join("text_encoder");
         let vae = base_dir.join("vae");
+        let mut companions = vec![vae];
+        if spec.text_encoder.is_none() {
+            companions.push(text_encoder);
+        }
+        let companion_refs = companions
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
         prepare_cached_candle_base_floor(
             &request.model,
             "Krea imported",
             settings,
             &spec,
-            &[text_encoder.as_path(), vae.as_path()],
+            &companion_refs,
         )?
     };
 

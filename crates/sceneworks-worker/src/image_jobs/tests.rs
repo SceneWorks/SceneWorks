@@ -8,6 +8,321 @@ use super::{
 };
 use serde_json::json;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn every_mlx_text_encoder_route_resolves_from_the_runtime_registry() {
+    for id in [
+        "krea_2_turbo",
+        "krea_2_raw",
+        "krea_2_edit",
+        "krea_2_turbo_edit",
+        "krea_2_turbo_control",
+        "qwen_image",
+        "qwen_image_edit",
+        "qwen_image_control",
+        "z_image_turbo",
+        "z_image",
+        "z_image_turbo_control",
+        "z_image_control",
+        "flux2_klein_9b",
+        "flux2_klein_9b_edit",
+        "flux2_klein_9b_kv_edit",
+        "flux2_dev",
+        "flux2_dev_edit",
+        "flux2_dev_control",
+    ] {
+        assert!(
+            crate::inference_runtime::media_encoder_contract(id).is_some(),
+            "runtime registry is missing the encoder contract for {id}"
+        );
+    }
+    assert_eq!(
+        crate::inference_runtime::media_encoder_contract("unknown_text_encoder_route"),
+        None
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn every_candle_text_encoder_route_resolves_from_the_runtime_registry() {
+    for id in [
+        "krea_2_turbo",
+        "krea_2_raw",
+        "krea_2_edit",
+        "krea_2_turbo_edit",
+        "krea_2_turbo_control",
+        "qwen_image",
+        "qwen_image_edit",
+        "qwen_image_control",
+        "z_image_turbo",
+        "z_image",
+        "z_image_turbo_control",
+        "z_image_control",
+        "flux2_klein_9b",
+        "flux2_dev",
+        "flux2_dev_control",
+    ] {
+        assert!(
+            crate::inference_runtime::media_encoder_contract(id).is_some(),
+            "runtime registry is missing the encoder contract for {id}"
+        );
+    }
+    assert_eq!(
+        crate::inference_runtime::media_encoder_contract("unknown_text_encoder_route"),
+        None
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn default_and_absent_text_encoder_selection_leave_load_spec_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let default_request = request(json!({
+        "projectId": "p",
+        "model": "krea_2_turbo",
+        "advanced": { "textEncoderModel": "default" },
+        "modelManifestEntry": { "family": "krea_2" }
+    }));
+    let default_spec = attach_manifest_text_encoder(
+        LoadSpec::new(WeightsSource::Dir(dir.path().join("base"))),
+        "krea_2_turbo",
+        &default_request,
+        &settings,
+    )
+    .unwrap();
+    assert!(default_spec.text_encoder.is_none());
+
+    let absent_request = request(json!({
+        "projectId": "p",
+        "model": "krea_2_turbo",
+        "advanced": {},
+        "modelManifestEntry": { "family": "krea_2" }
+    }));
+    let absent_spec = attach_manifest_text_encoder(
+        LoadSpec::new(WeightsSource::Dir(dir.path().join("base"))),
+        "krea_2_turbo",
+        &absent_request,
+        &settings,
+    )
+    .unwrap();
+    assert!(absent_spec.text_encoder.is_none());
+}
+
+/// SC-18314 route-coverage guard. Every specialized Krea/Qwen/Z/FLUX.2 load path must attach the
+/// selected encoder before the function's first fit/admission/cache/provider-load seam. This scans
+/// only production source between exact function markers; deleting or moving an attachment behind a
+/// load makes the test fail even though the runtime registry still resolves the route id.
+#[test]
+fn every_specialized_text_encoder_route_attaches_before_fit_or_load() {
+    fn function_body<'a>(source: &'a str, marker: &str) -> &'a str {
+        source
+            .split_once(marker)
+            .unwrap_or_else(|| panic!("missing production function marker {marker:?}"))
+            .1
+            .split_once("\n}\n")
+            .unwrap_or_else(|| panic!("production function {marker:?} has no top-level end marker"))
+            .0
+    }
+
+    const ROUTES: &[(&str, &str, &str, &str)] = &[
+        (
+            "MLX Krea control",
+            include_str!("krea_control.rs"),
+            "async fn generate_krea_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "MLX Krea edit",
+            include_str!("krea_edit.rs"),
+            "async fn generate_krea_edit_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Krea imported control",
+            include_str!("krea_imported.rs"),
+            "async fn generate_krea_imported_control_stream(",
+            "prepare_manifest_text_encoder_with_file_pins(",
+        ),
+        (
+            "Krea imported base/edit/multiphase",
+            include_str!("krea_imported.rs"),
+            "async fn generate_krea_imported_stream(",
+            "prepare_manifest_text_encoder_with_file_pins(",
+        ),
+        (
+            "Krea multiphase",
+            include_str!("krea_multiphase.rs"),
+            "async fn generate_krea_multiphase_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Krea turbo-on-Raw",
+            include_str!("krea_turbo_raw.rs"),
+            "async fn generate_krea_turbo_on_raw_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "MLX Qwen control",
+            include_str!("qwen.rs"),
+            "async fn generate_qwen_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "MLX Qwen edit",
+            include_str!("qwen.rs"),
+            "async fn generate_qwen_edit_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "MLX Z turbo control",
+            include_str!("zimage.rs"),
+            "async fn generate_zimage_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "MLX Z base control",
+            include_str!("zimage.rs"),
+            "async fn generate_zimage_base_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "MLX FLUX.2 edit",
+            include_str!("flux2.rs"),
+            "async fn generate_flux2_edit_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "MLX FLUX.2 control",
+            include_str!("flux2.rs"),
+            "async fn generate_flux2_dev_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle Krea control",
+            include_str!("krea_control_candle.rs"),
+            "pub(super) async fn generate_candle_krea_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle Krea edit",
+            include_str!("krea_edit_candle.rs"),
+            "pub(super) async fn generate_candle_krea_edit_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle Qwen edit",
+            include_str!("qwen_edit_candle.rs"),
+            "pub(super) async fn generate_candle_qwen_edit_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle Qwen control",
+            include_str!("qwen_control.rs"),
+            "pub(super) async fn generate_candle_qwen_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle Qwen ComfyUI",
+            include_str!("qwen_comfyui_candle.rs"),
+            "pub(super) async fn generate_candle_qwen_comfyui_stream(",
+            "prepare_qwen_comfyui_load_spec_for_request(",
+        ),
+        (
+            "Candle Z control",
+            include_str!("zimage_control.rs"),
+            "pub(super) async fn generate_candle_zimage_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle Z identity",
+            include_str!("zimage_identity_candle.rs"),
+            "pub(super) async fn generate_candle_zimage_identity_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle Z ComfyUI",
+            include_str!("zimage_comfyui_candle.rs"),
+            "pub(super) async fn generate_candle_zimage_comfyui_stream(",
+            "prepare_zimage_comfyui_load_spec_for_request(",
+        ),
+        (
+            "Candle FLUX.2 edit",
+            include_str!("flux2_edit_candle.rs"),
+            "pub(super) async fn generate_candle_flux2_edit_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle FLUX.2 control",
+            include_str!("flux2_control_candle.rs"),
+            "pub(super) async fn generate_candle_flux2_control_stream(",
+            "attach_manifest_text_encoder(",
+        ),
+        (
+            "Candle FLUX.2 ComfyUI",
+            include_str!("flux2_comfyui_candle.rs"),
+            "pub(super) async fn generate_candle_flux2_comfyui_stream(",
+            "prepare_flux2_comfyui_load_spec_for_request(",
+        ),
+    ];
+
+    for (route, source, function, attachment) in ROUTES {
+        let body = function_body(source, function);
+        let attach_at = body.find(attachment).unwrap_or_else(|| {
+            panic!("{route} no longer attaches a selected encoder through {attachment}")
+        });
+        let first_consumer = [
+            "start_cached_gen_stream(",
+            "start_cached_gen_stream_after_cold_admission(",
+            "start_gen_stream(",
+            "gate_with_evict_reclaim(",
+            "admit_conditioning_paths(",
+            "prepare_cached_candle_base_floor(",
+            "MlxRequestPlan::try_for_spec_and_manifest(",
+            "memory_strategy_contract(",
+            "start_cached_gen_stream_with_request_state(",
+            "run_candle_strict_control(",
+        ]
+        .iter()
+        .filter_map(|marker| body.find(marker))
+        .min()
+        .unwrap_or_else(|| panic!("{route} guard found no fit/admission/load consumer"));
+        assert!(
+            attach_at < first_consumer,
+            "{route} attaches the selected encoder after its first fit/admission/load consumer"
+        );
+    }
+
+    // The generic MLX/Candle base lanes cover Krea/Qwen/Z/FLUX.2 txt2img, edits sharing the base
+    // registry provider, and ConvRot. Both must attach after the spec is complete and before planning.
+    let base = include_str!("base.rs");
+    for (route, function, consumer) in [
+        (
+            "generic MLX base routes",
+            "async fn generate_stream(",
+            "MlxRequestPlan::for_spec_and_manifest(",
+        ),
+        (
+            "generic Candle base routes and ConvRot",
+            "async fn generate_candle_stream(",
+            "candle_base_memory_request_mode(",
+        ),
+    ] {
+        let body = function_body(base, function);
+        let attach_at = body
+            .find("attach_manifest_text_encoder(")
+            .unwrap_or_else(|| panic!("{route} lost its selected encoder attachment"));
+        let consume_at = body
+            .find(consumer)
+            .unwrap_or_else(|| panic!("{route} lost its planner marker {consumer}"));
+        assert!(attach_at < consume_at, "{route} attaches after {consumer}");
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -122,6 +437,7 @@ impl HiresProbeGenerator {
                 modality: gen_core::Modality::Image,
                 capabilities: Default::default(),
                 control_kinds: None,
+                encoder_contract: None,
                 required_components: &[],
             },
             requests: Default::default(),

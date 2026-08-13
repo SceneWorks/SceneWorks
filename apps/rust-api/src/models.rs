@@ -2010,6 +2010,7 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
+    let selection_catalog = models.clone();
     for model in &mut models {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
@@ -2019,7 +2020,12 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
                 .flatten()
         });
         apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
-        apply_runtime_text_encoder_options(model, &state.settings.data_dir)?;
+        apply_runtime_text_encoder_options(
+            model,
+            &selection_catalog,
+            &state.settings.data_dir,
+            &state.settings.external_model_roots,
+        )?;
     }
     Ok(models)
 }
@@ -2030,19 +2036,87 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
 /// Models sees it without a server restart, while no repo/revision/download metadata is persisted.
 fn apply_runtime_text_encoder_options(
     model: &mut Value,
+    catalog: &[Value],
     data_dir: &FsPath,
+    external_roots: &[PathBuf],
 ) -> Result<(), ApiError> {
-    let adapter = model
-        .get("adapter")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let options = sceneworks_worker::text_encoder_options_for_adapter(adapter, data_dir);
+    let mut options =
+        sceneworks_worker::image_text_encoder_options(catalog, model, data_dir, external_roots)
+            .into_iter()
+            .map(|option| serde_json::to_value(option).expect("text encoder option serializes"))
+            .collect::<Vec<_>>();
+    if options.is_empty() {
+        let adapter = model
+            .get("adapter")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        options.extend(
+            sceneworks_worker::text_encoder_options_for_adapter(adapter, data_dir)
+                .into_iter()
+                .map(|option| {
+                    serde_json::to_value(option).expect("video text encoder option serializes")
+                }),
+        );
+    }
     set_runtime_text_encoder_options(model, options)
+}
+
+/// Resolve an authored Image Studio encoder selection through the worker-owned descriptor contract.
+/// Only the opaque id comes from the client. The path-bearing resolution is rebuilt from a fresh
+/// server catalog at every create/retry/duplicate boundary and is never trusted as request input.
+pub(crate) async fn resolve_selected_image_text_encoder(
+    state: &AppState,
+    job_payload: &JsonObject,
+    model_id: &str,
+    manifest_entry: &mut Value,
+) -> Result<(), ApiError> {
+    let selected = match job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("textEncoderModel"))
+    {
+        None => {
+            if let Some(object) = manifest_entry.as_object_mut() {
+                object.remove("resolvedTextEncoder");
+            }
+            return Ok(());
+        }
+        Some(Value::String(id)) if id == "default" => {
+            if let Some(object) = manifest_entry.as_object_mut() {
+                object.remove("resolvedTextEncoder");
+            }
+            return Ok(());
+        }
+        Some(Value::String(id)) => id.as_str(),
+        Some(_) => return Err(ApiError::bad_request(
+            "advanced.textEncoderModel must be a string option id returned by GET /api/v1/models",
+        )),
+    };
+
+    let catalog = model_catalog_snapshot(state).await?;
+    let catalog_model = catalog
+        .iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+        .unwrap_or(manifest_entry);
+    let resolution = sceneworks_worker::resolve_image_text_encoder_selection(
+        catalog.as_ref(),
+        catalog_model,
+        selected,
+        &state.settings.data_dir,
+        &state.settings.external_model_roots,
+    )
+    .map_err(ApiError::bad_request)?
+    .ok_or_else(|| ApiError::internal("non-default text encoder resolved as default"))?;
+    let object = manifest_entry
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert("resolvedTextEncoder".to_owned(), resolution);
+    Ok(())
 }
 
 fn set_runtime_text_encoder_options(
     model: &mut Value,
-    options: Vec<sceneworks_worker::TextEncoderOption>,
+    options: Vec<Value>,
 ) -> Result<(), ApiError> {
     let object = model
         .as_object_mut()
@@ -2050,7 +2124,7 @@ fn set_runtime_text_encoder_options(
     if options.is_empty() {
         object.remove("textEncoderOptions");
     } else {
-        object.insert("textEncoderOptions".to_owned(), json!(options));
+        object.insert("textEncoderOptions".to_owned(), Value::Array(options));
     }
     Ok(())
 }
@@ -2062,45 +2136,31 @@ mod runtime_text_encoder_option_tests {
     use crate::tests::support::isolate_hf_cache;
 
     #[test]
-    fn catalog_field_is_generic_and_contains_no_distribution_metadata() {
-        let mut model = json!({ "id": "future_video", "adapter": "future_adapter" });
+    fn catalog_field_is_path_free_and_default_can_be_omitted() {
+        let mut model = json!({ "id": "future_image" });
         set_runtime_text_encoder_options(
             &mut model,
             vec![
-                sceneworks_worker::TextEncoderOption {
-                    id: "default",
-                    label: "Bundled encoder (default)",
-                    description: "Uses the installed encoder.",
-                    is_default: true,
-                },
-                sceneworks_worker::TextEncoderOption {
-                    id: "future_staged_encoder",
-                    label: "Staged alternate",
-                    description: "Uses a complete operator-staged alternate.",
-                    is_default: false,
-                },
+                json!({
+                    "id": "default",
+                    "label": "Model encoder (default)",
+                    "description": "Uses the bundled encoder.",
+                    "isDefault": true
+                }),
+                json!({
+                    "id": "text_encoder_0123456789abcdef0123456789abcdef",
+                    "label": "Alternate",
+                    "description": "Contract validated.",
+                    "isDefault": false
+                }),
             ],
         )
         .unwrap();
-
-        let options = model["textEncoderOptions"].as_array().unwrap();
-        assert_eq!(options.len(), 2);
-        assert_eq!(options[1]["id"], "future_staged_encoder");
-        assert_eq!(options[1]["isDefault"], false);
-        for forbidden in ["repo", "revision", "files", "download"] {
-            assert!(
-                options.iter().all(|option| option.get(forbidden).is_none()),
-                "runtime options must not become distribution metadata: {forbidden}"
-            );
+        let serialized = serde_json::to_string(&model["textEncoderOptions"]).unwrap();
+        for forbidden in ["path", "repo", "revision", "files", "download"] {
+            assert!(!serialized.contains(forbidden), "{forbidden}");
         }
-    }
 
-    #[test]
-    fn models_without_a_runtime_surface_emit_no_selector_field() {
-        let mut model = json!({
-            "id": "fixed_encoder_model",
-            "textEncoderOptions": [{ "id": "stale" }]
-        });
         set_runtime_text_encoder_options(&mut model, Vec::new()).unwrap();
         assert!(model.get("textEncoderOptions").is_none());
     }
@@ -2116,7 +2176,7 @@ mod runtime_text_encoder_option_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn live_options_refresh_when_alternate_becomes_valid_or_corrupt() {
+    fn legacy_ltx_fallback_refreshes_when_alternate_becomes_valid_or_corrupt() {
         let _env = isolate_hf_cache();
         let data_dir = tempfile::tempdir().unwrap();
         let repo = sceneworks_core::hf_home::huggingface_repo_cache_path(
@@ -2139,17 +2199,18 @@ mod runtime_text_encoder_option_tests {
         write_tiny_safetensors(&snapshot.join("model.safetensors"));
 
         let mut model = json!({ "id": "ltx_2_3", "adapter": "ltx_video" });
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        let catalog = vec![model.clone()];
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 2);
 
         std::fs::write(snapshot.join("model.safetensors"), b"truncated").unwrap();
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         let options = model["textEncoderOptions"].as_array().unwrap();
         assert_eq!(options.len(), 1);
         assert_eq!(options[0]["id"], "default");
 
         std::fs::remove_dir_all(&repo).unwrap();
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 1);
     }
 }

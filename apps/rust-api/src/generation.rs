@@ -47,7 +47,9 @@ pub(crate) async fn create_image_job(
         .and_then(Value::as_str)
         .unwrap_or(payload.model.as_str())
         .to_owned();
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    let mut model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    resolve_selected_image_text_encoder(&state, &job_payload, &model_id, &mut model_manifest_entry)
+        .await?;
     // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
     // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
