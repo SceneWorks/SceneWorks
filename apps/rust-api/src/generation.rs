@@ -129,7 +129,7 @@ pub(crate) async fn create_image_job(
     if let Some(caption_request) = caption_request {
         crate::ideogram::spawn_ideogram_caption_watcher(state, job.id.clone(), caption_request);
     }
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Refuse material imported-control intent unless the selected native topology has an exact Pose
@@ -236,7 +236,7 @@ pub(crate) async fn create_vqa_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
@@ -280,7 +280,7 @@ pub(crate) async fn create_interleave_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
@@ -741,7 +741,7 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the
@@ -816,7 +816,7 @@ pub(crate) async fn create_audio_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an

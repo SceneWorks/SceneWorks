@@ -568,7 +568,7 @@ pub(crate) async fn create_model_download_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Build the worker `ModelDownload` job payload for one `download` entry of `model`. Factored out
@@ -1055,7 +1055,7 @@ pub(crate) async fn create_model_convert_job(
         requested_gpu_or_auto(payload.requested_gpu),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn delete_model(
@@ -1816,7 +1816,7 @@ pub(crate) async fn queue_model_import_job(
         "auto".to_owned(),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn model_import_request_from_multipart(

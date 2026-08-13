@@ -21,7 +21,7 @@ pub(crate) async fn list_jobs(
     .await?;
     handle_stale_sweep(&state, &sweep);
     let jobs = jobs?;
-    Ok(Json(jobs))
+    Ok(Json(public_job_snapshots(jobs)))
 }
 
 /// Worker → API write of a job's structured generation metrics (epic 10402).
@@ -114,7 +114,7 @@ pub(crate) async fn create_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn claim_job(
@@ -324,9 +324,9 @@ pub(crate) async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
-    Ok(Json(
+    Ok(Json(public_job_snapshot(
         store_call(state, move |store, _timeout| store.get_job(&job_id)).await?,
-    ))
+    )))
 }
 
 pub(crate) async fn cancel_job(
@@ -339,7 +339,7 @@ pub(crate) async fn cancel_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) async fn retry_job(
@@ -365,7 +365,7 @@ pub(crate) async fn retry_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
@@ -404,7 +404,7 @@ pub(crate) async fn duplicate_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
@@ -578,7 +578,7 @@ pub(crate) async fn cancel_pending_jobs(
     publish_queue(&state).await?;
     Ok(Json(CancelPendingJobsResponse {
         canceled: jobs.len(),
-        jobs,
+        jobs: public_job_snapshots(jobs),
         extra: Default::default(),
     }))
 }
@@ -598,7 +598,7 @@ pub(crate) async fn clear_job(
     .await?;
     publish(&state, "jobs.cleared", &json!({ "ids": [job.id.clone()] }));
     publish_queue(&state).await?;
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) async fn update_job_progress(
@@ -725,7 +725,7 @@ pub(crate) async fn update_job_progress(
     if status_changed {
         publish_queue(&state).await?;
     }
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) fn terminal_model_job_changes_catalog(job_type: &JobType, status: &JobStatus) -> bool {

@@ -864,6 +864,579 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
     }
 }
 
+/// SC-18314: server resolution is worker-private. Exercise the raw queue primitive with the exact
+/// typed-image metadata shape so every generic job projection is covered without depending on a
+/// platform provider fixture. The raw store and `/jobs/claim` must retain the resolution; every
+/// browser-visible HTTP/SSE shape must retain only the authored opaque id.
+#[tokio::test]
+async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let selected = temp_dir.path().join("server/private/selected.safetensors");
+    let selected_parent = selected.parent().expect("selected parent").to_path_buf();
+    let distinct_server_root = temp_dir.path().join("other/managed/models");
+    let distinct_canonical_target = temp_dir.path().join("outside/canonical/encoder.bin");
+    let selection_id = "text_encoder_0123456789abcdef0123456789abcdef";
+    let job_payload = json!({
+        "prompt": "/imagine a lake",
+        "installedPath": "/public/models/base.safetensors",
+        "sourcePath": "/public/loras/style.safetensors",
+        "selectedEcho": selected.display().to_string(),
+        "advanced": { "textEncoderModel": selection_id },
+        "modelManifestEntry": {
+            "resolvedTextEncoder": {
+                "selectionId": selection_id,
+                "sourceKind": "file",
+                "path": selected
+            }
+        }
+    });
+    let create_request = json!({
+        "type": "image_detail",
+        "projectId": "project-1",
+        "projectName": "Project 1",
+        "payload": job_payload,
+        "requestedGpu": "auto"
+    });
+    let assert_public = |surface: &str, value: &Value| {
+        let encoded = value.to_string();
+        assert!(
+            !encoded.contains("resolvedTextEncoder"),
+            "{surface} exposed server-private resolution: {value}"
+        );
+        assert!(
+            !encoded.contains(selected.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem path: {value}"
+        );
+        assert!(
+            !encoded.contains(selected_parent.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem prefix: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_server_root.to_string_lossy().as_ref()),
+            "{surface} exposed an allowed model root: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_canonical_target.to_string_lossy().as_ref()),
+            "{surface} exposed a distinct canonical target: {value}"
+        );
+    };
+
+    let mut events = state.events.subscribe();
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_public("create response", &created);
+    assert_eq!(
+        created["payload"]["advanced"]["textEncoderModel"],
+        selection_id
+    );
+    assert_eq!(created["payload"]["prompt"], "/imagine a lake");
+    assert_eq!(
+        created["payload"]["installedPath"],
+        "/public/models/base.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["sourcePath"],
+        "/public/loras/style.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["selectedEcho"],
+        "[selected text encoder]"
+    );
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    let raw = state.jobs_store.get_job(&job_id).expect("raw job reads");
+    assert_eq!(
+        raw.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "public projection must not mutate the worker-owned stored row"
+    );
+    assert_eq!(
+        raw.payload["selectedEcho"],
+        selected.display().to_string(),
+        "the raw worker payload must retain an exact selected-path echo"
+    );
+    let mut raw_with_extra = raw.clone();
+    raw_with_extra.status = sceneworks_core::contracts::JobStatus::Failed;
+    raw_with_extra.extra.insert(
+        distinct_canonical_target.display().to_string(),
+        Value::String(format!("extra value at {}", distinct_server_root.display())),
+    );
+    let projected_extra =
+        serde_json::to_value(crate::public_job_snapshot(raw_with_extra)).expect("job serializes");
+    assert_public("flattened extra key/value projection", &projected_extra);
+
+    for expected in ["job.updated", "queue.updated"] {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("create event arrives")
+            .expect("event stream remains open");
+        assert_eq!(event.event, expected);
+        assert_public(
+            &format!("live {expected}"),
+            &serde_json::from_str(&event.data).expect("event data parses"),
+        );
+    }
+
+    let (status, listed) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("list response", &listed);
+    let (status, fetched) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("get response", &fetched);
+    let (status, queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("queue response", &queue);
+
+    let (status, reconnect) = request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reconnect[1].0, "jobs.snapshot");
+    assert_public("reconnect jobs.snapshot", &reconnect[1].1);
+    assert_eq!(reconnect[2].0, "queue.updated");
+    assert_public("reconnect queue.updated", &reconnect[2].1);
+
+    for operation in ["retry", "duplicate"] {
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "prompt": format!("safe {operation}") } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {response}");
+        assert_public(&format!("{operation} response"), &response);
+    }
+
+    let (status, canceled_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled_one}");
+    assert_public("single cancel response", &canceled_one);
+    let (status, cleared_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_one}");
+    assert_public("single clear response", &cleared_one);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel-pending",
+        json!({ "projectId": "project-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_public("cancel-pending response", &canceled);
+
+    // Seed a fresh row for the one private boundary: a compatible worker claim. The raw payload
+    // must survive public projection intact so the worker can validate and prepare its receipt.
+    let (status, worker_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{worker_job}");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "Test GPU",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(
+        claimed["job"]["payload"]["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "the worker claim must retain the server-private exact source"
+    );
+    let claimed_id = claimed["job"]["id"].as_str().expect("claimed id");
+    while tokio::time::timeout(Duration::from_millis(25), events.next())
+        .await
+        .is_ok()
+    {}
+    let (status, progress) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "running",
+            "stage": "running",
+            "progress": 0.5,
+            "message": "halfway",
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{progress}");
+    assert_public("progress response", &progress);
+    let progress_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_event.event, "job.updated");
+    assert_public(
+        "progress job.updated",
+        &serde_json::from_str(&progress_event.data).expect("progress event parses"),
+    );
+    let progress_queue = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress queue.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_queue.event, "queue.updated");
+    assert_public(
+        "progress queue.updated",
+        &serde_json::from_str(&progress_queue.data).expect("progress queue event parses"),
+    );
+
+    let private_error = format!(
+        "Selected text encoder must be inside an app-managed directory ({}, {}). Pinned target changed from {} to {}",
+        selected_parent.display(),
+        distinct_server_root.display(),
+        selected.display(),
+        distinct_canonical_target.display()
+    );
+    let private_result = Value::Object(
+        [
+            (
+                distinct_canonical_target.display().to_string(),
+                Value::String(format!("receipt source: {}", selected.display())),
+            ),
+            (
+                distinct_server_root
+                    .join("second-target")
+                    .display()
+                    .to_string(),
+                Value::String(format!(
+                    "canonical parent: {}",
+                    distinct_server_root.display()
+                )),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let (status, failed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": format!("Selected encoder failed at {}", selected.display()),
+            "error": private_error,
+            "result": private_result,
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{failed}");
+    assert_public("failed progress response", &failed);
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Selected text encoder must be inside")));
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("[selected text encoder]")));
+    assert!(failed["result"]
+        .as_object()
+        .is_some_and(|result| result.values().any(|value| value == "[redacted collision]")));
+    let raw_failed = state
+        .jobs_store
+        .get_job(claimed_id)
+        .expect("raw failure reads");
+    assert_eq!(raw_failed.error.as_deref(), Some(private_error.as_str()));
+    assert!(raw_failed
+        .message
+        .contains(selected.to_string_lossy().as_ref()));
+    assert!(raw_failed
+        .result
+        .contains_key(distinct_canonical_target.to_string_lossy().as_ref()));
+    assert!(raw_failed.result.contains_key(
+        distinct_server_root
+            .join("second-target")
+            .to_string_lossy()
+            .as_ref()
+    ));
+    let failed_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("failed job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(failed_event.event, "job.updated");
+    assert_public(
+        "failed job.updated",
+        &serde_json::from_str(&failed_event.data).expect("failed event parses"),
+    );
+    let (status, failed_get) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{claimed_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed get response", &failed_get);
+    let (status, failed_list) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed list response", &failed_list);
+    let (status, failed_reconnect) =
+        request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed reconnect jobs.snapshot", &failed_reconnect[1].1);
+    assert_public("failed reconnect queue.updated", &failed_reconnect[2].1);
+    let (status, cleared_terminal) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_terminal}");
+    assert_public("terminal clear response", &cleared_terminal);
+
+    // The supervisor crash report wraps its snapshot in `Option<JobSnapshot>` rather than using
+    // the ordinary progress response. Claim one final raw row so that container boundary is also
+    // proven public while the persisted worker payload remains exact.
+    let (status, termination_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request).await;
+    assert_eq!(status, StatusCode::CREATED, "{termination_job}");
+    let termination_job_id = termination_job["id"]
+        .as_str()
+        .expect("termination job id")
+        .to_owned();
+    let (status, termination_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{termination_claim}");
+    assert_eq!(termination_claim["job"]["id"], termination_job_id);
+    let (status, terminated) = request(
+        app,
+        "POST",
+        "/api/v1/workers/worker-1/terminated",
+        json!({ "signal": 9, "exitCode": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{terminated}");
+    assert_eq!(terminated["id"], termination_job_id);
+    assert_public("worker-terminated response", &terminated);
+    let raw_terminated = state
+        .jobs_store
+        .get_job(&termination_job_id)
+        .expect("raw terminated job reads");
+    assert_eq!(
+        raw_terminated.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "worker-termination projection must not mutate the stored worker payload"
+    );
+}
+
+#[test]
+fn selected_encoder_root_file_parent_is_never_a_universal_redaction_prefix() {
+    #[cfg(unix)]
+    let selected = std::path::Path::new("/selected.safetensors");
+    #[cfg(windows)]
+    let selected = std::path::Path::new(r"C:\selected.safetensors");
+
+    let cases = [
+        (
+            "https://example.com/models/help",
+            "https://example.com/models/help",
+        ),
+        (
+            "keep this/that slash-bearing prose",
+            "keep this/that slash-bearing prose",
+        ),
+        ("/", "/"),
+        ("root: / and keep this", "root: / and keep this"),
+        ("root: /; keep this", "root: /; keep this"),
+        (r#"root: "/" and keep this"#, r#"root: "/" and keep this"#),
+        (
+            "/another/private/models/escaped.safetensors",
+            "[selected text encoder]",
+        ),
+    ];
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+
+    let mut selected = selected.display().to_string();
+    crate::redact_private_text_encoder_diagnostic(&mut selected);
+    assert_eq!(selected, "[selected text encoder]");
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_encoder_symlink_canonical_target_is_redacted_without_using_root() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let lexical_parent = temp_dir.path().join("managed/text-encoders");
+    let escaped_parent = temp_dir.path().join("outside-root");
+    std::fs::create_dir_all(&lexical_parent).expect("lexical parent creates");
+    std::fs::create_dir_all(&escaped_parent).expect("escaped parent creates");
+    let canonical_target = escaped_parent.join("target.safetensors");
+    std::fs::write(&canonical_target, b"sentinel").expect("target writes");
+    let lexical = lexical_parent.join("selected.safetensors");
+    std::os::unix::fs::symlink(&canonical_target, &lexical).expect("symlink creates");
+
+    let mut diagnostic = format!(
+        "Selected text encoder resolved from {} to {}; allowed roots: {}",
+        lexical.display(),
+        canonical_target.display(),
+        temp_dir.path().join("another/model/root").display()
+    );
+    crate::redact_private_text_encoder_diagnostic(&mut diagnostic);
+    assert!(!diagnostic.contains(temp_dir.path().to_string_lossy().as_ref()));
+    assert!(diagnostic.contains("Selected text encoder resolved from"));
+    assert!(diagnostic.contains("[selected text encoder]"));
+}
+
+#[test]
+fn selected_encoder_path_token_scrubber_handles_wrappers_and_preserves_web_urls() {
+    let cases = [
+        ("source:/private/model", "source:[selected text encoder]"),
+        ("`/private/model with spaces`", "[selected text encoder]"),
+        ("</private/model>", "[selected text encoder]"),
+        (
+            r"source=C:\Models\private\model",
+            "source=[selected text encoder]",
+        ),
+        (
+            r"source=\\server\share\private\model",
+            "source=[selected text encoder]",
+        ),
+        ("file:///private/model", "[selected text encoder]"),
+        (
+            "https://example.com/private/model",
+            "https://example.com/private/model",
+        ),
+        (
+            "//cdn.example.com/private/model",
+            "//cdn.example.com/private/model",
+        ),
+        ("relative/model", "relative/model"),
+        ("./relative/model", "./relative/model"),
+        ("../relative/model", "../relative/model"),
+        ("~/relative/model", "~/relative/model"),
+        ("${HOME}/relative/model", "${HOME}/relative/model"),
+        (
+            "/Volumes/External Models/encoder.safetensors changed",
+            "[selected text encoder]",
+        ),
+        (
+            "at /tmp/private see https://example.com/public",
+            "at [selected text encoder]",
+        ),
+        ("/💾", "[selected text encoder]"),
+        ("/_", "[selected text encoder]"),
+        ("/...", "[selected text encoder]"),
+        ("/", "/"),
+        (r"C:\", r"C:\"),
+    ];
+
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+}
+
+#[test]
+fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() {
+    let file = crate::private_text_encoder_path_spellings("/models/x.safetensors", Some("file"));
+    let windows_file =
+        crate::private_text_encoder_path_spellings("C:/Models/x.safetensors", Some("file"));
+    let directory =
+        crate::private_text_encoder_path_spellings("/models/encoder", Some("directory"));
+    let trailing_directory =
+        crate::private_text_encoder_path_spellings("/models/encoder/", Some("directory"));
+    let cases = [
+        (&file, "/models/x.safetensors", "[selected text encoder]"),
+        (
+            &file,
+            "file:///models/x.safetensors",
+            "file://[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:///C:/Models/x.safetensors",
+            "file:///[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:/C:/Models/x.safetensors",
+            "file:/[selected text encoder]",
+        ),
+        (
+            &file,
+            "/models/x.safetensors.backup",
+            "/models/x.safetensors.backup",
+        ),
+        (
+            &directory,
+            "/models/encoder changed",
+            "[selected text encoder] changed",
+        ),
+        (
+            &directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (
+            &trailing_directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (&directory, "/models/encoder-v2", "/models/encoder-v2"),
+        (
+            &directory,
+            "/backup/models/encoder",
+            "/backup/models/encoder",
+        ),
+        (
+            &directory,
+            "https://example.com/models/encoder",
+            "https://example.com/models/encoder",
+        ),
+    ];
+
+    for (spellings, input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_selected_text_encoder_paths(&mut actual, spellings);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+}
+
 #[test]
 fn serialize_job_lora_carries_network_type_to_payload() {
     // A trained LoKr adapter records networkType (epic 2193); the generation
