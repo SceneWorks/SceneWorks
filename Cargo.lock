@@ -6500,6 +6500,7 @@ dependencies = [
  "pmetal-mlx-rs",
  "runtime-cuda",
  "runtime-macos",
+ "sceneworks-gen-core-testkit",
  "serde_json",
  "sha2 0.10.9",
 ]

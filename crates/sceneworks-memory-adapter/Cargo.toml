@@ -22,6 +22,9 @@ sha2 = "0.10"
 candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "fc92b21cbbf40436bc2fc49ae452d725fe23986d", features = ["cuda", "testkit"], optional = true }
 runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "fc92b21cbbf40436bc2fc49ae452d725fe23986d", optional = true }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "fc92b21cbbf40436bc2fc49ae452d725fe23986d" }
+
 [features]
 default = []
 mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-krea", "dep:mlx-gen-sdxl", "dep:mlx-rs", "dep:runtime-macos"]
