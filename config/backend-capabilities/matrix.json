@@ -4,8 +4,8 @@
   "summary": {
     "modelCount": 91,
     "cellCount": 868,
-    "mlxOnlyCellCount": 166,
-    "candleOnlyCellCount": 37,
+    "mlxOnlyCellCount": 124,
+    "candleOnlyCellCount": 41,
     "exceptionCount": 0
   },
   "sources": {
@@ -13,16 +13,16 @@
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
     "apiGeneration": "fdf2170b59442994679decea4516c80658c2c407326d6f6a72444ead30e30ff6",
     "apiValidation": "4057d142373904f43546de63248b2dd9cd016998df901664921051fd80df7be2",
-    "descriptorAudioFacts": "66f822afa2316b5afc530b828c398cb0cab68535f0297bfb0fc7fbaa9f0bc463",
-    "descriptorCandleFacts": "7e6ce631d94f8b13f6e5cc32a08a1a45ed54ba1e7b5d6f3f60f8631cbde1f1ac",
-    "descriptorCandleRuntime": "5cdf988531991c10c9b64e663c8393a8cb5b1e2be33a32bd5eb571ec14b4812b",
-    "descriptorMlxFacts": "df989d5355fd02465c66989c2372a9cc49267dbe0eb5be7ff028c1ea54ac2188",
-    "descriptorMlxRuntime": "0866b011a00be9953608d5b6a4e98f7c2917929bca8de3f8bc4ffae3d8426d93",
-    "descriptorPreviewFacts": "c8a80770af1e7cb8b23719f2ed8f24d3e9935c543da844cf3f0bc572afb34544",
+    "descriptorAudioFacts": "8fdd9f42086295e35e9ad57f19decce27d6aba029fbfb93c36eff9a62c46349b",
+    "descriptorCandleFacts": "74ce256fe10d0632cf5ebd930e3521007f9b3f7a24e8cec2dee5484f72eea7c6",
+    "descriptorCandleRuntime": "8c35ac3ec8cdbff8111588d0ff4829a31865a7e4cda12dd0c8fc4b36da25964c",
+    "descriptorMlxFacts": "f5fa3ef70d6a4444994193640f26b5152e05bb4b0fd65db8ba783626d4dd68d5",
+    "descriptorMlxRuntime": "c3daad70fe74ce7aba5ac342a2b6f60932118c5829973d771a6954dfcc92daab",
+    "descriptorPreviewFacts": "8658bd494caa9ba9582b7b50619c5e2fcf6e04e5f37b06d0a0ba9a7700799c38",
     "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
     "manifest": "e82ffbd0016f22c065fa77d95dcc1b32d99e052d662a8e82bad5e12a2acdf70d",
-    "routerCandle": "19eb34ee5877dfb5866734c5511efc8f8d9f0954208ca75f93168c3abbf2d00c",
-    "routerCatalog": "de3fbbc6315c14def35e6c6a49c3f6c4980601a5d9e70e809ceab3e0df127c3b",
+    "routerCandle": "27749770c45089ca79391751d573c95142d4f9880be81decd62ebcfae91028f5",
+    "routerCatalog": "affc9edbee77e520b0ea6d4c6a5d2f4c327baeacd0b3551af521b91435a3f9ed",
     "routerGaps": "e2b2fa7a5fe90832ff46f6de3fdf29a71c28ef5ed5e63b0faebe2dfbf51b99f1",
     "routerMlx": "cb9ae8bb3a39360bf039b22e3b52781304c089a2adfe0f78b2b22da12e089d87",
     "scheduler": "1b05c5c9c33fe036276bffeb400637575dbcab309a2977e8b1702bfce669d52f",
@@ -44,10 +44,10 @@
     "workerDispatch": "e39682f095cb924ebe555d688af3c5d704c2acb60451da606e7d408c0faf300b",
     "workerEngineTable": "ba4fbcc655cecf0d7c7235e4f894638a6c1a1d5c02837f82dc387929e5819c4d",
     "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
-    "workerImageDispatch": "f00b0b56a6806e35314839b5a79defba3c0e574d580c5b79b444eab4b9813976",
+    "workerImageDispatch": "c98239ce45cdf6a04ec394dc6110f27575f96ffdf285e42d2411edcd3294a0ca",
     "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
-    "workerVideoBernini": "0884a375e5006409d6f892212e1a4cb2bb250c18a8ef11f948d3d3098f63a651",
+    "workerVideoBernini": "b77f3667024dfc483ed8903f95218d5dc4155b4c22e5ccf680f73aa8154cb2ce",
     "workerVideoCandle": "209e2e9760c8e3afc1482855a4c0052e6575d305542677a8782dc099a34f8f30",
     "workerVideoDispatch": "8686346f7e665ab8974d3bd7316826d8b3cac9699719a722c7ef225c750dc183",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
@@ -57,7 +57,7 @@
     "workerVideoSeedvr2": "632d4afe9649858e8f73d226c46276a3222a2c129f2a3afabd24b0640727e0cf",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
-    "workerVideoWan": "0dcef4a504e0d1b92ee47bd2556d8a5a135947175022f9dcc1a65b89c76f2657"
+    "workerVideoWan": "3ed36c07dd84ed016735ead3aaf0377164be134359e268c729fa975e20c67e83"
   },
   "models": [
     {
@@ -391,12 +391,14 @@
         {
           "capability": "lora",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         },
         {
           "capability": "lokr",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         }
       ],
       "precisionTier": [
@@ -468,12 +470,14 @@
         {
           "capability": "lora",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         },
         {
           "capability": "lokr",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         }
       ],
       "precisionTier": [
@@ -770,20 +774,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -848,20 +844,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -926,20 +914,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -1198,20 +1178,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -1285,20 +1257,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -1372,20 +1336,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -1468,20 +1424,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -1553,20 +1501,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -1650,20 +1590,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -2150,20 +2082,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -3024,20 +2948,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -3082,20 +2998,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -3323,20 +3231,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -3733,20 +3633,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -3808,20 +3700,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -3893,20 +3777,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -4523,20 +4399,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -4593,20 +4461,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -4663,20 +4523,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -6125,20 +5977,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -6272,20 +6116,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [

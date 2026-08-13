@@ -889,6 +889,7 @@ fn bespoke_image_lane_support(
                 (category, capability),
                 ("operation", "edit_image" | "character_image")
                     | ("conditioning", "reference" | "multiReference")
+                    | ("adapter", "lora" | "lokr")
             )
         }
         CandleImageLane::Flux2Edit => {
@@ -1365,10 +1366,18 @@ fn adapter_cell(
         canonical_model_request(model, modality, mlx_facts, candle_facts)?;
     payload["loras"] = json!([{ "id": "probe", "networkType": adapter }]);
     let job = probe_job(job_type, &model.id, payload)?;
-    let mlx = descriptor_supports_adapter(mlx_facts, &model.id, None, adapter)
-        && backend_supports(&job, mlx_facts)?;
-    let candle = descriptor_supports_adapter(candle_facts, &model.id, None, adapter)
-        && backend_supports(&job, candle_facts)?;
+    let supports = |facts: &RuntimeDescriptorFacts| {
+        descriptor_supports_adapter(facts, &model.id, None, adapter)
+            || bespoke_image_lane_support(
+                &facts.snapshot.backend,
+                &model.id,
+                "adapter",
+                adapter,
+                &job,
+            )
+    };
+    let mlx = supports(mlx_facts) && backend_supports(&job, mlx_facts)?;
+    let candle = supports(candle_facts) && backend_supports(&job, candle_facts)?;
     Ok(cell(
         adapter.to_owned(),
         mlx,
@@ -2680,6 +2689,27 @@ mod tests {
                     .find(|cell| cell.capability == operation)
                     .unwrap();
                 assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
+            }
+        }
+    }
+
+    #[test]
+    fn sc18477_bespoke_qwen_edit_adapter_cells_match_production_routes() {
+        let matrix = backend_capability_matrix().unwrap();
+        for model in ["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            for adapter in ["lora", "lokr"] {
+                let cell = row
+                    .user_adapters
+                    .iter()
+                    .find(|cell| cell.capability == adapter)
+                    .unwrap();
+                assert_eq!(
+                    (cell.mlx, cell.candle),
+                    (Some(true), Some(true)),
+                    "{model}/{adapter} must match the bespoke Qwen-Edit route"
+                );
+                assert!(cell.parity_obligation.is_none());
             }
         }
     }
