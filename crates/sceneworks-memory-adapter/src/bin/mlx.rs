@@ -5531,10 +5531,23 @@ fn ltx_staging_is_proven(
 /// two-instant co-existence bound (see [`PhaseMemory::json`]), and for a staged video capture the
 /// allocator cache reaches 72-106 GB, so a ceiling over it predicts ~150 GB of demand on a 128 GiB
 /// host for a render that completed comfortably. A gate must budget the RESIDENT demand; the cache
-/// is elastic and MLX releases it under pressure. The image arms are left on their historical
-/// `allocator_bytes` input because changing them would move shipped admission decisions on
-/// evidence this story did not re-measure — their caches are <= 6.4 GB, so the two definitions
-/// differ by under 5% there. Raised on sc-18864 as a follow-up for the image lane.
+/// is elastic and MLX releases it under pressure.
+///
+/// The image arms are left on their historical `allocator_bytes` input, and the reason is
+/// DIRECTIONAL, not a matter of magnitude. Measured over the 69 MLX image records in
+/// `docs/generated/memory-calibration-evidence.json`, the two definitions are NOT close: 39 of 69
+/// records carry a phase whose `reclaimableBytes` exceeds 6.4 GB (up to 45.62 GB), 60 of 69 diverge
+/// by more than 5%, and the worst phase diverges by 117.7% (`imc-2cd840a85ce33b4f22a9` denoise,
+/// krea-2-turbo, 19.98 GB of cache). Per arm the worst divergences are krea-2-turbo 117.7%,
+/// flux2-dev 105.6%, z-image-turbo 65.2% and qwen-image 14.4% — only the qwen ladder's 6.45 GB
+/// worst-case cache is anywhere near "6.4 GB", and generalising that one arm to the lane was wrong.
+/// The shipped image records consequently over-predict their own measured resident peak by
+/// 1.05x-2.16x (`imc-b6537074420d51413b38` predicts 93.28 GB against a 43.18 GB resident peak).
+///
+/// That over-prediction is why the input is left alone: a ceiling over the co-existence bound is
+/// CONSERVATIVE — it never under-predicts — so switching the image arms to `active` would LOOSEN
+/// shipped admission decisions on evidence this story did not re-measure. Raised on sc-19115 as a
+/// follow-up for the image lane, which must re-measure before it moves the input.
 fn ltx_predicted_peak_bytes(
     conditioning: PhaseMemory,
     denoise: PhaseMemory,

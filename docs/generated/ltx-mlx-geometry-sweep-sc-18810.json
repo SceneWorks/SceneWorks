@@ -50,7 +50,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 149786984448
+            "value": 39862665216
           },
           {
             "name": "denoiseEntryActive",
@@ -369,7 +369,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 157168959488
+            "value": 47177531392
           },
           {
             "name": "denoiseEntryActive",
@@ -688,7 +688,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 160994164736
+            "value": 50935627776
           },
           {
             "name": "denoiseEntryActive",
@@ -1007,7 +1007,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 167637942272
+            "value": 56908316672
           },
           {
             "name": "denoiseEntryActive",
@@ -1326,7 +1326,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148914569216
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -1645,7 +1645,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 113883742208
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -1964,7 +1964,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 140257525760
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -2283,7 +2283,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 114219286528
+            "value": 37379637248
           },
           {
             "name": "denoiseEntryActive",
@@ -2602,7 +2602,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148981678080
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -2921,7 +2921,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148981678080
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -3240,7 +3240,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 139720654848
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -3559,7 +3559,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148444807168
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -3878,7 +3878,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 113950851072
+            "value": 37379637248
           },
           {
             "name": "denoiseEntryActive",

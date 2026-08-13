@@ -1107,7 +1107,8 @@ above** Metal's `recommendedMaxWorkingSetSize` (§6c). Both `validate_complete` 
 `validate_runtime_complete` — and their JS mirrors — now run that check against `activeBytes`.
 
 Schema v4 also carried `deviceBytes` and `wiredBytes`. **Both adapters set them to verbatim copies
-of `allocatorBytes`**, provably so across all 321 committed phase objects, and MLX exposes no third
+of `allocatorBytes`**, provably so across all 456 committed phase objects that carried them (404
+across the five bundles plus 52 in the thirteen immutable v4 receipts), and MLX exposes no third
 counter they could have carried. Schema v5 removes them rather than inventing readings for them, so
 a record can no longer *represent* `wiredBytes > hardware.wiredLimitBytes` — the shape every
 committed MLX record used to carry, and the reason none could be promoted past `gated`.

@@ -686,6 +686,30 @@ function validateRuntimeComplete(record) {
   assertResidencyFitsHardware(record);
 }
 
+// sc-18864 review: `diagnostics.measurements.predictedOverallCeiling` is a DIAGNOSTIC COPY of the
+// typed `predictedPeakBytes.overall`. The LTX arm derives both from `predicted_ceiling` over the
+// same `overall.active` peak and says so in its own comment ("Agrees with the emitted
+// predictedPeakBytes.overall by construction"). Nothing compared them, so when this story moved
+// `predictedPeakBytes` onto the resident peak, all 14 committed LTX records kept a diagnostic still
+// computed over the `allocatorBytes` co-existence bound: 2.5-4x the typed field sitting beside it,
+// and `imc-2c064567893ea869006e` publishing 149.79 GB of predicted demand on a 130.57 GB host — the
+// exact impossible figure this story exists to remove. An unchecked copy is a SECOND, UNVERSIONED
+// DEFINITION of one quantity, which is the drift this story closes. The rule is EQUALITY, not an
+// ordering: an ordering is what let the two spellings diverge in the first place.
+function validateDiagnosticCeilingAgreesWithTypedField(record) {
+  const measurements = record.diagnostics?.measurements;
+  if (!Array.isArray(measurements)) return;
+  const declared = measurements.find((entry) => entry?.name === "predictedOverallCeiling");
+  const typed = record.predictedPeakBytes?.overall;
+  if (declared === undefined || typeof typed !== "number") return;
+  if (declared.value !== typed) {
+    fail(
+      `${record.id}: diagnostics predictedOverallCeiling ${declared.value} must equal ` +
+        `predictedPeakBytes.overall ${typed}`,
+    );
+  }
+}
+
 export function validateRecord(record) {
   object(record, "record");
   text(record.id, "record.id");
@@ -724,6 +748,7 @@ export function validateRecord(record) {
   object(record.loadability, `${record.id}.loadability`);
   object(record.quality, `${record.id}.quality`);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
+  validateDiagnosticCeilingAgreesWithTypedField(record);
   if (record.status === "complete") validateComplete(record);
   if (record.status === "runtime_complete") validateRuntimeComplete(record);
   if (record.status === "negative_complete") validateNegative(record);

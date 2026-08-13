@@ -271,10 +271,12 @@ test("runtime-complete MLX telemetry is held to the probed wired ceiling", () =>
 
   // And the co-existence BOUND may sit far above the host without disqualifying the capture: it is
   // a peak-over-window summed with an instantaneous cache reading, which the allocator releases
-  // under pressure. This is the shape every committed LTX record carries.
+  // under pressure. This is the shape every committed LTX record carries, and these two numbers are
+  // `imc-2c064567893ea869006e`'s `observedMemory.overall` pair verbatim (their sum is its
+  // `allocatorBytes`, 142_648_318_860, against a 137_438_953_472-byte host).
   const elasticCache = structuredClone(atLimit);
-  const resident = 35_678_641_896;
-  const reclaimable = 106_969_676_964;
+  const resident = 37_931_479_408;
+  const reclaimable = 104_716_839_452;
   assert.ok(resident + reclaimable > elasticCache.hardware.memoryBytes, "fixture must discriminate");
   for (const name of ["conditioning", "denoise", "decode", "overall"]) {
     elasticCache.observedMemory[name] = {
@@ -474,6 +476,16 @@ test("complete status fails closed on scenario, quality, mutation, memory and lo
     [(r) => (r.observedMemory.overall = { activeBytes: 1, allocatorBytes: 1, reclaimableBytes: 0 }), /cover/],
     [(r) => (r.observedMemory.decode.allocatorBytes = 1), /allocator bytes must equal/],
     [(r) => (r.observedMemory.decode.reclaimableBytes = 999), /allocator bytes must equal/],
+    // sc-18864 review: the two rows above both drive `allocatorBytes` BELOW `active + reclaimable`,
+    // so a regression of the identity to the old one-sided `allocator >= active + reclaimable`
+    // shipped green in JS while the Rust mirror caught it. This row drives it ABOVE the sum — the
+    // direction that lets a DERIVED field inflate past its own derivation, which is precisely the
+    // drift this story removes. `overall` is raised in step so the failure is the identity rule and
+    // not the overall-covers-phases rule that would otherwise fire first.
+    [(r) => {
+      r.observedMemory.decode.allocatorBytes = r.observedMemory.decode.allocatorBytes + 5_000;
+      r.observedMemory.overall.allocatorBytes = r.observedMemory.decode.allocatorBytes;
+    }, /allocator bytes must equal/],
     [(r) => (r.hardware.memoryBytes = 100), /exceed probed hardware/],
     [(r) => (r.loadability.resolvedPathFingerprint = ""), /non-empty/],
     [(r) => (r.quality.contract = ""), /non-empty/],
@@ -1363,6 +1375,49 @@ test("gated real-adapter diagnostics are closed, typed, and never promote eviden
       /schema validation failed/,
     );
   }
+});
+
+// sc-18864 review GUARD: `predictedOverallCeiling` is a diagnostic COPY of the typed
+// `predictedPeakBytes.overall`, and the LTX arm's own comment says they agree by construction.
+// Nothing compared them, so all 14 committed LTX records shipped a diagnostic still computed over
+// the `allocatorBytes` co-existence bound while the typed field beside it carried the resident
+// peak. Both directions are rejected: an ordering in either direction is what let one quantity
+// carry two values.
+test("a diagnostic ceiling that disagrees with the typed predicted peak is refused in both directions", () => {
+  // The numbers are `imc-2c064567893ea869006e` verbatim: its migrated diagnostic and typed field,
+  // and the pre-migration value that this guard would have caught.
+  const agreeing = 39_862_665_216;
+  const preMigrationOverBound = 149_786_984_448;
+  const record = complete({
+    status: "gated",
+    evidenceScope: "authoritative",
+    diagnostics: {
+      adapter: "memory-mlx-adapter:ltx-2-3-staged-video",
+      execution: "executed",
+      blockers: ["the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all"],
+      measurements: [{ name: "predictedOverallCeiling", unit: "bytes", value: agreeing }],
+    },
+  });
+  record.predictedPeakBytes = { conditioning: 100, denoise: 200, decode: 150, overall: agreeing };
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+
+  // ABOVE the typed field — the real committed defect, a ceiling over `allocatorBytes`.
+  const above = structuredClone(record);
+  above.diagnostics.measurements[0].value = preMigrationOverBound;
+  assert.throws(() => validateRecord(above), /predictedOverallCeiling .* must equal predictedPeakBytes\.overall/);
+
+  // BELOW the typed field — the mirror error, and the direction a one-sided rule would miss.
+  const below = structuredClone(record);
+  below.diagnostics.measurements[0].value = agreeing - 64 * 1024 * 1024;
+  assert.throws(() => validateRecord(below), /predictedOverallCeiling .* must equal predictedPeakBytes\.overall/);
+
+  // A record carrying only one of the two is untouched: the candle arm emits a null
+  // `predictedPeakBytes`, and most arms emit no such diagnostic at all.
+  const typedOnly = structuredClone(record);
+  typedOnly.diagnostics.measurements = [{ name: "preRungActiveAfterClear", unit: "bytes", value: 1 }];
+  assert.equal(validateRecord(typedOnly), typedOnly);
 });
 
 test("parameterless strategies use a truthful degenerate sweep instead of a fabricated field", () => {

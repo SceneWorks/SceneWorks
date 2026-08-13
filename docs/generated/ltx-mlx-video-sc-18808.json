@@ -50,7 +50,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 104756936704
+            "value": 37379637248
           },
           {
             "name": "denoiseEntryActive",

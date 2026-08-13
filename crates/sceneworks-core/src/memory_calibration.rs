@@ -3441,15 +3441,15 @@ mod tests {
     /// sc-18864, GUARD 4 and the story's headline claim: a soundly-measured MLX capture whose
     /// allocator BOUND exceeds the host is admissible, while one whose RESIDENT peak does is not.
     ///
-    /// The numbers are `imc-2c064567893ea869006e` verbatim — a q8 LTX render that completed,
-    /// returned all 121 frames and was bit-identical on warm repeat, yet reported
-    /// `observedMemory.overall.deviceBytes` of 142.6 GB against a 137.4 GB host and was refused
-    /// promotion for it. `allocatorBytes` still carries that 142.6 GB, because it is a real upper
-    /// bound across two instants; it is simply not the quantity a host-capacity check may use.
+    /// The numbers are `imc-2c064567893ea869006e`'s `observedMemory.overall` pair verbatim — a q8
+    /// LTX render that completed, returned all 121 frames and was bit-identical on warm repeat, yet
+    /// reported `observedMemory.overall.deviceBytes` of 142.6 GB against a 137.4 GB host and was
+    /// refused promotion for it. `allocatorBytes` still carries that 142.6 GB, because it is a real
+    /// upper bound across two instants; it is simply not the quantity a host-capacity check may use.
     #[test]
     fn a_sound_mlx_capture_reaches_runtime_complete_despite_an_over_host_allocator_bound() {
-        const LTX_RESIDENT: u64 = 35_678_641_896;
-        const LTX_RECLAIMABLE: u64 = 106_969_676_964;
+        const LTX_RESIDENT: u64 = 37_931_479_408;
+        const LTX_RECLAIMABLE: u64 = 104_716_839_452;
 
         let clean: Value =
             serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");

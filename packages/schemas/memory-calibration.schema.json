@@ -31,7 +31,7 @@
     "phase": {
       "type": "object", "additionalProperties": false,
       "description":
-        "Per-phase memory counters. Every field is ONE named backend reading, or an explicitly derived function of two of them. schemaVersion 5 (sc-18864) REMOVED `deviceBytes` and `wiredBytes`: both adapters emitted them as verbatim copies of `allocatorBytes` — provably so across all 321 committed phase objects — so a record could assert `wiredBytes > hardware.wiredLimitBytes` purely as an artifact of that aliasing, and every committed MLX record did. MLX exposes no third counter for them to have carried, so they are removed rather than redefined.",
+        "Per-phase memory counters. Every field is ONE named backend reading, or an explicitly derived function of two of them. schemaVersion 5 (sc-18864) REMOVED `deviceBytes` and `wiredBytes`: both adapters emitted them as verbatim copies of `allocatorBytes` — provably so across all 456 committed phase objects that carried them (404 across the five bundles plus 52 in the thirteen immutable v4 receipts) — so a record could assert `wiredBytes > hardware.wiredLimitBytes` purely as an artifact of that aliasing, and every committed MLX record did. MLX exposes no third counter for them to have carried, so they are removed rather than redefined.",
       "required": ["activeBytes", "allocatorBytes", "reclaimableBytes"],
       "properties": {
         "activeBytes": {
