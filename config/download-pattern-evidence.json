@@ -104,9 +104,9 @@
       ]
     },
     {
-      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control@main",
+      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control@572bb9c9a1ba3d8e8724cce69783ffc2422386db",
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
-      "revision": null,
+      "revision": "572bb9c9a1ba3d8e8724cce69783ffc2422386db",
       "resolvedSha": "572bb9c9a1ba3d8e8724cce69783ffc2422386db",
       "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
       "gated": false,
@@ -118,9 +118,9 @@
       ]
     },
     {
-      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control@main",
+      "key": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control@b4d1c4d8c9e544e9bbbd6811bb4363708b6093ff",
       "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
-      "revision": null,
+      "revision": "b4d1c4d8c9e544e9bbbd6811bb4363708b6093ff",
       "resolvedSha": "b4d1c4d8c9e544e9bbbd6811bb4363708b6093ff",
       "servedRepo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
       "gated": false,
@@ -2802,9 +2802,9 @@
       ]
     },
     {
-      "key": "SceneWorks/scail2-dpo-lora@main",
+      "key": "SceneWorks/scail2-dpo-lora@15c2060c7604e18c33a9220402123ad440643d20",
       "repo": "SceneWorks/scail2-dpo-lora",
-      "revision": null,
+      "revision": "15c2060c7604e18c33a9220402123ad440643d20",
       "resolvedSha": "15c2060c7604e18c33a9220402123ad440643d20",
       "servedRepo": "SceneWorks/scail2-dpo-lora",
       "gated": false,
@@ -3986,9 +3986,9 @@
       ]
     },
     {
-      "key": "TenStrip/LTX2.3-10Eros@main",
+      "key": "TenStrip/LTX2.3-10Eros@84a05a13610d78dbe4340d1be23fd8185e10f697",
       "repo": "TenStrip/LTX2.3-10Eros",
-      "revision": null,
+      "revision": "84a05a13610d78dbe4340d1be23fd8185e10f697",
       "resolvedSha": "84a05a13610d78dbe4340d1be23fd8185e10f697",
       "servedRepo": "TenStrip/LTX2.3-10Eros",
       "gated": false,
@@ -4010,9 +4010,9 @@
       ]
     },
     {
-      "key": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments@main",
+      "key": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments@9c3548954510182827d7bfc872fd7cceb64230fd",
       "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
-      "revision": null,
+      "revision": "9c3548954510182827d7bfc872fd7cceb64230fd",
       "resolvedSha": "9c3548954510182827d7bfc872fd7cceb64230fd",
       "servedRepo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
       "gated": false,
@@ -4079,9 +4079,9 @@
       ]
     },
     {
-      "key": "conradlocke/krea2-identity-edit@main",
+      "key": "conradlocke/krea2-identity-edit@89e9e7a09ee2e5c9331e952063d79b1b8a703280",
       "repo": "conradlocke/krea2-identity-edit",
-      "revision": null,
+      "revision": "89e9e7a09ee2e5c9331e952063d79b1b8a703280",
       "resolvedSha": "89e9e7a09ee2e5c9331e952063d79b1b8a703280",
       "servedRepo": "conradlocke/krea2-identity-edit",
       "gated": false,
@@ -4117,9 +4117,9 @@
       ]
     },
     {
-      "key": "fal/AuraSR-v2@main",
+      "key": "fal/AuraSR-v2@ff452185a7c8b51206dd62c21c292e7baad5c3a3",
       "repo": "fal/AuraSR-v2",
-      "revision": null,
+      "revision": "ff452185a7c8b51206dd62c21c292e7baad5c3a3",
       "resolvedSha": "ff452185a7c8b51206dd62c21c292e7baad5c3a3",
       "servedRepo": "fal/AuraSR-v2",
       "gated": false,
@@ -4298,9 +4298,9 @@
       ]
     },
     {
-      "key": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v@main",
+      "key": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v@fef288b326f4fed6d2983b9800c35363da31fcfe",
       "repo": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v",
-      "revision": null,
+      "revision": "fef288b326f4fed6d2983b9800c35363da31fcfe",
       "resolvedSha": "fef288b326f4fed6d2983b9800c35363da31fcfe",
       "servedRepo": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v",
       "gated": false,
@@ -4451,9 +4451,9 @@
       ]
     },
     {
-      "key": "lightx2v/Wan2.2-Lightning@main",
+      "key": "lightx2v/Wan2.2-Lightning@18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
       "repo": "lightx2v/Wan2.2-Lightning",
-      "revision": null,
+      "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
       "resolvedSha": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
       "servedRepo": "lightx2v/Wan2.2-Lightning",
       "gated": false,
@@ -4644,9 +4644,9 @@
       ]
     },
     {
-      "key": "wikeeyang/Flux2-Klein-9B-True-V2@main",
+      "key": "wikeeyang/Flux2-Klein-9B-True-V2@9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
       "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
-      "revision": null,
+      "revision": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
       "resolvedSha": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
       "servedRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
       "gated": false,
@@ -4669,9 +4669,9 @@
       ]
     },
     {
-      "key": "xinsir/controlnet-tile-sdxl-1.0@main",
+      "key": "xinsir/controlnet-tile-sdxl-1.0@1ae8d9529efe58f7362a987363ff86a7904dc84f",
       "repo": "xinsir/controlnet-tile-sdxl-1.0",
-      "revision": null,
+      "revision": "1ae8d9529efe58f7362a987363ff86a7904dc84f",
       "resolvedSha": "1ae8d9529efe58f7362a987363ff86a7904dc84f",
       "servedRepo": "xinsir/controlnet-tile-sdxl-1.0",
       "gated": false,

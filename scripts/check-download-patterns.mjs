@@ -46,17 +46,10 @@
 // The usual objection to a recorded fixture is decay. It does not apply here, for two
 // structural reasons:
 //
-//  1. **84 of 95 keys are pinned to an immutable 40-hex revision.** A git SHA's file listing
-//     is timeless — re-reading it in a year returns the same bytes. There is nothing to
-//     decay.
-//
-//     The other **11 keys are unrevisioned** and this argument does NOT cover them. They read a
-//     moving default branch, and while each records the `resolvedSha` it actually read — so drift
-//     is VISIBLE in a re-record diff — nothing forces anyone to re-record. That is a real
-//     stale-green window, and it is 11 keys wide, not one. **sc-18924 tracks pinning all of them**,
-//     which is what converts them onto the immutability argument above. sc-18917 pinned the renamed
-//     LipDub/DubIt entry and sc-18923 pinned/rehosted HDR plus DubIt; the remaining eleven are
-//     sc-18924's scope.
+//  1. **95 of 95 keys are pinned to immutable lowercase 40-hex revisions.** A git SHA's file
+//     listing is timeless — re-reading it in a year returns the same bytes. There is nothing to
+//     decay. sc-18924 closed the last 11-key moving-default-branch window, and the offline gate now
+//     rejects every missing, branch, or tag revision before it can reintroduce that class.
 //  2. **Coverage is graded as a set, in both directions.** Adding an entry, or re-pinning
 //     one, changes its `repo@revision` key, and a key with no recorded listing is a hard
 //     failure naming the re-record command. Conversely a recorded key that nothing claims
@@ -285,11 +278,14 @@ export function patternToRegExp(pattern) {
   return new RegExp(`^${out}$`);
 }
 
-// The unit of evidence. An entry with no `revision` reads the default branch, which is what
-// the worker fetches for it, so "main" is the honest key rather than a missing one.
+// The unit of evidence. `@main` remains a useful diagnostic key for a malformed claim, but
+// sc-18924 makes it a hard authoring failure: every production claim must carry a lowercase
+// 40-hex commit SHA.
 export function claimKey(repo, revision) {
   return `${repo}@${revision ?? "main"}`;
 }
+
+const IMMUTABLE_REVISION_PATTERN = /^[0-9a-f]{40}$/u;
 
 function waiverKey({ label, repo, revision, pattern }) {
   // Joined on a NUL so the key is unambiguous: repos, labels and globs all legitimately
@@ -463,6 +459,22 @@ export function gradeRecordedEvidence({ claims, evidence, waivers, repoCondition
     claimedKeys.add(key);
     const at = claim.revision ? `@${claim.revision.slice(0, 12)}` : "";
     const entry = recorded.get(key);
+    const immutableRevision =
+      typeof claim.revision === "string" && IMMUTABLE_REVISION_PATTERN.test(claim.revision);
+
+    // sc-18924: an evidence fixture is timeless only when its manifest claim is immutable. A
+    // recorded `resolvedSha` on an unrevisioned key merely says which moving default branch the
+    // recorder happened to observe; nothing forces another read after upstream moves it. Reject
+    // missing revisions, branches and tags at authoring time so that stale-green class cannot
+    // regrow. Keep grading the entry after reporting this problem so independent pattern, gating,
+    // redirect and waiver defects are not hidden behind it.
+    if (!immutableRevision) {
+      fail(
+        "manifest-revision-required",
+        `${claim.label}  ${key}  manifest Hugging Face downloads must pin ` +
+          `\`revision\` to an immutable lowercase 40-hex commit SHA (sc-18924)`,
+      );
+    }
 
     if (!entry) {
       fail(
@@ -480,12 +492,13 @@ export function gradeRecordedEvidence({ claims, evidence, waivers, repoCondition
       continue;
     }
     // The recorder must have read the snapshot it claims to have read. NOTE what this does and
-    // does not cover, because its old comment over-claimed (sc-18854 review): `claim.revision &&`
-    // makes it INERT for every unrevisioned key, and an HF rename redirect preserves the sha, so a
-    // redirected pinned entry passes it too. It catches a recorder bug or a moved pin — not a
-    // substituted repo. `evidence-repo-id-mismatch` below is the guard that covers substitution,
-    // and it works for unrevisioned keys as well.
-    if (claim.revision && entry.resolvedSha && entry.resolvedSha !== claim.revision) {
+    // does not cover, because its old comment over-claimed (sc-18854 review): an HF rename redirect
+    // preserves the sha, so a redirected pinned entry passes it. It catches a recorder bug or a
+    // moved immutable pin — not a substituted repo. `evidence-repo-id-mismatch` below covers
+    // substitution. A branch or tag normally resolves to a different 40-hex SHA; its authoring
+    // failure was already reported above, so do not mislabel that expected difference or stop
+    // grading independent redirect, gating and pattern defects behind it.
+    if (immutableRevision && entry.resolvedSha && entry.resolvedSha !== claim.revision) {
       fail(
         "evidence-revision-mismatch",
         `${claim.label}  ${key}  recorded listing resolved to ${entry.resolvedSha.slice(0, 12)} — re-record with \`${RECORD_COMMAND}\``,
@@ -497,8 +510,8 @@ export function gradeRecordedEvidence({ claims, evidence, waivers, repoCondition
     evaluatedKeys.add(key);
     // The repo HF ACTUALLY served. `fetch` follows redirects, so a manifest entry naming a repo
     // that upstream renamed away resolves silently and every downstream check passes against a
-    // tree nobody declared. Unlike the sha check above this is meaningful for unrevisioned keys,
-    // which is where renames actually bite.
+    // tree nobody declared. Unlike the sha check above this also remains meaningful for a malformed
+    // unrevisioned input, even though sc-18924 now rejects that input independently.
     if (entry.servedRepo && entry.servedRepo !== claim.repo) {
       noteRepoCondition({
         kind: "evidence-repo-id-mismatch",
@@ -741,7 +754,7 @@ async function runLive({ only, write, dryRun }) {
     const repos = [...recorded.values()].sort((a, b) => (a.key < b.key ? -1 : 1));
     // No timestamp: the content is a pure function of the catalog and upstream state, so a
     // re-record with nothing changed is a no-op diff. `git log` on the file answers "when",
-    // and `resolvedSha` answers the more useful "which tree" for unrevisioned entries.
+    // and `resolvedSha` proves which immutable tree the API returned for each pin.
     const next = `${JSON.stringify({ repos }, null, 2)}\n`;
     const target = path.join(root, EVIDENCE_FILE);
     if (dryRun) {
@@ -878,6 +891,8 @@ async function runCheck() {
 // cannot occur, not because the guard works.
 // ---------------------------------------------------------------------------------------
 
+const SELF_TEST_LORA_REVISION = "b".repeat(40);
+
 const SELF_TEST_CLAIMS = [
   {
     id: "demo",
@@ -890,7 +905,7 @@ const SELF_TEST_CLAIMS = [
     id: "demo_lora",
     label: "lora:demo_lora",
     repo: "Org/demo-lora",
-    revision: null,
+    revision: SELF_TEST_LORA_REVISION,
     declared: ["demo.safetensors"],
   },
 ];
@@ -910,10 +925,10 @@ const SELF_TEST_EVIDENCE = {
       files: ["q8/transformer/model.safetensors", "q8/vae/config.json"],
     },
     {
-      key: "Org/demo-lora@main",
+      key: `Org/demo-lora@${SELF_TEST_LORA_REVISION}`,
       repo: "Org/demo-lora",
-      revision: null,
-      resolvedSha: "b".repeat(40),
+      revision: SELF_TEST_LORA_REVISION,
+      resolvedSha: SELF_TEST_LORA_REVISION,
       servedRepo: "Org/demo-lora",
       gated: false,
       files: ["demo.safetensors"],
@@ -926,7 +941,7 @@ const SELF_TEST_REPO_CONDITIONS = [];
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
-// Each case: mutate a deep copy of the baseline, expect exactly `kind` to appear.
+// Each case: mutate a deep copy of the baseline and expect `kind` plus any `alsoKinds` to appear.
 const SELF_TEST_CASES = [
   {
     name: "zero-match: a declared pattern matching no recorded file fails (the sc-18853 guard)",
@@ -942,6 +957,31 @@ const SELF_TEST_CASES = [
     kind: "evidence-missing-key",
     mutate: (input) => {
       input.claims[0].revision = "c".repeat(40);
+    },
+  },
+  {
+    name: "manifest-revision-required: a missing revision fails even when matching @main evidence exists",
+    kind: "manifest-revision-required",
+    mutate: (input) => {
+      input.claims[1].revision = null;
+      input.evidence.repos[1].key = "Org/demo-lora@main";
+      input.evidence.repos[1].revision = null;
+    },
+  },
+  {
+    name: "manifest-revision-required: a mutable tag fails without hiding independent defects",
+    kind: "manifest-revision-required",
+    alsoKinds: ["evidence-repo-id-mismatch", "evidence-gated", "zero-match"],
+    mutate: (input) => {
+      input.claims[1].revision = "latest";
+      input.evidence.repos[1].key = "Org/demo-lora@latest";
+      input.evidence.repos[1].revision = "latest";
+      // Recorder-realistic tag evidence: HF reports the mutable ref in `revision` and the
+      // immutable tree it currently resolves to in `resolvedSha`.
+      input.evidence.repos[1].resolvedSha = "c".repeat(40);
+      input.evidence.repos[1].servedRepo = "Org/demo-lora-renamed";
+      input.evidence.repos[1].gated = "auto";
+      input.evidence.repos[1].files = [];
     },
   },
   {
@@ -983,7 +1023,7 @@ const SELF_TEST_CASES = [
       input.waivers.push({
         label: "lora:demo_lora",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         pattern: "demo.safetensors",
         story: "sc-1",
         reason: "already fixed upstream",
@@ -1012,7 +1052,7 @@ const SELF_TEST_CASES = [
       input.waivers.push({
         label: "lora:demo_lora",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         pattern: "absent.safetensors",
         story: "TODO",
         reason: "upstream has not published it",
@@ -1027,7 +1067,7 @@ const SELF_TEST_CASES = [
       input.waivers.push({
         label: "lora:demo_lora",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         pattern: "absent.safetensors",
         story: "sc-3",
         reason: "   ",
@@ -1042,7 +1082,7 @@ const SELF_TEST_CASES = [
       const base = {
         label: "lora:demo_lora",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         pattern: "absent.safetensors",
         reason: "tracked upstream gap",
       };
@@ -1073,11 +1113,9 @@ const SELF_TEST_CASES = [
     },
   },
   {
-    name: "evidence-repo-id-mismatch: a listing served by a different repo fails, even unrevisioned",
+    name: "evidence-repo-id-mismatch: a pinned listing served by a different repo fails",
     kind: "evidence-repo-id-mismatch",
     mutate: (input) => {
-      // The unrevisioned entry on purpose: this is the case `evidence-revision-mismatch` cannot
-      // reach, since its `claim.revision &&` guard makes it inert for every unpinned key.
       input.evidence.repos[1].servedRepo = "Org/demo-lora-renamed";
     },
   },
@@ -1088,7 +1126,7 @@ const SELF_TEST_CASES = [
       input.repoConditions.push({
         kind: "evidence-gated",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         story: "sc-7",
         reason: "upstream un-gated it",
       });
@@ -1115,7 +1153,7 @@ const SELF_TEST_CASES = [
       input.repoConditions.push({
         kind: "evidence-probably-fine",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         story: "sc-9",
         reason: "a kind nothing emits would sit inert forever",
       });
@@ -1129,7 +1167,7 @@ const SELF_TEST_CASES = [
       input.repoConditions.push({
         kind: "evidence-gated",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         story: "TODO",
         reason: "upstream gated it",
       });
@@ -1143,7 +1181,7 @@ const SELF_TEST_CASES = [
       const base = {
         kind: "evidence-gated",
         repo: "Org/demo-lora",
-        revision: null,
+        revision: SELF_TEST_LORA_REVISION,
         reason: "upstream gated it",
       };
       input.repoConditions.push({ ...base, story: "sc-10" }, { ...base, story: "sc-11" });
@@ -1179,7 +1217,7 @@ export function runSelfTest({ log = console.log } = {}) {
   waivedInput.waivers.push({
     label: "lora:demo_lora",
     repo: "Org/demo-lora",
-    revision: null,
+    revision: SELF_TEST_LORA_REVISION,
     pattern: "absent.safetensors",
     story: "sc-4",
     reason: "tracked upstream gap",
@@ -1203,7 +1241,7 @@ export function runSelfTest({ log = console.log } = {}) {
   gatedInput.repoConditions.push({
     kind: "evidence-gated",
     repo: "Org/demo-lora",
-    revision: null,
+    revision: SELF_TEST_LORA_REVISION,
     story: "sc-12",
     reason: "tracked upstream gating",
   });
@@ -1223,8 +1261,12 @@ export function runSelfTest({ log = console.log } = {}) {
     testCase.mutate(input);
     const { problems } = gradeRecordedEvidence(input);
     const kinds = problems.map((problem) => problem.kind);
-    if (!kinds.includes(testCase.kind)) {
-      failures.push(`${testCase.name}: expected [${testCase.kind}], got [${kinds.join(", ")}]`);
+    const expectedKinds = [testCase.kind, ...(testCase.alsoKinds ?? [])];
+    const missingKinds = expectedKinds.filter((kind) => !kinds.includes(kind));
+    if (missingKinds.length > 0) {
+      failures.push(
+        `${testCase.name}: expected [${expectedKinds.join(", ")}], got [${kinds.join(", ")}]`,
+      );
     } else {
       log(`  ok  ${testCase.name}`);
     }

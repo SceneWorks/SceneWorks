@@ -152,6 +152,37 @@ test("the committed evidence grades the real catalog clean", async () => {
   assert.equal(waived.length, KNOWN_ZERO_MATCHES.length + KNOWN_REPO_CONDITIONS.length);
 });
 
+// THE sc-18924 REGRESSION TEST. The recorded fixture is timeless only if every manifest claim
+// names an immutable tree. Before this story, 11 real keys used a moving default branch and could
+// stay falsely green after upstream changed because nothing forced a re-record.
+test("all 95 real download keys are pinned to immutable lowercase commit SHAs", async () => {
+  const { claims, evidence } = await realInputs();
+  const immutableRevision = /^[0-9a-f]{40}$/u;
+  const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
+
+  assert.equal(keys.size, 95, "update the 95/95 disclosure when the real key census changes");
+  assert.equal(
+    evidence.repos.length,
+    95,
+    "the evidence census must stay aligned with the 95/95 disclosure",
+  );
+  for (const claim of claims) {
+    assert.match(
+      claim.revision ?? "",
+      immutableRevision,
+      `${claim.label} must pin an immutable lowercase 40-hex revision`,
+    );
+  }
+  for (const entry of evidence.repos) {
+    assert.match(
+      entry.revision ?? "",
+      immutableRevision,
+      `${entry.key} must not record a moving default branch`,
+    );
+    assert.equal(entry.key, claimKey(entry.repo, entry.revision));
+  }
+});
+
 // ANTI-VACUITY for the two new repo-level guards.
 //
 // `evidence-gated` and `evidence-repo-id-mismatch` read fields the RECORDER writes. If the recorder
@@ -244,7 +275,7 @@ test("the HDR and LipDub claims share one ungated immutable rehost with no gatin
 // — an UNREVISIONED redirected key, where `claim.revision &&` makes the sha guard inert outright
 // rather than merely satisfied — so the second half of this test rebuilds that shape from the same
 // real listing instead of letting the coverage quietly lapse with the fix.
-test("evidence-repo-id-mismatch catches the live redirect, in both the pinned and unrevisioned shapes", async () => {
+test("evidence-repo-id-mismatch catches the live redirect and a malformed unrevisioned shape", async () => {
   const { claims, evidence } = await realInputs();
 
   const repo = "apple/DFN5B-CLIP-ViT-H-14-384";
@@ -273,9 +304,10 @@ test("evidence-repo-id-mismatch catches the live redirect, in both the pinned an
     `${repo}: the sha check must NOT fire — that is why the repo-id guard is needed`,
   );
 
-  // Shape 2 — UNREVISIONED, which is where renames actually bite (nothing forces a re-record of a
-  // moving default branch). Same real listing, re-keyed to `@main`. Here the sha guard is not just
-  // satisfied, it is unreachable: `claim.revision &&` short-circuits before it can look.
+  // Shape 2 — MALFORMED AND UNREVISIONED. sc-18924 rejects this shape independently, but the
+  // repo-id guard must still report the redirect rather than hiding it behind the pin failure.
+  // Same real listing, re-keyed to `@main`; the sha guard remains unreachable because
+  // `claim.revision &&` short-circuits before it can look.
   const unrevisionedKey = claimKey(repo, null);
   assert.notEqual(unrevisionedKey, entry.key, "the re-key must actually change the key");
   const unrevisioned = gradeRecordedEvidence({
@@ -289,8 +321,12 @@ test("evidence-repo-id-mismatch catches the live redirect, in both the pinned an
     `expected evidence-repo-id-mismatch unrevisioned, got ${JSON.stringify(unrevisioned)}`,
   );
   assert.ok(
+    unrevisioned.some((problem) => problem.kind === "manifest-revision-required"),
+    `expected the sc-18924 immutable-pin guard too, got ${JSON.stringify(unrevisioned)}`,
+  );
+  assert.ok(
     !unrevisioned.some((problem) => problem.kind === "evidence-revision-mismatch"),
-    "unrevisioned: the sha guard is inert, so only the repo-id guard can see this",
+    "unrevisioned: the sha-equality guard is inert; the revision and repo-id guards own this shape",
   );
 
   // The other direction, on both shapes: a listing served by the repo it names must NOT fire.
@@ -309,6 +345,12 @@ test("evidence-repo-id-mismatch catches the live redirect, in both the pinned an
       !honest.some((problem) => problem.kind === "evidence-repo-id-mismatch"),
       `${name}: a repo serving its own listing must not fire, got ${JSON.stringify(honest)}`,
     );
+    if (name === "unrevisioned") {
+      assert.ok(
+        honest.some((problem) => problem.kind === "manifest-revision-required"),
+        "an honest servedRepo does not make a moving default branch immutable",
+      );
+    }
   }
 });
 
