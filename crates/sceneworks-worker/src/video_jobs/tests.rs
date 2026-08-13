@@ -4702,6 +4702,10 @@ fn wan_lightning_subdir_is_canonical_for_fetch_and_resolution() {
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx_bundle_revision_is_pinned_commit_not_main() {
+    assert_eq!(
+        LTX_BUNDLE_REVISION, "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "the LTX pin must name the first revision that contains bf16/ (sc-18853)"
+    );
     assert_ne!(
         LTX_BUNDLE_REVISION, "main",
         "LTX q8 bundle must pin a fixed revision"
@@ -4717,6 +4721,48 @@ fn ltx_bundle_revision_is_pinned_commit_not_main() {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "the pinned revision must be lowercase hex"
     );
+}
+
+/// The Models-screen install and generation-time tier fetch are two entry points into the same
+/// bundle. Every LTX row must therefore use the worker pin, and the bf16 row must request the
+/// directory that exists at that pin (sc-18853).
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_bundle_manifest_rows_match_the_worker_pin() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    let model = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"].as_str() == Some("ltx_2_3"))
+        .expect("ltx_2_3 present in the builtin catalog");
+    let downloads = model["downloads"]
+        .as_array()
+        .expect("ltx_2_3 declares downloads");
+
+    assert_eq!(downloads.len(), 4, "gemma plus q4/q8/bf16 rows");
+    for download in downloads {
+        assert_eq!(download["repo"].as_str(), Some(LTX_BUNDLE_REPO));
+        assert_eq!(
+            download["revision"].as_str(),
+            Some(LTX_BUNDLE_REVISION),
+            "manifest and on-demand fetches must populate the same snapshot"
+        );
+    }
+    let bf16 = downloads
+        .iter()
+        .find(|download| download["variant"].as_str() == Some("bf16"))
+        .expect("bf16 tier row");
+    assert_eq!(bf16["files"], json!(["bf16/*"]));
 }
 
 // sc-8828 (F-026): `resolve_video_route` is the extracted native (MLX) dispatch decision — the
@@ -8383,10 +8429,8 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
     assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
 }
 
-/// sc-18809: the bf16 tier only exists at the bumped `01df27d3…` revision, so a machine installed
-/// before the bump keeps its tiers SPLIT across two `snapshots/<rev>/` dirs. Tier selection must look
-/// across revisions, and — the part that actually matters — tier preference must dominate revision, or
-/// a bf16 request silently renders at whatever tier happens to sit in the selected snapshot.
+/// A pre-hotfix install keeps q4/q8 in the old snapshot while bf16 lands in the bumped snapshot.
+/// The requested tier must win across revisions; otherwise a bf16 request silently runs q8.
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
@@ -8404,107 +8448,60 @@ fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
             std::fs::write(dir.join(file), b"x").unwrap();
         }
     }
-    let cache_guard = tempfile::Builder::new()
-        .prefix("sw_ltx_revs_")
-        .tempdir()
-        .expect("temp dir");
-    // The real shape: `<repo>/snapshots/<rev>/<tier>`. Note the names: `new` (`01df27d3…`) sorts
-    // BEFORE `old` (`254989c3…`) lexically, so plain sorted order and `[selected] ++ sorted(siblings)`
-    // agree on every case below — which is exactly why the `selected`-first half of the invariant
-    // needs its own fixture, at the end of this test, where the two orders disagree.
-    let snapshots = cache_guard.path().join("snapshots");
-    let old = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
-    let new = snapshots.join("01df27d308466533aa09d251e3aebdcc627d07eb");
+
+    let cache = tempfile::tempdir().expect("temp cache");
+    let snapshots = cache.path().join("snapshots");
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    let bumped = snapshots.join(LTX_BUNDLE_REVISION);
     write_complete_ltx_dir(&old.join("q4"));
     write_complete_ltx_dir(&old.join("q8"));
-    write_complete_ltx_dir(&new.join("bf16"));
+    write_complete_ltx_dir(&bumped.join("bf16"));
 
-    // Selected = the pre-bump snapshot, which has no bf16 at all. The single-snapshot lookup would
-    // silently downgrade to q8 here; the cross-revision one finds the requested tier.
     assert_eq!(
         ltx_bundle_subdir(&old, &["bf16", "q8", "q4"]).as_deref(),
         Some(old.join("q8").as_path()),
-        "precondition: the single-snapshot lookup downgrades bf16 → q8"
+        "precondition: a single-snapshot lookup downgrades bf16 to q8"
     );
     assert_eq!(
         ltx_bundle_subdir_across_revisions(&old, &["bf16", "q8", "q4"]).as_deref(),
-        Some(new.join("bf16").as_path()),
-        "bf16 in a sibling revision must beat q8 in the selected one"
+        Some(bumped.join("bf16").as_path()),
+        "bf16 in a sibling revision must beat q8 in the selected revision"
     );
-    // Symmetric: selected = the bf16-only snapshot, request the q4 default.
     assert_eq!(
-        ltx_bundle_subdir_across_revisions(&new, &["q4", "q8"]).as_deref(),
-        Some(old.join("q4").as_path())
-    );
-    // The selected snapshot still wins for a tier both hold.
-    write_complete_ltx_dir(&new.join("q4"));
-    assert_eq!(
-        ltx_bundle_subdir_across_revisions(&new, &["q4", "q8"]).as_deref(),
-        Some(new.join("q4").as_path())
-    );
-    // An incomplete tier is skipped across revisions too, exactly as within one.
-    std::fs::remove_file(new.join("bf16").join("vocoder.safetensors")).unwrap();
-    assert_eq!(
-        ltx_bundle_subdir_across_revisions(&old, &["bf16", "q8", "q4"]).as_deref(),
-        Some(old.join("q8").as_path())
-    );
-    // `selected` FIRST, discriminated. Every case above is blind to it: `01df27d3…` sorts before
-    // `254989c3…`, so `[selected] ++ sorted(siblings)` and plain `sorted(all)` return the same path
-    // whichever is selected, and deleting the `vec![selected]` seed would leave them all green. Here
-    // the selected snapshot is the lexically LATER dir and BOTH hold a complete `q4`, so the two
-    // orders finally disagree: selected-first ⇒ `zz…`, sorted ⇒ `aa…`. This is the fixture that
-    // actually pins the documented invariant (`ltx.rs`: "`selected` itself is always tried first").
-    let tie_guard = tempfile::Builder::new()
-        .prefix("sw_ltx_tie_")
-        .tempdir()
-        .expect("temp dir");
-    let tie_snapshots = tie_guard.path().join("snapshots");
-    let sorts_first = tie_snapshots.join("aa11111111111111111111111111111111111111");
-    let sorts_last = tie_snapshots.join("zz99999999999999999999999999999999999999");
-    write_complete_ltx_dir(&sorts_first.join("q4"));
-    write_complete_ltx_dir(&sorts_last.join("q4"));
-    assert_eq!(
-        ltx_bundle_subdir_across_revisions(&sorts_last, &["q4", "q8"]).as_deref(),
-        Some(sorts_last.join("q4").as_path()),
-        "the SELECTED snapshot must win a tie, even when a sibling sorts ahead of it — a plain \
-         sorted scan would hand back the `aa…` sibling here"
-    );
-    // The mirror image, so the assertion above cannot pass by accidentally always returning `sorts_last`.
-    assert_eq!(
-        ltx_bundle_subdir_across_revisions(&sorts_first, &["q4", "q8"]).as_deref(),
-        Some(sorts_first.join("q4").as_path()),
+        ltx_bundle_subdir_across_revisions(&bumped, &["q4", "q8"]).as_deref(),
+        Some(old.join("q4").as_path()),
+        "the default tier remains reachable in the pre-hotfix snapshot"
     );
 
-    // A root that is NOT under a `snapshots/` dir keeps the old single-dir behaviour (legacy local
-    // conversions must not start scanning whatever sits beside them).
-    let flat_guard = tempfile::Builder::new()
-        .prefix("sw_ltx_flat_")
-        .tempdir()
-        .expect("temp dir");
-    write_complete_ltx_dir(&flat_guard.path().join("sibling").join("bf16"));
-    write_complete_ltx_dir(&flat_guard.path().join("selected").join("q4"));
+    write_complete_ltx_dir(&bumped.join("q4"));
     assert_eq!(
-        ltx_bundle_subdir_across_revisions(
-            &flat_guard.path().join("selected"),
-            &["bf16", "q8", "q4"]
-        )
-        .as_deref(),
-        Some(flat_guard.path().join("selected").join("q4").as_path())
+        ltx_bundle_subdir_across_revisions(&old, &["q4"]).as_deref(),
+        Some(bumped.join("q4").as_path()),
+        "the immutable current pin wins when both compatible revisions contain the tier"
+    );
+
+    let unrelated = snapshots.join("ffffffffffffffffffffffffffffffffffffffff");
+    write_complete_ltx_dir(&unrelated.join("bf16"));
+    std::fs::remove_file(bumped.join("bf16/vocoder.safetensors")).unwrap();
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&unrelated, &["bf16", "q8", "q4"]).as_deref(),
+        Some(old.join("q8").as_path()),
+        "an arbitrary cached revision must never bypass the immutable pin or its proven parent"
+    );
+
+    let flat = tempfile::tempdir().expect("flat cache");
+    write_complete_ltx_dir(&flat.path().join("sibling").join("bf16"));
+    write_complete_ltx_dir(&flat.path().join("selected").join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&flat.path().join("selected"), &["bf16", "q8", "q4"])
+            .as_deref(),
+        Some(flat.path().join("selected").join("q4").as_path()),
+        "legacy flat layouts must not scan unrelated sibling directories"
     );
 }
 
-/// A split-revision `SceneWorks/ltx-2.3-mlx` HF cache, in exactly the shape sc-18809's revision bump
-/// produces on a machine installed BEFORE it: the pre-bump `254989c3…` snapshot keeps `gemma/`,
-/// `q4/` and `q8/`, while the bumped `01df27d3…` one holds only the newly published `bf16/`. Returns
-/// the hub dir to point `$HF_HUB_CACHE` at. Goes through `safe_repo_dir_name` so the fixture cannot
-/// drift from the slug the real resolver computes.
-///
-/// **No `refs/main` is written, and that is the point.** A pinned install has none, so
-/// `resolve_huggingface_snapshot_dir` falls to its "snapshot with the most files" heuristic — which
-/// picks the PRE-BUMP dir here — 19 files (q4 7 + q8 7 + gemma 5) vs the bumped snapshot's 7
-/// (`bf16/` alone), counted the way `snapshot_file_count` does. That is the real machine on
-/// which a single-snapshot `bf16/` probe is permanently false: the selected snapshot never gains the
-/// tier, so the probe cannot ever become true no matter how many times the tier is fetched.
+/// Build the exact split cache created when an existing install downloads bf16 after the pin bump.
+/// No refs/main is written, so the real resolver's most-files fallback selects the old snapshot.
 #[cfg(target_os = "macos")]
 fn ltx_split_revision_hub(tag: &str) -> tempfile::TempDir {
     fn write_complete_ltx_dir(dir: &Path) {
@@ -8521,140 +8518,102 @@ fn ltx_split_revision_hub(tag: &str) -> tempfile::TempDir {
             std::fs::write(dir.join(file), b"x").unwrap();
         }
     }
-    let hub_guard = tempfile::Builder::new()
+
+    let hub = tempfile::Builder::new()
         .prefix(&format!("sw_ltx_hub_{tag}_"))
         .tempdir()
-        .expect("temp dir");
-    let snapshots = hub_guard
+        .expect("temp hub");
+    let snapshots = hub
         .path()
         .join(format!(
             "models--{}",
-            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO)
-                .expect("the LTX bundle repo slug")
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("LTX repo slug")
         ))
         .join("snapshots");
-    let pre_bump = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
-    write_complete_ltx_dir(&pre_bump.join("q4"));
-    write_complete_ltx_dir(&pre_bump.join("q8"));
-    write_complete_gemma_dir(&pre_bump.join("gemma"));
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    write_complete_ltx_dir(&old.join("q4"));
+    write_complete_ltx_dir(&old.join("q8"));
+    write_complete_gemma_dir(&old.join("gemma"));
     write_complete_ltx_dir(&snapshots.join(LTX_BUNDLE_REVISION).join("bf16"));
-    hub_guard
-}
-
-/// The env pins that make an LTX bundle resolution hermetic: the fixture hub wins over the dev box's
-/// real cache (`huggingface_hub_cache_dir` reads all three of these BEFORE `data_dir`), and the
-/// operator dir overrides are cleared so they cannot short-circuit the HF resolution under test.
-#[cfg(target_os = "macos")]
-fn ltx_hermetic_env(hub: &Path) -> Vec<(&'static str, String)> {
-    vec![
-        (
-            "HF_HUB_CACHE",
-            hub.to_str().expect("utf-8 fixture hub").to_owned(),
-        ),
-        ("HUGGINGFACE_HUB_CACHE", String::new()),
-        ("HF_HOME", String::new()),
-        ("SCENEWORKS_MLX_LTX_DIR", String::new()),
-        ("SCENEWORKS_MLX_LTX_EROS_DIR", String::new()),
-        ("LTX_GEMMA_DIR", String::new()),
-    ]
+    hub
 }
 
 #[cfg(target_os = "macos")]
-fn ltx_with_env<T>(hub: &Path, body: impl FnOnce() -> T) -> T {
-    let owned = ltx_hermetic_env(hub);
-    let borrowed: Vec<(&str, &str)> = owned
-        .iter()
-        .map(|(key, value)| (*key, value.as_str()))
-        .collect();
-    temp_env_vars(&borrowed, body)
+fn ltx_with_hermetic_cache<T>(hub: &Path, body: impl FnOnce() -> T) -> T {
+    temp_env_vars(
+        &[
+            ("HF_HUB_CACHE", hub.to_str().expect("utf-8 hub")),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("SCENEWORKS_MLX_LTX_DIR", ""),
+            ("SCENEWORKS_MLX_LTX_EROS_DIR", ""),
+            ("LTX_GEMMA_DIR", ""),
+        ],
+        body,
+    )
 }
 
-/// sc-18809 / issue 6: the ONE line that makes `resolve_ltx_model_dir` cross-revision
-/// (`ltx_bundle_subdir_across_revisions`, `ltx.rs`) had no hermetic coverage — only `#[ignore]`d
-/// real-weights smokes, which skip and still report `ok`. Reverting it to `ltx_bundle_subdir` left the
-/// whole suite GREEN while restoring the silent bf16 → q8 downgrade this story exists to remove.
-///
-/// This drives the real resolver over a split-revision fixture cache. Under the fix a bf16 request
-/// resolves the bumped snapshot's `bf16/`; under the revert it resolves the pre-bump snapshot's `q8/`
-/// — a tier the user did not pick, at a quality they did not ask for, with no error anywhere.
+/// Drive the production resolver over the split cache, rather than only testing its helper.
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_ltx_model_dir_reaches_bf16_in_a_sibling_revision() {
-    let hub_guard = ltx_split_revision_hub("resolve");
-    let hub = hub_guard.path();
-    let data_guard = tempfile::Builder::new()
-        .prefix("sw_ltx_data_")
-        .tempdir()
-        .expect("temp dir");
-    // `offline_settings` so a regression that somehow reaches a download fails locally, not on the hub.
+    let hub = ltx_split_revision_hub("resolve");
+    let data = tempfile::tempdir().expect("temp data");
     let settings = Settings {
-        data_dir: data_guard.path().to_path_buf(),
+        data_dir: data.path().to_path_buf(),
         ..offline_settings()
     };
-    let ltx = |adv: Value| {
-        request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+    let request_for = |bits: Option<i64>| {
+        let advanced = bits.map_or_else(|| json!({}), |bits| json!({ "mlxQuantize": bits }));
+        request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": advanced
+        }))
     };
     let snapshots = hub
+        .path()
         .join(format!(
             "models--{}",
             sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
         ))
         .join("snapshots");
 
-    let (bf16, q8, default) = ltx_with_env(hub, || {
+    let (bf16, q8, default) = ltx_with_hermetic_cache(hub.path(), || {
         (
-            resolve_ltx_model_dir(&settings, &ltx(json!({ "mlxQuantize": 0 }))),
-            resolve_ltx_model_dir(&settings, &ltx(json!({ "mlxQuantize": 8 }))),
-            resolve_ltx_model_dir(&settings, &ltx(json!({}))),
+            resolve_ltx_model_dir(&settings, &request_for(Some(0))),
+            resolve_ltx_model_dir(&settings, &request_for(Some(8))),
+            resolve_ltx_model_dir(&settings, &request_for(None)),
         )
     });
 
     assert_eq!(
-        bf16.expect("a bf16 request must resolve").as_path(),
-        snapshots.join(LTX_BUNDLE_REVISION).join("bf16"),
-        "bf16 lives ONLY in the bumped snapshot, which is not the one \
-         `resolve_huggingface_snapshot_dir` selects — resolving to the pre-bump `q8/` here is the \
-         silent downgrade sc-18809 fixed"
+        bf16.expect("bf16 resolves"),
+        snapshots.join(LTX_BUNDLE_REVISION).join("bf16")
     );
-    // The tiers that DO live in the selected snapshot still resolve there — the scan widens the
-    // search, it does not reorder it.
-    let pre_bump = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
-    assert_eq!(
-        q8.expect("a q8 request must resolve").as_path(),
-        pre_bump.join("q8")
-    );
-    assert_eq!(
-        default.expect("a default request must resolve").as_path(),
-        pre_bump.join("q4"),
-        "and the default order still never reaches for the dense tier"
-    );
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    assert_eq!(q8.expect("q8 resolves"), old.join("q8"));
+    assert_eq!(default.expect("default resolves"), old.join("q4"));
 }
 
-/// sc-18809 / issue 1: the presence probes are the SIBLING seam of the resolver fix above, and they
-/// were missed. `ensure_ltx_{q8,bf16}_present` probed a single snapshot
-/// (`ltx_dir_is_complete(&root.join("bf16"))`), which on the split-revision install this very story
-/// CREATES is permanently false — see [`ltx_split_revision_hub`] for why the selected snapshot can
-/// never gain the tier. Every bf16 job then re-entered `ensure_hf_files_cached`, doing a
-/// `HuggingFaceSnapshot::resolve` plus a HEAD per file for weights already on disk: no bytes moved,
-/// but the render HARD-FAILS offline or during a hub outage, forever.
-///
-/// **How this discriminates.** `offline_settings` pins `huggingface_base_url` at a closed port, so an
-/// attempted fetch cannot succeed — a probe that returns `Ok(())` proves no fetch was made, and the
-/// negative control at the end proves that `Ok(())` is not vacuous by showing the same call going red
-/// when the tier really is absent everywhere.
+/// A complete tier in any revision is already provisioned. Presence checks must not contact the Hub
+/// for it, while a tier missing from every revision must still attempt the fetch.
 #[cfg(target_os = "macos")]
 #[test]
-fn ensure_ltx_tier_present_skips_the_fetch_for_a_tier_in_a_sibling_revision() {
-    let hub_guard = ltx_split_revision_hub("ensure");
-    let hub = hub_guard.path();
-    let data_guard = tempfile::Builder::new()
-        .prefix("sw_ltx_ensure_data_")
-        .tempdir()
-        .expect("temp dir");
+fn ensure_ltx_tier_present_skips_fetch_for_a_sibling_revision() {
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    let hub = ltx_split_revision_hub("ensure");
+    let data = tempfile::tempdir().expect("temp data");
     let settings = Settings {
-        data_dir: data_guard.path().to_path_buf(),
+        data_dir: data.path().to_path_buf(),
         ..offline_settings()
     };
+    let api = ApiClient::new(&settings);
     let job: JobSnapshot = serde_json::from_value(json!({
         "id": "job-ltx-tier-1",
         "type": "video_generate",
@@ -8673,81 +8632,45 @@ fn ensure_ltx_tier_present_skips_the_fetch_for_a_tier_in_a_sibling_revision() {
         "etaSeconds": null,
         "attempts": 1,
         "cancelRequested": false,
-        "createdAt": "2026-08-11T00:00:00Z",
-        "updatedAt": "2026-08-11T00:00:00Z"
+        "createdAt": "2026-08-13T00:00:00Z",
+        "updatedAt": "2026-08-13T00:00:00Z"
     }))
     .expect("job snapshot");
-    let ltx = |adv: Value| {
-        request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+    let ltx = |bits: i64| {
+        request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "x",
+            "advanced": { "mlxQuantize": bits }
+        }))
     };
-    // A generic fn, not a closure: the two `ensure_*` calls are distinct `impl Future` opaque types,
-    // and a closure parameter would unify to whichever one it saw first.
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime builds")
-            .block_on(future)
-    }
-    let api = ApiClient::new(&settings);
 
-    // bf16 is in the BUMPED snapshot, q8 in the SELECTED one; both must be seen as present.
-    let (bf16, q8) = ltx_with_env(hub, || {
+    let (bf16, q8) = ltx_with_hermetic_cache(hub.path(), || {
         (
-            block_on(ensure_ltx_bf16_present(
-                &api,
-                &settings,
-                &job,
-                &ltx(json!({ "mlxQuantize": 0 })),
-            )),
-            block_on(ensure_ltx_q8_present(
-                &api,
-                &settings,
-                &job,
-                &ltx(json!({ "mlxQuantize": 8 })),
-            )),
+            block_on(ensure_ltx_bf16_present(&api, &settings, &job, &ltx(0))),
+            block_on(ensure_ltx_q8_present(&api, &settings, &job, &ltx(8))),
         )
     });
     assert!(
         bf16.is_ok(),
-        "bf16 is complete in a sibling revision — probing it must not dial the hub, or a fully \
-         provisioned tier stops rendering offline: {:?}",
-        bf16.err().map(|error| error.to_string())
+        "bf16 in a sibling must not dial the Hub: {bf16:?}"
     );
-    assert!(
-        q8.is_ok(),
-        "q8 is complete in the selected revision: {:?}",
-        q8.err().map(|error| error.to_string())
-    );
+    assert!(q8.is_ok(), "q8 in the selected snapshot is present: {q8:?}");
 
-    // Negative control: with `bf16/` absent from EVERY revision the same call must attempt the fetch
-    // and go red against the closed port. Without this the assertions above would still pass if the
-    // probe had been "gutted" into an unconditional `return Ok(())`.
-    let bare_guard = tempfile::Builder::new()
-        .prefix("sw_ltx_hub_bare_")
-        .tempdir()
-        .expect("temp dir");
-    let bare_hub = bare_guard.path();
-    let bare_snapshot = bare_hub
+    let bare = tempfile::tempdir().expect("bare hub");
+    let bare_snapshot = bare
+        .path()
         .join(format!(
             "models--{}",
             sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
         ))
         .join("snapshots")
-        .join("254989c3ca7ee691187647f350b112c0c448789d");
+        .join(LTX_BUNDLE_PRE_BF16_REVISION);
     write_complete_gemma_dir(&bare_snapshot.join("gemma"));
-    let missing = ltx_with_env(bare_hub, || {
-        block_on(ensure_ltx_bf16_present(
-            &api,
-            &settings,
-            &job,
-            &ltx(json!({ "mlxQuantize": 0 })),
-        ))
+    let missing = ltx_with_hermetic_cache(bare.path(), || {
+        block_on(ensure_ltx_bf16_present(&api, &settings, &job, &ltx(0)))
     });
     assert!(
         missing.is_err(),
-        "a genuinely absent bf16 tier MUST still be fetched — an `Ok` here would mean the probe \
-         short-circuits everything and the assertions above prove nothing"
+        "bf16 absent from every revision must still attempt a fetch"
     );
 }
 
@@ -9194,7 +9117,7 @@ fn resolve_ltx_eros_gemma_reaches_a_sibling_revision() {
         ..offline_settings()
     };
 
-    let (selected, resolved) = ltx_with_env(hub, || {
+    let (selected, resolved) = ltx_with_hermetic_cache(hub, || {
         (
             crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO),
             resolve_ltx_eros_gemma_dir(&settings, &eros),

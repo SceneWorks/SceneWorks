@@ -10899,24 +10899,10 @@
         // the per-tier footprint. The worker still fetches a toggled-but-not-downloaded tier on demand
         // (ensure_ltx_{q8,bf16}_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
         //
-        // ⚠ REVISION (sc-18809): all four rows pin `01df27d3…`, the commit that ADDED `bf16/`. The
-        // previous pin `254989c3…` (2026-06-14) predates that upload by three weeks and has NO `bf16/`
-        // path at all, so the bf16 row's `files: ["bf16/*"]` matched zero files: the download reported
-        // success having fetched nothing, and the engine then failed at load with "missing
-        // transformer.safetensors in the model dir". `01df27d3…` is a strict superset — it only added
-        // `bf16/`, so `gemma/`, `q4/` and `q8/` keep byte-identical LFS digests. The cache is keyed by
-        // those digests (downloads.rs `blobs/<etag>` + the `existing_bytes == size` short-circuit), so
-        // an installed machine re-materializes symlinks and re-downloads NOTHING.
-        //
-        // Keep all four rows and the worker's LTX_BUNDLE_REVISION on ONE commit. The reason is NOT that
-        // the worker can only read one snapshot — sc-18809 also taught it to read across revisions
-        // (ltx_bundle_subdir_across_revisions, video_jobs/ltx.rs), because a pre-bump machine ends up
-        // with its tiers genuinely split and must still resolve them. The reason is that this const and
-        // these rows are the SAME pin viewed from two files: the worker's on-demand fetch asks for
-        // `<tier>/*` at LTX_BUNDLE_REVISION, and the first-install download asks for it at the row's
-        // `revision`. Let them drift and the two paths populate different snapshots/<sha>/ dirs for the
-        // same tier — extra disk, an extra hub round trip, and a co-requisite that resolves against a
-        // revision no row declares. The cross-revision scan makes that survivable, not correct.
+        // sc-18853: keep all four rows at the first immutable revision that contains `bf16/`.
+        // The former `254989c3…` pin predates that directory; `01df27d3…` is its direct child and adds
+        // only the ten bf16 files, so q4/q8/gemma remain byte-identical. Keep these rows aligned with
+        // the worker's LTX_BUNDLE_REVISION so first-install and on-demand downloads populate one pin.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
