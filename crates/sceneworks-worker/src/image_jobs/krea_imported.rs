@@ -1032,9 +1032,9 @@ fn resolve_krea_imported_edit_conditioning(
         ));
     }
     if reference_ids.len() > 2 {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Krea 2 edit takes at most 2 images (image 1, then image 2)."
-        )));
+        return Err(WorkerError::InvalidPayload(
+            "Krea 2 edit takes at most 2 images (image 1, then image 2).".to_owned(),
+        ));
     }
     let mut sources = Vec::with_capacity(reference_ids.len());
     for id in &reference_ids {

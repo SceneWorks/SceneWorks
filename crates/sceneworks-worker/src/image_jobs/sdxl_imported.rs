@@ -25,6 +25,7 @@ struct PreparedSdxlImportedSources {
     adapters: PreparedAdapters,
 }
 
+#[cfg(test)]
 fn resolve_imported_sdxl_file(
     request: &ImageRequest,
     settings: &Settings,
@@ -151,6 +152,7 @@ fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
     true
 }
 
+#[cfg(test)]
 fn sdxl_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
     sdxl_imported_request_shape_available(request)
         && matches!(

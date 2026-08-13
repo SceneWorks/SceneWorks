@@ -948,10 +948,12 @@ derive_model_list! {
 /// MLX-only (`mac_only: true`), and there is no candle Mage generator to route a fine-tune to.
 /// The token is the MANIFEST family spelling (`mage-flow`), matching the builtin entries — not the
 /// underscored id prefix.
+#[cfg(test)]
 pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
 
 /// Whether an image `family` string routes to an in-process MLX engine via the route-by-family path
 /// (sc-14019) — i.e. it is a member of [`MLX_ROUTED_FAMILIES`]. Consulted only for non-builtin ids.
+#[cfg(test)]
 pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
     imported_provider_routes("mlx", family).next().is_some()
 }
@@ -961,6 +963,7 @@ pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
 /// checkpoints have novel ids and are claimed only after the scheduler validates their manifest
 /// family and supported request shape. Seeded by the descriptor-gated Krea single-file lane
 /// (sc-14023).
+#[cfg(test)]
 pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
 
 /// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
@@ -1224,6 +1227,7 @@ pub fn imported_image_request_provider_eligible(
 /// [`imported_image_request_family_eligible`] keys request-shape admission on. One named struct —
 /// not positional bools — so the mlx.rs / candle.rs call sites and the worker's mirrored
 /// `KREA_IMPORTED_SUPPORTS_*` constants cannot silently transpose capabilities.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ImportedImageBackendCaps {
     /// The backend's native single-file loader takes an `adapters` slice: the MLX entrypoint
@@ -1241,6 +1245,7 @@ pub(crate) struct ImportedImageBackendCaps {
 }
 
 /// The MLX backend's imported-lane capabilities (mlx.rs / the Mac worker's macOS constants).
+#[cfg(test)]
 pub(crate) const MLX_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageBackendCaps {
     adapters: true,
     pose_control: true,
@@ -1248,6 +1253,7 @@ pub(crate) const MLX_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageBack
 
 /// The candle backend's imported-lane capabilities (candle.rs / the worker's candle constants):
 /// no adapters (sc-14135), no pose control — its native single-file entrypoint threads neither.
+#[cfg(test)]
 pub(crate) const CANDLE_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageBackendCaps {
     adapters: false,
     pose_control: false,
@@ -1263,6 +1269,7 @@ pub(crate) const CANDLE_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageB
 /// surface, `pose_control` admits a strict-pose set on the `krea_2` family. img2img (a single
 /// `referenceAssetId` on a non-edit mode, resolved by the worker's `resolve_img2img_init_generic`)
 /// needs no capability, so it is admitted on **both** backends.
+#[cfg(test)]
 pub(crate) fn imported_image_request_family_eligible(
     model: &str,
     payload: &Map<String, Value>,
@@ -1393,7 +1400,7 @@ pub(crate) fn imported_image_request_family_eligible(
 }
 
 /// Minimal probe payload for a non-builtin image request of `family` at `model`, carrying exactly
-/// the fields [`imported_image_request_family_eligible`] reads: the manifest entry (family + a
+/// the fields [`imported_image_request_provider_eligible`] reads: the manifest entry (family + a
 /// non-empty installed path) and, when `with_lora`, a single job LoRA. Everything else is absent, so
 /// the probe is the PLAIN t2i shape — the surface every imported lane claims — plus/minus adapters.
 fn imported_image_lora_probe(
@@ -1425,7 +1432,7 @@ fn imported_image_lora_probe(
 
 /// Whether a non-builtin (imported / fine-tuned) image model may ADVERTISE LoRA compatibility on a
 /// deployment offering the given native lanes — the advertisement-side twin of
-/// [`imported_image_request_family_eligible`] (sc-14135 follow-up; the class sc-15328 named).
+/// [`imported_image_request_provider_eligible`] (sc-14135 follow-up; the class sc-15328 named).
 ///
 /// * `None` — the family is not served by the route-by-family path at all, so this oracle has no
 ///   opinion and the entry must be left exactly as-is (its problem, if any, is that it renders
@@ -1436,10 +1443,9 @@ fn imported_image_lora_probe(
 ///   worker ever claims it, so the job sits on "Waiting for an available GPU worker" forever.
 ///
 /// 🔴 Derived by asking the REAL gate — the same function the scheduler calls, with the same
-/// per-lane capability surfaces the two routers pass ([`MLX_IMPORTED_CAPS`] from `mlx.rs` /
-/// [`CANDLE_IMPORTED_CAPS`] from `candle.rs`). Restating the per-family verdict as its own table
-/// here is precisely how the advertisement and the gate drift apart again, so it is computed,
-/// never copied.
+/// exact provider facts used by both routers. Restating the per-family verdict as its own table here
+/// is precisely how the advertisement and the gate drift apart again, so it is computed, never
+/// copied.
 pub fn imported_image_model_lora_advertisement(
     model: &str,
     family: &str,

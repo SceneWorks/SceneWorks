@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "c84a51765afa6e9b18a8cc1d7a296cedb46d31f1",
+    "inferenceRevision": "6b29a795e914a26d77640f9db62583285fa27e6f",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -1353,6 +1353,137 @@
           "shiftBits": 1038966011
         }
       }
+    }
+  ],
+  "imports": [
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "edit",
+      "providerId": "krea_2_turbo_edit",
+      "conditioning": [
+        "reference",
+        "multi_reference"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "generate",
+      "providerId": "krea_2_turbo",
+      "conditioning": [
+        "reference"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "multi_phase",
+      "providerId": "krea_2_raw",
+      "conditioning": [
+        "reference"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "pose",
+      "providerId": "krea_2_turbo_control",
+      "conditioning": [
+        "control"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "mage-flow",
+      "source": "transformer_directory",
+      "operation": "generate",
+      "providerId": "mage_flow_base",
+      "conditioning": [],
+      "supportsLora": false,
+      "supportsLokr": false,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": false,
+      "registryCached": true
+    },
+    {
+      "family": "sdxl",
+      "source": "fused_checkpoint",
+      "operation": "edit",
+      "providerId": "sdxl",
+      "conditioning": [
+        "reference",
+        "mask",
+        "control"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "sdxl",
+      "source": "fused_checkpoint",
+      "operation": "generate",
+      "providerId": "sdxl",
+      "conditioning": [
+        "reference",
+        "mask",
+        "control"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
     }
   ]
 }
