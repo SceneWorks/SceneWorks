@@ -38,14 +38,27 @@
     },
     "decodeGeometryPolicy": {
       "type": "object",
-      "required": ["qualityAbi", "family", "resolvedRoute", "backend", "tier", "mode", "overlay", "geometry", "usePid", "tileEdge", "overlap", "metric", "maximumError", "fixtures", "productionEvidenceSha256", "disposition"],
+      "required": ["qualityAbi", "family", "resolvedRoute", "backend", "tier", "loadShape", "artifact", "implementationFingerprint", "mode", "overlay", "geometry", "usePid", "tileEdge", "overlap", "metric", "maximumError", "fixtures", "productionEvidenceSha256", "disposition"],
       "additionalProperties": false,
       "properties": {
-        "qualityAbi": { "const": 1 },
+        "qualityAbi": { "const": 2 },
         "family": { "type": "string", "minLength": 1 },
         "resolvedRoute": { "type": "string", "minLength": 1 },
         "backend": { "const": "mlx" },
         "tier": { "enum": ["bf16", "q4", "q8", "nvfp4", "fp32"] },
+        "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
+        "artifact": {
+          "type": "object",
+          "required": ["repository", "revision", "variant", "fingerprint"],
+          "additionalProperties": false,
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "variant": { "type": "string", "minLength": 1 },
+            "fingerprint": { "type": "string", "minLength": 1 }
+          }
+        },
+        "implementationFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "mode": { "type": "string", "minLength": 1 },
         "overlay": { "type": ["string", "null"], "minLength": 1 },
         "geometry": {

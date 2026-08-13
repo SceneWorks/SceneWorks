@@ -70,6 +70,8 @@ pub(crate) struct LoadIdentity {
     /// engine must not retain a sibling checkpoint's authority or an older policy table.
     resolved_route: Option<String>,
     decode_geometry_policies: Vec<MemoryDecodeGeometryPolicy>,
+    decode_geometry_policy_authoritative: bool,
+    decode_quality_runtime_identity: Option<gen_core::MemoryDecodeQualityRuntimeIdentity>,
     weights: CacheWeightsSource,
     quantize: Option<Quant>,
     precision: Precision,
@@ -176,6 +178,8 @@ impl LoadIdentity {
             engine_id: engine_id.to_owned(),
             resolved_route: spec.resolved_route.clone(),
             decode_geometry_policies: spec.decode_geometry_policies.clone(),
+            decode_geometry_policy_authoritative: spec.decode_geometry_policy_authoritative,
+            decode_quality_runtime_identity: spec.decode_quality_runtime_identity.clone(),
             weights: CacheWeightsSource::from_spec(spec, &spec.weights)?,
             quantize: spec.quantize,
             precision: spec.precision,
@@ -1327,6 +1331,9 @@ mod tests {
         });
         assert_field_changes_identity!("precision", |spec: &mut LoadSpec| {
             spec.precision = Precision::Fp32;
+        });
+        assert_field_changes_identity!("decode quality authority", |spec: &mut LoadSpec| {
+            spec.decode_geometry_policy_authoritative = true;
         });
         assert_field_changes_identity!("control", |spec: &mut LoadSpec| {
             spec.control = None;

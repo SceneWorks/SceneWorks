@@ -1010,6 +1010,7 @@ fn evaluate_shared_image_inner(
         predicted_peak_gb: selected_evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB,
         context: MemoryRunContext {
             selection,
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
             calibration_abi: selected_evidence.calibration_abi,
             calibration_fingerprint: selected_evidence.calibration_fingerprint.clone(),
             mode: mode.mode,

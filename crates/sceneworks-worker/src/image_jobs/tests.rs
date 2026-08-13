@@ -224,6 +224,7 @@ impl Generator for StrictKreaHiresFallbackGenerator {
 fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::MemoryRunContext {
     gen_core::MemoryRunContext {
         selection,
+        optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
         calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: "test".to_owned(),
         load_shape: gen_core::LoadShape::EagerMaterialization,

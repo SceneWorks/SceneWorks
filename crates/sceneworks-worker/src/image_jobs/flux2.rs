@@ -292,6 +292,7 @@ fn flux2_dev_edit_memory_context(
                 component_precision_floors: &[],
             },
         },
+        optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         load_shape: calibration.load_shape,
