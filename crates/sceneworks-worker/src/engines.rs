@@ -771,10 +771,9 @@ pub(crate) const VIDEO_ENGINE_IDS: &[&str] = &[
 /// of these. Trainer descriptors DO carry `backend` (sc-4906), so the derivation gates per-backend
 /// — a candle trainer lights training up only under `backend_candle_enabled`, an mlx one only under
 /// `backend_mlx_enabled` (see the gate in `registry_capabilities`). `lens` is the mlx (sc-5148) +
-/// candle (sc-7817) Lens trainer. The mlx backend registers all of these; the candle backend includes
-/// {`sdxl`, `z_image_turbo`, `lens`, `krea_2_raw`, `ltx_2_3`, `wan2_2_t2v_14b`} (the Wan 5B /
-/// I2V A14B + Kolors have no candle trainer — `jobs_store::training_job_is_candle_eligible` keeps
-/// them off candle).
+/// candle (sc-7817) Lens trainer. At the pinned inference revision Candle also serves the sc-18479
+/// Anima Base, Kolors, Mage-Flow Base, SD3.5 Large/Medium, Wan TI2V-5B, and Wan I2V-14B cells.
+/// Per-base/network routing remains fail-closed even though this inventory is intentionally coarse.
 pub(crate) const TRAINER_IDS: &[&str] = &[
     "z_image_turbo",
     "sdxl",
@@ -782,20 +781,22 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "lens",
     // SD3.5 LoRA-training bases (epic 7841 T3 sc-7884): the engine registers the LoRA/LoKr trainer
     // under the same id as the inference generator of the training base — Large (sc-7883) and the
-    // MMDiT-X Medium (sc-7885). mlx-only (no candle SD3 trainer; epic 7982).
+    // MMDiT-X Medium (sc-7885). Both native backends register these ids.
     "sd3_5_large",
     "sd3_5_medium",
     "ltx_2_3",
     "wan2_2_ti2v_5b",
     "wan2_2_t2v_14b",
     "wan2_2_i2v_14b",
-    // Anima (Cosmos-Predict2 DiT + AnimaTextConditioner; epic 10512, sc-10522): the `mlx-gen-anima`
-    // trainer registers LoRA/LoKr under the same ids as the inference generators of the three variants
-    // (base/aesthetic/turbo). mlx-only (no candle/torch Anima trainer). The trained adapter targets the
-    // DiT AND the bundled `llm_adapter` conditioner (508 targets), applying back via `apply_anima_adapters`.
+    // Anima (Cosmos-Predict2 DiT + AnimaTextConditioner; epic 10512, sc-10522). The product trains
+    // Base; the MLX inventory also retains its pre-existing sibling trainer ids. The adapter targets
+    // the DiT and bundled `llm_adapter` conditioner and applies across the family.
     "anima_base",
     "anima_aesthetic",
     "anima_turbo",
+    // Mage-Flow Base is the sole Mage training base. One trainer id serves LoRA, LoKr, and full
+    // fine-tuning; the network type remains part of TrainingConfig rather than registry identity.
+    "mage_flow_base",
 ];
 
 /// A [`ModelRow`] paired with the linked gen_core descriptor for its engine id — the merged
@@ -1061,6 +1062,22 @@ fn registry_capabilities_from(
 mod tests {
     use super::*;
     use sceneworks_core::contracts::WorkerCapability as Cap;
+
+    #[test]
+    fn training_inventory_names_every_sc18479_provider_id() {
+        for id in [
+            "anima_base",
+            "kolors",
+            "mage_flow_base",
+            "sd3_5_large",
+            "sd3_5_medium",
+            "wan2_2_ti2v_5b",
+            "wan2_2_t2v_14b",
+            "wan2_2_i2v_14b",
+        ] {
+            assert!(TRAINER_IDS.contains(&id), "missing trainer id {id}");
+        }
+    }
 
     // A test Settings with the two backend toggles set; everything else is from_env defaults.
     // (Tests set no backend env vars, so from_env() yields mlx=on / candle=off by default; the
@@ -2285,7 +2302,8 @@ mod tests {
             supports_lora: true,
             supports_lokr: true,
             supports_control: false,
-            // sc-14056: adapter-only stub — the full base fine-tune path is Mage/mlx-only.
+            // This SDXL registry-derivation stub is adapter-only. Mage owns the separate
+            // native full-base descriptor on both backends.
             supports_full_finetune: false,
         }
     }

@@ -1345,15 +1345,8 @@ derive_model_list! {
 /// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
 /// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
 /// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
-/// kernel and base model onto an engine trainer id). `kolors_lora` (SDXL U-Net plus
-/// ChatGLM3) gained a native trainer in sc-4568, cut over here in sc-4732. `lens_lora`
-/// gained a native mlx-gen-lens trainer in sc-5148, cut over here in sc-5180 (off-Mac
-/// has no off-Mac trainer). `krea_lora` is the native `mlx-gen-krea` trainer
-/// (sc-7577); it is native-only, so it is also listed in `MLX_ONLY_TRAINING_KERNELS`
-/// (sc-7578). `sd3_lora` is the native `mlx-gen-sd3` trainer (sc-7883/7885; Large +
-/// MMDiT-X Medium training bases), cut over here in sc-7884; it is native-only too,
-/// so it is also in `MLX_ONLY_TRAINING_KERNELS`. A kernel absent here is never routed to
-/// the mlx worker.
+/// kernel and base model onto an engine trainer id). This list describes MLX routing only; several
+/// entries also have Candle trainers. A kernel absent here is never routed to the MLX worker.
 ///
 /// Public (sc-15277) so the worker's `engine_trainer_id` invariant can be DERIVED from this list
 /// rather than restating it: a kernel that is routed here but has no trainer mapping is claimed by
@@ -1369,27 +1362,17 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_moe_lora",
     "ltx_mlx_lora",
     // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
-    // conditioner). It is native-only, so it is also in `MLX_ONLY_TRAINING_KERNELS`.
+    // conditioner). Candle reached parity in sc-18479.
     "anima_lora",
-    // Mage-Flow (epic 14034, sc-14055 LoRA/LoKr + sc-14056 full base fine-tune): the native
-    // `mlx-gen-mage` trainer. It is native-only, so it is ALSO in `MLX_ONLY_TRAINING_KERNELS` — and
-    // that pairing is exactly why this entry is load-bearing: `MLX_ONLY_TRAINING_KERNELS` makes every
-    // generic/candle worker refuse the job, so until the kernel appears HERE no worker claims it at
-    // all and a Mage training job queues forever (sc-14056). The kernel serves both the LoRA path and
-    // the `networkType: "full"` base fine-tune; the full path is additionally admission-gated by the
-    // worker's unified-memory pre-flight.
+    // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
     "mage_flow_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
-/// (sc-7817, epic 5164) — the off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`]. The candle registry
-/// holds trainers for `sdxl`, `z_image_turbo`, `lens`, `krea_2_raw` (the Krea 2 Raw 12B DiT, epic
-/// 7565 P4 — sc-8614 wires it here), and the Wan **A14B T2V** MoE (`wan2_2_t2v_14b`); the first four
-/// map straight from kernel, while `wan_moe_lora` is base-model gated (handled in
-/// [`training_job_is_candle_eligible`]). Krea is in BOTH this set and
-/// [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR candle). The dense Wan 5B + the I2V A14B have no
-/// candle trainer yet (sc-5167 follow-ups), and Kolors has none; unsupported kernels remain queued
-/// off-Mac. LTX uses its historical `ltx_mlx_lora` kernel name on both native backends.
+/// (sc-7817, epic 5164) — the off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`]. The registry includes
+/// Kolors, SD3.5, Anima, Mage, Wan TI2V-5B, and both Wan A14B experts as of sc-18479. Families that
+/// share a kernel remain base-model gated by [`training_job_is_candle_eligible`]. LTX keeps its
+/// historical `ltx_mlx_lora` kernel name on both native backends.
 /// `krea_control` (epic 10159, B2 sc-10163 / B1 sc-10162) is the Krea 2 pose-ControlNet branch trainer
 /// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it has no MLX trainer, so —
 /// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
@@ -1397,25 +1380,25 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "z_image_lora",
     "sdxl_lora",
+    "kolors_lora",
     "lens_lora",
     "krea_lora",
     "krea_control",
+    "sd3_lora",
     "ltx_mlx_lora",
+    "wan_lora",
+    "wan_moe_lora",
+    "anima_lora",
+    "mage_flow_lora",
 ];
 
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
 /// training kernel". Despite the constant's historical name, this means native-Rust-only rather than
-/// MLX-backend-only: LTX and Krea have both MLX and candle trainers. Their candle workers are admitted
+/// MLX-backend-only: most members have both MLX and Candle trainers. Candle workers are admitted
 /// by the [`worker_supports_job`] exception when the kernel is also in
-/// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `sd3_lora` (epic 7841 T3
-/// sc-7884) is MLX-native with no candle trainer yet (the off-Mac/candle SD3.5 trainer is epic
-/// 7982), so only an mlx worker runs it today. `mage_flow_lora` was registered as a
-/// training-target contract in sc-14054 ahead of its native trainer; the `mlx-gen-mage` trainer
-/// landed in sc-14055 (LoRA/LoKr) and sc-14056 (full base fine-tune), and sc-14056 added the kernel
-/// to [`MLX_ROUTED_TRAINING_KERNELS`] so an mlx worker finally claims it. It stays here because there
-/// is no candle Mage trainer — a generic/candle worker must leave the job queued rather than claim it
-/// and fail with "no training kernel".
+/// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `krea_control` is the
+/// intentional Candle-only exception; the historical constant name remains for compatibility.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "ltx_mlx_lora",
     "krea_lora",
@@ -1720,10 +1703,16 @@ mod tests {
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
         "z_image_lora",
         "sdxl_lora",
+        "kolors_lora",
         "lens_lora",
         "krea_lora",
         "krea_control",
+        "sd3_lora",
         "ltx_mlx_lora",
+        "wan_lora",
+        "wan_moe_lora",
+        "anima_lora",
+        "mage_flow_lora",
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[

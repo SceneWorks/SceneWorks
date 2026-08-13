@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "cb8e61c90c1b313c2b9a71a4916c0aad52781cc4",
+    "inferenceRevision": "961cef6d8f6b28a50fa244de75d86c23f26ac7c5",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -2027,15 +2027,42 @@
     ],
     "transform_ids": [],
     "trainer_ids": [
+      "anima_base",
+      "kolors",
       "krea_2_raw",
       "krea_2_control",
       "lens",
       "ltx_2_3",
+      "mage_flow_base",
+      "sd3_5_large",
+      "sd3_5_medium",
       "sdxl",
       "wan2_2_t2v_14b",
+      "wan2_2_i2v_14b",
+      "wan2_2_ti2v_5b",
       "z_image_turbo"
     ],
     "trainer_capabilities": [
+      {
+        "id": "anima_base",
+        "family": "anima",
+        "backend": "candle",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "kolors",
+        "family": "kolors",
+        "backend": "candle",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
       {
         "id": "krea_2_raw",
         "family": "krea_2",
@@ -2077,6 +2104,36 @@
         "supports_full_finetune": false
       },
       {
+        "id": "mage_flow_base",
+        "family": "mage_flow",
+        "backend": "candle",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": true
+      },
+      {
+        "id": "sd3_5_large",
+        "family": "sd3",
+        "backend": "candle",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "sd3_5_medium",
+        "family": "sd3",
+        "backend": "candle",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
         "id": "sdxl",
         "family": "sdxl",
         "backend": "candle",
@@ -2093,6 +2150,26 @@
         "modality": "video",
         "supports_lora": true,
         "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "wan2_2_i2v_14b",
+        "family": "wan",
+        "backend": "candle",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "wan2_2_ti2v_5b",
+        "family": "wan",
+        "backend": "candle",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": false,
         "supports_control": false,
         "supports_full_finetune": false
       },

@@ -1,6 +1,95 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+#[test]
+fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
+    let mlx = crate::training::effective_training_targets_for_candle(false);
+    let candle = crate::training::effective_training_targets_for_candle(true);
+
+    for kernel in ["kolors_lora", "sd3_lora", "mage_flow_lora"] {
+        let mlx_target = mlx
+            .targets
+            .iter()
+            .find(|target| target.kernel == kernel)
+            .expect("MLX target");
+        let candle_target = candle
+            .targets
+            .iter()
+            .find(|target| target.id == mlx_target.id)
+            .expect("Candle projection of the same target");
+        assert_eq!(
+            mlx_target.defaults.advanced["gradientCheckpointing"],
+            json!(true),
+            "{kernel} keeps its pre-existing MLX checkpointing default"
+        );
+        assert!(
+            mlx_target.defaults.advanced["sampleEvery"]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "{kernel} keeps its pre-existing MLX preview cadence"
+        );
+        assert_eq!(
+            candle_target.defaults.advanced["gradientCheckpointing"],
+            json!(false),
+            "{kernel} Candle metadata must not advertise unsupported checkpointing"
+        );
+        assert_eq!(candle_target.defaults.advanced["sampleEvery"], json!(0));
+        if kernel == "mage_flow_lora" {
+            assert!(mlx_target
+                .defaults
+                .advanced
+                .get("fullFinetuneConfig")
+                .is_none());
+            assert_eq!(
+                candle_target.defaults.advanced["fullFinetuneConfig"],
+                json!({
+                    "mixedPrecision": "f32",
+                    "gradientCheckpointing": false
+                })
+            );
+        }
+    }
+
+    let candle_wan5 = candle
+        .targets
+        .iter()
+        .find(|target| target.base_model == "wan_2_2")
+        .expect("Wan TI2V-5B target");
+    assert_eq!(candle_wan5.defaults.advanced["sampleEvery"], json!(0));
+    let candle_wan14 = candle
+        .targets
+        .iter()
+        .filter(|target| target.kernel == "wan_moe_lora")
+        .collect::<Vec<_>>();
+    assert_eq!(candle_wan14.len(), 2);
+    assert!(candle_wan14.iter().all(|target| {
+        target.defaults.advanced["gradientCheckpointing"] == json!(true)
+            && target.defaults.advanced["sampleEvery"] == json!(0)
+    }));
+
+    let mlx_presets = crate::training::effective_training_presets_for_candle(false);
+    let candle_presets = crate::training::effective_training_presets_for_candle(true);
+    let mlx_kolors = mlx_presets
+        .presets
+        .iter()
+        .find(|preset| preset.target_id == "kolors_lora")
+        .expect("Kolors preset");
+    let candle_kolors = candle_presets
+        .presets
+        .iter()
+        .find(|preset| preset.id == mlx_kolors.id)
+        .expect("Candle Kolors preset");
+    assert_eq!(
+        mlx_kolors.config.advanced["gradientCheckpointing"],
+        json!(true)
+    );
+    assert_eq!(
+        candle_kolors.config.advanced["gradientCheckpointing"],
+        json!(false)
+    );
+    assert_eq!(candle_kolors.config.advanced["sampleEvery"], json!(0));
+}
+
 #[tokio::test]
 async fn training_targets_route_returns_builtin_registry() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -1945,6 +2034,192 @@ async fn completed_training_job_registers_lora_with_provenance() {
         .iter()
         .any(|item| item["name"] == json!("Aurora Style")
             && item["provenance"]["trainingJobId"] == json!(job_id)));
+}
+
+#[tokio::test]
+async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    seed_installed_training_base(&settings.data_dir, "wan_2_2_i2v_14b");
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Wan Experts Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Wan expert set",
+            "items": [{
+                "assetId": asset["id"],
+                "caption": { "text": "wanSubject portrait" }
+            }]
+        }),
+    )
+    .await;
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["baseModel"] == "wan_2_2_i2v_14b")
+        .expect("Wan I2V A14B target")
+        .clone();
+
+    let (status, missing_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": target["id"],
+            "datasetId": dataset["id"],
+            "config": target["defaults"],
+            "outputName": "Wan Missing",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{missing_job}");
+    let missing_job_id = missing_job["id"].as_str().expect("missing job id");
+    claim_training_job(&app, missing_job_id).await;
+    let missing_output_dir = std::path::PathBuf::from(
+        missing_job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("missing output dir"),
+    );
+    std::fs::create_dir_all(&missing_output_dir).expect("missing output dir creates");
+    write_test_safetensors(&missing_output_dir.join("wan_missing.high_noise.safetensors"));
+    let (status, missing_completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{missing_job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Only one Wan expert was written.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": missing_output_dir.join("wan_missing.high_noise.safetensors").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(missing_completed["result"]["loraRegistered"], false);
+    assert!(missing_completed["result"]["loraRegistrationError"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("No declared trained adapter")));
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": target["id"],
+            "datasetId": dataset["id"],
+            "config": target["defaults"],
+            "outputName": "Wan Pair",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["manifestEntry"]["files"],
+        json!([
+            "wan_pair.high_noise.safetensors",
+            "wan_pair.low_noise.safetensors"
+        ])
+    );
+
+    let job_id = job["id"].as_str().expect("job id");
+    claim_training_job(&app, job_id).await;
+    let output_dir = std::path::PathBuf::from(
+        job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("output dir"),
+    );
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    for name in [
+        "wan_pair.high_noise.safetensors",
+        "wan_pair.low_noise.safetensors",
+    ] {
+        write_test_safetensors(&output_dir.join(name));
+    }
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained both Wan experts.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": output_dir.join("wan_pair.high_noise.safetensors").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["result"]["loraRegistered"], true);
+
+    let (_, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let registered = loras
+        .as_array()
+        .expect("loras")
+        .iter()
+        .find(|entry| entry["name"] == "Wan Pair")
+        .expect("registered Wan pair");
+    assert_eq!(
+        registered["files"],
+        json!([
+            "wan_pair.high_noise.safetensors",
+            "wan_pair.low_noise.safetensors"
+        ])
+    );
+}
+
+#[test]
+fn trusted_adapter_files_rejects_a_missing_wan_expert() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_test_safetensors(&dir.path().join("wan_pair.high_noise.safetensors"));
+    let declared = json!([
+        "wan_pair.high_noise.safetensors",
+        "wan_pair.low_noise.safetensors"
+    ]);
+    assert!(crate::training::trusted_adapter_files(Some(&declared), dir.path()).is_none());
+    write_test_safetensors(&dir.path().join("wan_pair.low_noise.safetensors"));
+    assert_eq!(
+        crate::training::trusted_adapter_files(Some(&declared), dir.path()),
+        Some(vec![
+            "wan_pair.high_noise.safetensors".to_owned(),
+            "wan_pair.low_noise.safetensors".to_owned()
+        ])
+    );
 }
 
 #[tokio::test]

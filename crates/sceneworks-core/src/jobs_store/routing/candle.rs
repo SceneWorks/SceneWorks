@@ -1533,11 +1533,8 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
 /// Linux/NVIDIA) worker? The training sibling of
 /// [`image_job_is_candle_eligible`]/[`video_job_is_candle_eligible`]: the candle engine has a native
 /// trainer for the family. Both dry-run and real runs are eligible (the dry-run validates the same
-/// resolved plan). `wan_moe_lora` is candle-eligible ONLY for the **T2V** A14B base model
-/// (`wan_2_2_t2v_14b`) — the candle Wan trainer is registered under `wan2_2_t2v_14b` only; the I2V
-/// A14B and the dense `wan_lora` 5B have no candle trainer, so they are refused and remain queued. UNLIKE the mlx Wan
-/// path, the candle Wan trainer DOES support LoKr (its `build_lokr_targets` merge), so there is no
-/// LoKr-on-Wan exclusion here. The resolved plan is stamped into the payload at submit (apps/rust-api
+/// resolved plan). `wan_moe_lora` accepts both A14B T2V and I2V bases, while `wan_lora` accepts the
+/// dense TI2V-5B base. The resolved plan is stamped into the payload at submit (apps/rust-api
 /// training.rs), so the kernel + base model are readable without touching the dataset or weights.
 pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // The ControlNet studio job (epic 10159) trains through the SAME native executor keyed on the
@@ -1554,19 +1551,44 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel) {
-        return true;
+    if !CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+        return false;
     }
-    // The A14B MoE: candle registers only the T2V trainer (`wan2_2_t2v_14b`). The I2V A14B base
-    // model has no candle trainer, so it is refused and remains queued.
-    if kernel == "wan_moe_lora" {
-        let base_model = target
-            .and_then(|target| target.get("baseModel"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        return base_model == "wan_2_2_t2v_14b";
+    let base_model = target
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let network_type = plan
+        .get("config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("advanced"))
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("networkType"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("lora");
+    let is_adapter =
+        network_type.eq_ignore_ascii_case("lora") || network_type.eq_ignore_ascii_case("lokr");
+
+    match kernel {
+        "kolors_lora" => base_model == "kolors" && is_adapter,
+        "sd3_lora" => matches!(base_model, "sd3_5_large" | "sd3_5_medium") && is_adapter,
+        "wan_lora" => base_model == "wan_2_2" && network_type.eq_ignore_ascii_case("lora"),
+        "wan_moe_lora" => match base_model {
+            "wan_2_2_t2v_14b" => is_adapter,
+            "wan_2_2_i2v_14b" => network_type.eq_ignore_ascii_case("lora"),
+            _ => false,
+        },
+        "anima_lora" => base_model == "anima_base" && is_adapter,
+        "mage_flow_lora" => {
+            base_model == "mage_flow_base"
+                && (is_adapter || network_type.eq_ignore_ascii_case("full"))
+        }
+        // Existing native families keep their established admission. Their trainers perform the
+        // final typed validation; Krea ControlNet deliberately has no adapter-kind selector.
+        _ => true,
     }
-    false
 }
 
 /// Whether an `image_upscale` job is candle-eligible (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic
