@@ -640,7 +640,7 @@ enum LegacyAdmissionReason {
 }
 
 /// Sentinel for routes that carry no calibration record, so no closure can be current against them.
-const UNCALIBRATED_CLOSURE: &str = "uncalibrated";
+pub(crate) const UNCALIBRATED_CLOSURE: &str = "uncalibrated";
 
 /// Resolves the LIVE compile-closure digest for one `(backend, provider)` lane (sc-17774).
 ///
@@ -832,7 +832,7 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
 /// default it expresses is defeasible — a rung the provider does not implement is not engaged, so a
 /// provider publishing a verified cheaper composition no longer has its unimplemented rung's knob
 /// switched on underneath it.
-fn memory_for_selection(
+pub(crate) fn memory_for_selection(
     contract: &MemoryProviderContract,
     selection: MemorySelection,
 ) -> GenerationMemory {
@@ -1474,9 +1474,13 @@ fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase 
 /// conformance, no observed peak, parity not run — the record claims exactly what an estimate can
 /// claim and nothing more. The selector's estimate-scoped eligibility wrap (sc-18096,
 /// `memory_strategy::candidate_exclusion`) is what admits it.
+/// `backend` is a parameter rather than a constant because sc-18814 routes the VIDEO lane through
+/// this same shape on both backends; every image caller here passes [`MemoryBackend::Mlx`], which
+/// is what the field was hardcoded to before.
 #[allow(clippy::too_many_arguments)]
-fn estimate_evidence(
+pub(crate) fn estimate_evidence(
     contract: &MemoryProviderContract,
+    backend: gen_core::MemoryBackend,
     tier: MemoryNumericTier,
     mode: &str,
     overlay: Option<&str>,
@@ -1488,7 +1492,7 @@ fn estimate_evidence(
     MemoryEvidence {
         key: MemoryEvidenceKey {
             resolved_route: contract.provider_id.clone(),
-            backend: gen_core::MemoryBackend::Mlx,
+            backend,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
@@ -1534,7 +1538,7 @@ fn estimate_evidence(
 ///   promising an unmeasured saving.
 /// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
 ///   itself declares them `bounded_by` a rung the composition engages.
-fn estimate_floor_weights_bytes(
+pub(crate) fn estimate_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> u64 {
@@ -1568,7 +1572,7 @@ fn estimate_floor_weights_bytes(
 /// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
 /// knob has no declared range: such a selection cannot be validated, so no candidate is
 /// synthesized for the rung.
-fn estimate_floor_parameters(
+pub(crate) fn estimate_floor_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> Option<gen_core::MemoryStrategyParameters> {
@@ -1741,6 +1745,7 @@ fn synthesize_estimate_ladder(
                     selection,
                     evidence: estimate_evidence(
                         contract,
+                        gen_core::MemoryBackend::Mlx,
                         plan.tier,
                         mode_key,
                         overlay,
@@ -1783,6 +1788,7 @@ fn synthesize_estimate_ladder(
             selection,
             evidence: estimate_evidence(
                 contract,
+                gen_core::MemoryBackend::Mlx,
                 plan.tier,
                 mode_key,
                 overlay,
@@ -2907,6 +2913,35 @@ use crate::fit_gate::BYTES_PER_GIB;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MlxMemoryBudget {
     pub total_gb: f64,
+}
+
+/// The numeric tier a `LoadSpec` loads, exactly as [`MlxRequestPlan::for_spec_and_manifest`]
+/// derives it (sc-18814 factored it out so the video gate cannot drift into a second derivation).
+/// The manifest-driven `fixed_artifact_tier` override is deliberately NOT applied here: a video
+/// route carries no calibration binding to resolve one from.
+pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumericTier {
+    MemoryNumericTier {
+        precision: spec.precision,
+        quant: spec.quantize,
+        component_precision_floors: active_component_floors(
+            declared_component_floors(engine_id),
+            spec.quantize,
+        ),
+    }
+}
+
+/// The activation-headroom allowance this load already charges — the same
+/// [`HeadroomAllowance`] the load-time residency gate uses (sc-18814 exposes it so the video gate
+/// reuses that number instead of inventing one).
+pub(crate) fn spec_headroom_bytes(engine_id: &str, spec: &LoadSpec) -> u64 {
+    gib_to_bytes(spec_component_bytes(engine_id, spec).2.total_gb)
+}
+
+/// The live unified-memory budget in GiB, honoring the small-Mac emulation cap — the same figure
+/// [`decide_residency`] budgets against. `None` off macOS or when the probe fails, which the video
+/// gate treats as no signal (never block).
+pub(crate) fn live_unified_budget_gb() -> Option<f64> {
+    resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb()).map(|b| b.total_gb)
 }
 
 /// Read the small-Mac cap from the environment. `Some(gb)` only for a positive number.
