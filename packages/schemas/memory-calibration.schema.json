@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "harnessVersion", "records"],
   "properties": {
-    "schemaVersion": { "const": 4 },
+    "schemaVersion": { "const": 5 },
     "harnessVersion": { "const": "sceneworks-memory-v5" },
     "sourceSessions": { "type": "array", "items": { "$ref": "#/$defs/sourceSession" } },
     "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }
@@ -30,13 +30,22 @@
     },
     "phase": {
       "type": "object", "additionalProperties": false,
-      "required": ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"],
+      "description":
+        "Per-phase memory counters. Every field is ONE named backend reading, or an explicitly derived function of two of them. schemaVersion 5 (sc-18864) REMOVED `deviceBytes` and `wiredBytes`: both adapters emitted them as verbatim copies of `allocatorBytes` — provably so across all 456 committed phase objects that carried them (404 across the five bundles plus 52 in the thirteen immutable v4 receipts) — so a record could assert `wiredBytes > hardware.wiredLimitBytes` purely as an artifact of that aliasing, and every committed MLX record did. MLX exposes no third counter for them to have carried, so they are removed rather than redefined.",
+      "required": ["activeBytes", "allocatorBytes", "reclaimableBytes"],
       "properties": {
-        "activeBytes": { "type": "integer", "minimum": 0 },
-        "allocatorBytes": { "type": "integer", "minimum": 0 },
-        "deviceBytes": { "type": "integer", "minimum": 0 },
-        "wiredBytes": { "type": "integer", "minimum": 0 },
-        "reclaimableBytes": { "type": "integer", "minimum": 0 }
+        "activeBytes": {
+          "type": "integer", "minimum": 0,
+          "description": "MLX: `mlx_rs::memory::get_peak_memory()` — the MAXIMUM live-array (\"active\") byte count over the phase window, the quantity MLX's own `get_memory_limit()` bounds. CUDA: the `nvidia-smi memory.used` device delta on the required idle single-process GPU. This is the NON-RECLAIMABLE residency and the only field a host-capacity or wired-ceiling check may be run against."
+        },
+        "allocatorBytes": {
+          "type": "integer", "minimum": 0,
+          "description": "DERIVED, not measured: `activeBytes + reclaimableBytes`, and both validators enforce that identity. It is an UPPER BOUND on co-existence, NOT a simultaneous maximum — `activeBytes` is a peak-over-window while `reclaimableBytes` is instantaneous at the phase boundary, and MLX exposes no \"cache at the active peak\". Never compare it to a hardware ceiling: a completing LTX render co-existed 7.46 GiB above `recommendedMaxWorkingSetSize` because the allocator cache is released under pressure (sc-18810)."
+        },
+        "reclaimableBytes": {
+          "type": "integer", "minimum": 0,
+          "description": "MLX: `mlx_rs::memory::get_cache_memory()` — the allocator's free-buffer cache, read INSTANTANEOUSLY at the phase boundary. Elastic and released under memory pressure, so it is never charged as wired residency. CUDA: 0, because candle's exact backend has no caching allocator."
+        }
       }
     },
     "phaseMetrics": {

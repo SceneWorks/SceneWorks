@@ -916,16 +916,19 @@ export function mlxRequiredHostBytes(record) {
   const mlxLimit = record.hardware?.mlxMemoryLimitBytes;
   const wiredLimit = record.hardware?.wiredLimitBytes;
   const predicted = record.predictedPeakBytes?.overall;
-  const wired = record.observedMemory?.overall?.wiredBytes;
-  const reclaimable = record.observedMemory?.overall?.reclaimableBytes;
-  const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, wired, reclaimable];
+  // sc-18864: this read `wiredBytes - reclaimableBytes`. Schema v5 has no `wiredBytes` — it was a
+  // copy of `allocatorBytes`, and that subtraction was recovering `activeBytes` the long way round.
+  // The mirrored Rust law (`EvidenceRecord::mlx_admission_envelope`) reads the same field, and the
+  // arithmetic is unchanged on every committed record.
+  const resident = record.observedMemory?.overall?.activeBytes;
+  const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, resident];
   if (!inputs.every((value) => Number.isSafeInteger(value) && value >= 0)) return null;
 
   const captureHost = BigInt(memoryBytes);
   if (captureHost === 0n) return null;
   const processCeiling = BigInt(Math.min(memoryBytes, mlxLimit, wiredLimit));
   const foreignReserve = captureHost - processCeiling;
-  const nonReclaimableWired = BigInt(Math.max(0, wired - reclaimable));
+  const nonReclaimableWired = BigInt(resident);
   const peak = BigInt(predicted) > nonReclaimableWired ? BigInt(predicted) : nonReclaimableWired;
   const absoluteRequirement = peak + foreignReserve;
 
@@ -939,9 +942,13 @@ export function mlxRequiredHostBytes(record) {
   return required <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(required) : null;
 }
 
+// The published peak is the ALLOCATOR bound (active + reclaimable), which is what `deviceBytes`
+// carried before sc-18864 removed it — so every published cell keeps its exact value. It is a
+// footprint figure for the matrix, not a feasibility figure: `mlxRequiredHostBytes` above is the
+// one that sizes a host, and it reads the non-reclaimable residency instead.
 export function observedPeakBytes(record) {
   const overall = record?.observedMemory?.overall;
-  const value = overall?.deviceBytes ?? overall?.activeBytes;
+  const value = overall?.allocatorBytes ?? overall?.activeBytes;
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
@@ -3726,6 +3733,7 @@ function renderMarkdown(matrix) {
     "Static capability is never promoted to dynamic verification. The six evidence dimensions stay separate: `staticImplementation`, `historicalVerification`, `currentEnvironmentVerification`, `strategyParameterVerification` and `structural` are per-coordinate and ride the cell; `declaredCalibration` and `loadability` are functions of (entry, backend, tier) alone and are published once per scope in `manifestScopes`, which the cell names through `evidence.manifestScope` (sc-18099).",
     "`Runtime verified` means the exact base-only coordinate is production-admissible from current runtime evidence; it is deliberately not Full `Verified`, which additionally requires the catalog story's lifecycle and negative-mutation signoff.",
     "",
+    "sc-18864: `observedPeakGb` is the ALLOCATOR BOUND — a phase's peak-over-window `activeBytes` summed with its instantaneous end-of-phase `reclaimableBytes`, which MLX releases under pressure. It is an upper bound on co-existence, so it is a FOOTPRINT figure, not a feasibility figure, and it may legitimately exceed the capture host. `mlxRequiredHostBytes` is the figure that sizes a host: it reads the non-reclaimable residency instead.",
     "One row per (catalog entry, backend): ownership is backend-scoped, so a single row per entry could only name one backend's stories (SC-15812).",
     "",
     "sc-18815: the `Modality` column exists because the universe is no longer one modality. Video entries carry no per-entry ownership story — epic 18803 does not slice video that way, so `Model story` is `—` rather than a story id that could not close the cell — and their family story is the family's rung-4 survey story, which covers both backends.",

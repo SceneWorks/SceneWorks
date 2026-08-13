@@ -91,14 +91,15 @@ fn decimal_gb_to_bytes(value: f64) -> u64 {
 
 fn cuda_phase_metrics(device_bytes: u64) -> Value {
     // Candle's exact CUDA backend allocates directly through cudarc/CUDA and has no caching
-    // allocator counter. On the required idle single-process GPU, the device delta is therefore the
-    // only truthful active/allocator residency counter; diagnostics records this alias explicitly.
-    // Discrete CUDA device allocations are physically non-pageable, so wired aliases device too.
+    // allocator counter. On the required idle single-process GPU the `nvidia-smi memory.used` delta
+    // is therefore the one truthful residency counter, and it is non-reclaimable: discrete CUDA
+    // device allocations are physically non-pageable. So `activeBytes` carries the reading,
+    // `reclaimableBytes` is a measured zero, and `allocatorBytes` is their sum by the schema-v5
+    // identity. sc-18864 dropped `deviceBytes` and `wiredBytes`, which were further copies of this
+    // same number under names claiming to be distinct quantities.
     json!({
         "activeBytes": device_bytes,
         "allocatorBytes": device_bytes,
-        "deviceBytes": device_bytes,
-        "wiredBytes": device_bytes,
         "reclaimableBytes": 0,
     })
 }

@@ -667,6 +667,16 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
         lambda record: record["quality"].update(contract=""),
         lambda record: record["hardware"].update(unexpected="closed"),
         lambda record: record["scenarios"][0].update(unexpected="closed"),
+        # sc-18864: schema v5 dropped `deviceBytes`/`wiredBytes`, which both adapters emitted as
+        # verbatim copies of `allocatorBytes`. That aliasing is what let every committed MLX record
+        # claim wired residency above its own probed ceiling. Each alias is reintroduced on its own
+        # so the schema is shown to close both, not merely one of the pair.
+        lambda record: record["observedMemory"]["overall"].update(
+            deviceBytes=record["observedMemory"]["overall"]["allocatorBytes"]
+        ),
+        lambda record: record["observedMemory"]["overall"].update(
+            wiredBytes=record["observedMemory"]["overall"]["allocatorBytes"]
+        ),
     ]
     for index, mutate in enumerate(mutations):
         invalid = copy.deepcopy(bundle)

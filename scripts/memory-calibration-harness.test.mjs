@@ -9,7 +9,8 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
-  HARNESS_VERSION, RUNG_REUSE_TOLERANCE, assessProviderReuse, atomicWrite, canonicalJson,
+  HARNESS_VERSION, RUNG_REUSE_TOLERANCE, SCHEMA_VERSION, assessProviderReuse, atomicWrite, canonicalJson,
+  projectPhaseMetricsToSchemaV5,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
   physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
@@ -42,9 +43,7 @@ async function cleanFixtureRepo() {
 const phase = (value) => ({
   activeBytes: value,
   allocatorBytes: value + 10,
-  deviceBytes: value + 20,
-  wiredBytes: value + 30,
-  reclaimableBytes: 0,
+  reclaimableBytes: 10,
 });
 
 function complete(overrides = {}) {
@@ -220,10 +219,10 @@ test("complete record validates and identity includes evidence scope plus resolv
 test("runtime-complete accepts an honest overall CUDA high-water mark without fabricated phases", () => {
   const record = runtimeComplete();
   assert.equal(validateRecord(record), record);
-  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
 
   const malformed = runtimeComplete();
-  malformed.observedMemory.overall.deviceBytes = malformed.observedMemory.overall.activeBytes;
+  malformed.observedMemory.overall.allocatorBytes = malformed.observedMemory.overall.activeBytes;
   malformed.id = recordId(malformed);
   assert.throws(() => validateRecord(malformed), /only the measured activeBytes/);
 
@@ -233,13 +232,94 @@ test("runtime-complete accepts an honest overall CUDA high-water mark without fa
   assert.throws(() => validateRecord(overCapacity), /exceed probed hardware/);
 });
 
+// sc-18864 GUARD: the MLX wired ceiling is now checked on `runtime_complete`, not only on
+// `complete`. It was checked only on `complete` before, which is exactly how three
+// `mlx:flux2_dev` runtime-complete records shipped claiming up to 26.0 GB more wired residency
+// than the probed limit. Exercised at the boundary in both directions.
+test("runtime-complete MLX telemetry is held to the probed wired ceiling", () => {
+  const wiredLimit = 80 * 1024 ** 3;
+
+  const atLimit = qwenPositiveComplete();
+  atLimit.status = "runtime_complete";
+  atLimit.sweep = {
+    axes: [{ parameter: "decodeTileEdge", testedValues: [512] }],
+    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 64 }, result: "passed" }],
+    rangeVerified: true,
+  };
+  atLimit.scenarios = runtimeComplete().scenarios;
+  atLimit.negativeMutation = null;
+  atLimit.quality = runtimeComplete().quality;
+  atLimit.predictedPeakBytes = { overall: wiredLimit };
+  atLimit.observedMemory = {
+    conditioning: { activeBytes: 1, allocatorBytes: 1, reclaimableBytes: 0 },
+    denoise: { activeBytes: 1, allocatorBytes: 1, reclaimableBytes: 0 },
+    decode: { activeBytes: wiredLimit, allocatorBytes: wiredLimit, reclaimableBytes: 0 },
+    overall: { activeBytes: wiredLimit, allocatorBytes: wiredLimit, reclaimableBytes: 0 },
+  };
+  atLimit.logicalCaseId = logicalCaseId(atLimit);
+  atLimit.id = recordId(atLimit);
+  assert.equal(validateRecord(atLimit), atLimit, "resident bytes exactly at the ceiling are admissible");
+
+  const overLimit = structuredClone(atLimit);
+  for (const name of ["decode", "overall"]) {
+    overLimit.observedMemory[name] = {
+      activeBytes: wiredLimit + 1, allocatorBytes: wiredLimit + 1, reclaimableBytes: 0,
+    };
+  }
+  overLimit.id = recordId(overLimit);
+  assert.throws(() => validateRecord(overLimit), /overall wired bytes exceed the probed wired ceiling/);
+
+  // And the co-existence BOUND may sit far above the host without disqualifying the capture: it is
+  // a peak-over-window summed with an instantaneous cache reading, which the allocator releases
+  // under pressure. This is the shape every committed LTX record carries, and these two numbers are
+  // `imc-2c064567893ea869006e`'s `observedMemory.overall` pair verbatim (their sum is its
+  // `allocatorBytes`, 142_648_318_860, against a 137_438_953_472-byte host).
+  const elasticCache = structuredClone(atLimit);
+  const resident = 37_931_479_408;
+  const reclaimable = 104_716_839_452;
+  assert.ok(resident + reclaimable > elasticCache.hardware.memoryBytes, "fixture must discriminate");
+  for (const name of ["conditioning", "denoise", "decode", "overall"]) {
+    elasticCache.observedMemory[name] = {
+      activeBytes: resident, allocatorBytes: resident + reclaimable, reclaimableBytes: reclaimable,
+    };
+  }
+  elasticCache.id = recordId(elasticCache);
+  assert.equal(validateRecord(elasticCache), elasticCache);
+});
+
+// sc-18864 GUARD: the immutable v4 provider receipts are projected, never rewritten — and a
+// receipt whose aliases are NOT copies of `allocatorBytes` is refused rather than normalised,
+// because that would mean discarding a reading the field names claimed.
+test("the v4 provider-receipt projection drops copies and refuses non-copies", () => {
+  const v4 = {
+    overall: { activeBytes: 100, allocatorBytes: 150, deviceBytes: 150, wiredBytes: 150, reclaimableBytes: 50 },
+  };
+  assert.deepEqual(projectPhaseMetricsToSchemaV5(structuredClone(v4), "receipt"), {
+    overall: { activeBytes: 100, allocatorBytes: 150, reclaimableBytes: 50 },
+  });
+
+  for (const alias of ["deviceBytes", "wiredBytes"]) {
+    const tampered = structuredClone(v4);
+    tampered.overall[alias] = 151;
+    assert.throws(
+      () => projectPhaseMetricsToSchemaV5(tampered, "receipt"),
+      new RegExp(`${alias} is 151, not a copy of allocatorBytes 150`),
+      `${alias} must be refused individually`,
+    );
+  }
+
+  // A v5 receipt passes through untouched, so the projection cannot rewrite current captures.
+  const v5 = { overall: { activeBytes: 100, allocatorBytes: 150, reclaimableBytes: 50 } };
+  assert.deepEqual(projectPhaseMetricsToSchemaV5(structuredClone(v5), "receipt"), v5);
+});
+
 test("complete status still rejects overall-only runtime telemetry", () => {
   const record = runtimeComplete();
   record.status = "complete";
   record.id = recordId(record);
   assert.throws(() => validateRecord(record), /conditioning/);
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] }),
     /schema validation failed/,
   );
 });
@@ -372,12 +452,12 @@ test("the SDXL adapter's runtime-complete fragment passes the real harness witho
   record.logicalCaseId = logicalCaseId(record);
   record.id = recordId(record);
   assert.equal(validateRecord(record), record);
-  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
 
   const stringAxis = structuredClone(record);
   stringAxis.sweep.axes.push({ parameter: "transformerWindowComponent", testedValues: ["dit"] });
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [stringAxis] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [stringAxis] }),
     /schema validation failed/,
   );
 });
@@ -391,9 +471,21 @@ test("complete status fails closed on scenario, quality, mutation, memory and lo
     [(r) => (r.quality.result = "not_run"), /quality/],
     [(r) => (r.negativeMutation.measured = false), /measured/],
     [(r) => { r.negativeMutation.maximumError = 0.01; r.negativeMutation.meanError = 0.001; }, /breach/],
-    [(r) => (r.observedMemory.overall.deviceBytes = 1), /cover/],
-    [(r) => (r.observedMemory.decode.allocatorBytes = 1), /cover active/],
-    [(r) => (r.observedMemory.decode.reclaimableBytes = 999), /reclaimable/],
+    // sc-18864: keep the derived identity intact so this row exercises the overall-covers-phases
+    // rule and not the identity rule two rows down.
+    [(r) => (r.observedMemory.overall = { activeBytes: 1, allocatorBytes: 1, reclaimableBytes: 0 }), /cover/],
+    [(r) => (r.observedMemory.decode.allocatorBytes = 1), /allocator bytes must equal/],
+    [(r) => (r.observedMemory.decode.reclaimableBytes = 999), /allocator bytes must equal/],
+    // sc-18864 review: the two rows above both drive `allocatorBytes` BELOW `active + reclaimable`,
+    // so a regression of the identity to the old one-sided `allocator >= active + reclaimable`
+    // shipped green in JS while the Rust mirror caught it. This row drives it ABOVE the sum — the
+    // direction that lets a DERIVED field inflate past its own derivation, which is precisely the
+    // drift this story removes. `overall` is raised in step so the failure is the identity rule and
+    // not the overall-covers-phases rule that would otherwise fire first.
+    [(r) => {
+      r.observedMemory.decode.allocatorBytes = r.observedMemory.decode.allocatorBytes + 5_000;
+      r.observedMemory.overall.allocatorBytes = r.observedMemory.decode.allocatorBytes;
+    }, /allocator bytes must equal/],
     [(r) => (r.hardware.memoryBytes = 100), /exceed probed hardware/],
     [(r) => (r.loadability.resolvedPathFingerprint = ""), /non-empty/],
     [(r) => (r.quality.contract = ""), /non-empty/],
@@ -440,7 +532,7 @@ test("runtime-complete fails closed on promoted lifecycle scenarios, overlay tar
   );
   assert.throws(
     () => validateBundle({
-      schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [secondCase],
+      schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [secondCase],
     }),
     /schema validation failed: .*sweep\.cases: array has too many items/,
   );
@@ -453,7 +545,7 @@ test("runtime-complete fails closed on promoted lifecycle scenarios, overlay tar
   );
   assert.throws(
     () => validateBundle({
-      schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [mismatch],
+      schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [mismatch],
     }),
     /exactly one passed case matching its strategy parameters/,
   );
@@ -483,7 +575,7 @@ test("a singleton production parameter domain is valid complete evidence", () =>
   };
   record.id = recordId(record);
   assert.equal(validateBundle({
-    schemaVersion: 4,
+    schemaVersion: SCHEMA_VERSION,
     harnessVersion: HARNESS_VERSION,
     records: [record],
   }).records[0], record);
@@ -497,13 +589,13 @@ test("merge is commutative and rejects conflicting exact-identity captures", () 
   });
   second.logicalCaseId = logicalCaseId(second);
   second.id = recordId(second);
-  const a = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [first] };
-  const b = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [second] };
+  const a = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [first] };
+  const b = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [second] };
   assert.equal(canonicalJson(mergeBundles(a, b)), canonicalJson(mergeBundles(b, a)));
   const conflict = structuredClone(first);
   conflict.capturedAt = "2026-07-28T14:00:00Z";
   assert.throws(
-    () => mergeBundles(a, { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [conflict] }),
+    () => mergeBundles(a, { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [conflict] }),
     /conflicting record/,
   );
 });
@@ -513,18 +605,16 @@ test("fresh and reused rung captures use a committed absolute-or-relative tolera
   const reusedRecord = structuredClone(freshRecord);
   const withinTolerance = RUNG_REUSE_TOLERANCE.absoluteBytes;
   for (const phaseName of ["conditioning", "denoise", "decode", "overall"]) {
-    for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes"]) {
+    for (const metric of ["activeBytes", "allocatorBytes"]) {
       reusedRecord.observedMemory[phaseName][metric] += withinTolerance;
     }
   }
-  const fresh = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [freshRecord] };
-  const reused = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [reusedRecord] };
+  const fresh = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [freshRecord] };
+  const reused = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [reusedRecord] };
   assert.equal(compareRungReuse(fresh, reused).verdict, "amortizable");
 
   reusedRecord.observedMemory.conditioning.activeBytes += 1;
   reusedRecord.observedMemory.conditioning.allocatorBytes += 1;
-  reusedRecord.observedMemory.conditioning.deviceBytes += 1;
-  reusedRecord.observedMemory.conditioning.wiredBytes += 1;
   assert.equal(compareRungReuse(fresh, reused).verdict, "unable_to_amortize");
 
   const differentHardware = structuredClone(reusedRecord);
@@ -625,7 +715,7 @@ test("current Qwen q4 and bf16 evidence cannot omit physical MLX provenance", as
     );
     await assert.rejects(
       validateSourceSessionFiles(
-        { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] },
+        { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] },
         null,
         revisions.inferenceClosureDigests,
       ),
@@ -1084,13 +1174,13 @@ test("provider execution requires one backend-specific hardware probe", async ()
 test("a legacy Qwen completion cannot suppress a provenance-required recapture", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
-  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
   const provenanceRequired = structuredClone(record);
   provenanceRequired.sourceProvenance = "physical_mlx_v1";
   provenanceRequired.logicalCaseId = logicalCaseId(provenanceRequired);
   provenanceRequired.id = recordId(provenanceRequired);
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [provenanceRequired] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [provenanceRequired] }),
     /exact artifact inventory|missing source-session derivation/,
   );
   const qwenRemaining = expandPlan(config, [record]).filter(
@@ -1111,7 +1201,7 @@ test("a legacy Qwen completion cannot suppress a provenance-required recapture",
 });
 
 test("runtime bundle validation matches schema closure for malformed gated and nested values", () => {
-  const valid = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [complete()] };
+  const valid = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [complete()] };
   validateBundle(valid);
   const mutations = [
     (bundle) => (bundle.unexpected = true),
@@ -1181,7 +1271,7 @@ test("authoritative Z-Image evidence requires dimension-specific source sessions
     },
   });
   const bundleWith = (candidate) => ({
-    schemaVersion: 4, harnessVersion: HARNESS_VERSION,
+    schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION,
     sourceSessions: [candidate, inventory], records: [record],
   });
   validateBundle(bundleWith(source));
@@ -1224,7 +1314,7 @@ test("authoritative Z-Image evidence requires dimension-specific source sessions
   qualityWithoutInputs.claims = ["quality"];
   qualityWithoutInputs.inputs = [];
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [qualityWithoutInputs], records: [] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [qualityWithoutInputs], records: [] }),
     /artifact claims require exact inputs|schema validation failed/,
   );
 
@@ -1232,7 +1322,7 @@ test("authoritative Z-Image evidence requires dimension-specific source sessions
   negativeWithoutControl.claims = ["negative_mutation"];
   negativeWithoutControl.inputs = negativeWithoutControl.inputs.filter((input) => input.role !== "control");
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [negativeWithoutControl], records: [] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [negativeWithoutControl], records: [] }),
     /artifact claim is missing its exact tier\/overlay inputs/,
   );
 
@@ -1241,7 +1331,7 @@ test("authoritative Z-Image evidence requires dimension-specific source sessions
   missing.logicalCaseId = logicalCaseId(missing);
   missing.id = recordId(missing);
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [source], records: [missing] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [source], records: [missing] }),
     /missing source-session derivation/,
   );
 
@@ -1281,10 +1371,53 @@ test("gated real-adapter diagnostics are closed, typed, and never promote eviden
     const invalid = structuredClone(record);
     mutate(invalid);
     assert.throws(
-      () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [invalid] }),
+      () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [invalid] }),
       /schema validation failed/,
     );
   }
+});
+
+// sc-18864 review GUARD: `predictedOverallCeiling` is a diagnostic COPY of the typed
+// `predictedPeakBytes.overall`, and the LTX arm's own comment says they agree by construction.
+// Nothing compared them, so all 14 committed LTX records shipped a diagnostic still computed over
+// the `allocatorBytes` co-existence bound while the typed field beside it carried the resident
+// peak. Both directions are rejected: an ordering in either direction is what let one quantity
+// carry two values.
+test("a diagnostic ceiling that disagrees with the typed predicted peak is refused in both directions", () => {
+  // The numbers are `imc-2c064567893ea869006e` verbatim: its migrated diagnostic and typed field,
+  // and the pre-migration value that this guard would have caught.
+  const agreeing = 39_862_665_216;
+  const preMigrationOverBound = 149_786_984_448;
+  const record = complete({
+    status: "gated",
+    evidenceScope: "authoritative",
+    diagnostics: {
+      adapter: "memory-mlx-adapter:ltx-2-3-staged-video",
+      execution: "executed",
+      blockers: ["the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all"],
+      measurements: [{ name: "predictedOverallCeiling", unit: "bytes", value: agreeing }],
+    },
+  });
+  record.predictedPeakBytes = { conditioning: 100, denoise: 200, decode: 150, overall: agreeing };
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+
+  // ABOVE the typed field — the real committed defect, a ceiling over `allocatorBytes`.
+  const above = structuredClone(record);
+  above.diagnostics.measurements[0].value = preMigrationOverBound;
+  assert.throws(() => validateRecord(above), /predictedOverallCeiling .* must equal predictedPeakBytes\.overall/);
+
+  // BELOW the typed field — the mirror error, and the direction a one-sided rule would miss.
+  const below = structuredClone(record);
+  below.diagnostics.measurements[0].value = agreeing - 64 * 1024 * 1024;
+  assert.throws(() => validateRecord(below), /predictedOverallCeiling .* must equal predictedPeakBytes\.overall/);
+
+  // A record carrying only one of the two is untouched: the candle arm emits a null
+  // `predictedPeakBytes`, and most arms emit no such diagnostic at all.
+  const typedOnly = structuredClone(record);
+  typedOnly.diagnostics.measurements = [{ name: "preRungActiveAfterClear", unit: "bytes", value: 1 }];
+  assert.equal(validateRecord(typedOnly), typedOnly);
 });
 
 test("parameterless strategies use a truthful degenerate sweep instead of a fabricated field", () => {
@@ -1313,7 +1446,7 @@ test("parameterless strategies use a truthful degenerate sweep instead of a fabr
   invalid.logicalCaseId = logicalCaseId(invalid);
   invalid.id = recordId(invalid);
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [invalid] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [invalid] }),
     /parameterized complete strategy must sweep at least one axis/,
   );
 });
@@ -1434,7 +1567,7 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   const semanticSession = semanticTamper.sourceSessions[0];
   const semanticRecord = semanticTamper.records[0];
   const tamperedProviderResponse = JSON.parse(raw.toString("utf8"));
-  tamperedProviderResponse.observedMemory.overall.deviceBytes = 987654321;
+  tamperedProviderResponse.observedMemory.overall.activeBytes = 987654321;
   tamperedProviderResponse.quality.maximumError = 0.077;
   const tamperedProviderBytes = Buffer.from(JSON.stringify(tamperedProviderResponse));
   const tamperedStdoutSha256 = createHash("sha256").update(tamperedProviderBytes).digest("hex");
@@ -2267,7 +2400,7 @@ test("pre-composition evidence is rejected as stale by the schema and harness ga
 
   // 3. a stale record cannot be smuggled in under a current envelope either.
   assert.throws(
-    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [stale] }),
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [stale] }),
     /schema validation failed/,
   );
 
@@ -2275,7 +2408,7 @@ test("pre-composition evidence is rejected as stale by the schema and harness ga
   //    above are caused by the version bump and by nothing else.
   const current = complete();
   assert.equal(validateRecord(current), current);
-  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [current] });
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [current] });
 });
 
 test("the promoted evidence bundle carries the current harnessVersion", async () => {

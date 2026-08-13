@@ -7686,9 +7686,13 @@ mod tests {
             .evidence
             .clone();
         assert_eq!(evidence.predicted_peak_bytes, gib_to_bytes(5.0));
+        // sc-18864: 3 GiB is the fixture's NON-RECLAIMABLE residency (`activeBytes`). It read 4 GiB
+        // when the envelope recovered it as `wiredBytes - reclaimableBytes`, and `wiredBytes` was a
+        // copy of the two-instant allocator bound. Still distinct from the 5 GiB prediction, so the
+        // assertion below still discriminates observed telemetry from the predicted maximum.
         assert_eq!(
             evidence.observed_peak_bytes,
-            Some(gib_to_bytes(4.0)),
+            Some(gib_to_bytes(3.0)),
             "observed telemetry remains the measured counter rather than the predicted maximum"
         );
         let evaluated = evaluate_request_with_budget_using_bundle(
@@ -10265,8 +10269,6 @@ mod tests {
                 .expect("fixture has full phase telemetry");
             observed.overall.active_bytes = gib_to_bytes(3.0);
             observed.overall.allocator_bytes = gib_to_bytes(3.0);
-            observed.overall.device_bytes = gib_to_bytes(3.0);
-            observed.overall.wired_bytes = gib_to_bytes(3.0);
             observed.overall.reclaimable_bytes = 0;
         }
         bundle.records.push(transformer_record);

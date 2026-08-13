@@ -50,7 +50,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 149786984448
+            "value": 39862665216
           },
           {
             "name": "denoiseEntryActive",
@@ -199,33 +199,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 40050360486,
-          "deviceBytes": 40050360486,
-          "reclaimableBytes": 4371718590,
-          "wiredBytes": 40050360486
+          "reclaimableBytes": 4371718590
         },
         "decode": {
           "activeBytes": 37931479408,
           "allocatorBytes": 142648318860,
-          "deviceBytes": 142648318860,
-          "reclaimableBytes": 104716839452,
-          "wiredBytes": 142648318860
+          "reclaimableBytes": 104716839452
         },
         "denoise": {
           "activeBytes": 36831735964,
           "allocatorBytes": 36831735964,
-          "deviceBytes": 36831735964,
-          "reclaimableBytes": 0,
-          "wiredBytes": 36831735964
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 37931479408,
           "allocatorBytes": 142648318860,
-          "deviceBytes": 142648318860,
-          "reclaimableBytes": 104716839452,
-          "wiredBytes": 142648318860
+          "reclaimableBytes": 104716839452
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 39862665216,
+        "denoise": 38721814528,
+        "overall": 39862665216
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -372,7 +369,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 157168959488
+            "value": 47177531392
           },
           {
             "name": "denoiseEntryActive",
@@ -521,33 +518,30 @@
         "conditioning": {
           "activeBytes": 36326061806,
           "allocatorBytes": 41546419784,
-          "deviceBytes": 41546419784,
-          "reclaimableBytes": 5220357978,
-          "wiredBytes": 41546419784
+          "reclaimableBytes": 5220357978
         },
         "decode": {
           "activeBytes": 44883604052,
           "allocatorBytes": 149658685528,
-          "deviceBytes": 149658685528,
-          "reclaimableBytes": 104775081476,
-          "wiredBytes": 149658685528
+          "reclaimableBytes": 104775081476
         },
         "denoise": {
           "activeBytes": 39681242940,
           "allocatorBytes": 39681242940,
-          "deviceBytes": 39681242940,
-          "reclaimableBytes": 0,
-          "wiredBytes": 39681242940
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 44883604052,
           "allocatorBytes": 149658685528,
-          "deviceBytes": 149658685528,
-          "reclaimableBytes": 104775081476,
-          "wiredBytes": 149658685528
+          "reclaimableBytes": 104775081476
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 38184943616,
+        "decode": 47177531392,
+        "denoise": 41674604544,
+        "overall": 47177531392
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -694,7 +688,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 160994164736
+            "value": 50935627776
           },
           {
             "name": "denoiseEntryActive",
@@ -843,33 +837,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 41143402398,
-          "deviceBytes": 41143402398,
-          "reclaimableBytes": 5464760502,
-          "wiredBytes": 41143402398
+          "reclaimableBytes": 5464760502
         },
         "decode": {
           "activeBytes": 48458873744,
           "allocatorBytes": 153325602360,
-          "deviceBytes": 153325602360,
-          "reclaimableBytes": 104866728616,
-          "wiredBytes": 153325602360
+          "reclaimableBytes": 104866728616
         },
         "denoise": {
           "activeBytes": 40789577860,
           "allocatorBytes": 40789577860,
-          "deviceBytes": 40789577860,
-          "reclaimableBytes": 0,
-          "wiredBytes": 40789577860
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 48458873744,
           "allocatorBytes": 153325602360,
-          "deviceBytes": 153325602360,
-          "reclaimableBytes": 104866728616,
-          "wiredBytes": 153325602360
+          "reclaimableBytes": 104866728616
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 50935627776,
+        "denoise": 42882564096,
+        "overall": 50935627776
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -1016,7 +1007,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 167637942272
+            "value": 56908316672
           },
           {
             "name": "denoiseEntryActive",
@@ -1165,33 +1156,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 41858403034,
-          "deviceBytes": 41858403034,
-          "reclaimableBytes": 6179761138,
-          "wiredBytes": 41858403034
+          "reclaimableBytes": 6179761138
         },
         "decode": {
           "activeBytes": 54153098156,
           "allocatorBytes": 159636259044,
-          "deviceBytes": 159636259044,
-          "reclaimableBytes": 105483160888,
-          "wiredBytes": 159636259044
+          "reclaimableBytes": 105483160888
         },
         "denoise": {
           "activeBytes": 43473686612,
           "allocatorBytes": 43473686612,
-          "deviceBytes": 43473686612,
-          "reclaimableBytes": 0,
-          "wiredBytes": 43473686612
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 54153098156,
           "allocatorBytes": 159636259044,
-          "deviceBytes": 159636259044,
-          "reclaimableBytes": 105483160888,
-          "wiredBytes": 159636259044
+          "reclaimableBytes": 105483160888
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 56908316672,
+        "denoise": 45701136384,
+        "overall": 56908316672
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -1338,7 +1326,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148914569216
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -1487,33 +1475,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 39497775898,
-          "deviceBytes": 39497775898,
-          "reclaimableBytes": 3819134002,
-          "wiredBytes": 39497775898
+          "reclaimableBytes": 3819134002
         },
         "decode": {
           "activeBytes": 33264924644,
           "allocatorBytes": 139391922400,
-          "deviceBytes": 139391922400,
-          "reclaimableBytes": 106126997756,
-          "wiredBytes": 139391922400
+          "reclaimableBytes": 106126997756
         },
         "denoise": {
           "activeBytes": 34769704268,
           "allocatorBytes": 34769704268,
-          "deviceBytes": 34769704268,
-          "reclaimableBytes": 0,
-          "wiredBytes": 34769704268
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35678641896,
           "allocatorBytes": 141805639652,
-          "deviceBytes": 141805639652,
-          "reclaimableBytes": 106126997756,
-          "wiredBytes": 141805639652
+          "reclaimableBytes": 106126997756
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36574330880,
+        "overall": 37513854976
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -1660,7 +1645,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 113883742208
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -1809,33 +1794,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 37816337636,
-          "deviceBytes": 37816337636,
-          "reclaimableBytes": 2137695740,
-          "wiredBytes": 37816337636
+          "reclaimableBytes": 2137695740
         },
         "decode": {
           "activeBytes": 18070892912,
           "allocatorBytes": 90828230152,
-          "deviceBytes": 90828230152,
-          "reclaimableBytes": 72757337240,
-          "wiredBytes": 90828230152
+          "reclaimableBytes": 72757337240
         },
         "denoise": {
           "activeBytes": 28508626012,
           "allocatorBytes": 28508626012,
-          "deviceBytes": 28508626012,
-          "reclaimableBytes": 0,
-          "wiredBytes": 28508626012
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35678641896,
           "allocatorBytes": 108435979136,
-          "deviceBytes": 108435979136,
-          "reclaimableBytes": 72757337240,
-          "wiredBytes": 108435979136
+          "reclaimableBytes": 72757337240
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 18991808512,
+        "denoise": 29997662208,
+        "overall": 37513854976
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -1982,7 +1964,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 140257525760
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -2131,33 +2113,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 38638922458,
-          "deviceBytes": 38638922458,
-          "reclaimableBytes": 2960280562,
-          "wiredBytes": 38638922458
+          "reclaimableBytes": 2960280562
         },
         "decode": {
           "activeBytes": 26094597036,
           "allocatorBytes": 123985478732,
-          "deviceBytes": 123985478732,
-          "reclaimableBytes": 97890881696,
-          "wiredBytes": 123985478732
+          "reclaimableBytes": 97890881696
         },
         "denoise": {
           "activeBytes": 31765738324,
           "allocatorBytes": 31765738324,
-          "deviceBytes": 31765738324,
-          "reclaimableBytes": 0,
-          "wiredBytes": 31765738324
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35678641896,
           "allocatorBytes": 133569523592,
-          "deviceBytes": 133569523592,
-          "reclaimableBytes": 97890881696,
-          "wiredBytes": 133569523592
+          "reclaimableBytes": 97890881696
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 27447525376,
+        "denoise": 33420214272,
+        "overall": 37513854976
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -2304,7 +2283,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 114219286528
+            "value": 37379637248
           },
           {
             "name": "denoiseEntryActive",
@@ -2453,33 +2432,30 @@
         "conditioning": {
           "activeBytes": 35561029352,
           "allocatorBytes": 37561730462,
-          "deviceBytes": 37561730462,
-          "reclaimableBytes": 2000701110,
-          "wiredBytes": 37561730462
+          "reclaimableBytes": 2000701110
         },
         "decode": {
           "activeBytes": 18070892912,
           "allocatorBytes": 91231873944,
-          "deviceBytes": 91231873944,
-          "reclaimableBytes": 73160981032,
-          "wiredBytes": 91231873944
+          "reclaimableBytes": 73160981032
         },
         "denoise": {
           "activeBytes": 28508438876,
           "allocatorBytes": 28508438876,
-          "deviceBytes": 28508438876,
-          "reclaimableBytes": 0,
-          "wiredBytes": 28508438876
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35561029352,
           "allocatorBytes": 108722010384,
-          "deviceBytes": 108722010384,
-          "reclaimableBytes": 73160981032,
-          "wiredBytes": 108722010384
+          "reclaimableBytes": 73160981032
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37379637248,
+        "decode": 18991808512,
+        "denoise": 29997662208,
+        "overall": 37379637248
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -2626,7 +2602,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148981678080
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -2775,33 +2751,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 39469064970,
-          "deviceBytes": 39469064970,
-          "reclaimableBytes": 3790423074,
-          "wiredBytes": 39469064970
+          "reclaimableBytes": 3790423074
         },
         "decode": {
           "activeBytes": 33264924244,
           "allocatorBytes": 139452342672,
-          "deviceBytes": 139452342672,
-          "reclaimableBytes": 106187418428,
-          "wiredBytes": 139452342672
+          "reclaimableBytes": 106187418428
         },
         "denoise": {
           "activeBytes": 34743682492,
           "allocatorBytes": 34743682492,
-          "deviceBytes": 34743682492,
-          "reclaimableBytes": 0,
-          "wiredBytes": 34743682492
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35678641896,
           "allocatorBytes": 141866060324,
-          "deviceBytes": 141866060324,
-          "reclaimableBytes": 106187418428,
-          "wiredBytes": 141866060324
+          "reclaimableBytes": 106187418428
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36507222016,
+        "overall": 37513854976
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -2948,7 +2921,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148981678080
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -3097,33 +3070,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 39495122758,
-          "deviceBytes": 39495122758,
-          "reclaimableBytes": 3816480862,
-          "wiredBytes": 39495122758
+          "reclaimableBytes": 3816480862
         },
         "decode": {
           "activeBytes": 33264924244,
           "allocatorBytes": 139465257632,
-          "deviceBytes": 139465257632,
-          "reclaimableBytes": 106200333388,
-          "wiredBytes": 139465257632
+          "reclaimableBytes": 106200333388
         },
         "denoise": {
           "activeBytes": 34743677820,
           "allocatorBytes": 34743677820,
-          "deviceBytes": 34743677820,
-          "reclaimableBytes": 0,
-          "wiredBytes": 34743677820
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35678641896,
           "allocatorBytes": 141878975284,
-          "deviceBytes": 141878975284,
-          "reclaimableBytes": 106200333388,
-          "wiredBytes": 141878975284
+          "reclaimableBytes": 106200333388
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36507222016,
+        "overall": 37513854976
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -3270,7 +3240,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 139720654848
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -3419,33 +3389,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 38638922458,
-          "deviceBytes": 38638922458,
-          "reclaimableBytes": 2960280562,
-          "wiredBytes": 38638922458
+          "reclaimableBytes": 2960280562
         },
         "decode": {
           "activeBytes": 26094597036,
           "allocatorBytes": 123461136552,
-          "deviceBytes": 123461136552,
-          "reclaimableBytes": 97366539516,
-          "wiredBytes": 123461136552
+          "reclaimableBytes": 97366539516
         },
         "denoise": {
           "activeBytes": 31765755988,
           "allocatorBytes": 31765755988,
-          "deviceBytes": 31765755988,
-          "reclaimableBytes": 0,
-          "wiredBytes": 31765755988
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35678641896,
           "allocatorBytes": 133045181412,
-          "deviceBytes": 133045181412,
-          "reclaimableBytes": 97366539516,
-          "wiredBytes": 133045181412
+          "reclaimableBytes": 97366539516
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 27447525376,
+        "denoise": 33420214272,
+        "overall": 37513854976
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -3592,7 +3559,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 148444807168
+            "value": 37513854976
           },
           {
             "name": "denoiseEntryActive",
@@ -3741,33 +3708,30 @@
         "conditioning": {
           "activeBytes": 35678641896,
           "allocatorBytes": 39497762710,
-          "deviceBytes": 39497762710,
-          "reclaimableBytes": 3819120814,
-          "wiredBytes": 39497762710
+          "reclaimableBytes": 3819120814
         },
         "decode": {
           "activeBytes": 33264924644,
           "allocatorBytes": 138952231004,
-          "deviceBytes": 138952231004,
-          "reclaimableBytes": 105687306360,
-          "wiredBytes": 138952231004
+          "reclaimableBytes": 105687306360
         },
         "denoise": {
           "activeBytes": 34769752780,
           "allocatorBytes": 34769752780,
-          "deviceBytes": 34769752780,
-          "reclaimableBytes": 0,
-          "wiredBytes": 34769752780
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35678641896,
           "allocatorBytes": 141365948256,
-          "deviceBytes": 141365948256,
-          "reclaimableBytes": 105687306360,
-          "wiredBytes": 141365948256
+          "reclaimableBytes": 105687306360
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36574330880,
+        "overall": 37513854976
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -3914,7 +3878,7 @@
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 113950851072
+            "value": 37379637248
           },
           {
             "name": "denoiseEntryActive",
@@ -4063,33 +4027,30 @@
         "conditioning": {
           "activeBytes": 35573730024,
           "allocatorBytes": 37533267398,
-          "deviceBytes": 37533267398,
-          "reclaimableBytes": 1959537374,
-          "wiredBytes": 37533267398
+          "reclaimableBytes": 1959537374
         },
         "decode": {
           "activeBytes": 18070892912,
           "allocatorBytes": 90986921652,
-          "deviceBytes": 90986921652,
-          "reclaimableBytes": 72916028740,
-          "wiredBytes": 90986921652
+          "reclaimableBytes": 72916028740
         },
         "denoise": {
           "activeBytes": 28508335644,
           "allocatorBytes": 28508335644,
-          "deviceBytes": 28508335644,
-          "reclaimableBytes": 0,
-          "wiredBytes": 28508335644
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 35573730024,
           "allocatorBytes": 108489758764,
-          "deviceBytes": 108489758764,
-          "reclaimableBytes": 72916028740,
-          "wiredBytes": 108489758764
+          "reclaimableBytes": 72916028740
         }
       },
-      "predictedPeakBytes": null,
+      "predictedPeakBytes": {
+        "conditioning": 37379637248,
+        "decode": 18991808512,
+        "denoise": 29997662208,
+        "overall": 37379637248
+      },
       "quality": {
         "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
         "identicalInputs": true,
@@ -4188,6 +4149,6 @@
       }
     }
   ],
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "sourceSessions": []
 }
