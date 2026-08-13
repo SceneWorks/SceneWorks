@@ -1880,3 +1880,312 @@ test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T
   assert.match(arm, /loaded_contract != &contract/);
   assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
 });
+
+// SC-18902. Source inspection cannot decide whether the current Eros Candle route is acceptable:
+// the decision starts with a real Windows/CUDA baseline artifact. The published cond_safe LoRA is
+// not a valid candidate for the current Candle adapter surface (3,320 source keys versus 768
+// accepted keys), so this pins a product-neutral baseline only. The mutation loop is load-bearing:
+// each historically plausible drift is injected into an in-memory copy and must make this same
+// validator fail, proving the positive assertions are sensitive rather than decorative.
+test("the LTX Eros CUDA baseline is fixed, anonymous, mux-faithful, and mutation-sensitive", async () => {
+  const documents = {
+    manifestText: await source("config/manifests/builtin.models.jsonc"),
+    workflow: await source(".github/workflows/windows-candle.yml"),
+    harness: await source("crates/sceneworks-worker/src/ltx_eros_gpu_smoke.rs"),
+    workerLib: await source("crates/sceneworks-worker/src/lib.rs"),
+  };
+
+  const validate = ({ manifestText, workflow, harness, workerLib }) => {
+    const manifest = JSON.parse(stripJsoncComments(manifestText));
+    const base = manifest.models.find((entry) => entry.id === "ltx_2_3");
+    const eros = manifest.models.find((entry) => entry.id === "ltx_2_3_eros");
+    assert.ok(base, "the base ltx_2_3 manifest route must remain present");
+    assert.ok(eros, "the ltx_2_3_eros manifest route must remain present");
+    const shippedDefaults = {
+      duration: 6,
+      fps: 25,
+      resolution: "768x512",
+      quality: "balanced",
+      steps: 8,
+    };
+    assert.deepEqual(eros.defaults, shippedDefaults, "Eros manifest defaults must stay fixed");
+    assert.deepEqual(base.defaults, shippedDefaults, "base LTX manifest defaults must stay untouched");
+    assert.equal(
+      base.mlx?.autoDistillLora,
+      undefined,
+      "the evidence harness must not add the Eros distill recipe to base ltx_2_3",
+    );
+    assert.deepEqual(
+      eros.mlx?.autoDistillLora,
+      { stage1Strength: 1, stage2Strength: 0.4 },
+      "the existing MLX-only two-pass recipe is context, not a Candle recipe to copy",
+    );
+
+    assert.match(
+      workflow,
+      /run_ltx_eros_acceptance:\s+description:[^\n]+\s+required: false\s+type: boolean\s+default: false/,
+      "the expensive real-weight capture must be explicit and off by default",
+    );
+    assert.doesNotMatch(
+      `${workflow}\n${harness}`,
+      /AdapterKind|AdapterSpec|LTX_EROS_RECIPE|LTX_EROS_DISTILL_LORA|ltx_eros_recipe|single-pass-distill|DISTILL_(?:REPOSITORY|REVISION|FILE)/,
+      "the baseline harness must not expose or construct an unsupported filtered-LoRA candidate",
+    );
+    assert.match(
+      workflow,
+      /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\|/,
+      "the real-weight render needs the guarded six-hour ceiling",
+    );
+    for (const [repository, revision] of [
+      ["TenStrip/LTX2.3-10Eros", "84a05a13610d78dbe4340d1be23fd8185e10f697"],
+      ["SceneWorks/ltx-2.3-mlx", "01df27d308466533aa09d251e3aebdcc627d07eb"],
+    ]) {
+      assert.ok(workflow.includes(`repo_id="${repository}"`), `${repository} must be exact`);
+      assert.ok(workflow.includes(revision), `${repository} must use its exact revision`);
+    }
+    const provisioning = workflow.slice(
+      workflow.indexOf("- name: Provision exact public LTX Eros acceptance artifacts"),
+      workflow.indexOf("- name: Render the fixed LTX Eros CUDA acceptance artifact"),
+    );
+    assert.equal(
+      provisioning.match(/token=False/g)?.length,
+      2,
+      "both HF downloads must explicitly refuse implicit credentials",
+    );
+    assert.match(provisioning, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
+    assert.doesNotMatch(
+      provisioning,
+      /secrets\.|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|google\/gemma/,
+      "the harness must not use a secret or a gated Gemma source",
+    );
+    assert.match(
+      workflow,
+      /cargo test -p sceneworks-worker --features backend-candle --release ltx_eros_candle_gpu_smoke -- --ignored --nocapture --test-threads=1/,
+    );
+    assert.match(
+      workflow,
+      /ffmpeg [^\n]*-framerate 25[^\n]*-c:v libx264[^\n]*-r 25 \$videoOnly/,
+      "the source frames must first be encoded as the product's H.264 video stream",
+    );
+    assert.match(
+      workflow,
+      /ffmpeg [^\n]*-i \$videoOnly -i \$audio[^\n]*-c:v copy[^\n]*-c:a aac[^\n]*-shortest[^\n]*-map_metadata 0[^\n]*\$mp4/,
+      "the evidence MP4 must use the product's copy-video/AAC/-shortest mux contract",
+    );
+    assert.match(workflow, /stream=index,codec_name,codec_type[^'\n]+duration:format=duration/);
+    assert.match(
+      workflow,
+      /\$video\.codec_name -ne 'h264'/,
+      "the MP4 verifier must require the production H.264 video codec",
+    );
+    assert.match(
+      workflow,
+      /\$sound\.codec_name -ne 'aac'/,
+      "the MP4 verifier must require the production AAC audio codec",
+    );
+    assert.match(
+      workflow,
+      /\$wavAudio\.codec_name -ne 'pcm_s16le'/,
+      "the source audio verifier must require the worker's PCM16 WAV codec",
+    );
+    assert.match(workflow, /nb_read_frames -ne 153/);
+    assert.match(workflow, /\$expectedDurationSeconds = 153\.0 \/ 25\.0/);
+    assert.match(
+      workflow,
+      /\$durationToleranceSeconds = 1\.0 \/ 25\.0/,
+      "duration tolerance must remain exactly one output frame",
+    );
+    for (const label of [
+      "source WAV container",
+      "MP4 video stream",
+      "MP4 audio stream",
+      "MP4 container",
+    ]) {
+      assert.ok(
+        workflow.includes(`Assert-DurationNear '${label}'`),
+        `${label} duration must be checked against all 153 frames`,
+      );
+    }
+    assert.match(workflow, /ffprobe-mp4\.json/);
+    assert.match(workflow, /ffprobe-wav\.json/);
+    assert.match(
+      workflow,
+      /\$metadata\.captureKind -ne 'current-candle-route-baseline'/,
+      "uploaded metadata must identify the product-neutral current-route baseline",
+    );
+    assert.match(
+      workflow,
+      /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
+      "only a verified capture may publish the MP4/stills/metadata bundle",
+    );
+
+    for (const declaration of [
+      "const WIDTH: u32 = 768;",
+      "const HEIGHT: u32 = 512;",
+      "const DURATION_SECONDS: u32 = 6;",
+      "const FPS: u32 = 25;",
+      "const STEPS: u32 = 8;",
+      "const RENDERED_FRAMES: u32 = 153;",
+      "const SEED: u64 = 18_902;",
+      "assert_eq!(request.sampler, None);",
+      'const CAPTURE_KIND: &str = "current-candle-route-baseline";',
+    ]) {
+      assert.ok(harness.includes(declaration), `fixed harness contract missing: ${declaration}`);
+    }
+    assert.doesNotMatch(
+      harness,
+      /sampler:\s*Some\(/,
+      "the current-route baseline must preserve the manifest-default absent sampler",
+    );
+    assert.match(
+      harness,
+      /"sampler": null/,
+      "capture metadata must record the manifest-default absent sampler",
+    );
+    assert.match(harness, /const PROMPT: &str = "A wide locked camera shot of a red fox/);
+    assert.doesNotMatch(
+      `${workflow}\n${harness}`,
+      /LTX_EROS_(?:PROMPT|SEED|WIDTH|HEIGHT|DURATION|FPS|STEPS)/,
+      "evidence-defining request fields must not be environment-overridable",
+    );
+    assert.match(harness, /fn load_spec\(eros_dir: PathBuf, gemma_dir: PathBuf\) -> LoadSpec/);
+    assert.doesNotMatch(harness, /\.with_adapters\(/);
+    assert.match(harness, /assert!\(spec\.adapters\.is_empty\(\)\)/);
+    assert.match(harness, /"captureKind": CAPTURE_KIND/);
+    assert.match(harness, /adapter_reports\.is_empty\(\)/);
+    assert.match(harness, /"pairDeltas": pair_deltas/);
+    assert.match(harness, /"frameStats": frame_stats/);
+    assert.match(harness, /audio\.expect\("Candle LTX Eros must return its synchronized audio track"\)/);
+    assert.match(
+      workerLib,
+      /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod ltx_eros_gpu_smoke;/,
+      "the ignored real-weight test must compile on the actual Windows Candle lane",
+    );
+  };
+
+  assert.doesNotThrow(() => validate(documents));
+
+  const manifestObject = JSON.parse(stripJsoncComments(documents.manifestText));
+  const manifestMutation = (mutate) => {
+    const copy = structuredClone(manifestObject);
+    mutate(copy);
+    return JSON.stringify(copy);
+  };
+  const mutations = [
+    {
+      name: "manifest duration drift",
+      expected: /Eros manifest defaults must stay fixed/,
+      documents: {
+        ...documents,
+        manifestText: manifestMutation((copy) => {
+          copy.models.find((entry) => entry.id === "ltx_2_3_eros").defaults.duration = 5;
+        }),
+      },
+    },
+    {
+      name: "base route contamination",
+      expected: /must not add the Eros distill recipe to base/,
+      documents: {
+        ...documents,
+        manifestText: manifestMutation((copy) => {
+          copy.models.find((entry) => entry.id === "ltx_2_3").mlx.autoDistillLora = {
+            stage1Strength: 1,
+            stage2Strength: 0.4,
+          };
+        }),
+      },
+    },
+    {
+      name: "auto-dispatch regression",
+      expected: /must be explicit and off by default/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          /(run_ltx_eros_acceptance:[\s\S]*?default:) false/,
+          "$1 true",
+        ),
+      },
+    },
+    {
+      name: "credentialed HF regression",
+      expected: /both HF downloads must explicitly refuse implicit credentials/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          /(repo_id="TenStrip\/LTX2\.3-10Eros"[\s\S]*?)token=False/,
+          "$1token=True",
+        ),
+      },
+    },
+    {
+      name: "unsupported candidate mode introduced",
+      expected: /must not expose or construct an unsupported filtered-LoRA candidate/,
+      documents: {
+        ...documents,
+        workflow: `${documents.workflow}\nltx_eros_recipe: single-pass-distill`,
+      },
+    },
+    {
+      name: "production shortest mux removed",
+      expected: /copy-video\/AAC\/-shortest mux contract/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "-b:a 192k -shortest -map_metadata",
+          "-b:a 192k -map_metadata",
+        ),
+      },
+    },
+    {
+      name: "H.264 verification weakened",
+      expected: /must require the production H\.264 video codec/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$video.codec_name -ne 'h264'",
+          "$video.codec_name -ne 'hevc'",
+        ),
+      },
+    },
+    {
+      name: "duration tolerance widened",
+      expected: /duration tolerance must remain exactly one output frame/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$durationToleranceSeconds = 1.0 / 25.0",
+          "$durationToleranceSeconds = 2.0 / 25.0",
+        ),
+      },
+    },
+    {
+      name: "MP4 audio duration verification removed",
+      expected: /MP4 audio stream duration must be checked/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'MP4 audio stream' $sound.duration",
+          "",
+        ),
+      },
+    },
+    {
+      name: "explicit sampler alias reintroduced",
+      expected: /manifest-default absent sampler/,
+      documents: {
+        ...documents,
+        harness: documents.harness.replace(
+          "steps: Some(STEPS),",
+          'steps: Some(STEPS),\n        sampler: Some("rectified-flow".to_owned()),',
+        ),
+      },
+    },
+  ];
+  for (const mutation of mutations) {
+    assert.throws(
+      () => validate(mutation.documents),
+      mutation.expected,
+      `${mutation.name} must be killed by the acceptance contract`,
+    );
+  }
+});
