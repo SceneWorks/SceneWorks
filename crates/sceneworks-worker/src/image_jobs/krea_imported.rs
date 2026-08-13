@@ -640,24 +640,20 @@ fn krea_imported_control_raw_settings(
 /// The promoted ENVELOPE, however, is deliberately NOT reused, and `None` is passed for the
 /// resolved-artifact provenance on purpose rather than by omission. Promoted `krea_2_turbo_control`
 /// evidence is artifact-bound, and every measured record in the corpus was captured on the **q4**
-/// base tier (fixture `krea-pose-control-q4-seed16099`). This composition is DENSE: the native
-/// loader materializes the imported single file bf16 (an int8-per-row file is dequantized at load,
-/// and there is no quantize path on the native control assembly), so the imported 12B DiT is
-/// ~24 GiB resident against the ~6 GiB the q4 record measured. Same architecture is NOT the same
-/// footprint once the tier differs, and this gate's permissive-side failure mode is an OS Jetsam
-/// SIGKILL — so the request runs on the conservative estimate path instead. The estimate is honest
-/// about the real assembly: the spec points at the resolved DENSE `bf16` base tier (whose
-/// `transformer/` ships the same-shape dense weights the imported file carries) plus the overlay
-/// and adapter files.
+/// base tier (fixture `krea-pose-control-q4-seed16099`). The imported native-control assembly does
+/// support an explicit Q4/Q8 load-time selection; without one it materializes the imported file as
+/// dense bf16. Even a Q4 selection cannot inherit that promoted record, because the user's imported
+/// DiT has no pinned artifact identity proving it is the measured checkpoint. The request therefore
+/// stays on the conservative estimate path. That estimate sees the real assembly: the primary File
+/// DiT, its requested quant tier, the resolved dense `bf16` companion tier, the control overlay, and
+/// adapter files.
 ///
 /// Note what it would actually take for this lane to serve promoted numbers, so the estimate path
 /// is not mistaken for a one-line gap: promoted evidence is ARTIFACT-bound, and an imported DiT is
 /// a user file with no pinned repository/revision/variant to bind to — so a dense-tier capture
-/// alone would not reach it. It would also need an explicit decision that a same-shape dense
-/// imported DiT may INHERIT a dense record measured on the builtin base (defensible — identical
-/// architecture and dtype means identical resident bytes, which is exactly the property the q4
-/// record lacks), plus something that proves the imported file really is that shape and dtype
-/// before the inheritance applies. That is an evidence-reuse policy change, not a binding.
+/// alone would not reach it. Reuse would need an explicit policy plus provenance proving the imported
+/// file is the exact artifact/load shape represented by a promoted record before inheritance applies.
+/// That is an evidence-reuse policy change, not a binding.
 ///
 /// Independently of the estimate, the generator's own measured, architecture-keyed feasibility
 /// check (`control_geometry_fits`, sized off the arch config + branch block count + tiers) guards
