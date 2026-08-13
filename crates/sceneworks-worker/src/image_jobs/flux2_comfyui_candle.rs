@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
     ApiClient, ColdLoadAdmission, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot,
     JsonObject, LoadSpec, Path, PathBuf, PreparedFileDispatch, Quant, Settings, Value,
@@ -56,6 +56,8 @@ pub(super) struct ComfyuiFlux2Paths {
     transformer: gen_core::PinnedWeightsFile,
     /// A resident `SceneWorks/flux2-dev-mlx` tier dir (`text_encoder/ vae/ tokenizer/tokenizer.json`).
     snapshot_dir: PathBuf,
+    /// Exact registry-validated on-the-fly tier selected before dispatch.
+    quant: Quant,
 }
 
 /// Resolve the ComfyUI FLUX.2-dev DiT path + the resident snapshot tier from the forwarded
@@ -115,6 +117,9 @@ pub(super) fn resolve_flux2_comfyui_paths(
             "ComfyUI FLUX.2-dev transformer",
         )?,
         snapshot_dir,
+        // Structural resolution does not claim the route by itself; production preparation replaces
+        // this default with the exact request selection after registry validation.
+        quant: FLUX2_COMFYUI_DEFAULT_QUANT,
     }))
 }
 
@@ -136,13 +141,25 @@ pub(super) fn prepare_flux2_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
-    if !request.model.starts_with("external_base_")
-        || request.mode == "edit_image"
-        || !pose_entries(request).is_empty()
-    {
+    let Some(_descriptor) = super::imported_generate_request_supported(
+        request,
+        "flux2",
+        gen_core::ImportedModelSource::ComfyUiTree,
+    ) else {
+        return Ok(None);
+    };
+    if !request.model.starts_with("external_base_") {
         return Ok(None);
     }
-    resolve_flux2_comfyui_paths(request, settings)
+    let quant = match flux2_comfyui_quant(request) {
+        Ok(quant) => quant,
+        Err(_) => return Ok(None),
+    };
+    let Some(mut paths) = resolve_flux2_comfyui_paths(request, settings)? else {
+        return Ok(None);
+    };
+    paths.quant = quant;
+    Ok(Some(paths))
 }
 
 /// The compute quant the DiT + snapshot TE fold onto the GPU at: `advanced.quant` (`q4`/`q8`), else the
@@ -164,25 +181,37 @@ pub(super) fn prepare_flux2_comfyui_sources(
 ///    aborted the load with `WorkerError::Engine("ComfyUI FLUX.2-dev load failed: …")` — killing the job
 ///    on EXACTLY the Blackwell hardware the tier targets, while off-Blackwell hosts fell back fine.
 ///
-/// So a `quantTier: "nvfp4"` request on this lane falls through to the UNCHANGED `q4`/`q8`/default arms
-/// below on every host. That fall-through IS the clean fallback the story requires. The asset record
-/// stays honest about it: [`flux2_comfyui_raw_settings`] STRIPS the stale `quantTier` label on the
-/// q4/q8 path (its `else` branch — the only reachable one here), so the record names the tier that
-/// actually rendered rather than the one that was asked for. `quantTier` is the tier's identity
-/// precisely because `mlxQuantize` is bits-valued and no integer is honest for NVFP4 (see
-/// [`flux2_comfyui_raw_settings`]); that identity simply has no servable target on this lane. Pinned by
-/// `flux2_comfyui_never_selects_nvfp4`.
-pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> Quant {
-    match request
-        .advanced
-        .get("quant")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("q4") => Quant::Q4,
-        Some("q8") => Quant::Q8,
-        _ => FLUX2_COMFYUI_DEFAULT_QUANT,
+/// An explicit unsupported tier is rejected instead of silently relabeled. Only a request with no
+/// tier selection receives the lane's required Q8 default.
+pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant> {
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "flux2",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .ok_or_else(|| {
+        WorkerError::Engine(
+            "this runtime has no registered ComfyUI FLUX.2 generate route".to_owned(),
+        )
+    })?;
+    let explicit = ["quantTier", "quant", "mlxQuantize"].iter().any(|key| {
+        request
+            .advanced
+            .get(*key)
+            .is_some_and(|value| !value.is_null())
+    });
+    let (selected, _) = super::imported_model_quant(request, &descriptor, "ComfyUI FLUX.2")?;
+    match selected {
+        Some(Quant::Q4) => Ok(Quant::Q4),
+        Some(Quant::Q8) => Ok(Quant::Q8),
+        Some(Quant::Nvfp4) => Err(WorkerError::InvalidPayload(
+            "ComfyUI FLUX.2 cannot execute the NVFP4 tier; choose q4 or q8.".to_owned(),
+        )),
+        None if !explicit => Ok(FLUX2_COMFYUI_DEFAULT_QUANT),
+        None => Err(WorkerError::InvalidPayload(
+            "ComfyUI FLUX.2 requires q4 or q8 load-time packing; dense/bf16 is not executable."
+                .to_owned(),
+        )),
     }
 }
 
@@ -317,11 +346,21 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "flux2",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .ok_or_else(|| {
+        WorkerError::Engine(
+            "this runtime has no registered ComfyUI FLUX.2 generate route".to_owned(),
+        )
+    })?;
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
     let guidance = flux2_comfyui_guidance(request);
-    let quant = flux2_comfyui_quant(request);
+    let quant = paths.quant;
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
     let (spec, snapshot_dir) = prepare_flux2_comfyui_load_spec(paths, quant)?;
     // The companion snapshot supplies TE/VAE/tokenizer/config only. Its own transformer is replaced;
@@ -345,7 +384,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
 
     let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
-        "flux2_dev",
+        descriptor.id,
         0,
         spec,
         "ComfyUI FLUX.2-dev load failed".to_owned(),

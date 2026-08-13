@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
     ApiClient, ColdLoadAdmission, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot,
     JsonObject, LoadSpec, Path, PathBuf, PreparedFileDispatch, Settings, Value, WeightsSource,
@@ -163,9 +163,15 @@ pub(super) fn prepare_qwen_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiQwenPaths>> {
+    let descriptor = super::imported_generate_request_supported(
+        request,
+        "qwen-image",
+        gen_core::ImportedModelSource::ComfyUiTree,
+    );
     if !request.model.starts_with("external_base_")
-        || request.mode == "edit_image"
-        || !pose_entries(request).is_empty()
+        || descriptor.as_ref().map_or(true, |descriptor| {
+            super::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image").is_err()
+        })
     {
         return Ok(None);
     }
@@ -260,6 +266,16 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "qwen-image",
+        gen_core::ImportedModelSource::ComfyUiTree,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .ok_or_else(|| {
+        WorkerError::Engine(
+            "this runtime has no registered ComfyUI Qwen-Image generate route".to_owned(),
+        )
+    })?;
     let (spec, snapshot_dir, has_imported_vae) = prepare_qwen_comfyui_load_spec(paths)?;
     // Price finalized File tokens plus only the companion directories the provider consumes. The
     // snapshot transformer is replaced; an imported VAE also replaces the snapshot VAE.
@@ -300,7 +316,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
 
     let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
-        "qwen_image",
+        descriptor.id,
         0,
         spec,
         "ComfyUI Qwen-Image load failed".to_owned(),

@@ -9,6 +9,13 @@ const SDXL_IMPORTED_ENGINE: &str = "candle_sdxl_imported";
 
 const SDXL_IMPORTED_DEFAULT_STEPS: u32 = 30;
 const SDXL_IMPORTED_DEFAULT_GUIDANCE: f32 = 7.0;
+// On macOS these shared defaults are supplied by the advanced SDXL route included in the same
+// module. The Windows Candle build does not include that MLX-only file, so keep its imported SDXL
+// conditioning defaults explicit and byte-identical here.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SDXL_EDIT_STRENGTH: f32 = 0.6;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SDXL_INPAINT_STRENGTH: f32 = 0.85;
 const SDXL_CLIP_L_REPO: &str = "openai/clip-vit-large-patch14";
 const SDXL_CLIP_L_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -20,10 +27,15 @@ const SDXL_VAE_REPO: &str = "madebyollin/sdxl-vae-fp16-fix";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SDXL_VAE_REVISION: &str = "207b116dae70ace3637169f1ddd2434b91b3a8cd";
 
-fn resolve_imported_sdxl_file(
+struct PreparedSdxlImportedSources {
+    checkpoint: gen_core::PinnedWeightsFile,
+    adapters: PreparedAdapters,
+}
+
+fn resolve_imported_sdxl_pin(
     request: &ImageRequest,
     settings: &Settings,
-) -> WorkerResult<Option<PathBuf>> {
+) -> WorkerResult<Option<gen_core::PinnedWeightsFile>> {
     if request
         .model_manifest_entry
         .get("family")
@@ -49,27 +61,244 @@ fn resolve_imported_sdxl_file(
     else {
         return Ok(None);
     };
-    let path = crate::paths::normalize_app_managed_model_path(
+    let confined = crate::paths::normalize_app_managed_model_path(
         settings,
         raw_path,
         "Imported SDXL checkpoint",
     )?;
-    Ok(imported_dit_file(&path))
+    let candidate = if confined.is_dir() {
+        // Select inside the already-confined target, then reconstruct the caller-visible child and
+        // re-confine/pin that exact lexical entry. A child symlink must never inherit trust from its
+        // parent directory.
+        imported_dit_file(&confined).and_then(|file| {
+            file.file_name()
+                .map(|name| Path::new(raw_path).join(name))
+        })
+    } else if imported_dit_file(Path::new(raw_path)).is_some() {
+        Some(PathBuf::from(raw_path))
+    } else {
+        None
+    };
+    candidate
+        .map(|file| {
+            crate::paths::pin_app_managed_model_file(
+                settings,
+                &file,
+                "Imported SDXL checkpoint",
+            )
+        })
+        .transpose()
 }
 
+fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
+    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced) {
+        return false;
+    }
+    let operation = if request.mode == "edit_image" {
+        gen_core::ImportedModelOperation::Edit
+    } else {
+        gen_core::ImportedModelOperation::Generate
+    };
+    let Some(descriptor) = crate::inference_runtime::imported_model_descriptor(
+        "sdxl",
+        gen_core::ImportedModelSource::FusedCheckpoint,
+        operation,
+    ) else {
+        return false;
+    };
+    let caps = &descriptor.capabilities;
+    if imported_model_quant(request, &descriptor, "Imported SDXL").is_err() {
+        return false;
+    }
+    let has_phases = request
+        .advanced
+        .get("phases")
+        .and_then(Value::as_array)
+        .is_some_and(|phases| !phases.is_empty());
+    if !pose_entries(request).is_empty()
+        || !request.reference_asset_ids.is_empty()
+        || request.character_id.is_some()
+        || request.character_look_id.is_some()
+        || has_phases
+        || (!request.loras.is_empty() && !(caps.supports_lora || caps.supports_lokr))
+    {
+        return false;
+    }
+    let has_reference = non_empty(&request.reference_asset_id);
+    let has_source = non_empty(&request.source_asset_id);
+    if request.mode == "edit_image" {
+        if !(has_source || has_reference)
+            || !caps
+                .conditioning
+                .contains(&gen_core::ConditioningKind::Reference)
+        {
+            return false;
+        }
+        if non_empty(&request.mask_asset_id)
+            && !caps
+                .conditioning
+                .contains(&gen_core::ConditioningKind::Mask)
+        {
+            return false;
+        }
+    } else if has_source
+        || non_empty(&request.mask_asset_id)
+        || (has_reference
+            && !caps
+                .conditioning
+                .contains(&gen_core::ConditioningKind::Reference))
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+fn resolve_imported_sdxl_file(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    Ok(resolve_imported_sdxl_pin(request, settings)?
+        .map(|pin| pin.loader_path().to_path_buf()))
+}
+
+#[cfg(test)]
 fn sdxl_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.mode != "edit_image"
-        && request.reference_asset_id.is_none()
-        && request.reference_asset_ids.is_empty()
-        && request.source_asset_id.is_none()
-        && request.mask_asset_id.is_none()
-        && request.character_id.is_none()
-        && request.character_look_id.is_none()
-        && pose_entries(request).is_empty()
+    sdxl_imported_request_shape_available(request)
         && matches!(
             resolve_imported_sdxl_file(request, settings),
             Ok(Some(_))
         )
+}
+
+/// Resolve imported SDXL img2img/edit/inpaint/outpaint conditioning. The exact registered provider
+/// owns the capability claim; this helper only turns SceneWorks asset ids into that contract.
+fn resolve_imported_sdxl_conditioning(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<(Vec<Conditioning>, &'static str, Option<f32>)> {
+    let (width, height) = (request.width, request.height);
+    if request.mode != "edit_image" {
+        let Some(asset_id) = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok((Vec::new(), "text_to_image", None));
+        };
+        let image = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            asset_id,
+            project_path,
+        )?;
+        let image = fit_engine_image(image, width, height, &request.fit_mode)?;
+        let strength = advanced::f32_clamped(
+            &request.advanced,
+            "strength",
+            SDXL_EDIT_STRENGTH,
+            0.0..=1.0,
+        );
+        return Ok((
+            vec![Conditioning::Reference {
+                image,
+                strength: Some(strength),
+            }],
+            "img2img",
+            Some(strength),
+        ));
+    }
+
+    let source_id = request
+        .source_asset_id
+        .as_deref()
+        .or(request.reference_asset_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Imported SDXL edit requires a source image".to_owned())
+        })?;
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        source_id,
+        project_path,
+    )?;
+    let outpaint = request.fit_mode == "outpaint";
+    let masked = non_empty(&request.mask_asset_id);
+    let (src_w, src_h) = (source.width, source.height);
+    let source = fit_engine_image(source, width, height, &request.fit_mode)?;
+    let strength = advanced::f32_clamped(
+        &request.advanced,
+        "strength",
+        if masked || outpaint {
+            SDXL_INPAINT_STRENGTH
+        } else {
+            SDXL_EDIT_STRENGTH
+        },
+        0.0..=1.0,
+    );
+    let mut conditioning = vec![Conditioning::Reference {
+        image: source,
+        strength: Some(strength),
+    }];
+    if masked || outpaint {
+        let mut mask = if outpaint {
+            gen_core::imageops::outpaint_border_mask(src_w, src_h, width, height)
+        } else {
+            let mask_id = request.mask_asset_id.as_deref().unwrap().trim();
+            let mask = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                mask_id,
+                project_path,
+            )?;
+            fit_engine_image(mask, width, height, &request.fit_mode)?
+        };
+        if outpaint && masked {
+            let mask_id = request.mask_asset_id.as_deref().unwrap().trim();
+            let user_mask = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                mask_id,
+                project_path,
+            )?;
+            let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
+            mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
+                WorkerError::Engine(format!("Imported SDXL outpaint mask union failed: {error}"))
+            })?;
+        }
+        conditioning.push(Conditioning::Mask { image: mask });
+    }
+    Ok((
+        conditioning,
+        if outpaint {
+            "outpaint"
+        } else if masked {
+            "inpaint"
+        } else {
+            "edit"
+        },
+        Some(strength),
+    ))
+}
+
+fn prepare_sdxl_imported_sources(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
+    if !sdxl_imported_request_shape_available(request) {
+        return Ok(None);
+    }
+    let Some(checkpoint) = resolve_imported_sdxl_pin(request, settings)? else {
+        return Ok(None);
+    };
+    Ok(Some(PreparedSdxlImportedSources {
+        checkpoint,
+        adapters: resolve_prepared_adapters(request, settings)?,
+    }))
 }
 
 async fn stage_sdxl_component_file(
@@ -193,20 +422,19 @@ async fn generate_sdxl_imported_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    plan: &ImagePlan,
+    dispatch: PreparedFileDispatch<'_, PreparedSdxlImportedSources>,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let PreparedFileDispatch { plan, sources } = dispatch;
     let request = &plan.request;
-    let file = resolve_imported_sdxl_file(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "Imported SDXL checkpoint could not be resolved as one confined .safetensors file"
-                .to_owned(),
-        )
-    })?;
-    let adapters = resolve_adapters(request, settings)?;
-    let adapter_count = adapters.len();
+    let PreparedSdxlImportedSources {
+        checkpoint: file_pin,
+        adapters: prepared_adapters,
+    } = sources;
+    let file = file_pin.loader_path().to_path_buf();
+    let adapter_count = prepared_adapters.specs.len();
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", SDXL_IMPORTED_DEFAULT_STEPS, 1..=100);
     let guidance = resolve_advanced_or_manifest_f32(
@@ -216,8 +444,20 @@ async fn generate_sdxl_imported_stream(
         0.0..=30.0,
     );
     let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
-    let descriptor = crate::inference_runtime::media_descriptor("sdxl").ok_or_else(|| {
-        WorkerError::Engine("native SDXL generator is not registered".to_owned())
+    let operation = if request.mode == "edit_image" {
+        gen_core::ImportedModelOperation::Edit
+    } else {
+        gen_core::ImportedModelOperation::Generate
+    };
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "sdxl",
+        gen_core::ImportedModelSource::FusedCheckpoint,
+        operation,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "The active backend has no registered imported SDXL {operation:?} provider"
+        ))
     })?;
     let caps = &descriptor.capabilities;
     let sampler = normalize_sampling_knob(
@@ -249,7 +489,15 @@ async fn generate_sdxl_imported_stream(
     let negative_prompt = (!request.negative_prompt.trim().is_empty())
         .then(|| request.negative_prompt.clone());
     let (width, height) = (request.width, request.height);
+    let (conditioning, mode_tag, strength) =
+        resolve_imported_sdxl_conditioning(request, settings, project_path)?;
     let hires_fix = resolve_hires_fix_plan(request, steps, Some(guidance), None);
+    if !conditioning.is_empty() && hires_fix.is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "Imported SDXL img2img/edit conditioning cannot be combined with Hires.fix".to_owned(),
+        ));
+    }
+    let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported SDXL")?;
     let enhance = PromptEnhance::default();
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
@@ -261,12 +509,20 @@ async fn generate_sdxl_imported_stream(
     raw_settings.insert("guidanceScale".to_owned(), json!(guidance));
     raw_settings.insert(
         "engine".to_owned(),
-        Value::String(SDXL_IMPORTED_ENGINE.to_owned()),
+        Value::String(descriptor.id.to_owned()),
     );
     raw_settings.insert(
         "importedCheckpoint".to_owned(),
         Value::String(request.model.clone()),
     );
+    raw_settings.insert("mode".to_owned(), Value::String(mode_tag.to_owned()));
+    raw_settings.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map_or(Value::Null, Value::from),
+    );
+    if let Some(strength) = strength {
+        raw_settings.insert("strength".to_owned(), json!(strength));
+    }
     if request.hires_fix.enabled {
         raw_settings.insert(
             "hiresFix".to_owned(),
@@ -274,35 +530,39 @@ async fn generate_sdxl_imported_stream(
         );
     }
 
-    let mut spec = LoadSpec::new(WeightsSource::File(file.clone())).with_adapters(adapters);
+    let mut spec = LoadSpec::new(WeightsSource::File(file.clone()));
+    if !prepared_adapters.specs.is_empty() {
+        spec = spec.with_adapters(prepared_adapters.specs);
+    }
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        std::iter::once(file_pin).chain(prepared_adapters.pins),
+        "SDXL imported source preparation failed",
+    )?;
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
     #[cfg(target_os = "macos")]
-    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, "sdxl")?;
+    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
     #[cfg(target_os = "macos")]
-    let tokenizer_root = stage_sdxl_tokenizer(api, settings, job).await?;
+    let spec = spec.with_component(
+        "ldm_tokenizer",
+        WeightsSource::Dir(stage_sdxl_tokenizer(api, settings, job).await?),
+    );
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = attach_imported_sdxl_components(spec, api, settings, job).await?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     admit_candle_load_spec_floor(&request.model, "SDXL imported", settings, &spec).await?;
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        SDXL_IMPORTED_ENGINE,
+        descriptor.id,
         adapter_count,
-        move || {
-            #[cfg(target_os = "macos")]
-            let loaded = runtime_macos::providers::sdxl::load_from_ldm_file(
-                &spec,
-                &tokenizer_root,
-            );
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            let loaded = runtime_cuda::providers::sdxl::load(&spec);
-            loaded.map_err(|error| {
-                WorkerError::Engine(format!("SDXL imported checkpoint load failed: {error}"))
-            })
-        },
+        spec,
+        "SDXL imported checkpoint load failed".to_owned(),
         move |model, tx, cancel| {
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
@@ -310,7 +570,7 @@ async fn generate_sdxl_imported_stream(
                 }
                 if let Some(hires_fix) = hires_fix {
                     let (out_width, out_height, pixels) = generate_one_with_hires(
-                        model.as_ref(),
+                        model,
                         &prompt,
                         width,
                         height,
@@ -352,6 +612,7 @@ async fn generate_sdxl_imported_stream(
                     scheduler_shift,
                     guidance_method: guidance_method.clone(),
                     use_pid,
+                    conditioning: conditioning.clone(),
                     preview,
                     cancel: cancel.clone(),
                     ..Default::default()

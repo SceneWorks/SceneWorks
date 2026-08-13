@@ -94,6 +94,7 @@ pub(crate) async fn create_image_job(
         &mut job_payload,
     )
     .await?;
+    validate_imported_submission(&state, &model_id, &job_payload)?;
     if payload.seed.is_none() {
         // `job_payload["count"]` is the resolved count — the block above writes the model's declared
         // `defaults.count` whenever the caller named none, so the seed batch matches what actually
@@ -127,6 +128,88 @@ pub(crate) async fn create_image_job(
         crate::ideogram::spawn_ideogram_caption_watcher(state, job.id.clone(), caption_request);
     }
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
+/// source shape and operation select one provider registration; family identity alone never admits
+/// a request. Builtins retain their id-keyed routing and are out of this family gate.
+fn validate_imported_submission(
+    state: &AppState,
+    model_id: &str,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if entry.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+        || sceneworks_core::jobs_store::is_builtin_image_model(model_id)
+    {
+        return Ok(());
+    }
+    let candle_required = !cfg!(target_os = "macos") || state.settings.candle_required;
+    let has_material_control = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
+    let backend = if candle_required { "candle" } else { "mlx" };
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .unwrap_or("unknown");
+    if sceneworks_core::jobs_store::imported_image_request_provider_eligible(
+        model_id, payload, backend,
+    ) {
+        return Ok(());
+    }
+    let feature = if has_material_control
+        && !payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get("poses"))
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    {
+        "control image/mode without a supported Pose request"
+    } else if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "strict-pose control"
+    } else if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("phases"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "multi-phase denoise"
+    } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        "image edit"
+    } else if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "LoRA/LoKr adapters"
+    } else {
+        "requested generation shape"
+    };
+    let code = if candle_required {
+        "candle_unsupported"
+    } else if has_material_control {
+        "imported_control_unsupported"
+    } else {
+        "imported_unsupported"
+    };
+    Err(ApiError::bad_request(format!(
+        "{code}: imported {family} {feature} is not supported by the resolved {backend} provider \
+         registration for this exact source and operation; the request was not queued"
+    )))
 }
 
 pub(crate) async fn create_vqa_job(

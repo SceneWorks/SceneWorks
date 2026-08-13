@@ -18,6 +18,36 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn mage_and_comfy_shared_generate_shape_reject_material_imported_control_intent() {
+    assert!(!imported_generate_request_has_unsupported_shape(&request(
+        json!({ "model": "external_base_plain" })
+    )));
+    for advanced in [
+        json!({ "controlImage": "control-map" }),
+        json!({ "controlImage": "" }),
+        json!({ "controlMode": "pose" }),
+        json!({ "controlMode": "canny" }),
+        json!({ "poses": [{ "id": "pose" }], "controlImage": "control-map" }),
+    ] {
+        assert!(imported_generate_request_has_unsupported_shape(&request(
+            json!({ "model": "external_base_controlled", "advanced": advanced })
+        )));
+    }
+    for advanced in [
+        json!({ "controlImage": null }),
+        json!({ "controlMode": "  " }),
+    ] {
+        assert!(!imported_generate_request_has_unsupported_shape(&request(
+            json!({ "model": "external_base_plain", "advanced": advanced })
+        )));
+    }
+}
+
 #[test]
 fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
     let valid = request(json!({
@@ -670,6 +700,8 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 req.height,
                 1,
                 case.conditioning,
+                None,
+                None,
                 Some(1.2),
                 case.hires_fix,
                 tx,
@@ -3269,7 +3301,7 @@ fn bernini_image_task_and_quant_mapping() {
 /// probe; this test must not depend on the rig's GPU.)
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn flux2_comfyui_never_selects_nvfp4() {
+fn flux2_comfyui_rejects_unexecutable_tiers_instead_of_relabeling_them() {
     let req = |advanced: Value| {
         request(json!({
             "projectId": "p", "model": "external_base_flux2", "prompt": "p", "advanced": advanced,
@@ -3282,20 +3314,17 @@ fn flux2_comfyui_never_selects_nvfp4() {
         "test scaffolding is wrong — the label never reached `advanced`, so the rest is vacuous"
     );
 
-    // The explicit pick the web can emit — on this lane it must resolve the lane default, never Nvfp4.
-    assert!(matches!(
-        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4" }))),
-        FLUX2_COMFYUI_DEFAULT_QUANT
-    ));
-    // …and the label must not disturb an explicit q4/q8 pick either (the fall-through is UNCHANGED).
-    assert!(matches!(
-        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4", "quant": "q4" }))),
-        Quant::Q4
-    ));
-    assert!(matches!(
-        flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4", "quant": "q8" }))),
-        Quant::Q8
-    ));
+    // An explicit creative tier must never be silently rewritten to the lane default or a stale
+    // secondary knob. The named tier has precedence and is refused on this exact source route.
+    assert!(flux2_comfyui_quant(&req(json!({ "quantTier": "nvfp4" }))).is_err());
+    assert!(flux2_comfyui_quant(&req(json!({
+        "quantTier": "nvfp4", "quant": "q4"
+    })))
+    .is_err());
+    assert!(flux2_comfyui_quant(&req(json!({
+        "quantTier": "nvfp4", "quant": "q8"
+    })))
+    .is_err());
     // No request shape on this lane may ever produce Nvfp4 — including the `mlxQuantize: null` an NVFP4
     // request actually carries (sc-12006), and a stale bits knob alongside the label.
     for advanced in [
@@ -3308,11 +3337,27 @@ fn flux2_comfyui_never_selects_nvfp4() {
         json!({}),
     ] {
         assert!(
-            !matches!(flux2_comfyui_quant(&req(advanced.clone())), Quant::Nvfp4),
+            !matches!(
+                flux2_comfyui_quant(&req(advanced.clone())),
+                Ok(Quant::Nvfp4)
+            ),
             "the comfyui lane cannot serve NVFP4 — the GGUF fold rejects it, so selecting it \
              hard-fails the job (advanced={advanced})"
         );
     }
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({}))),
+        Ok(FLUX2_COMFYUI_DEFAULT_QUANT)
+    ));
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quant": "q4" }))),
+        Ok(Quant::Q4)
+    ));
+    assert!(matches!(
+        flux2_comfyui_quant(&req(json!({ "quant": "q8" }))),
+        Ok(Quant::Q8)
+    ));
+    assert!(flux2_comfyui_quant(&req(json!({ "quant": "bf16" }))).is_err());
 }
 
 /// Candle Bernini tier-subdir selection (sc-11003): the published `SceneWorks/bernini` layout nests
@@ -9640,7 +9685,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     let PreparedCandleImageRoute::KreaImported(sources) = route else {
         panic!("Krea route lost its source bundle")
     };
-    let PreparedKreaImportedSources { dit_pin } = *sources;
+    let PreparedKreaImportedSources { dit_pin, .. } = *sources;
     let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()));
     assert!(
         crate::paths::prepare_load_spec_with_file_pins(&mut spec, [dit_pin], "test Krea route")
@@ -15072,7 +15117,7 @@ fn resolve_image_route_sends_imported_single_file_krea_to_the_bespoke_lane() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn resolve_image_route_sends_only_plain_imported_sdxl_to_fused_lane() {
+fn resolve_image_route_sends_registered_imported_sdxl_operations_to_fused_lane() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir
         .path()
@@ -15090,6 +15135,7 @@ fn resolve_image_route_sends_only_plain_imported_sdxl_to_fused_lane() {
             "prompt": "a fox",
             "modelManifestEntry": {
                 "family": "sdxl",
+                "importSourceShape": "fused_checkpoint",
                 "modelPath": file.to_str().unwrap()
             }
         });
@@ -15103,7 +15149,8 @@ fn resolve_image_route_sends_only_plain_imported_sdxl_to_fused_lane() {
     let plain = payload(json!({}));
     assert_eq!(
         resolve_imported_sdxl_file(&plain, &settings).unwrap(),
-        Some(std::fs::canonicalize(&file).unwrap_or(file.clone()))
+        Some(file.clone()),
+        "the pinned dispatch retains the caller-visible lexical entry while validating its target"
     );
     assert!(sdxl_imported_available(&plain, &settings));
     assert_eq!(
@@ -15111,20 +15158,82 @@ fn resolve_image_route_sends_only_plain_imported_sdxl_to_fused_lane() {
         Some(ImageRoute::SdxlImported)
     );
 
+    // A confined install directory does not confer trust on a selected child. Re-run confinement
+    // and pinning on the lone entry so a symlink to an out-of-root checkpoint is refused.
+    let outside = tempfile::tempdir().unwrap();
+    let escaped = outside.path().join("outside-sdxl.safetensors");
+    std::fs::write(&escaped, b"outside").unwrap();
+    let linked_dir = dir.path().join("models/imports/linked-xl");
+    std::fs::create_dir_all(&linked_dir).unwrap();
+    std::os::unix::fs::symlink(&escaped, linked_dir.join("model.safetensors")).unwrap();
+    let linked = request(json!({
+        "projectId": "p", "model": "linked_xl", "prompt": "a fox",
+        "modelManifestEntry": {
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "modelPath": linked_dir.to_str().unwrap()
+        }
+    }));
+    assert!(
+        resolve_imported_sdxl_file(&linked, &settings).is_err(),
+        "a child symlink escaping the managed model root must be rejected"
+    );
+
     for conditioned in [
         payload(json!({ "referenceAssetId": "asset-1" })),
         payload(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" })),
-        payload(json!({ "advanced": { "poses": [{}] } })),
     ] {
         assert!(
-            !sdxl_imported_available(&conditioned, &settings),
-            "conditioning must never be silently dropped by the fused txt2img lane"
+            sdxl_imported_available(&conditioned, &settings),
+            "the exact MLX Generate/Edit registrations accept SDXL reference conditioning"
         );
-        assert_ne!(
+        assert_eq!(
             resolve_image_route(&conditioned, &settings),
             Some(ImageRoute::SdxlImported)
         );
     }
+
+    let pose = payload(json!({ "advanced": { "poses": [{}] } }));
+    assert!(!sdxl_imported_available(&pose, &settings));
+    assert_ne!(
+        resolve_image_route(&pose, &settings),
+        Some(ImageRoute::SdxlImported),
+        "there is no imported SDXL Pose registration"
+    );
+    for controlled in [
+        payload(json!({ "advanced": { "controlImage": "asset-1" } })),
+        payload(json!({ "advanced": { "controlMode": "pose" } })),
+        payload(json!({
+            "mode": "edit_image",
+            "sourceAssetId": "asset-1",
+            "advanced": { "controlImage": "asset-2" }
+        })),
+    ] {
+        assert!(
+            !sdxl_imported_available(&controlled, &settings),
+            "material control intent must not flatten into imported SDXL Generate/Edit"
+        );
+        assert_ne!(
+            resolve_image_route(&controlled, &settings),
+            Some(ImageRoute::SdxlImported)
+        );
+    }
+
+    let ambiguous_dir = dir.path().join("models/imports/ambiguous-xl");
+    std::fs::create_dir_all(&ambiguous_dir).unwrap();
+    std::fs::write(ambiguous_dir.join("a.safetensors"), b"a").unwrap();
+    std::fs::write(ambiguous_dir.join("b.safetensors"), b"b").unwrap();
+    let ambiguous = request(json!({
+        "projectId": "p", "model": "ambiguous_xl", "prompt": "a fox",
+        "modelManifestEntry": {
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "modelPath": ambiguous_dir.to_str().unwrap()
+        }
+    }));
+    assert!(resolve_imported_sdxl_pin(&ambiguous, &settings)
+        .unwrap()
+        .is_none());
 }
 
 /// Candle twin of the MLX route regression above: the external id is absent from the builtin table,
@@ -15156,12 +15265,9 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
 
 /// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
 /// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
-/// t2i + img2img are accepted on EVERY backend; LoRAs (sc-14111) and the Kontext edit surface
-/// (sc-14119) are accepted only on an adapter-capable backend ([`KREA_IMPORTED_SUPPORTS_ADAPTERS`]:
-/// MLX yes / candle not yet, sc-14135); the bare-transformer guards (pose, mask, character, multi-phase,
-/// a non-edit two-reference SET, a bare non-edit `sourceAssetId`) stay rejected on every backend. Runs on
-/// the cross-platform path so both the MLX and candle imported lanes are covered, asserting the
-/// per-backend split via the compile-time capability const.
+/// t2i, img2img, adapters, edit, and multi-phase follow the exact live provider registration. Pose
+/// remains MLX-only because Candle registers no imported Pose operation; mask/character and silently
+/// dropped reference shapes stay rejected on every backend.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -15171,7 +15277,11 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     let dir = tempfile::tempdir().unwrap();
     let (settings, file) = imported_krea_settings_with_file(dir.path());
     let path_str = file.to_str().unwrap().to_owned();
-    let base = json!({ "family": "krea_2", "modelPath": path_str });
+    let base = json!({
+        "family": "krea_2",
+        "importSourceShape": "transformer_file",
+        "modelPath": path_str,
+    });
 
     // Plain txt2img: accepted on every backend.
     let t2i = request(json!({
@@ -15194,7 +15304,7 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "an img2img referenceAssetId (mode t2i) is accepted"
     );
 
-    // A LoRA stack (sc-14111) and the edit surface (sc-14119) are backend-gated: MLX yes, candle no.
+    // Both linked providers advertise adapters and edit for this exact source shape.
     let t2i_lora = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "loras": [{ "id": "adapter" }],
@@ -15209,33 +15319,9 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "referenceAssetIds": ["scene", "person"],
         "modelManifestEntry": base.clone()
     }));
-    if KREA_IMPORTED_SUPPORTS_ADAPTERS {
-        assert!(
-            krea_imported_available(&t2i_lora, &settings),
-            "a LoRA t2i job is accepted on the adapter-capable backend"
-        );
-        assert!(
-            krea_imported_available(&edit_source, &settings),
-            "an edit_image + source is accepted on the adapter-capable backend"
-        );
-        assert!(
-            krea_imported_available(&edit_two_ref, &settings),
-            "an edit_image + the scene+person set is accepted on the adapter-capable backend"
-        );
-    } else {
-        assert!(
-            !krea_imported_available(&t2i_lora, &settings),
-            "a LoRA job is rejected on a backend without adapter support (sc-14135)"
-        );
-        assert!(
-            !krea_imported_available(&edit_source, &settings),
-            "edit is rejected on a backend without adapter support (sc-14135)"
-        );
-        assert!(
-            !krea_imported_available(&edit_two_ref, &settings),
-            "edit (two-ref) is rejected on a backend without adapter support (sc-14135)"
-        );
-    }
+    assert!(krea_imported_available(&t2i_lora, &settings));
+    assert!(krea_imported_available(&edit_source, &settings));
+    assert!(krea_imported_available(&edit_two_ref, &settings));
 
     // An `edit_image` job with NO conditioning image is rejected on every backend (defensive shape).
     let edit_no_ref = request(json!({
@@ -15255,10 +15341,36 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "advanced": { "poses": [{ "id": "a" }] },
         "modelManifestEntry": base.clone()
     }));
-    if KREA_IMPORTED_SUPPORTS_POSE_CONTROL {
+    #[cfg(target_os = "macos")]
+    {
         assert!(
             krea_imported_available(&pose, &settings),
             "a pose set is served on the pose-control-capable backend"
+        );
+        let pose_with_user_map = request(json!({
+            "projectId": "p", "model": "kreamania_variant4",
+            "advanced": {
+                "poses": [{ "id": "a" }],
+                "controlImage": "control-map",
+                "controlMode": "pose"
+            },
+            "modelManifestEntry": base.clone()
+        }));
+        assert!(
+            krea_imported_available(&pose_with_user_map, &settings),
+            "the selected Krea Pose route must retain the user control-map passthrough shape"
+        );
+        let unsupported_kind = request(json!({
+            "projectId": "p", "model": "kreamania_variant4",
+            "advanced": {
+                "poses": [{ "id": "a" }],
+                "controlMode": "canny"
+            },
+            "modelManifestEntry": base.clone()
+        }));
+        assert!(
+            !krea_imported_available(&unsupported_kind, &settings),
+            "Krea Pose supports only the shared strict-control kinds registered for that engine"
         );
         // `krea_imported_control_available` (the route-claim predicate) exists only on the
         // pose-control-capable build, so probe it under its own cfg rather than the const — the
@@ -15268,14 +15380,68 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
             krea_imported_control_available(&pose, &settings),
             "...and it is claimed by the pose-control route, not the plain per-image one"
         );
-    } else {
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
         assert!(
             !krea_imported_available(&pose, &settings),
             "a pose set is rejected on a backend without pose-control support"
         );
     }
 
-    // Bare-transformer guards stay rejected on EVERY backend: mask, character, multi-phase, a
+    let multi_phase = request(json!({
+        "projectId": "p", "model": "kreamania_variant4",
+        "advanced": { "phases": [{ "steps": 4 }] },
+        "modelManifestEntry": base.clone(),
+    }));
+    assert!(
+        krea_imported_available(&multi_phase, &settings),
+        "the imported MultiPhase registration selects the Raw provider"
+    );
+
+    for (label, extra) in [
+        (
+            "generate + control image",
+            json!({ "advanced": { "controlImage": "control-map" } }),
+        ),
+        (
+            "generate + explicit control mode",
+            json!({ "advanced": { "controlMode": "pose" } }),
+        ),
+        (
+            "edit + control image",
+            json!({
+                "mode": "edit_image",
+                "sourceAssetId": "source",
+                "advanced": { "controlImage": "control-map" }
+            }),
+        ),
+        (
+            "multi-phase + control mode",
+            json!({
+                "advanced": {
+                    "phases": [{ "steps": 4 }],
+                    "controlMode": "pose"
+                }
+            }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "kreamania_variant4",
+            "modelManifestEntry": base.clone()
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(
+            !krea_imported_available(&request(payload), &settings),
+            "{label} must not flatten into a non-Pose Krea operation"
+        );
+    }
+
+    // Bare-transformer guards stay rejected on EVERY backend: mask, character, a
     // NON-edit two-reference SET (the edit surface, only valid in edit mode), and a bare non-edit
     // `sourceAssetId` (the img2img resolve reads only `referenceAssetId`, so it would silently drop it).
     // A pose set combined with any of them is likewise rejected — the pose render loop reads none of
@@ -15303,10 +15469,6 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         ),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
-        (
-            "multi-phase",
-            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
-        ),
         (
             "non-edit two-ref set",
             json!({ "referenceAssetIds": ["a", "b"] }),
@@ -16261,11 +16423,24 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
         "projectId": "p", "model": "finetune_9f3c0a11",
         "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
     }));
+    let prepared = resolve_mage_finetuned_transformer(&finetune, &settings)
+        .expect("resolve ok")
+        .expect("a complete fine-tuned checkpoint resolves");
     assert_eq!(
-        resolve_mage_finetuned_transformer(&finetune, &settings)
-            .expect("resolve ok")
-            .expect("a complete fine-tuned checkpoint resolves"),
+        prepared.directory,
         std::fs::canonicalize(&checkpoint).unwrap_or(checkpoint.clone())
+    );
+    assert_eq!(
+        prepared.config.loader_path(),
+        prepared
+            .directory
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE)
+    );
+    assert_eq!(
+        prepared.weights.loader_path(),
+        prepared
+            .directory
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE)
     );
 
     // A BUILTIN Mage id keeps loading from its own per-tier snapshot through the generic lane.
@@ -16365,6 +16540,14 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             json!({ "advanced": { "poses": [{ "assetId": "a" }] } }),
         ),
         ("phases", json!({ "advanced": { "phases": [{}] } })),
+        (
+            "control image",
+            json!({ "advanced": { "controlImage": "control-map" } }),
+        ),
+        (
+            "control mode",
+            json!({ "advanced": { "controlMode": "pose" } }),
+        ),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
         ("look", json!({ "characterLookId": "l" })),
@@ -16380,6 +16563,49 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             "{label} must not route to the fine-tuned lane"
         );
     }
+}
+
+/// Route preparation owns the exact fine-tuned transformer config/weights across the async worker
+/// preamble. Replacing either file after selection must invalidate the retained token rather than
+/// letting dispatch silently re-resolve and load different bytes.
+#[cfg(target_os = "macos")]
+#[test]
+fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
+    let dir = tempfile::tempdir().expect("data root");
+    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    let selected = request(json!({
+        "projectId": "p",
+        "model": "finetune_9f3c0a11",
+        "modelManifestEntry": {
+            "family": "mage-flow",
+            "paths": { "model": checkpoint.display().to_string() }
+        }
+    }));
+    let prepared = prepare_image_route(&selected, &settings)
+        .expect("route preparation succeeds")
+        .expect("Mage fine-tuned route selected");
+    assert_eq!(prepared.kind(), ImageRoute::MageFinetuned);
+
+    std::thread::yield_now();
+    let weights =
+        checkpoint.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE);
+    std::fs::write(&weights, b"replacement-transformer-is-different")
+        .expect("replace selected weights");
+
+    let PreparedImageRoute::MageFinetuned(transformer) = prepared else {
+        panic!("prepared route lost its Mage transformer")
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.directory));
+    let error = crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        [transformer.config, transformer.weights],
+        "test Mage fine-tuned route",
+    )
+    .expect_err("dispatch rejects a retargeted prepared transformer");
+    assert!(
+        error.to_string().contains("changed") || error.to_string().contains("identity"),
+        "unexpected validation error: {error}"
+    );
 }
 
 /// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint

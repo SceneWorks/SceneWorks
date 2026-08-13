@@ -1,7 +1,8 @@
 use super::*;
 
 use sceneworks_core::base_weights::{
-    detect_base_weight_file, import_detection_supported, BaseWeightDetection,
+    detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
+    BaseWeightDetection, ComponentRole,
 };
 
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
@@ -4512,7 +4513,7 @@ pub(crate) async fn run_model_import_job(
         .await;
     }
 
-    let imported_model_file = first_safetensors_path(&target_dir);
+    let imported_model_file = imported_model_primary_weight_file(&target_dir);
     let mut model_file_sha256 = None;
     let mut verified_model_file_identity = None;
 
@@ -4560,7 +4561,7 @@ pub(crate) async fn run_model_import_job(
     // source-URL, and uploaded imports uniformly (the API's synchronous `import_source_supported`
     // only sees on-disk uploads at queue time). NEVER a silent fallback. `target_dir` is
     // app-managed (`resolve_model_import_target`) — this gate is purely additive to confinement.
-    let base_weight_family = match imported_model_file.as_ref() {
+    let (base_weight_family, import_source_shape) = match imported_model_file.as_ref() {
         Some(weight_file) => match detect_base_weight_file(weight_file) {
             Ok(detection) => {
                 if let Err(reason) = import_detection_supported(&detection) {
@@ -4572,6 +4573,26 @@ pub(crate) async fn run_model_import_job(
                     )
                     .await;
                 }
+                if matches!(
+                    &detection,
+                    BaseWeightDetection::Recognized(verdict)
+                        if verdict.family.as_deref() == Some("mage-flow")
+                ) && !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&target_dir)
+                {
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Model import is not supported for this file.",
+                        Some(
+                            "Model import for the 'mage-flow' family requires a complete \
+                             transformer directory containing config.json and \
+                             diffusion_pytorch_model.safetensors; a bare weights file is refused \
+                             because the loader cannot derive its architecture."
+                                .to_owned(),
+                        ),
+                    )
+                    .await;
+                }
                 // sc-14108: a single-file base checkpoint is a bare DiT — neither a diffusers
                 // directory nor a LoRA — so the LoRA-oriented `detect_model_family` below returns
                 // None for it. Reuse the family the gate's base-weight verdict already resolved so
@@ -4580,8 +4601,34 @@ pub(crate) async fn run_model_import_job(
                 // the family (sc-14019 `MLX_ROUTED_FAMILIES`), "Not On Mac" — so the model can't be
                 // selected in the Image Studio.
                 match detection {
-                    BaseWeightDetection::Recognized(verdict) => verdict.family,
-                    BaseWeightDetection::Unrecognized { .. } => None,
+                    BaseWeightDetection::Recognized(verdict) => {
+                        let source = match verdict.component {
+                            ComponentRole::Transformer
+                                if verdict.family.as_deref() == Some("mage-flow")
+                                    && sceneworks_core::base_weights::is_mage_flow_transformer_dir(
+                                        &target_dir,
+                                    ) =>
+                            {
+                                "transformer_directory"
+                            }
+                            ComponentRole::Transformer => "transformer_file",
+                            ComponentRole::Checkpoint => "fused_checkpoint",
+                            ComponentRole::TextEncoder | ComponentRole::Vae => {
+                                return fail_job(
+                                    api,
+                                    &job.id,
+                                    "Model import is not supported for this file.",
+                                    Some(format!(
+                                        "A {:?} component cannot be registered as a complete imported model.",
+                                        verdict.component
+                                    )),
+                                )
+                                .await;
+                            }
+                        };
+                        (verdict.family, Some(source))
+                    }
+                    BaseWeightDetection::Unrecognized { .. } => (None, None),
                 }
             }
             Err(error) => {
@@ -4670,6 +4717,12 @@ pub(crate) async fn run_model_import_job(
             manifest_entry
                 .entry("family")
                 .or_insert(Value::String(family));
+        }
+        if let Some(source) = import_source_shape {
+            manifest_entry.insert(
+                "importSourceShape".to_owned(),
+                Value::String(source.to_owned()),
+            );
         }
         let model_type = manifest_entry
             .get("type")

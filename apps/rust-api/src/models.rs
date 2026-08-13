@@ -1,6 +1,9 @@
 use super::*;
 
-use sceneworks_core::base_weights::{detect_base_weight_file, import_detection_supported};
+use sceneworks_core::base_weights::{
+    detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
+    BaseWeightDetection, ComponentRole,
+};
 use sceneworks_core::credentials::normalize_host;
 use sceneworks_core::lora_family::is_hidden_file;
 
@@ -1588,18 +1591,28 @@ const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled
 /// widens or bypasses that. The worker re-runs the same predicate over the downloaded bytes so repo/
 /// URL imports (whose file is not on disk at queue time) are covered there.
 fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
-    let weight_file = if source.is_dir() {
-        first_safetensors_path(source)
-    } else {
-        Some(source.to_path_buf())
-    };
+    let weight_file = imported_model_primary_weight_file(source);
     let Some(weight_file) = weight_file else {
         return Err(ApiError::bad_request(
             "No safetensors base-weight file was found to import; single-file base-checkpoint import expects a .safetensors transformer.",
         ));
     };
     let detection = detect_base_weight_file(&weight_file).map_err(model_family_inspection_error)?;
-    import_detection_supported(&detection).map_err(ApiError::bad_request)
+    import_detection_supported(&detection).map_err(ApiError::bad_request)?;
+    if matches!(
+        &detection,
+        BaseWeightDetection::Recognized(verdict)
+            if verdict.family.as_deref() == Some("mage-flow")
+    ) && (!source.is_dir()
+        || !sceneworks_core::base_weights::is_mage_flow_transformer_dir(source))
+    {
+        return Err(ApiError::bad_request(
+            "Model import for the 'mage-flow' family requires a complete transformer directory \
+             containing config.json and diffusion_pytorch_model.safetensors; a bare weights file \
+             is refused because the loader cannot derive its architecture.",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn create_model_import_job(
@@ -2467,6 +2480,40 @@ mod import_gate_tests {
         ]
     }
 
+    fn fused_sdxl_f16_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+                "F16",
+            ),
+            (
+                "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+                "F16",
+            ),
+            ("first_stage_model.encoder.conv_in.weight", "F16"),
+            ("first_stage_model.decoder.conv_out.weight", "F16"),
+        ]
+    }
+
+    fn legacy_user_entry(family: &str, path: &FsPath) -> JsonObject {
+        json!({
+            "id": "legacy_user_model",
+            "family": family,
+            "paths": { "model": path.to_string_lossy() },
+        })
+        .as_object()
+        .expect("legacy entry")
+        .clone()
+    }
+
     #[test]
     fn krea2_bf16_upload_is_accepted() {
         let temp = tempfile::tempdir().unwrap();
@@ -2476,6 +2523,67 @@ mod import_gate_tests {
             import_source_supported(&file).is_ok(),
             "a dense-bf16 Krea 2 DiT upload must pass the import gate"
         );
+    }
+
+    #[test]
+    fn legacy_source_shape_backfill_uses_the_exact_loader_structure() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let models = data_dir.join("models");
+
+        let krea_dir = models.join("imports/krea");
+        let krea_file = krea_dir.join("transformer.safetensors");
+        write_safetensors(&krea_file, &krea2_bf16_dit_keys());
+        let mut krea = legacy_user_entry("krea_2", &krea_dir);
+        stamp_legacy_import_source_shape(&mut krea, &data_dir, true);
+        assert_eq!(krea["importSourceShape"], json!("transformer_file"));
+
+        let sdxl_file = models.join("imports/sdxl.safetensors");
+        write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());
+        let mut sdxl = legacy_user_entry("sdxl", &sdxl_file);
+        stamp_legacy_import_source_shape(&mut sdxl, &data_dir, true);
+        assert_eq!(sdxl["importSourceShape"], json!("fused_checkpoint"));
+
+        let mage_dir = models.join("imports/mage");
+        std::fs::create_dir_all(&mage_dir).unwrap();
+        std::fs::write(mage_dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            mage_dir.join("diffusion_pytorch_model.safetensors"),
+            b"weights",
+        )
+        .unwrap();
+        let mut mage = legacy_user_entry("mage-flow", &mage_dir);
+        stamp_legacy_import_source_shape(&mut mage, &data_dir, true);
+        assert_eq!(mage["importSourceShape"], json!("transformer_directory"));
+    }
+
+    #[test]
+    fn legacy_source_shape_backfill_refuses_ambiguous_or_mismatched_trees() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let models = data_dir.join("models");
+
+        let ambiguous = models.join("imports/ambiguous");
+        write_safetensors(&ambiguous.join("one.safetensors"), &krea2_bf16_dit_keys());
+        write_safetensors(&ambiguous.join("two.safetensors"), &krea2_bf16_dit_keys());
+        let mut multiple = legacy_user_entry("krea_2", &ambiguous);
+        stamp_legacy_import_source_shape(&mut multiple, &data_dir, true);
+        assert!(multiple.get("importSourceShape").is_none());
+
+        let nested = models.join("imports/nested");
+        write_safetensors(
+            &nested.join("transformer/model.safetensors"),
+            &krea2_bf16_dit_keys(),
+        );
+        let mut recursive = legacy_user_entry("krea_2", &nested);
+        stamp_legacy_import_source_shape(&mut recursive, &data_dir, true);
+        assert!(recursive.get("importSourceShape").is_none());
+
+        let sdxl_file = models.join("imports/wrong-family.safetensors");
+        write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());
+        let mut wrong_family = legacy_user_entry("krea_2", &sdxl_file);
+        stamp_legacy_import_source_shape(&mut wrong_family, &data_dir, true);
+        assert!(wrong_family.get("importSourceShape").is_none());
     }
 
     #[test]
@@ -4070,25 +4178,278 @@ fn apply_imported_lora_advertisement_for_lanes(
     else {
         return;
     };
+    let Some(source) = object
+        .get("importSourceShape")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| {
+            matches!(
+                *source,
+                "transformer_file" | "fused_checkpoint" | "transformer_directory" | "comfy_ui_tree"
+            )
+        })
+    else {
+        return;
+    };
     let serves_loras = sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
         &id,
         &family,
+        source,
         mlx_lane_available,
         candle_lane_available,
     );
-    if serves_loras != Some(false) {
+    let Some(serves_loras) = serves_loras else {
         return;
-    }
+    };
     let compatibility = object
         .entry("loraCompatibility".to_owned())
         .or_insert_with(|| json!({}));
+    if !compatibility.is_object() {
+        *compatibility = json!({});
+    }
     let Some(compatibility) = compatibility.as_object_mut() else {
         return;
     };
-    // Preserve every other key (`types` drives the multi-phase surface); only the families
-    // promise is withdrawn.
-    compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
-    compatibility.insert("supported".to_owned(), Value::Bool(false));
+    if serves_loras {
+        let families = compatibility
+            .entry("families".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !families.is_array() {
+            *families = Value::Array(Vec::new());
+        }
+        if let Some(families) = families.as_array_mut() {
+            if !families
+                .iter()
+                .any(|value| value.as_str() == Some(family.as_str()))
+            {
+                families.push(Value::String(family));
+            }
+        }
+        compatibility.insert("supported".to_owned(), Value::Bool(true));
+    } else {
+        // Explicit empty wins over permissive family fallback in the validator.
+        compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
+        compatibility.insert("supported".to_owned(), Value::Bool(false));
+    }
+}
+
+/// Project the exact active-provider surface for a stamped imported source shape. Family siblings
+/// are never unioned: a Krea transformer file, SDXL fused checkpoint, Mage directory, and external
+/// ComfyUI tree each see only registrations for their structural loader.
+fn apply_imported_provider_surface(object: &mut JsonObject) {
+    let mlx_lane = cfg!(target_os = "macos");
+    apply_imported_provider_surface_for_lanes(object, mlx_lane, !mlx_lane);
+}
+
+fn apply_imported_provider_surface_for_lanes(
+    object: &mut JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) {
+    if object.get("type").and_then(Value::as_str) != Some("image")
+        || object.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+    {
+        return;
+    }
+    let Some(family) = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(source) = object
+        .get("importSourceShape")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| {
+            matches!(
+                *source,
+                "transformer_file" | "fused_checkpoint" | "transformer_directory" | "comfy_ui_tree"
+            )
+        })
+        .map(str::to_owned)
+    else {
+        return;
+    };
+
+    let mlx_routes = sceneworks_core::jobs_store::imported_provider_routes("mlx", &family)
+        .filter(|route| route.source == source)
+        .collect::<Vec<_>>();
+    let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    let mac_support = if mlx_routes.is_empty() {
+        serde_json::to_value(sceneworks_core::jobs_store::model_mac_support(
+            id, "image", None,
+        ))
+    } else {
+        Ok(json!({
+            "supported": true,
+            "features": {
+                "pose": mlx_routes.iter().any(|route| {
+                    route.operation == "pose"
+                        && route.conditioning.iter().any(|kind| kind == "control")
+                }),
+                "reference": mlx_routes.iter().any(|route| {
+                    route.operation == "generate"
+                        && route
+                            .conditioning
+                            .iter()
+                            .any(|kind| matches!(kind.as_str(), "reference" | "multi_reference"))
+                }),
+                "edit": mlx_routes.iter().any(|route| route.operation == "edit"),
+                "lycoris": mlx_routes
+                    .iter()
+                    .any(|route| route.supports_lora || route.supports_lokr),
+            }
+        }))
+    };
+    if let Ok(mac_support) = mac_support {
+        object.insert("macSupport".to_owned(), mac_support);
+    }
+
+    let routes = [
+        ("mlx", mlx_lane_available),
+        ("candle", candle_lane_available),
+    ]
+    .into_iter()
+    .filter(|(_, available)| *available)
+    .flat_map(|(backend, _)| {
+        sceneworks_core::jobs_store::imported_provider_routes(backend, &family)
+    })
+    .filter(|route| route.source == source)
+    .collect::<Vec<_>>();
+    project_imported_operation_surface(object, &routes);
+}
+
+/// Replace family-wide defaults with the operations exposed by this exact source/backend route set.
+/// Imported rows are initially enriched by `apply_model_manifest_defaults`, so merely adding provider
+/// capabilities leaves unsupported sibling operations visible. This projection is intentionally
+/// subtractive for every route-owned field while preserving unrelated author metadata.
+fn project_imported_operation_surface(
+    object: &mut JsonObject,
+    routes: &[&sceneworks_core::jobs_store::ImportedProviderSurface],
+) {
+    let generates_reference = routes.iter().any(|route| {
+        route.operation == "generate"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "reference" | "multi_reference"))
+    });
+    let pose = routes.iter().any(|route| {
+        route.operation == "pose" && route.conditioning.iter().any(|kind| kind == "control")
+    });
+    let edit = routes.iter().any(|route| route.operation == "edit");
+    let edit_multi_reference = routes.iter().any(|route| {
+        route.operation == "edit"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| kind == "multi_reference")
+    });
+    let multi_phase = routes.iter().any(|route| route.operation == "multi_phase");
+    let generates = routes.iter().any(|route| {
+        matches!(
+            route.operation.as_str(),
+            "generate" | "pose" | "multi_phase"
+        )
+    });
+
+    let capabilities = object
+        .entry("capabilities".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !capabilities.is_array() {
+        *capabilities = Value::Array(Vec::new());
+    }
+    if let Some(capabilities) = capabilities.as_array_mut() {
+        capabilities.retain(|value| {
+            !matches!(
+                value.as_str(),
+                Some("text_to_image" | "edit_image" | "image_to_image" | "character_image")
+            )
+        });
+        if generates {
+            capabilities.push(Value::String("text_to_image".to_owned()));
+        }
+        if edit {
+            capabilities.push(Value::String("edit_image".to_owned()));
+        }
+    }
+
+    let ui = object.entry("ui".to_owned()).or_insert_with(|| json!({}));
+    if !ui.is_object() {
+        *ui = json!({});
+    }
+    if let Some(ui) = ui.as_object_mut() {
+        if generates_reference {
+            ui.insert("img2img".to_owned(), Value::Bool(true));
+        } else {
+            ui.remove("img2img");
+            ui.remove("img2imgStrength");
+        }
+        if pose {
+            ui.insert("poseLibrary".to_owned(), Value::Bool(true));
+            ui.insert("poseControlScale".to_owned(), Value::Bool(true));
+            ui.insert("controlModes".to_owned(), json!(["pose"]));
+        } else {
+            ui.remove("poseLibrary");
+            ui.remove("poseControlScale");
+            ui.remove("controlModes");
+        }
+        if !edit_multi_reference {
+            ui.remove("editReferences");
+        }
+    }
+
+    // An empty route set means this backend has no opinion about adapter compatibility. Do not
+    // manufacture an empty object: catalog consumers distinguish abstention from an explicit
+    // provider-owned compatibility surface. Once at least one exact route exists, keep the existing
+    // object-shaped projection so supported routes retain a stable schema even when they expose no
+    // acceleration adapter.
+    if routes.is_empty() {
+        object.remove("loraCompatibility");
+    } else {
+        let compatibility = object
+            .entry("loraCompatibility".to_owned())
+            .or_insert_with(|| json!({}));
+        if let Some(compatibility) = compatibility.as_object_mut() {
+            if let Some(types) = compatibility.get_mut("types").and_then(Value::as_array_mut) {
+                types.retain(|value| value.as_str() != Some("acceleration"));
+            }
+            if multi_phase {
+                let types = compatibility
+                    .entry("types".to_owned())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(types) = types.as_array_mut() {
+                    types.push(Value::String("acceleration".to_owned()));
+                }
+            }
+        }
+    }
+
+    object.remove("runtimeQuantTiers");
+    let mut runtime_quant_tiers = Vec::new();
+    for tier in ["q4", "q8"] {
+        if routes.iter().any(|route| {
+            route
+                .supported_quants
+                .iter()
+                .any(|candidate| candidate == tier)
+        }) {
+            runtime_quant_tiers.push(Value::String(tier.to_owned()));
+        }
+    }
+    if routes.iter().any(|route| route.source != "comfy_ui_tree") {
+        runtime_quant_tiers.push(Value::String("bf16".to_owned()));
+    }
+    if !runtime_quant_tiers.is_empty() {
+        object.insert(
+            "runtimeQuantTiers".to_owned(),
+            Value::Array(runtime_quant_tiers),
+        );
+    }
 }
 
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
@@ -4116,9 +4477,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        // Forward the catalog-declared family so an imported/user model whose id is in no routing
-        // table still routes to its family's MLX engine (route-by-family, sc-14019) instead of
-        // reporting "not available on Mac". Builtin ids are unaffected (they route by id).
+        // Preserve the catalog-declared family in the shared probe call, but do not authorize an
+        // imported loader from family identity alone. This pass supplies builtin id-keyed defaults;
+        // `apply_imported_provider_surface` runs later with the full manifest entry and replaces an
+        // imported row's provisional verdict from its exact family + `importSourceShape` routes.
         let family = object
             .get("family")
             .and_then(Value::as_str)
@@ -4367,6 +4729,7 @@ fn apply_model_catalog_entry(
     download_context: Option<DownloadContext>,
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
+    builtin_model_ids: &std::collections::HashSet<String>,
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
@@ -4375,11 +4738,23 @@ fn apply_model_catalog_entry(
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    // Ownership and routing authority are deliberately separate. A user overlay on a builtin is
+    // removable (deleting it restores builtin defaults), but it cannot reclassify that protected id
+    // as an imported checkpoint and bypass/trigger source-shaped provider validation.
     let user_managed = user_model_ids.contains(model_id);
+    let builtin_routing_authority = builtin_model_ids.contains(model_id);
     object.insert(
         "catalogScope".to_owned(),
-        Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+        Value::String(
+            if builtin_routing_authority {
+                "builtin"
+            } else {
+                "user"
+            }
+            .to_owned(),
+        ),
     );
+    stamp_legacy_import_source_shape(object, data_dir, !builtin_routing_authority);
     object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
     object.insert(
         "installState".to_owned(),
@@ -4441,6 +4816,7 @@ fn apply_model_catalog_entry(
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
     apply_mac_and_mlx_fields(object, data_dir);
+    apply_imported_provider_surface(object);
     apply_imported_lora_advertisement(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
     // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
@@ -4451,6 +4827,71 @@ fn apply_model_catalog_entry(
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
     sceneworks_core::preview_support::apply_to_model_entry(object);
     Ok(model)
+}
+
+/// Backfill the explicit source-shape discriminator for user entries created before SC-18312.
+/// This is structural inspection under the app-managed model root, never a family guess: a Mage
+/// transformer directory must carry both of its required files; a single-file import is classified
+/// by the same header-only detector the importer uses. The worker repeats confinement and shape
+/// validation before opening weights.
+fn stamp_legacy_import_source_shape(
+    object: &mut JsonObject,
+    data_dir: &FsPath,
+    user_managed: bool,
+) {
+    if !user_managed || object.contains_key("importSourceShape") {
+        return;
+    }
+    let Some(raw) = object
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .get("paths")
+                .and_then(Value::as_object)
+                .and_then(|paths| paths.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    let Ok(path) = std::fs::canonicalize(raw) else {
+        return;
+    };
+    let Ok(model_root) = std::fs::canonicalize(data_dir.join("models")) else {
+        return;
+    };
+    if !path.starts_with(model_root) {
+        return;
+    }
+    if object.get("family").and_then(Value::as_str) == Some("mage-flow")
+        && path.is_dir()
+        && sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path)
+    {
+        object.insert(
+            "importSourceShape".to_owned(),
+            Value::String("transformer_directory".to_owned()),
+        );
+        return;
+    }
+    let Some(weight_file) = imported_model_primary_weight_file(&path) else {
+        return;
+    };
+    let Ok(BaseWeightDetection::Recognized(verdict)) = detect_base_weight_file(&weight_file) else {
+        return;
+    };
+    let family = object.get("family").and_then(Value::as_str);
+    let source = match (family, verdict.family.as_deref(), verdict.component) {
+        (Some("krea_2"), Some("krea_2"), ComponentRole::Transformer) => "transformer_file",
+        (Some("sdxl"), Some("sdxl"), ComponentRole::Checkpoint) => "fused_checkpoint",
+        _ => return,
+    };
+    object.insert(
+        "importSourceShape".to_owned(),
+        Value::String(source.to_owned()),
+    );
 }
 
 type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
@@ -4651,6 +5092,7 @@ async fn load_model_catalog_inputs(
         Vec<Value>,
         Vec<Option<DownloadContext>>,
         std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
     ),
     ApiError,
 > {
@@ -4660,6 +5102,10 @@ async fn load_model_catalog_inputs(
     let user =
         load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
     let user_model_ids = user
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    let builtin_model_ids = builtin
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
@@ -4675,13 +5121,13 @@ async fn load_model_catalog_inputs(
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((models, download_contexts, user_model_ids))
+    Ok((models, download_contexts, user_model_ids, builtin_model_ids))
 }
 
 async fn estimate_current_model_catalog_sizes(
     state: &AppState,
 ) -> Result<HashMap<ModelSizeCacheKey, Option<u64>>, ApiError> {
-    let (_, download_contexts, _) = load_model_catalog_inputs(state).await?;
+    let (_, download_contexts, _, _) = load_model_catalog_inputs(state).await?;
     Ok(estimate_model_catalog_sizes(state, &download_contexts, true).await)
 }
 
@@ -4690,10 +5136,12 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     // sweep) so tests can assert request-scoped and process-shared reuse.
     #[cfg(test)]
     crate::test_note_model_catalog_build();
-    let (models, download_contexts, user_model_ids) = load_model_catalog_inputs(state).await?;
+    let (models, download_contexts, user_model_ids, builtin_model_ids) =
+        load_model_catalog_inputs(state).await?;
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
+    let builtin_model_ids = Arc::new(builtin_model_ids);
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -4701,6 +5149,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
+    let builtin_model_ids_for_sweep = builtin_model_ids.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -4715,6 +5164,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     download_context,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
+                    &builtin_model_ids_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -4737,9 +5187,15 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
         // job validation never wait on unrelated Hugging Face network calls.
         apply_model_catalog_size_fields(model, context.as_ref(), None)?;
     }
-    let external = external.map_err(|err| {
+    let mut external = external.map_err(|err| {
         ApiError::internal(format!("external model catalog scan task failed: {err}"))
     })?;
+    for model in &mut external {
+        if let Some(object) = model.as_object_mut() {
+            apply_imported_provider_surface(object);
+            apply_imported_lora_advertisement(object);
+        }
+    }
     models.extend(external);
     models.sort_by(|left, right| {
         let left_key = (
@@ -4804,7 +5260,23 @@ pub(crate) async fn resolve_model_manifest_entry(
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
             .cloned()
     };
-    let mut entry = merge_model_manifest_entry(find(&builtin), find(&user));
+    let builtin_entry = find(&builtin);
+    let user_entry = find(&user);
+    let catalog_scope = if builtin_entry.is_some() {
+        Some("builtin")
+    } else if user_entry.is_some() {
+        Some("user")
+    } else {
+        None
+    };
+    let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
+    if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
+        // The merged worker-facing entry must carry the same routing authority as `/models`.
+        // A user manifest may override builtin presentation/defaults without turning the protected
+        // builtin identity into an imported checkpoint. Genuine user-only ids remain user-scoped.
+        object.insert("catalogScope".to_owned(), Value::String(scope.to_owned()));
+        stamp_legacy_import_source_shape(object, &state.settings.data_dir, scope == "user");
+    }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
     Ok(entry)
 }
@@ -7638,11 +8110,45 @@ mod variant_delete_tests {
 mod imported_lora_advertisement_tests {
     use super::*;
 
+    fn route(
+        operation: &str,
+        conditioning: &[&str],
+    ) -> sceneworks_core::jobs_store::ImportedProviderSurface {
+        sceneworks_core::jobs_store::ImportedProviderSurface {
+            family: "fixture".to_owned(),
+            source: "fixture".to_owned(),
+            operation: operation.to_owned(),
+            provider_id: "fixture_provider".to_owned(),
+            conditioning: conditioning
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            supports_lora: true,
+            supports_lokr: false,
+            supported_quants: vec!["q4".to_owned(), "q8".to_owned()],
+            supports_kv_cache: false,
+            supports_sequential_offload: false,
+            registry_cached: true,
+        }
+    }
+
     fn entry(id: &str, family: &str) -> JsonObject {
-        json!({ "id": id, "type": "image", "family": family })
-            .as_object()
-            .expect("entry object")
-            .clone()
+        let source = match family {
+            "krea_2" => "transformer_file",
+            "sdxl" => "fused_checkpoint",
+            "mage-flow" => "transformer_directory",
+            _ => "comfy_ui_tree",
+        };
+        json!({
+            "id": id,
+            "type": "image",
+            "family": family,
+            "catalogScope": "user",
+            "importSourceShape": source,
+        })
+        .as_object()
+        .expect("entry object")
+        .clone()
     }
 
     fn withdrawn(object: &JsonObject) -> bool {
@@ -7654,24 +8160,20 @@ mod imported_lora_advertisement_tests {
             && object["loraCompatibility"]["supported"] == json!(false)
     }
 
-    /// THE REPORTED BUG, on the lane it actually happens on. A candle host cannot load adapters
-    /// into an imported Krea 2 single-file checkpoint (sc-14135), so the advertisement must be
-    /// withdrawn there — and must survive untouched on macOS, where MLX genuinely serves it.
     #[test]
-    fn imported_krea_2_withdraws_on_candle_and_is_untouched_on_mlx() {
+    fn imported_krea_2_advertises_adapters_on_both_registered_backends() {
         let mut on_candle = entry("user_kreamania_variant5", "krea_2");
         apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
-        assert!(
-            withdrawn(&on_candle),
-            "a candle host must not advertise adapters it cannot load: {on_candle:?}"
+        assert_eq!(
+            on_candle["loraCompatibility"]["families"],
+            json!(["krea_2"])
         );
+        assert_eq!(on_candle["loraCompatibility"]["supported"], json!(true));
 
         let mut on_mlx = entry("user_kreamania_variant5", "krea_2");
         apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
-        assert!(
-            on_mlx.get("loraCompatibility").is_none(),
-            "MLX serves imported Krea 2 LoRAs — withdrawing there would break a working surface"
-        );
+        assert_eq!(on_mlx["loraCompatibility"]["families"], json!(["krea_2"]));
+        assert_eq!(on_mlx["loraCompatibility"]["supported"], json!(true));
     }
 
     /// Mage-Flow refuses adapters on every backend, so the MLX lane withdraws. On candle it is not
@@ -7700,12 +8202,11 @@ mod imported_lora_advertisement_tests {
         for (mlx, candle) in [(true, false), (false, true)] {
             let mut sdxl = entry("community_xl", "sdxl");
             apply_imported_lora_advertisement_for_lanes(&mut sdxl, mlx, candle);
-            assert!(
-                sdxl.get("loraCompatibility").is_none(),
-                "both fused SDXL loaders accept UNet adapters"
-            );
+            assert_eq!(sdxl["loraCompatibility"]["families"], json!(["sdxl"]));
+            assert_eq!(sdxl["loraCompatibility"]["supported"], json!(true));
 
             let mut builtin = entry("krea_2_turbo", "krea_2");
+            builtin.insert("catalogScope".to_owned(), json!("builtin"));
             apply_imported_lora_advertisement_for_lanes(&mut builtin, mlx, candle);
             assert!(
                 builtin.get("loraCompatibility").is_none(),
@@ -7718,10 +8219,10 @@ mod imported_lora_advertisement_tests {
     /// multi-phase surface, and only the families promise is being retracted.
     #[test]
     fn withdrawal_preserves_sibling_compatibility_keys() {
-        let mut object = entry("user_kreamania_variant5", "krea_2");
+        let mut object = entry("external_qwen", "qwen-image");
         object.insert(
             "loraCompatibility".to_owned(),
-            json!({ "families": ["krea-2"], "types": ["character", "style"] }),
+            json!({ "families": ["qwen-image"], "types": ["character", "style"] }),
         );
         apply_imported_lora_advertisement_for_lanes(&mut object, false, true);
         assert!(withdrawn(&object));
@@ -7729,5 +8230,112 @@ mod imported_lora_advertisement_tests {
             object["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
+    }
+
+    #[test]
+    fn provider_surface_matches_exact_source_shape() {
+        let mut krea = entry("user_krea", "krea_2");
+        apply_imported_provider_surface_for_lanes(&mut krea, true, false);
+        assert_eq!(krea["ui"]["img2img"], json!(true));
+        assert_eq!(krea["ui"]["poseLibrary"], json!(true));
+        assert!(krea["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "edit_image"));
+        assert_eq!(krea["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+
+        let mut wrong_shape = entry("wrong_shape", "krea_2");
+        wrong_shape.insert("importSourceShape".to_owned(), json!("fused_checkpoint"));
+        apply_model_manifest_defaults(&mut wrong_shape, "image", Some("krea_2"));
+        apply_imported_provider_surface_for_lanes(&mut wrong_shape, true, true);
+        assert!(wrong_shape["capabilities"]
+            .as_array()
+            .is_some_and(|values| values
+                .iter()
+                .all(|value| { !matches!(value.as_str(), Some("text_to_image" | "edit_image")) })));
+        assert!(wrong_shape["ui"].get("img2img").is_none());
+        assert!(wrong_shape["ui"].get("editReferences").is_none());
+        assert!(wrong_shape.get("runtimeQuantTiers").is_none());
+        assert_eq!(wrong_shape["macSupport"]["supported"], json!(false));
+    }
+
+    #[test]
+    fn exact_route_projection_withdraws_family_siblings_before_adding_supported_operations() {
+        let mut candle_sdxl = entry("community_xl", "sdxl");
+        apply_model_manifest_defaults(&mut candle_sdxl, "image", Some("sdxl"));
+        let generate = route("generate", &[]);
+        project_imported_operation_surface(&mut candle_sdxl, &[&generate]);
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "text_to_image"));
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|value| value != "edit_image"));
+        assert!(candle_sdxl["ui"].get("img2img").is_none());
+
+        let mut krea = entry("user_krea", "krea_2");
+        apply_model_manifest_defaults(&mut krea, "image", Some("krea_2"));
+        let edit = route("edit", &["reference", "multi_reference"]);
+        let pose = route("pose", &["control"]);
+        let multi_phase = route("multi_phase", &[]);
+        let generate = route("generate", &["reference"]);
+        project_imported_operation_surface(&mut krea, &[&generate, &edit, &pose, &multi_phase]);
+        assert_eq!(krea["ui"]["img2img"], json!(true));
+        assert_eq!(krea["ui"]["poseLibrary"], json!(true));
+        assert!(krea["ui"].get("editReferences").is_some());
+        assert!(krea["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "edit_image"));
+        assert!(krea["loraCompatibility"]["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "acceleration"));
+    }
+
+    #[test]
+    fn external_comfyui_surface_uses_exact_candle_registration() {
+        let mut zimage = entry("external_z", "z-image");
+        zimage.insert("catalogScope".to_owned(), json!("external"));
+        apply_imported_provider_surface_for_lanes(&mut zimage, false, true);
+        assert_eq!(zimage["ui"]["img2img"], json!(true));
+
+        let mut qwen = entry("external_qwen", "qwen-image");
+        qwen.insert("catalogScope".to_owned(), json!("external"));
+        apply_imported_provider_surface_for_lanes(&mut qwen, false, true);
+        assert_eq!(qwen["capabilities"], json!(["text_to_image"]));
+        assert_eq!(qwen["ui"], json!({}));
+        assert!(qwen.get("runtimeQuantTiers").is_none());
+        assert_eq!(qwen["loraCompatibility"], json!({}));
+
+        let mut mage_on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_mlx, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_mlx, true, false);
+        assert!(mage_on_mlx["capabilities"]
+            .as_array()
+            .is_some_and(|values| values.contains(&json!("text_to_image"))));
+        assert_eq!(
+            mage_on_mlx["runtimeQuantTiers"],
+            json!(["q4", "q8", "bf16"])
+        );
+
+        let mut mage_on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_candle, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_candle, false, true);
+        assert!(mage_on_candle["capabilities"]
+            .as_array()
+            .is_some_and(|values| !values.contains(&json!("text_to_image"))));
+        assert!(
+            mage_on_candle.get("loraCompatibility").is_none(),
+            "an empty route set must abstain instead of manufacturing compatibility metadata"
+        );
+        assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
     }
 }
