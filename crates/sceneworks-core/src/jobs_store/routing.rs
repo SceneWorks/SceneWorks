@@ -55,7 +55,8 @@ pub fn video_mode_conditioning_requirements(mode: &str) -> &'static [&'static [&
 }
 
 /// Build the canonical, structurally complete production request used to probe one video route.
-/// The payload contains the same required asset seams enforced by the Rust API before enqueue.
+/// The payload contains the same required asset and provider-adapter seams enforced by the Rust API
+/// before enqueue.
 pub fn canonical_video_route_probe(model: &str, mode: &str) -> Result<JobSnapshot, String> {
     let (job_type, payload) = match mode {
         "image_to_video" => (
@@ -144,10 +145,21 @@ pub fn canonical_video_route_probe(model: &str, mode: &str) -> Result<JobSnapsho
         ),
         other => return Err(format!("unknown production video mode {other:?}")),
     };
-    let payload = payload
+    let mut payload = payload
         .as_object()
         .cloned()
         .expect("canonical video payload is an object");
+    // Native LTX clip append/control is structurally available only with its in-context adapter.
+    // Capability facts must probe the complete runnable shape; omitting this mandatory input makes
+    // both backends falsely report extend/bridge/replacement as unsupported.
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+        && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
+    {
+        payload.insert(
+            "loras".to_owned(),
+            json!([{ "conditioningRole": "ic_lora" }]),
+        );
+    }
     Ok(JobSnapshot {
         id: "video-route-probe".to_owned(),
         job_type,
@@ -194,6 +206,35 @@ pub fn video_backend_mode_supported(
         "mlx" => Ok(mlx::video_job_is_mlx_eligible(&job)),
         "candle" => Ok(candle::video_job_is_candle_eligible(&job)),
         other => Err(format!("unknown native video backend {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_ltx_clip_probes_include_the_required_ic_lora() {
+        for model in ["ltx_2_3", "ltx_2_3_eros"] {
+            for mode in ["extend_clip", "video_bridge", "replace_person"] {
+                let job = canonical_video_route_probe(model, mode).unwrap();
+                let loras = job.payload["loras"].as_array().unwrap();
+                assert!(crate::video_request::loras_contain_ltx_ic_lora(loras));
+                for backend in ["mlx", "candle"] {
+                    assert!(
+                        video_backend_mode_supported(backend, model, mode).unwrap(),
+                        "{backend} must admit the complete {model}/{mode} probe"
+                    );
+                }
+            }
+            for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+                assert!(canonical_video_route_probe(model, mode)
+                    .unwrap()
+                    .payload
+                    .get("loras")
+                    .is_none());
+            }
+        }
     }
 }
 

@@ -1248,13 +1248,13 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
   });
 
   it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
-    // MINOR 4. `candle.measured === false` is the uncalibrated inventory. It is false on 20 entries;
+    // MINOR 4. `candle.measured === false` is the uncalibrated inventory. It is false on 21 entries;
     // twelve of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers are
     // pinned so the prose cannot drift from the catalog again. sc-16025 adds the six Mage profiles to
     // this set because their q4/q8 numeric identity changed and the historical samples are no longer
-    // valid current measurements.
+    // valid current measurements. sc-18478 adds the uncalibrated VACE-Fun blanket-only lane.
     const uncalibratedLane = manifestModels.filter((model) => model.candle?.measured === false);
-    expect(uncalibratedLane.length).toBe(20);
+    expect(uncalibratedLane.length).toBe(21);
     const withPerTier = uncalibratedLane.filter(
       (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length > 0,
     );
@@ -1274,8 +1274,12 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "sd3_5_medium",
       ].sort(),
     );
-    // The other eight are blanket-only, so the flag has nothing per-tier to qualify on them.
-    expect(uncalibratedLane.length - withPerTier.length).toBe(8);
+    // The other nine are blanket-only, so the flag has nothing per-tier to qualify on them.
+    const blanketOnly = uncalibratedLane.filter(
+      (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length === 0,
+    );
+    expect(blanketOnly.map((model) => model.id)).toContain("wan_2_2_vace_fun_14b");
+    expect(blanketOnly.length).toBe(9);
   });
 
   it("pins the shipped shapes the SimpleModelManager fixtures claim", () => {
