@@ -446,6 +446,157 @@ mod tests {
         assert!(predicted_ceiling(overall.allocator_bytes()) >= overall.allocator_bytes());
     }
 
+    #[test]
+    fn prediction_basis_keeps_image_admission_conservative_and_video_resident() {
+        let phase = PhaseMemory {
+            active: 16 * MIB,
+            cache: 15 * MIB,
+        };
+        assert_eq!(
+            IMAGE_PREDICTED_PEAK_BASIS,
+            PredictedPeakBasis::HistoricalImageAllocatorBound
+        );
+        assert_eq!(
+            VIDEO_PREDICTED_PEAK_BASIS,
+            PredictedPeakBasis::ResidentActive
+        );
+        assert_eq!(
+            predicted_phase_ceiling(phase, IMAGE_PREDICTED_PEAK_BASIS),
+            predicted_ceiling(31 * MIB)
+        );
+        assert_eq!(
+            predicted_phase_ceiling(phase, VIDEO_PREDICTED_PEAK_BASIS),
+            predicted_ceiling(16 * MIB)
+        );
+    }
+
+    #[test]
+    fn every_receipt_builder_is_bound_to_its_lane_prediction_wrapper() {
+        let source = include_str!("mlx.rs");
+        let image_receipts = source
+            .lines()
+            .filter(|line| {
+                line.trim_start()
+                    .starts_with("let predicted_peaks = image_predicted_peak_bytes(")
+            })
+            .count();
+        assert_eq!(
+            image_receipts, 6,
+            "all six MLX image receipt builders must use the image policy wrapper"
+        );
+        assert_eq!(
+            source
+                .lines()
+                .filter(|line| {
+                    line.trim_start()
+                        == "video_predicted_peak_bytes(conditioning, denoise, decode).json()"
+                })
+                .count(),
+            1,
+            "the LTX receipt builder must use the video policy wrapper"
+        );
+    }
+
+    /// sc-19115. This is the load-bearing decision test, not merely a count of records with cache.
+    /// It evaluates the same host-reserve currency production uses over every committed MLX image
+    /// cell and proves that changing the image basis would loosen 54 shipped admission outcomes.
+    #[test]
+    fn resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells() {
+        use sceneworks_core::memory_calibration::{Backend, EvidenceBundle, RequiredNullable};
+
+        fn phase(phase: &sceneworks_core::memory_calibration::Phase) -> PhaseMemory {
+            PhaseMemory {
+                active: phase.active_bytes,
+                cache: phase.reclaimable_bytes,
+            }
+        }
+
+        let evidence: EvidenceBundle = serde_json::from_str(include_str!(
+            "../../../../docs/generated/memory-calibration-evidence.json"
+        ))
+        .expect("parse committed memory evidence");
+        let host_bytes = [24_u64, 32, 48, 64, 96, 128].map(|gib| gib * 1024 * 1024 * 1024);
+        let mut image_records = 0_usize;
+        let mut changed_records = 0_usize;
+        let mut flipped_cells = 0_usize;
+        let mut flips_by_provider = std::collections::BTreeMap::<&str, usize>::new();
+
+        for record in evidence.records.iter().filter(|record| {
+            record.backend == Backend::Mlx && record.target.mode == "text_to_image"
+        }) {
+            image_records += 1;
+            let observed = match &record.observed_memory {
+                RequiredNullable::Value(observed) => observed.full().expect("full image telemetry"),
+                RequiredNullable::Null => panic!("{} has null image telemetry", record.id),
+            };
+            let historical = image_predicted_peak_bytes(
+                phase(&observed.conditioning),
+                phase(&observed.denoise),
+                phase(&observed.decode),
+            )
+            .overall;
+            let resident = video_predicted_peak_bytes(
+                phase(&observed.conditioning),
+                phase(&observed.denoise),
+                phase(&observed.decode),
+            )
+            .overall;
+            let shipped = match &record.predicted_peak_bytes {
+                RequiredNullable::Value(predicted) => predicted.overall(),
+                RequiredNullable::Null => panic!("{} has null prediction", record.id),
+            };
+            assert_eq!(
+                shipped, historical,
+                "{} no longer carries the historical image prediction",
+                record.id
+            );
+            if historical != resident {
+                changed_records += 1;
+            }
+
+            let historical_envelope = record
+                .mlx_admission_envelope()
+                .unwrap_or_else(|| panic!("{} has no production MLX envelope", record.id));
+            let mut counterfactual = record.clone();
+            match &mut counterfactual.predicted_peak_bytes {
+                RequiredNullable::Value(predicted) => {
+                    predicted.full_mut().expect("full image prediction").overall = resident;
+                }
+                RequiredNullable::Null => panic!("{} has null prediction", record.id),
+            }
+            let resident_envelope = counterfactual
+                .mlx_admission_envelope()
+                .expect("counterfactual production MLX envelope");
+            for host in host_bytes {
+                let historical_fits = historical_envelope.fits_scaled_host_bytes(host);
+                let resident_fits = resident_envelope.fits_scaled_host_bytes(host);
+                if historical_fits != resident_fits {
+                    assert!(
+                        !historical_fits && resident_fits,
+                        "the resident counterfactual must only loosen admission"
+                    );
+                    flipped_cells += 1;
+                    *flips_by_provider
+                        .entry(record.target.provider.as_str())
+                        .or_default() += 1;
+                }
+            }
+        }
+
+        assert_eq!(image_records, 69);
+        assert_eq!(changed_records, 62);
+        assert_eq!(flipped_cells, 54);
+        assert_eq!(
+            flips_by_provider,
+            std::collections::BTreeMap::from([
+                ("flux2_dev", 7),
+                ("krea_2_turbo_control", 8),
+                ("qwen_image", 38),
+                ("z_image_turbo", 1),
+            ])
+        );
+    }
+
     /// sc-18864. The emitted phase object must carry ONE named MLX quantity per field. Before this
     /// story it carried five keys for two readings: `deviceBytes` and `wiredBytes` were both set to
     /// `active + cache`, which is how every committed MLX record claimed wired residency of
@@ -1236,6 +1387,43 @@ struct PhaseMemory {
     cache: u64,
 }
 
+/// The physical quantity an MLX calibration lane promotes into admission evidence.
+///
+/// Image evidence deliberately preserves its historical componentwise co-existence bound. That
+/// bound adds peak-active-over-window to end-of-phase reclaimable cache, so it is conservative but
+/// not a simultaneous resident measurement. Moving those records to `ResidentActive` would loosen
+/// shipped image admission without a replacement campaign (sc-19115). Video evidence uses the
+/// resident active peak because staged video leaves an enormous elastic cache at phase boundaries;
+/// charging that cache would make successful LTX captures inadmissible on their capture host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PredictedPeakBasis {
+    HistoricalImageAllocatorBound,
+    ResidentActive,
+}
+
+const IMAGE_PREDICTED_PEAK_BASIS: PredictedPeakBasis =
+    PredictedPeakBasis::HistoricalImageAllocatorBound;
+const VIDEO_PREDICTED_PEAK_BASIS: PredictedPeakBasis = PredictedPeakBasis::ResidentActive;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PredictedPhasePeaks {
+    conditioning: u64,
+    denoise: u64,
+    decode: u64,
+    overall: u64,
+}
+
+impl PredictedPhasePeaks {
+    fn json(self) -> Value {
+        json!({
+            "conditioning": self.conditioning,
+            "denoise": self.denoise,
+            "decode": self.decode,
+            "overall": self.overall,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AllocatorState {
     active: u64,
@@ -1353,6 +1541,45 @@ fn predicted_ceiling(bytes: u64) -> u64 {
         .saturating_add(64 * MIB - 1)
         .saturating_div(64 * MIB)
         .saturating_mul(64 * MIB)
+}
+
+fn predicted_phase_ceiling(phase: PhaseMemory, basis: PredictedPeakBasis) -> u64 {
+    let bytes = match basis {
+        PredictedPeakBasis::HistoricalImageAllocatorBound => phase.allocator_bytes(),
+        PredictedPeakBasis::ResidentActive => phase.active,
+    };
+    predicted_ceiling(bytes)
+}
+
+fn predicted_phase_peaks(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+    basis: PredictedPeakBasis,
+) -> PredictedPhasePeaks {
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    PredictedPhasePeaks {
+        conditioning: predicted_phase_ceiling(conditioning, basis),
+        denoise: predicted_phase_ceiling(denoise, basis),
+        decode: predicted_phase_ceiling(decode, basis),
+        overall: predicted_phase_ceiling(overall, basis),
+    }
+}
+
+fn image_predicted_peak_bytes(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+) -> PredictedPhasePeaks {
+    predicted_phase_peaks(conditioning, denoise, decode, IMAGE_PREDICTED_PEAK_BASIS)
+}
+
+fn video_predicted_peak_bytes(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+) -> PredictedPhasePeaks {
+    predicted_phase_peaks(conditioning, denoise, decode, VIDEO_PREDICTED_PEAK_BASIS)
 }
 
 fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
@@ -1691,7 +1918,8 @@ fn run_z_image_reference_loaded(
         );
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -1932,12 +2160,7 @@ fn run_z_image_reference_loaded(
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "the authoritative Z-Image target has no overlay" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -2349,7 +2572,8 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         );
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
     let exact_fit = flux2_admission_context(
         &selection,
         calibration,
@@ -2453,12 +2677,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -3165,7 +3384,8 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
         );
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -3232,12 +3452,7 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -3638,7 +3853,8 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
         return Err("a synchronized SDXL lifecycle phase reported a zero active peak".to_owned());
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -3721,12 +3937,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -4071,13 +4282,14 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
     let denoise = denoise.get();
     let phases = [conditioning, denoise, decode];
     let overall = PhaseMemory::overall(&phases);
-    let predicted_conditioning = predicted_ceiling(conditioning.active + conditioning.cache);
-    let predicted_denoise = predicted_ceiling(denoise.active + denoise.cache);
-    let predicted_decode = predicted_ceiling(decode.active + decode.cache);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted_conditioning = predicted_peaks.conditioning;
+    let predicted_denoise = predicted_peaks.denoise;
+    let predicted_decode = predicted_peaks.decode;
     // The harness defines `overall` as a conservative componentwise high-water envelope: every
     // overall metric must cover the corresponding peak from every physical phase. Predict from that
     // same envelope so exact-fit admission can never sit below the published observed overall.
-    let predicted_overall = predicted_ceiling(overall.allocator_bytes());
+    let predicted_overall = predicted_peaks.overall;
     let mutation_bias = 0.05_f64;
     let mutated_maximum = maximum_error + mutation_bias;
     let mutated_mean = mean_error + mutation_bias;
@@ -4592,7 +4804,8 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     }
     let phases = [conditioning, denoise, decode];
     let overall = PhaseMemory::overall(&phases);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -4756,12 +4969,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "the authoritative Qwen target has no overlay" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -5544,24 +5752,19 @@ fn ltx_staging_is_proven(
 /// The shipped image records consequently over-predict their own measured resident peak by
 /// 1.05x-2.16x (`imc-b6537074420d51413b38` predicts 93.28 GB against a 43.18 GB resident peak).
 ///
-/// That over-prediction is why the input is left alone: a ceiling over the co-existence bound is
-/// CONSERVATIVE — it never under-predicts — so switching the image arms to `active` would LOOSEN
-/// shipped admission decisions on evidence this story did not re-measure. Raised on sc-19115 as a
-/// follow-up for the image lane, which must re-measure before it moves the input.
+/// That over-prediction is why sc-19115 keeps the image input unchanged: a ceiling over the
+/// co-existence bound is CONSERVATIVE — it never under-predicts — while switching to `active`
+/// would LOOSEN shipped admission. [`PredictedPeakBasis`] and its image/video constants are the
+/// single policy declaration both lanes consume. The corpus test
+/// `resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells` pins the decision
+/// against all 69 committed MLX image records and production's scaled foreign-reserve currency:
+/// 62 record predictions change and 54 host-grid decisions flip from refusal to admission.
 fn ltx_predicted_peak_bytes(
     conditioning: PhaseMemory,
     denoise: PhaseMemory,
     decode: PhaseMemory,
 ) -> Value {
-    let conditioning = predicted_ceiling(conditioning.active);
-    let denoise = predicted_ceiling(denoise.active);
-    let decode = predicted_ceiling(decode.active);
-    json!({
-        "conditioning": conditioning,
-        "denoise": denoise,
-        "decode": decode,
-        "overall": conditioning.max(denoise).max(decode),
-    })
+    video_predicted_peak_bytes(conditioning, denoise, decode).json()
 }
 
 fn ltx_scenarios(blocker: &str) -> Value {
@@ -5842,7 +6045,11 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 // Agrees with the emitted predictedPeakBytes.overall by construction:
                 // `predicted_ceiling` is monotonic, so ceiling(max(active)) == max(ceiling(active)).
-                ("predictedOverallCeiling", "bytes", predicted_ceiling(overall.active)),
+                (
+                    "predictedOverallCeiling",
+                    "bytes",
+                    video_predicted_peak_bytes(conditioning, denoise, decode).overall,
+                ),
                 ("denoiseEntryActive", "bytes", denoise_entry.active),
                 ("decodeEntryActive", "bytes", decode_entry.active),
                 ("stagedGemmaBytes", "bytes", gemma_bytes),
