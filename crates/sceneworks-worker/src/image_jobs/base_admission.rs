@@ -118,7 +118,7 @@ fn reject_message(
     let evidence = if catalog_evidence {
         "the per-tier catalog peak (including headroom)"
     } else {
-        "at least the on-disk weights plus headroom; activations are not measured for this external checkpoint"
+        "at least the uncataloged load's on-disk weights plus headroom; activations are not measured"
     };
     WorkerError::InvalidPayload(format!(
         "{model}{tier} cannot run through the {lane} lane: {evidence} needs ~{} GB of VRAM, but GPU \
@@ -257,21 +257,26 @@ pub(super) async fn admit_candle_base(
     }
 }
 
-/// Gate an imported/ComfyUI base whose user-owned paths have no stable catalog row.
-/// This is intentionally a floor: it can reject only when the weights alone cannot fit.
-pub(super) async fn admit_candle_base_floor(
+fn candle_base_floor_gb(paths: &[&Path], resident_overlay_bytes: u64) -> Option<f64> {
+    let bytes = distinct_weight_bytes(paths).saturating_add(resident_overlay_bytes);
+    (bytes > 0).then(|| bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB)
+}
+
+/// Gate an uncataloged base on its on-disk weights plus any independently resident overlay bytes.
+/// This is intentionally a floor: it can reject only when that load-time surface alone cannot fit.
+pub(super) async fn admit_candle_base_floor_with_resident_overlay(
     model: &str,
     lane: &'static str,
     settings: &Settings,
     paths: &[&Path],
+    resident_overlay_bytes: u64,
 ) -> WorkerResult<()> {
-    let bytes = distinct_weight_bytes(paths);
-    let needed = (bytes > 0).then(|| bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB);
+    let needed = candle_base_floor_gb(paths, resident_overlay_bytes);
     let Some(floor_gb) = needed else {
         tracing::warn!(
             model,
             lane,
-            "candle base admission: explicitly un-gateable because the external checkpoint paths contain \
+            "candle base admission: explicitly un-gateable because the uncataloged load paths contain \
              no countable weights; admitting without a floor (sc-16093)"
         );
         return Ok(());
@@ -294,7 +299,7 @@ pub(super) async fn admit_candle_base_floor(
                 model,
                 lane,
                 floor_gb,
-                "candle base admission: external checkpoint admitted on its on-disk weights floor; \
+                "candle base admission: uncataloged load admitted on its on-disk weights floor; \
                  activation peaks remain unmeasured (sc-16093)"
             );
             Ok(())
@@ -310,6 +315,16 @@ pub(super) async fn admit_candle_base_floor(
             false,
         )),
     }
+}
+
+/// Gate an imported/ComfyUI base whose user-owned paths have no stable catalog row.
+pub(super) async fn admit_candle_base_floor(
+    model: &str,
+    lane: &'static str,
+    settings: &Settings,
+    paths: &[&Path],
+) -> WorkerResult<()> {
+    admit_candle_base_floor_with_resident_overlay(model, lane, settings, paths, 0).await
 }
 
 /// Imported SDXL already materializes a `LoadSpec` containing its external checkpoint,
@@ -355,6 +370,16 @@ mod tests {
             "NVFP4 conservatively reuses the catalog q8 row, matching predicted_peak_gb"
         );
         assert!(!has_candle_tier_peak_row(&evidenced, "bf16"));
+    }
+
+    #[test]
+    fn uncataloged_floor_adds_independently_resident_overlay_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base.safetensors");
+        std::fs::write(&base, vec![0_u8; 8192]).unwrap();
+        let plain = candle_base_floor_gb(&[base.as_path()], 0).unwrap();
+        let adapted = candle_base_floor_gb(&[base.as_path()], 4096).unwrap();
+        assert!((adapted - plain - 4096.0 / BYTES_PER_GIB).abs() < f64::EPSILON);
     }
 
     #[test]

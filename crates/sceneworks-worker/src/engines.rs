@@ -866,9 +866,9 @@ impl ResolvedModel {
     pub fn supports_quant(&self) -> bool {
         !self.descriptor.capabilities.supported_quants.is_empty()
     }
-    /// Whether the engine accepts LoRA/LoKr adapters (descriptor-derived). Lens is the first candle
-    /// family to advertise either (sc-5126); the others advertise neither. Candle-lane-only for the
-    /// same reason as [`Self::supports_quant`].
+    /// Whether the engine accepts LoRA/LoKr adapters, derived from the linked provider descriptor.
+    /// Candle-lane-only for the same reason as [`Self::supports_quant`]; callers must consult the
+    /// per-engine descriptor rather than assuming adapter support from the model family.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     pub fn supports_adapters(&self) -> bool {
         self.descriptor.capabilities.supports_lora || self.descriptor.capabilities.supports_lokr

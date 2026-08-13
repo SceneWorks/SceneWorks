@@ -566,7 +566,6 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
         "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
         "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
         "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/zimage_identity_candle.rs": "default_repo_for(&request.model)",
         "sensenova_jobs.rs": "default_repo_for(&request.model)",
         "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
     }
