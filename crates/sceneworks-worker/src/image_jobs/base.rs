@@ -4247,7 +4247,11 @@ mod measured_mlx_load_shape_tests {
         TransformerComponent,
     };
 
-    fn fixture_spec(root: &std::path::Path, quant_bits: Option<u8>) -> LoadSpec {
+    fn fixture_spec(
+        root: &std::path::Path,
+        quant_bits: Option<u8>,
+        encoder: Option<(&str, Option<i32>)>,
+    ) -> LoadSpec {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
@@ -4260,14 +4264,38 @@ mod measured_mlx_load_shape_tests {
             bytes.extend_from_slice(&0f32.to_le_bytes());
             std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
         }
-        std::fs::write(
-            root.join("text_encoder/config.json"),
-            quant_bits.map_or_else(
-                || r#"{"dtype":"bfloat16"}"#.to_owned(),
-                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
-            ),
-        )
-        .unwrap();
+        if let Some((engine_id, encoder_quant_bits)) = encoder {
+            let contract = crate::inference_runtime::media_encoder_contract(engine_id)
+                .unwrap_or_else(|| panic!("{engine_id} owns a text-encoder contract"));
+            let result = if engine_id == "qwen_image_edit" {
+                gen_core_testkit::write_multimodal_encoder_contract_fixture_with_quant(
+                    &root.join("text_encoder"),
+                    contract,
+                    runtime_macos::providers::qwen_image::VISION_ENCODER_CONTRACT,
+                    None,
+                )
+            } else {
+                gen_core_testkit::write_encoder_contract_fixture_with_quant(
+                    &root.join("text_encoder"),
+                    contract,
+                    encoder_quant_bits,
+                )
+            };
+            result.unwrap_or_else(|error| {
+                panic!("write registry-owned {engine_id} encoder fixture: {error}")
+            });
+        } else {
+            std::fs::write(
+                root.join("text_encoder/config.json"),
+                quant_bits.map_or_else(
+                    || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                    |bits| {
+                        format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#)
+                    },
+                ),
+            )
+            .unwrap();
+        }
         std::fs::write(
             root.join("transformer/config.json"),
             quant_bits.map_or_else(
@@ -4293,9 +4321,9 @@ mod measured_mlx_load_shape_tests {
     #[test]
     fn worker_lens_specs_reach_only_their_exact_measured_contracts() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path(), None);
+        let bf16 = fixture_spec(bf16_dir.path(), None, None);
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), Some(4)).with_quant(Quant::Q4);
+        let q4 = fixture_spec(q4_dir.path(), Some(4), None).with_quant(Quant::Q4);
 
         let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
         assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
@@ -4371,9 +4399,13 @@ mod measured_mlx_load_shape_tests {
     #[test]
     fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path(), None);
+        let bf16 = fixture_spec(
+            bf16_dir.path(),
+            None,
+            Some(("qwen_image", None)),
+        );
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), None);
+        let q4 = fixture_spec(q4_dir.path(), None, Some(("qwen_image_edit", None)));
         std::fs::write(
             q4_dir.path().join("transformer/config.json"),
             r#"{"quantization":{"bits":4}}"#,
@@ -4447,7 +4479,11 @@ mod measured_mlx_load_shape_tests {
             ("q8", Some(8), Some(Quant::Q8)),
         ] {
             let root = tempfile::tempdir().unwrap();
-            let mut spec = fixture_spec(root.path(), quant_bits);
+            let mut spec = fixture_spec(
+                root.path(),
+                quant_bits,
+                Some(("krea_2_turbo", quant_bits.map(i32::from))),
+            );
             if let Some(quant) = quant {
                 spec = spec.with_quant(quant);
             }
@@ -4493,7 +4529,12 @@ mod measured_mlx_load_shape_tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let base = fixture_spec(root.path(), Some(4)).with_quant(Quant::Q4);
+        let base = fixture_spec(
+            root.path(),
+            Some(4),
+            Some(("krea_2_turbo", Some(4))),
+        )
+        .with_quant(Quant::Q4);
         assert_eq!(
             apply_measured_mlx_load_shape_for_request("krea_2_turbo", base.clone(), false)
                 .load_shape,
