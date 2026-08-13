@@ -848,14 +848,15 @@ pub(super) fn ltx_resident_weight_bytes(input: &VideoGenInput) -> WorkerResult<u
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-async fn admit_candle_ltx(input: &VideoGenInput, settings: &Settings) -> WorkerResult<()> {
-    let bytes = ltx_resident_weight_bytes(input)?;
-    if let Some(error) = crate::vram_gate::video_weights_fit_error(
-        input.engine_id,
-        bytes,
-        &settings.gpu_id,
-        candle_video_vram_budget(settings).await,
-    ) {
+async fn admit_candle_ltx(
+    engine_id: &'static str,
+    bytes: u64,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    let budget = candle_video_vram_budget(settings).await;
+    if let Some(error) =
+        crate::vram_gate::video_weights_fit_error(engine_id, bytes, &settings.gpu_id, budget)
+    {
         return Err(error);
     }
     Ok(())
@@ -1274,7 +1275,11 @@ pub(super) async fn generate_candle_video_using(
         ..VideoGenInput::default()
     };
     if is_ltx {
-        admit_candle_ltx(&input, settings).await?;
+        // Resolve every field from `input` before the async budget read. `VideoGenInput` also owns a
+        // one-shot cold-load admission closure, which is `Send` but intentionally not `Sync`; an
+        // async helper taking `&VideoGenInput` would therefore make the worker loop future non-`Send`.
+        let resident_bytes = ltx_resident_weight_bytes(&input)?;
+        admit_candle_ltx(input.engine_id, resident_bytes, settings).await?;
     }
     let raw_settings = candle_video_raw_settings(request, &repo);
     let decoded = generate_video_using(
