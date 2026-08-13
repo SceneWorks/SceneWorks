@@ -125,6 +125,13 @@
     },
     {
       "modelId": "ltx_2_3",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
       "mode": "first_last_frame",
       "engineIds": [
         "ltx_2_3"
@@ -139,7 +146,28 @@
     },
     {
       "modelId": "ltx_2_3",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
       "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "video_bridge",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "extend_clip",
       "engineIds": [
         "ltx_2_3"
       ]
@@ -160,7 +188,21 @@
     },
     {
       "modelId": "ltx_2_3_eros",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
       "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "video_bridge",
       "engineIds": [
         "ltx_2_3"
       ]

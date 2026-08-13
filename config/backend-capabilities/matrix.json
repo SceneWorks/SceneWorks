@@ -15,9 +15,9 @@
     "apiValidation": "4057d142373904f43546de63248b2dd9cd016998df901664921051fd80df7be2",
     "descriptorAudioFacts": "e330a692dd7f3ac1c201b385853b69fac84ad8aa5a6cb589b216fb90e4659f3a",
     "descriptorCandleFacts": "3ea6cef0917dfbd32b00085a0e620686a1dc1be6f8025c40be8a67964ca95383",
-    "descriptorCandleRuntime": "17951ec80509919e8fd4a2bea8306b4c59d75211a14722582f009452523beb10",
+    "descriptorCandleRuntime": "3ad7e1179591d10235273ea85794f6eb2fc44cb8677f228b9af1ab367ffcc2b7",
     "descriptorMlxFacts": "21e2e76df23482c60729002ccff4a2d43b4aa0716d31a1bfc678b4f750c0b8a9",
-    "descriptorMlxRuntime": "785dad872f131ee00f7819dc75ae847d273b56527cd62d165bf18686dc9f489f",
+    "descriptorMlxRuntime": "3bfbfc7e33f6714af2386faf430222ca00a0278565331e3796d9099db88fbca7",
     "descriptorPreviewFacts": "24b1350eb13bc8ad4d6d3ca56c21074565bf22b23d72bbcae4b508e0b73d5582",
     "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
     "manifest": "c53549dcf212c424daa861d6f2b9bbf64647293880e2c0862eac022e33aa06d3",
@@ -42,7 +42,7 @@
     "webVideoValidation": "96e4706c436f7d61ea378ece6aabb328e0dd5531272bf6b00b8368aa7c064a9c",
     "workerAudioDispatch": "1679977fd1fbd9427572df035fd32e2644f79363eadceef90305ea54083043b1",
     "workerDispatch": "e39682f095cb924ebe555d688af3c5d704c2acb60451da606e7d408c0faf300b",
-    "workerEngineTable": "6523b32c940ec0396f7379d6e8885fa5a233dcbac6ae13b2278c65f02f23c541",
+    "workerEngineTable": "78a2f8c833abaea291f5fb7901224caa3d018e570da9044952e5177e1736ef25",
     "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
     "workerImageDispatch": "d297780579c42c0d60a887e4cca5a3ac03cb6d9c904520a6a44b95b5f395940c",
     "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
@@ -2588,8 +2588,8 @@
         },
         {
           "capability": "extend_clip",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "first_last_frame",
@@ -2618,8 +2618,8 @@
         },
         {
           "capability": "replace_person",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "text_to_video",
@@ -2628,8 +2628,8 @@
         },
         {
           "capability": "video_bridge",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "video_to_video",
@@ -2640,8 +2640,8 @@
       "conditioningShape": [
         {
           "capability": "controlClip",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "keyframe",
@@ -2655,8 +2655,8 @@
         },
         {
           "capability": "videoClip",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "userAdapters": [
@@ -2730,8 +2730,8 @@
         },
         {
           "capability": "extend_clip",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "first_last_frame",
@@ -2760,8 +2760,8 @@
         },
         {
           "capability": "replace_person",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "text_to_video",
@@ -2770,8 +2770,8 @@
         },
         {
           "capability": "video_bridge",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "video_to_video",
@@ -2782,8 +2782,8 @@
       "conditioningShape": [
         {
           "capability": "controlClip",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "keyframe",
@@ -2797,8 +2797,8 @@
         },
         {
           "capability": "videoClip",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "userAdapters": [

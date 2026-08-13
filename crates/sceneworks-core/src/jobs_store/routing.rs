@@ -209,35 +209,6 @@ pub fn video_backend_mode_supported(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_ltx_clip_probes_include_the_required_ic_lora() {
-        for model in ["ltx_2_3", "ltx_2_3_eros"] {
-            for mode in ["extend_clip", "video_bridge", "replace_person"] {
-                let job = canonical_video_route_probe(model, mode).unwrap();
-                let loras = job.payload["loras"].as_array().unwrap();
-                assert!(crate::video_request::loras_contain_ltx_ic_lora(loras));
-                for backend in ["mlx", "candle"] {
-                    assert!(
-                        video_backend_mode_supported(backend, model, mode).unwrap(),
-                        "{backend} must admit the complete {model}/{mode} probe"
-                    );
-                }
-            }
-            for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
-                assert!(canonical_video_route_probe(model, mode)
-                    .unwrap()
-                    .payload
-                    .get("loras")
-                    .is_none());
-            }
-        }
-    }
-}
-
 /// True when a payload key contains a non-blank string.
 pub(super) fn has_nonempty_string(payload: &Map<String, Value>, key: &str) -> bool {
     payload
@@ -418,4 +389,33 @@ pub(super) fn krea_edit_has_unsupported_carrier(payload: &Map<String, Value>) ->
         ]
         .iter()
         .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_ltx_clip_probes_include_the_required_ic_lora() {
+        for model in ["ltx_2_3", "ltx_2_3_eros"] {
+            for mode in ["extend_clip", "video_bridge", "replace_person"] {
+                let job = canonical_video_route_probe(model, mode).unwrap();
+                let loras = job.payload["loras"].as_array().unwrap();
+                assert!(crate::video_request::loras_contain_ltx_ic_lora(loras));
+                for backend in ["mlx", "candle"] {
+                    assert!(
+                        video_backend_mode_supported(backend, model, mode).unwrap(),
+                        "{backend} must admit the complete {model}/{mode} probe"
+                    );
+                }
+            }
+            for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+                assert!(canonical_video_route_probe(model, mode)
+                    .unwrap()
+                    .payload
+                    .get("loras")
+                    .is_none());
+            }
+        }
+    }
 }
