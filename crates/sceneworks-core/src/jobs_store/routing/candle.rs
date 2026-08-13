@@ -41,8 +41,9 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
 /// the conditioned shapes ported under epic 5480 — SDXL/FLUX.2/Qwen `edit_image` (sc-5487), IP-Adapter
 /// reference (sc-5488/sc-5872), InstantID/PuLID identity (sc-5491/sc-5492), and strict-pose ControlNet
-/// (sc-5489). Anything still without a candle lane (an unsupported family or shape, or a LoRA on a
-/// non-Lens family) is refused here and remains queued for a capable native worker.
+/// (sc-5489). Anything still without a candle lane (an unsupported family or shape, or an adapter on
+/// a family whose descriptor advertises no adapter support) is refused here and remains queued for a
+/// capable native worker.
 ///
 /// Like the MLX twin [`image_job_is_mlx_eligible`], this accepts BOTH `image_generate` and the distinct
 /// `image_edit` job type (the Image Studio/Editor "plain Image Edit": `mode == "edit_image"` +
@@ -467,9 +468,10 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
 /// Does this video job belong on the candle video lane? The candle wan/ltx providers drive plain
 /// text-to-video, the 14B I2V's single source-image conditioning (sc-5175), SVD image→video (sc-5493),
 /// **and** the Wan-VACE advanced modes — replace_person / extend / bridge (sc-5494, the `PersonReplace`
-/// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Every other shape
-/// (reference/mask/first-last-frame conditioning, LoRAs) is refused here and remains queued for a
-/// capable native worker. SCAIL-2 (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
+/// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Model-advertised user
+/// LoRAs remain on the compatible base lane; unsupported conditioning, or an adapter on a provider
+/// with no adapter slot, is refused here and remains queued for a capable native worker. SCAIL-2
+/// (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
 /// `animate_character` + `replace_person` (sc-6837, epic 6563) — gated separately (it is not a VACE
 /// model). Bernini (`bernini`) adds another DISTINCT candle engine off-Mac — t2v + the editing/
 /// reference/multi-source video modes (sc-10997, epic 6562) — also gated separately. The per-model

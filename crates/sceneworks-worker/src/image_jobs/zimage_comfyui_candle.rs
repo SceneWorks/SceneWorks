@@ -147,15 +147,18 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 .to_owned(),
         )
     })?;
+    let adapters = resolve_adapters(request, settings)?;
+    let mut admission_paths = vec![
+        paths.transformer.as_path(),
+        paths.text_encoder.as_path(),
+        paths.vae.as_path(),
+    ];
+    admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
     admit_candle_base_floor(
         &request.model,
         "ComfyUI Z-Image",
         settings,
-        &[
-            paths.transformer.as_path(),
-            paths.text_encoder.as_path(),
-            paths.vae.as_path(),
-        ],
+        &admission_paths,
     )
     .await?;
 
@@ -163,8 +166,6 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
     let raw_settings = zimage_comfyui_raw_settings(request, steps);
-    let adapters = resolve_adapters(request, settings)?;
-
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))

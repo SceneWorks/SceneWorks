@@ -53,9 +53,9 @@ use gen_core::{
 // PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.
 #[cfg(target_os = "macos")]
 use gen_core::IdentityWeights;
-// `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126: the candle Lens lane is the
-// first candle family to take LoRA/LoKr, so it now classifies adapters too and the import moved into
-// the shared block above. `ControlKind` (ControlNet conditioning) was MLX-only until sc-8304: the candle
+// `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126 introduced the first candle
+// adapter lane; it now serves the shared MLX and candle adapter loaders, so the import lives in the
+// shared block above. `ControlKind` (ControlNet conditioning) was MLX-only until sc-8304: the candle
 // strict-control trio (`candle_strict_control.rs`) now shares the cross-platform `strict_control.rs`
 // `(engine_id, supported_kinds)` table + `preprocess_control_entry`, so `ControlKind` is in scope on the
 // candle build too.
@@ -187,7 +187,7 @@ const STUB_ADAPTER: &str = "procedural_preview";
 /// Used by the generic candle per-asset stream and its route-derived generation-set label.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_ADAPTER: &str = "candle_sdxl";
-// Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's total LoRAs at
+// Shared by the MLX path and every adapter-capable candle image lane: all cap a job's total LoRAs at
 // MAX_JOB_LORAS (`resolve_adapters`), so the const is available on the Windows candle build too.
 // The web pickers enforce a lower user-selectable cap (presetUtils.MAX_USER_JOB_LORAS) that leaves
 // headroom for an auto-applied builtin within this total (sc-8936).
@@ -906,14 +906,11 @@ pub(crate) async fn run_image_generate_job(
         false
     };
     // Windows/CUDA candle execution path (sc-3675, epic 3672). The macOS dispatch above is MLX-bound;
-    // candle is a narrow txt2img-only lane, so for a candle-engine model (sdxl/realvisxl) with the
-    // backend enabled we run `generate_candle_stream` (same neutral assetWrites/progress/cancellation
-    // harness). Gated on `backend_candle_enabled` (default off) so production routing is unchanged
-    // until parity is accepted — otherwise it stubs exactly like before.
-    // InstantID (sc-5491, epic 5480) is the exception to "txt2img-only": the candle InstantID provider
-    // gets its own bespoke path (`generate_instantid_stream`, the off-Mac sibling of the macOS
-    // `ImageRoute::InstantId` arm) — checked first since `instantid_realvisxl` is not an inventory
-    // `is_candle_engine` id.
+    // this branch executes the single route selected by `resolve_candle_image_route`, covering the
+    // generic registered-generator stream plus the bespoke edit, reference, identity, control,
+    // imported, and ComfyUI lanes. Every route uses the same neutral assetWrites/progress/cancellation
+    // harness. Gated on `backend_candle_enabled` (default off), so disabling Candle preserves the stub
+    // behavior.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let handled = match route {
         Some(route) => {
@@ -3100,8 +3097,9 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor, admit_candle_load_spec_floor,
-    has_candle_tier_peak_row, safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
+    admit_candle_base, admit_candle_base_floor, admit_candle_base_floor_with_resident_overlay,
+    admit_candle_load_spec_floor, has_candle_tier_peak_row, safetensors_tensor_bytes_with_prefixes,
+    CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —

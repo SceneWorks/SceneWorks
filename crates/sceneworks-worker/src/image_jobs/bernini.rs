@@ -106,7 +106,9 @@ fn bernini_image_raw_settings(
 /// Generate one Bernini still (RGB8) at `seed`. Builds the engine request with `frames:Some(1)` +
 /// `video_mode:Some(task)` so the engine returns a single image, and the (optional) i2i source as the
 /// shared `conditioning`. Standard guidance family (`guidance` carries the CFG scale, negative prompt
-/// forwarded); no LoRA.
+/// forwarded). Adapters are installed when the generator is loaded rather than carried by this
+/// per-image request: the MLX path remains adapter-free, while the candle path installs the resolved
+/// request stack.
 #[allow(clippy::too_many_arguments)]
 #[cfg(any(
     target_os = "macos",
@@ -325,6 +327,39 @@ const CANDLE_BERNINI_IMAGE_ADAPTER: &str = "candle_bernini";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_BERNINI_REPO: &str = "SceneWorks/bernini";
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn bernini_adapter_resident_bytes(
+    adapters: &[AdapterSpec],
+    quant: Option<Quant>,
+) -> WorkerResult<u64> {
+    if quant.is_none() || adapters.is_empty() {
+        // Dense experts fold adapter deltas into their existing weights.
+        return Ok(0);
+    }
+    let expert_bytes = |expert| {
+        let stack: Vec<_> = adapters
+            .iter()
+            .filter(|adapter| {
+                adapter
+                    .moe_expert
+                    .map_or(true, |target| target == expert)
+            })
+            .cloned()
+            .collect();
+        gen_core::adapter_stack_resident_bytes(&stack, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Bernini still image cannot determine the resident size of the requested adapter stack."
+                        .to_owned(),
+                )
+            })
+    };
+    // Packed Bernini keeps both experts resident. An untargeted adapter is installed on both and is
+    // therefore counted twice; expert-targeted stacks contribute once to their respective expert.
+    Ok(expert_bytes(gen_core::MoeExpert::High)?
+        .saturating_add(expert_bytes(gen_core::MoeExpert::Low)?))
+}
+
 /// True when this is a candle Bernini still-image job: the `bernini_image` id. Routed on the model id
 /// alone (like the sdxl candle txt2img arm) — NOT weight-gated — so a missing snapshot fails loud at
 /// load rather than silently stubbing, and the routing decision needs no staged 168 GB weights. Both
@@ -460,12 +495,12 @@ pub(crate) fn resolve_candle_bernini_tier_dir_and_quant(
 }
 
 /// Real candle Bernini still-image generation (sc-10996, epic 6562): the off-Mac sibling of
-/// [`generate_bernini_image_stream`]. Loads the full candle planner+renderer once from the converted
-/// `SceneWorks/bernini` snapshot (dense — the candle loader reads the converted tree as-is), then
-/// one image per seed: t2i from the prompt alone, or i2i conditioned on the `sourceAssetId` source (the
-/// engine ViT/VAE-encodes it at native resolution, no worker-side fit). Forces `frames:1` + the engine
-/// task string so the video-modality engine returns a single still. Standard guidance family (no LoRA;
-/// the descriptor reports `supports_lora:false`).
+/// [`generate_bernini_image_stream`]. Loads the full candle planner+renderer once from the selected
+/// published `SceneWorks/bernini` tier, then one image per seed: t2i from the prompt alone, or i2i
+/// conditioned on the `sourceAssetId` source (the engine ViT/VAE-encodes it at native resolution, no
+/// worker-side fit). Forces `frames:1` + the engine task string so the video-modality engine returns a
+/// single still. The candle descriptor advertises LoRA/LoKr, and the resolved request adapter stack is
+/// installed through the generator load spec.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_bernini_image_stream(
     api: &ApiClient,
@@ -510,16 +545,19 @@ async fn generate_candle_bernini_image_stream(
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let (weights_dir, quant) = resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
-    let offload_policy = admit_candle_base(
-        request,
-        settings,
-        &weights_dir,
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_resident_bytes = bernini_adapter_resident_bytes(&adapters, quant)?;
+    // Bernini still-image tiers have not been CUDA-calibrated. Keep the exact load-time weight and
+    // independently resident packed-adapter floor live until the catalog gains measured tier rows.
+    admit_candle_base_floor_with_resident_overlay(
+        &request.model,
         "Bernini still image",
-        CandleBaseEvidence::Ungateable("Bernini still-image tiers have not been CUDA-calibrated"),
-        0,
-        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
+        settings,
+        &[weights_dir.as_path()],
+        adapter_resident_bytes,
     )
     .await?;
+    let offload_policy = gen_core::OffloadPolicy::Resident;
 
     // i2i (`edit_image`): resolve the source image into the engine's `Conditioning::Reference` (the
     // engine ViT/VAE-encodes it at native resolution, no worker-side fit, and ignores the reference
@@ -560,7 +598,6 @@ async fn generate_candle_bernini_image_stream(
 
     // Load the resolved tier subfolder at its matching quant: `bf16/` dense (quant `None`), or the
     // packed `q4/`|`q8/` tree with `Quant::Q4`|`Quant::Q8` (sc-11003).
-    let adapters = resolve_adapters(request, settings)?;
     let spec = load_spec(weights_dir, quant, adapters, None)
         .with_offload_policy(offload_policy);
     let (cancel, rx, blocking) = start_cached_gen_stream(

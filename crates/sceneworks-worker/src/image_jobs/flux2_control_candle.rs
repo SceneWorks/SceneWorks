@@ -14,6 +14,18 @@ use super::{
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 
+pub(super) fn flux2_control_adapter_source_bytes(
+    adapters: &[gen_core::AdapterSpec],
+) -> WorkerResult<u64> {
+    gen_core::adapter_stack_resident_bytes(adapters, gen_core::AdapterResidencyMode::Additive)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.2 control cannot determine the resident size of the requested adapter stack."
+                    .to_owned(),
+            )
+        })
+}
+
 // Candle (Windows/CUDA) FLUX.2-dev strict-pose Fun-Controlnet-Union route (sc-7736, epic 6564) —
 // `flux2_dev` + `advanced.poses` off-Mac via `runtime_cuda::providers::flux2::Flux2Control`. The candle sibling of the
 // MLX FLUX.2-dev strict-pose path (flux2.rs `generate_flux2_dev_control_stream`, sc-6055 / engine
@@ -330,6 +342,7 @@ impl CandleStrictControl for Flux2StrictControl {
     fn conditioning_admission(&self) -> ConditioningAdmission {
         let mut overlays = vec![self.control.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "FLUX.2-dev",
             "strict-pose Fun-Controlnet-Union branch",
@@ -465,9 +478,13 @@ pub(super) async fn generate_candle_flux2_control_stream(
         Some("q8") => "q8",
         _ => "bf16",
     };
-    let overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control);
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_source_bytes = flux2_control_adapter_source_bytes(&adapters)?;
+    let runtime_overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control)
+        .saturating_add(adapter_source_bytes);
     let mut strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
         .with_control(gen_core::WeightsSource::File(control.clone()))
+        .with_adapters(adapters.clone())
         .with_offload_policy(gen_core::OffloadPolicy::Sequential);
     strategy_spec.quantize = quant;
     let strategy_spec = apply_candle_image_load_shape("flux2_dev", strategy_spec);
@@ -478,7 +495,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
-        overlay_bytes,
+        runtime_overlay_bytes,
     );
     let (control_repo, control_file) = flux2_control_candle_repo_file(request)?;
     let control_revision = trusted_control_weight_revision(
@@ -517,7 +534,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         false,
         raw_budget,
         predicted_peak,
-        overlay_bytes,
+        runtime_overlay_bytes,
         gen_core::MemoryCacheState::Cold,
     )?;
     let generation_memory = memory_evaluation
@@ -545,7 +562,6 @@ pub(super) async fn generate_candle_flux2_control_stream(
         );
     }
 
-    let adapters = resolve_adapters(request, settings)?;
     let provider = Flux2StrictControl {
         base,
         control,

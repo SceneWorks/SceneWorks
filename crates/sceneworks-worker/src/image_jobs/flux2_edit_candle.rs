@@ -10,6 +10,18 @@ use super::{
 };
 use serde_json::json;
 
+pub(super) fn flux2_edit_adapter_source_bytes(
+    adapters: &[gen_core::AdapterSpec],
+) -> WorkerResult<u64> {
+    gen_core::adapter_stack_resident_bytes(adapters, gen_core::AdapterResidencyMode::Additive)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.2 edit cannot determine the resident size of the requested adapter stack."
+                    .to_owned(),
+            )
+        })
+}
+
 // Candle (Windows/CUDA) FLUX.2 image-edit route (sc-5487 klein, epic 5480; sc-7736 dev, epic 6564) —
 // Kontext-style reference-conditioned editing off-Mac via `runtime_cuda::providers::flux2::Flux2Edit`. FLUX.2-klein has
 // no torch path (it is diffusers/MLX-only), so before this an off-Mac `edit_image` job on klein had no
@@ -287,6 +299,8 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             "FLUX.2 reference-bearing mode requires a reference image".to_owned(),
         ));
     }
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_source_bytes = flux2_edit_adapter_source_bytes(&adapters)?;
     // The canonical Klein base is admitted exclusively by the exact shared selector below. The
     // legacy resident-only gate cannot model its bounded rungs and would reject constrained
     // requests before sequential offload/decode/attention/block choices are evaluated. Siblings
@@ -308,7 +322,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             &flux2_base,
             "FLUX.2 edit",
             evidence,
-            0,
+            adapter_source_bytes,
             false,
         )
         .await?;
@@ -347,6 +361,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     };
     let mut strategy_spec =
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux2_base.clone()))
+            .with_adapters(adapters.clone())
             .with_offload_policy(gen_core::OffloadPolicy::Sequential);
     strategy_spec.quantize = quant;
     let memory_provider = if is_dev {
@@ -368,7 +383,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
-        0,
+        adapter_source_bytes,
     );
     let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
         memory_provider,
@@ -391,7 +406,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         false,
         raw_budget,
         predicted_peak,
-        0,
+        adapter_source_bytes,
         gen_core::MemoryCacheState::Cold,
     )?;
     if request.model == "flux2_klein_9b" && memory_evaluation.is_none() {
@@ -446,8 +461,6 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     let total = work.len();
     let negative = request.negative_prompt.clone();
     let enhance = PromptEnhance::from_advanced(&request.advanced)?;
-    let adapters = resolve_adapters(request, settings)?;
-
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "flux2_edit",

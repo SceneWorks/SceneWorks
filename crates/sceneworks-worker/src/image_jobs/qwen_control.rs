@@ -414,11 +414,13 @@ impl CandleStrictControl for QwenStrictControl {
     /// The Qwen-Image-2512 base tier dir + the packed 2512-Fun-Controlnet-Union overlay file, exactly
     /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
+        let mut overlays = vec![self.controlnet.as_path()];
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "Qwen-Image",
             "strict-pose ControlNet branch",
             &self.qwen_base,
-            &[&self.controlnet],
+            &overlays,
         ))
     }
 

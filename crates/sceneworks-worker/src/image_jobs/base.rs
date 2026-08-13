@@ -723,16 +723,15 @@ impl CandleImageRoute {
             | CandleImageRoute::QwenEdit
             | CandleImageRoute::QwenImageComfyui
             | CandleImageRoute::ZimageEdit
+            | CandleImageRoute::KolorsEdit
             | CandleImageRoute::MageEdit
             | CandleImageRoute::KreaEdit
             | CandleImageRoute::KreaTurboOnRaw
             | CandleImageRoute::KreaMultiPhase
-            | CandleImageRoute::KreaImported
             | CandleImageRoute::SdxlImported
             | CandleImageRoute::KreaControl => true,
             CandleImageRoute::CandleTxt2Img => {
-                !wants_krea_convrot(request)
-                    && mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
+                mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
             }
             _ => false,
         }
@@ -3698,6 +3697,14 @@ fn load_spec(
     spec
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn with_krea_convrot_dit(mut spec: LoadSpec, convrot_dit: Option<PathBuf>) -> LoadSpec {
+    if let Some(convrot_dit) = convrot_dit {
+        spec.text_encoder = Some(WeightsSource::File(convrot_dit));
+    }
+    spec
+}
+
 /// Select deferred materialization for the native Candle/CUDA Qwen routes. Only the uniform
 /// base/edit transformer trunk can be reopened one window at a time: control/IP/PiD and adapter
 /// overlays keep the established eager shape and therefore make rung 4 explicitly unavailable.
@@ -5862,15 +5869,25 @@ pub(crate) fn resolve_character_image_likeness_source(
     settings: &Settings,
     project_path: &Path,
 ) -> Option<(Image, String)> {
-    if request.mode != "character_image" {
-        return None;
-    }
-    // Angle / pose sets are already scored by sc-4409 / sc-4410 through the same shared seam; this is
-    // the PLAIN With-Character path only, so exclude both groupings to avoid double-attaching.
-    if !pose_entries(request).is_empty() || advanced::flag(&request.advanced, "angleSet") {
+    if !character_image_likeness_requested(request) {
         return None;
     }
     resolve_control_identity_source(request, settings, project_path)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn character_image_likeness_requested(request: &ImageRequest) -> bool {
+    request.mode == "character_image"
+        && request
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        // Angle / pose sets are already scored by sc-4409 / sc-4410 through the shared seam.
+        && pose_entries(request).is_empty()
+        && !advanced::flag(&request.advanced, "angleSet")
 }
 
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
@@ -8191,20 +8208,19 @@ async fn gate_with_evict_reclaim<D>(
     Ok((reclaimed, reclaimed_budget))
 }
 
-/// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
-/// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
-/// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
-/// `generate_one` → `consume_gen_events`) against the registry-resolved candle generator.
+/// Windows/CUDA registry-generator path (sc-3675 SDXL, generalized in sc-5096). This is the Candle
+/// sibling of [`generate_stream`], driving the same neutral streaming harness
+/// (`start_cached_gen_stream` → `generate_one` → `consume_gen_events`) for base generation and the
+/// descriptor-backed reference/edit/identity shapes selected by [`resolve_candle_image_route`].
 ///
 /// Backend-neutral resolution (sc-5096): the per-engine repo / steps / guidance / negative prompt all
 /// come from the shared [`mlx_model`] join (`MODEL_TABLE` row + the linked candle descriptor), exactly
 /// like the MLX path — so adding a family needs no new dispatch logic, just its provider crate linked.
-/// Quant + LoRA/LoKr are **descriptor-gated** (sc-5126): resolved (via the same `resolve_quant` /
-/// `resolve_adapters` the MLX path uses) only when the linked candle descriptor advertises them — i.e.
-/// for Lens (Q4/Q8 + LoRA/LoKr); the sc-3675/sc-5096 families advertise neither, so they stay dense +
-/// adapter-free exactly as before. No reference/img2img/control — unsupported shapes are refused
-/// upstream and remain queued (`image_request_candle_eligible`). Reached only when `backend_candle_enabled`
-/// (default off → production routing unchanged until parity).
+/// Quant + LoRA/LoKr are **descriptor-gated** (sc-5126): resolved through the same `resolve_quant` /
+/// `resolve_adapters` seams as MLX only when the linked Candle descriptor advertises them. Bespoke
+/// control/IP/ComfyUI providers divert before this function; unsupported request shapes are refused
+/// upstream and remain queued (`image_request_candle_eligible`). Reached only when
+/// `backend_candle_enabled` (default off → production routing unchanged until parity).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_stream(
     api: &ApiClient,
@@ -8319,10 +8335,9 @@ async fn generate_candle_stream(
         _ => {}
     }
 
-    // Descriptor-gated quant + adapters (sc-5126). Lens advertises Q4/Q8 (Q8 default) + LoRA/LoKr, so
-    // it resolves them like the MLX path; the sc-3675/sc-5096 families advertise neither and skip both
-    // (dense bf16/fp16, no adapters) — preserving their shipped behavior. The router only lets a quant
-    // request / LoRA reach this worker for a family that supports it (`image_request_candle_eligible`).
+    // Descriptor-gated quant + adapters (sc-5126). Every registered family resolves exactly the
+    // precision and adapter surfaces its linked Candle descriptor advertises; unsupported requests
+    // never reach this stream (`image_request_candle_eligible`).
     // `mut` so the sc-10733 downtier can correct the recorded precision to the tier it lands on.
     let (mut quant, mut quant_bits) = if convrot.is_some() {
         // INT8-ConvRot (sc-9300): the int8 DiT replaces the dense transformer wholesale — a bits-based
@@ -8348,10 +8363,8 @@ async fn generate_candle_stream(
     } else {
         (None, None)
     };
-    let adapters = if convrot.is_some() {
-        // ConvRot does not combine with LoRA/LoKr (the int8 DiT is not adapter-wired); skip adapters.
-        Vec::new()
-    } else if model.supports_adapters() {
+    let adapters = if model.supports_adapters() {
+        // Pinned inference applies Krea adapters as additive residuals over ConvRot projections too.
         resolve_adapters(request, settings)?
     } else {
         Vec::new()
@@ -9360,9 +9373,7 @@ async fn generate_candle_stream(
     // canonical Krea 2 bf16 snapshot `Dir` (set as `weights_dir` above). The candle-gen krea engine's
     // `convrot_selector` decodes a `File` here → `load_components_convrot` (which enforces the sm_89
     // compute-cap floor); a `Dir`/`None` there is the normal dense/packed path. Other engines ignore it.
-    if let Some((_, convrot_dit)) = convrot {
-        spec.text_encoder = Some(WeightsSource::File(convrot_dit));
-    }
+    spec = with_krea_convrot_dit(spec, convrot.map(|(_, convrot_dit)| convrot_dit));
 
     // Surface the decision before model execution, while the reason for a slow render is still clear,
     // then keep the same compact note on subsequent progress updates. The structured event is the
@@ -9403,6 +9414,19 @@ async fn generate_candle_stream(
         .await?;
     }
 
+    // The registered Z-Image identity route retains the shared, non-fatal likeness post-pass from the
+    // retired bespoke stream. This stages only the existing face stack, not an obsolete Z-Image path.
+    let likeness_source = resolve_character_image_likeness_source(request, settings, project_path);
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "registered Candle character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
+    let likeness_source = face_stack_dir.as_ref().and(likeness_source);
+
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -9410,7 +9434,14 @@ async fn generate_candle_stream(
         spec,
         format!("candle {engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items_reported(
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            drive_gen_items_scored_reported(
                 tx,
                 work,
                 move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
@@ -9473,7 +9504,18 @@ async fn generate_candle_stream(
                     initial,
                     |retry_seed| render(retry_seed, on_progress),
                 )?;
-                Ok(Some((final_seed, out_w, out_h, pixels)))
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
         },
@@ -10196,6 +10238,92 @@ async fn consume_gen_events_with_disclosure(
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_label_tests {
     use super::*;
+
+    #[test]
+    fn krea_convrot_load_spec_preserves_adapters() {
+        let request = ImageRequest::from_payload(
+            json!({
+                "model": "krea_2_turbo",
+                "advanced": { "convRot": true }
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert!(
+            CandleImageRoute::CandleTxt2Img.applies_request_loras(&request),
+            "the fail-closed route guard must admit ConvRot adapters before the load seam"
+        );
+        assert!(
+            !CandleImageRoute::KreaImported.applies_request_loras(&request),
+            "imported Krea adapters remain owned by sc-18480 and must fail closed on Candle"
+        );
+        assert!(
+            CandleImageRoute::KolorsEdit.applies_request_loras(&request),
+            "the registered Kolors edit stream consumes the same adapter-bearing load spec"
+        );
+        assert!(
+            !CandleImageRoute::SenseNovaEdit.applies_request_loras(&request),
+            "SenseNova descriptors expose no user-adapter slot"
+        );
+
+        let adapter = AdapterSpec::new(
+            PathBuf::from("/nonexistent/krea-style-lora.safetensors"),
+            0.6,
+            AdapterKind::Lora,
+        );
+        let spec = load_spec(
+            PathBuf::from("/nonexistent/krea-bf16-surface"),
+            None,
+            vec![adapter.clone()],
+            None,
+        );
+        let convrot = PathBuf::from("/nonexistent/krea-int8-convrot.safetensors");
+        let spec = with_krea_convrot_dit(spec, Some(convrot.clone()));
+
+        assert!(matches!(
+            spec.text_encoder.as_ref(),
+            Some(WeightsSource::File(path)) if path == &convrot
+        ));
+        assert_eq!(spec.adapters.len(), 1);
+        assert_eq!(spec.adapters[0].path, adapter.path);
+    }
+
+    #[test]
+    fn registered_zimage_identity_routes_scored_source_metadata() {
+        let request = ImageRequest::from_payload(
+            json!({
+                "model": "z_image_turbo",
+                "mode": "character_image",
+                "referenceAssetId": "character-42",
+                "advanced": { "referenceStrength": 0.7 }
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert!(zimage_identity_candle_strength(&request).is_some());
+        assert!(character_image_likeness_requested(&request));
+
+        let fact = json!({ "sourceAssetId": "character-42" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        drive_gen_items_scored_reported(
+            tx,
+            [()],
+            move |_index, (), _preview, _reports, _progress| {
+                Ok(Some((17, 1, 1, vec![0_u8; 3], Some(fact.clone()))))
+            },
+        )
+        .unwrap();
+        match rx.try_recv().expect("scored image event") {
+            GenEvent::Image {
+                face_likeness: Some(face_likeness),
+                ..
+            } => assert_eq!(face_likeness["sourceAssetId"], "character-42"),
+            _ => panic!("expected scored image event"),
+        }
+    }
 
     #[test]
     fn mage_edit_preserves_primary_then_ordered_extra_references() {

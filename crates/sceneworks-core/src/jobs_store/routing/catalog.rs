@@ -1271,8 +1271,8 @@ pub fn imported_image_model_lora_advertisement(
 derive_model_list! {
     /// The models the candle (Windows/CUDA) lane can serve for base txt2img (derived from
     /// [`IMAGE_MODEL_CAPS`]`.candle_routed`, sc-9495). Mirrors the worker's `image_jobs::is_candle_engine`.
-    /// Deliberately narrow: candle is a gated txt2img-only lane, so every conditioning shape is
-    /// refused unless a bespoke candle lane in `image_job_is_candle_eligible` claims it.
+    /// Deliberately limited to the unconditioned base surface: every other request shape must be
+    /// claimed explicitly by a descriptor-backed or bespoke lane in `image_job_is_candle_eligible`.
     pub(crate) CANDLE_ROUTED_MODELS, IMAGE_MODEL_CAPS, candle_routed
 }
 

@@ -925,8 +925,9 @@ fn flux2_klein_weight_variants_route_txt2img_to_candle() {
 
 #[test]
 fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
-    // Every candle image family is txt2img-only on candle: unsupported conditioning shapes are
-    // refused (the worker advertises none of these, so this is the no-silently-dropped-control boundary).
+    // These cases exercise unsupported conditioning on the generic base predicate. Specialized edit,
+    // reference, identity, and control routes are asserted separately; anything not claimed by one
+    // of them must be refused rather than silently rendered as unconditioned text-to-image.
     let cases = [
         (
             "z_image_turbo",

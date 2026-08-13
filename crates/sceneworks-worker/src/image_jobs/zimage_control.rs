@@ -389,6 +389,7 @@ impl CandleStrictControl for ZImageStrictControl {
     fn conditioning_admission(&self) -> ConditioningAdmission {
         let mut overlays = vec![self.controlnet.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             if self.is_base {
                 "Z-Image"

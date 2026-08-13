@@ -600,10 +600,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     } else {
         Vec::new()
     };
-    // User style/subject LoRAs (sc-10271): folded in alongside any built-in distill LoRA,
-    // mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at load.
-    // This closes the candle edit-LoRA gap for the Qwen-Image-Edit family; the SDXL / FLUX.2 /
-    // Z-Image candle edit engines still need an `adapters` field in candle-gen (tracked).
+    // User LoRA/LoKr-family adapters (sc-10271/sc-18477): installed alongside any built-in
+    // distill LoRA, mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at
+    // load. The SDXL, FLUX.2, and Z-Image candle edit lanes now resolve and install their request
+    // adapter stacks too; each lane retains its own strict family/shape validation.
     let user_adapters = resolve_adapters(request, settings)?;
     adapters.extend(user_adapters.iter().cloned());
     let adapter_count = adapters.len();

@@ -279,22 +279,19 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
     let paths = resolve_flux2_comfyui_paths(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
             "ComfyUI FLUX.2-dev components could not be resolved (family/usable/transformer/snapshot)"
-                .to_owned(),
+            .to_owned(),
         )
     })?;
+    let adapters = resolve_adapters(request, settings)?;
     let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
     let snapshot_vae = paths.snapshot_dir.join("vae");
-    admit_candle_base_floor(
-        &request.model,
-        "ComfyUI FLUX.2",
-        settings,
-        &[
-            paths.transformer.as_path(),
-            snapshot_text_encoder.as_path(),
-            snapshot_vae.as_path(),
-        ],
-    )
-    .await?;
+    let mut admission_paths = vec![
+        paths.transformer.as_path(),
+        snapshot_text_encoder.as_path(),
+        snapshot_vae.as_path(),
+    ];
+    admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
+    admit_candle_base_floor(&request.model, "ComfyUI FLUX.2", settings, &admission_paths).await?;
 
     let (width, height) = (request.width, request.height);
     let steps =
@@ -302,8 +299,6 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
     let guidance = flux2_comfyui_guidance(request);
     let quant = flux2_comfyui_quant(request);
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
-    let adapters = resolve_adapters(request, settings)?;
-
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))

@@ -517,6 +517,7 @@ pub(super) async fn generate_candle_pulid_stream(
     {
         let mut overlays = vec![adapter.as_path(), eva.as_path(), face_dir.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
+        overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
         admit_conditioning_paths(
             settings,
             "PuLID-FLUX",

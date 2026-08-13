@@ -13718,6 +13718,140 @@ fn candle_strict_control_trait_routes_each_provider() {
     assert_eq!(kolors.stream_tag(), "kolors_control");
 }
 
+/// sc-18477 review regression: every adapter-capable bespoke Candle route must price the exact
+/// resolved adapter stack before handing it to the provider. Exercise both admission mechanisms:
+/// shared-selector routes receive nonzero resident bytes, and floor routes include the adapter path
+/// in the footprint whose decision can flip at the resulting boundary.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
+    let root = tempfile::tempdir().expect("adapter admission fixture");
+    let adapter_path = root.path().join("style.safetensors");
+    std::fs::write(&adapter_path, vec![0_u8; 4096]).expect("adapter bytes");
+    let adapters = vec![AdapterSpec::new(
+        adapter_path.clone(),
+        0.75,
+        AdapterKind::Lora,
+    )];
+
+    for (route, bytes) in [
+        (
+            "FLUX.2 edit",
+            flux2_edit_adapter_source_bytes(&adapters).expect("sized FLUX.2 edit adapter"),
+        ),
+        (
+            "FLUX.1 control",
+            flux1_control_adapter_source_bytes(&adapters).expect("sized FLUX.1 control adapter"),
+        ),
+        (
+            "FLUX.2 control",
+            flux2_control_adapter_source_bytes(&adapters).expect("sized FLUX.2 control adapter"),
+        ),
+    ] {
+        assert_eq!(bytes, 4096, "{route} must pass real, nonzero adapter bytes");
+        let manifest = json!({ "candle": { "vramGbByTier": { "q4": 10.0 } } })
+            .as_object()
+            .unwrap()
+            .clone();
+        let plain = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(&manifest, "q4", 0)
+            .expect("plain peak");
+        let adapted =
+            crate::vram_gate::predicted_peak_gb_with_adapter_bytes(&manifest, "q4", bytes)
+                .expect("adapted peak");
+        assert!(
+            adapted > plain,
+            "{route} adapter bytes must raise admission"
+        );
+    }
+    assert_eq!(
+        bernini_adapter_resident_bytes(&adapters, None).expect("dense Bernini folds adapters"),
+        0
+    );
+    assert_eq!(
+        bernini_adapter_resident_bytes(&adapters, Some(Quant::Q4))
+            .expect("packed Bernini sizes both resident experts"),
+        8192,
+        "an untargeted packed Bernini adapter is resident on both co-resident experts"
+    );
+    let missing = vec![AdapterSpec::new(
+        root.path().join("missing.safetensors"),
+        1.0,
+        AdapterKind::Lora,
+    )];
+    for (route, result) in [
+        ("FLUX.2 edit", flux2_edit_adapter_source_bytes(&missing)),
+        (
+            "FLUX.1 control",
+            flux1_control_adapter_source_bytes(&missing),
+        ),
+        (
+            "FLUX.2 control",
+            flux2_control_adapter_source_bytes(&missing),
+        ),
+        (
+            "packed Bernini still",
+            bernini_adapter_resident_bytes(&missing, Some(Quant::Q4)),
+        ),
+    ] {
+        assert!(
+            result.is_err(),
+            "{route} must fail closed when adapter bytes cannot be sized"
+        );
+    }
+
+    let base = root.path().join("base");
+    std::fs::create_dir_all(&base).expect("base dir");
+    std::fs::write(base.join("model.safetensors"), vec![0_u8; 8192]).expect("base bytes");
+    let control = root.path().join("control.safetensors");
+    std::fs::write(&control, vec![0_u8; 2048]).expect("control bytes");
+    let plain = crate::conditioning_fit::ConditioningFootprint::from_paths(
+        "test",
+        "control",
+        &base,
+        &[control.as_path()],
+    );
+    let adapted = crate::conditioning_fit::ConditioningFootprint::from_paths(
+        "test",
+        "control + adapter",
+        &base,
+        &[control.as_path(), adapter_path.as_path()],
+    );
+    assert_eq!(adapted.overlay_bytes - plain.overlay_bytes, 4096);
+    let plain_floor = crate::conditioning_fit::conditioning_floor_gb(&plain).unwrap();
+    let adapted_floor = crate::conditioning_fit::conditioning_floor_gb(&adapted).unwrap();
+    let budget = crate::vram_gate::VramBudget {
+        free_gb: (plain_floor + adapted_floor) / 2.0,
+        total_gb: adapted_floor,
+    };
+    assert!(matches!(
+        crate::conditioning_fit::decide(&plain, Some(budget)),
+        crate::conditioning_fit::ConditioningFit::Fits { .. }
+    ));
+    assert!(matches!(
+        crate::conditioning_fit::decide(&adapted, Some(budget)),
+        crate::conditioning_fit::ConditioningFit::TooBig { .. }
+    ));
+
+    for (route, source, marker) in [
+        ("FLUX.2 edit selector", include_str!("flux2_edit_candle.rs"), "predicted_peak_gb_with_adapter_bytes(\n        &request.model_manifest_entry,\n        tier,\n        adapter_source_bytes,"),
+        ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("Bernini admission", include_str!("bernini.rs"), "admit_candle_base_floor_with_resident_overlay(\n        &request.model,\n        \"Bernini still image\",\n        settings,\n        &[weights_dir.as_path()],\n        adapter_resident_bytes,"),
+        ("Qwen control", include_str!("qwen_control.rs"), "self.adapters.iter()"),
+        ("Kolors control", include_str!("kolors_control.rs"), "self.adapters.iter()"),
+        ("Z-Image control", include_str!("zimage_control.rs"), "self.adapters.iter()"),
+        ("Kolors IP-Adapter", include_str!("kolors_ipadapter.rs"), "admission_overlays.extend(adapters.iter()"),
+        ("PuLID fallback", include_str!("pulid_candle.rs"), "overlays.extend(adapters.iter()"),
+        ("Z-Image ComfyUI", include_str!("zimage_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
+        ("FLUX.2 ComfyUI", include_str!("flux2_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
+    ] {
+        assert!(
+            source.contains(marker),
+            "{route} must add the same resolved adapter paths to preflight admission"
+        );
+    }
+}
+
 /// epic 16948 / sc-16962: the two preview-wired bespoke strict-control lanes put the job's **live**
 /// sink on their request, not the inert default.
 ///
@@ -16633,7 +16767,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "Bernini",
             "bernini.rs",
             include_str!("bernini.rs"),
-            "admit_candle_base(",
+            "admit_candle_base_floor_with_resident_overlay(",
         ),
     ];
     for (route, file, source, marker) in BASE_ADMITTED {

@@ -320,12 +320,14 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
     // the IP-Adapter overlay. This lane loads through the UNcached `start_gen_stream` with a bespoke
     // `IpAdapterKolorsPaths`, so it reaches neither the `generate_candle_stream` `vram_gate` nor the
     // `generator_cache` `apply_residency_policy`; before this it allocated unchecked.
+    let mut admission_overlays = vec![ip_adapter.as_path()];
+    admission_overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
     admit_conditioning_paths(
         settings,
         "Kolors",
         "IP-Adapter",
         &kolors_base,
-        &[ip_adapter.as_path()],
+        &admission_overlays,
     )
     .await?;
 

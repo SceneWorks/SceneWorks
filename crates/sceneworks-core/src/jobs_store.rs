@@ -3834,13 +3834,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         return false;
     }
     // Candle (Windows/CUDA) lane (epic 3672 image sc-3678; epic 5095 image families sc-5096 + video
-    // sc-5097): the candle worker advertises `image_generate` (+ `video_generate` once video engines
-    // are wired) and serves gated, narrow **txt2img / txt2video-only** lanes. It must refuse every
-    // other shape — a non-candle family, or a conditioned (img2img/edit/reference/inpaint/pose/
-    // i2v/extend/bridge/replace) / LoRA request — so unsupported work remains queued unless another
-    // capable native worker registers. Identified by the `candle` marker capability (not `gpu_id`,
-    // which is a real CUDA index here). When candle is disabled the marker is absent and this is inert,
-    // so production routing is unchanged until the lane is turned on.
+    // sc-5097): the candle worker advertises broad image/video job capabilities, then the route
+    // predicates narrow them to concrete per-family base, conditioned, adapter, and control lanes.
+    // It must refuse every model/request-shape/tier/adapter combination those predicates do not own,
+    // so unsupported work remains queued unless another capable native worker registers. Identified
+    // by the `candle` marker capability (not `gpu_id`, which is a real CUDA index here). When candle
+    // is disabled the marker is absent and this is inert.
     if worker_is_candle(worker) {
         // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
         // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
