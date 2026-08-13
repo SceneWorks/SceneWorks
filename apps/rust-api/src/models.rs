@@ -4468,9 +4468,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        // Forward the catalog-declared family so an imported/user model whose id is in no routing
-        // table still routes to its family's MLX engine (route-by-family, sc-14019) instead of
-        // reporting "not available on Mac". Builtin ids are unaffected (they route by id).
+        // Preserve the catalog-declared family in the shared probe call, but do not authorize an
+        // imported loader from family identity alone. This pass supplies builtin id-keyed defaults;
+        // `apply_imported_provider_surface` runs later with the full manifest entry and replaces an
+        // imported row's provisional verdict from its exact family + `importSourceShape` routes.
         let family = object
             .get("family")
             .and_then(Value::as_str)
