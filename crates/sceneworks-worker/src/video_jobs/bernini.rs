@@ -7,11 +7,13 @@ use super::ltx::extract_clip_frames;
 use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::wan::local_mlx_dir;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::wan::resolve_wan_adapters;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use super::wan::{generate_video, resolve_wan_adapters, VideoGenInput};
+use super::wan::{generate_video, VideoGenInput};
 
 // ---------------------------------------------------------------------------
 // Real MLX Bernini generation (macOS, via mlx-gen-bernini, epic 4699 / sc-4707 + sc-4703 + sc-5425):
