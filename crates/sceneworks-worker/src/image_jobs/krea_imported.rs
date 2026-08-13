@@ -23,11 +23,10 @@
 // txt2img plus img2img (reference-guided latent-init off a single `referenceAssetId` + strength, resolved
 // through the shared cross-platform `resolve_img2img_init_generic` on the SAME Turbo t2i descriptor — the
 // engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
-// imported lanes get img2img). MLX also claims strict pose conditioning by composing the cached base-tier
-// control branch with the imported DiT; candle still rejects pose because its native loader has no control
-// parameter. Edit conditioning remains a separate surface (sc-14119). Descriptor contents and per-row scale
-// shapes are validated by the inference loader before dequantization; ConvRot descriptors remain on their
-// separate loader arm.
+// imported lanes get img2img). Both native backends also claim adapters, Kontext edit, and strict pose
+// conditioning through the pinned runtime's file-loaded entrypoints. Descriptor contents and per-row
+// scale shapes are validated by the inference loader before dequantization; ConvRot descriptors remain
+// on their separate loader arm.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
@@ -37,13 +36,11 @@ const KREA_IMPORTED_ENGINE: &str = "mlx_krea_imported";
 const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
 /// Whether the selected backend's native single-file entrypoint accepts adapters — i.e. it serves job
 /// LoRAs (sc-14111) and the Kontext edit surface (sc-14119, whose required `krea2_identity_edit` LoRA
-/// IS an adapter). The MLX `load_from_native_dit_file` takes an `&[AdapterSpec]` (inference #211); the
-/// candle one does NOT yet (it threads no load-time adapters — sc-14135, the candle follow-up), so the
-/// candle imported lane stays **t2i / img2img only**. img2img (a `Conditioning::Reference` init) needs
-/// no adapter, so it is served on both backends regardless of this flag. Read by
+/// IS an adapter). Both pinned native `load_from_native_dit_file` entrypoints take an
+/// `&[AdapterSpec]`. img2img (a `Conditioning::Reference` init) needs no adapter, so it is served on
+/// both backends regardless of this flag. Read by
 /// [`krea_imported_available`] (the claim gate mirrors the scheduler's
-/// `imported_image_request_family_eligible(adapters_supported)`), so a candle host never routes a
-/// LoRA/edit imported job into this lane.
+/// `imported_image_request_family_eligible(adapters_supported)`), keeping claim and dispatch aligned.
 #[cfg(target_os = "macos")]
 const KREA_IMPORTED_SUPPORTS_ADAPTERS: bool = true;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -51,12 +48,9 @@ const KREA_IMPORTED_SUPPORTS_ADAPTERS: bool = true;
 /// Whether the selected backend can serve **strict-pose control** on an imported single-file Krea 2
 /// checkpoint. The pose ControlNet is a `control_scale`-scaled residual branch (`Krea2ControlBranch`)
 /// folded onto the frozen Turbo DiT at load — architecturally independent of the DiT's weights, so a
-/// same-shape imported fine-tune composes with it exactly as the builtin base does. The MLX runtime
-/// has the native control entrypoint (`load_control_from_native_dit_file`); the candle single-file
-/// path has no control (nor adapter, sc-14135) parameter, so candle keeps rejecting pose here — and
-/// the scheduler mirror (`imported_image_request_family_eligible`) agrees per backend, so a candle
-/// host never claims an imported pose job (a candle-required deployment fails it terminally via the
-/// `candle_unsupported` enforce sweep rather than stranding it).
+/// same-shape imported fine-tune composes with it exactly as the builtin base does. Both runtime
+/// bundles expose `load_control_from_native_dit_file`, and the scheduler mirror
+/// (`imported_image_request_family_eligible`) agrees per backend.
 #[cfg(target_os = "macos")]
 const KREA_IMPORTED_SUPPORTS_POSE_CONTROL: bool = true;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -305,14 +299,12 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 ///     latent-init the shared [`resolve_img2img_init_generic`] resolves to one `Conditioning::Reference`
 ///     on the Turbo t2i descriptor), on every backend (no adapter needed);
 ///   - **LoRAs** on t2i / img2img (sc-14111) and the **Kontext edit** surface (mode `edit_image` + a
-///     conditioning image, sc-14119) — ONLY on a backend whose native loader accepts adapters
-///     ([`KREA_IMPORTED_SUPPORTS_ADAPTERS`]: MLX yes / candle not yet, sc-14135). This mirrors the
-///     scheduler's `imported_image_request_family_eligible(adapters_supported)`, so the claim gate and
-///     the router agree per backend and a candle host never routes a LoRA/edit imported job here.
-///   - a **strict-pose set** (a non-empty `advanced.poses` outside edit mode) — ONLY on a backend
+///     conditioning image, sc-14119) on either native backend. This mirrors the scheduler's
+///     `imported_image_request_family_eligible(adapters_supported)`, so claim and dispatch agree.
+///   - a **strict-pose set** (a non-empty `advanced.poses` outside edit mode) on either native backend
 ///     whose native loader can assemble the pose control branch around the file-loaded DiT
-///     ([`KREA_IMPORTED_SUPPORTS_POSE_CONTROL`]: MLX yes / candle no). The base-tier control overlay
-///     is staged alongside the TE/VAE/tokenizer the lane already resolves; an optional single
+///     ([`KREA_IMPORTED_SUPPORTS_POSE_CONTROL`]). The base-tier control overlay is staged alongside
+///     the TE/VAE/tokenizer the lane already resolves; an optional single
 ///     `referenceAssetId` on a pose job is the identity-likeness scoring source (the builtin
 ///     `krea_control_available` semantics), never an img2img init.
 ///
@@ -377,7 +369,7 @@ fn krea_imported_available(request: &ImageRequest, settings: &Settings) -> bool 
     matches!(resolve_imported_krea_dit(request, settings), Ok(Some(_)))
 }
 
-/// True when this is an imported single-file Krea 2 **strict-pose** job the MLX backend serves: a
+/// True when this is an imported single-file Krea 2 **strict-pose** job a native backend serves: a
 /// non-edit pose set on an imported `krea_2`-family checkpoint that [`krea_imported_available`]
 /// admits (which already requires [`KREA_IMPORTED_SUPPORTS_POSE_CONTROL`] for a pose shape). Split
 /// out so the router can claim the pose set into its own route arm ([`ImageRoute::KreaImportedControl`],
@@ -941,11 +933,11 @@ fn resolve_krea_imported_adapters_and_edit(
 
 /// Real in-place imported single-file Krea 2 generation (epic 14015 S0c, sc-14023 + sc-14071 +
 /// sc-14111 + sc-14119): resolve the imported DiT, the resident base tier, any img2img reference, and —
-/// on the adapter-capable MLX backend — the job LoRA stack + Kontext edit conditioning, then load the
+/// on either adapter-capable native backend — the job LoRA stack + Kontext edit conditioning, then load the
 /// selected runtime's native entrypoint once and generate each image on the blocking thread.
 ///
 /// Three shapes ride one lane: plain **t2i**, reference-guided **img2img** (one `Conditioning::Reference`
-/// on the Turbo t2i descriptor, both backends), and — MLX only — **LoRA-adapted** t2i/img2img (sc-14111)
+/// on the Turbo t2i descriptor, both backends), **LoRA-adapted** t2i/img2img (sc-14111),
 /// and the **Kontext edit** surface (sc-14119: the `turbo_edit_descriptor` + the fitted source
 /// reference(s) as `Reference`/`MultiReference` + the `krea2_identity_edit` adapter). The merge is
 /// distilled Turbo (no CFG / negative prompt). The `Box<dyn Generator>` is bespoke (not registry-cached).
@@ -993,9 +985,9 @@ async fn generate_krea_imported_stream(
         None
     };
 
-    // Adapter-capable backend (MLX, inference #211): resolve the job LoRA stack into engine `AdapterSpec`s
-    // (sc-14111) and, for an `edit_image` job, the fitted source reference(s) + the required identity-edit
-    // adapter (sc-14119). Candle takes no adapters (sc-14135), so it stays t2i/img2img with an empty stack.
+    // Resolve the job LoRA stack into engine `AdapterSpec`s (sc-14111) and, for an `edit_image` job,
+    // the fitted source reference(s) + the required identity-edit adapter (sc-14119). Both pinned
+    // native loaders consume the same resolved stack.
     let (adapters, edit_conditioning) =
         resolve_krea_imported_adapters_and_edit(request, settings, project_path)?;
     let adapter_count = adapters.len();
