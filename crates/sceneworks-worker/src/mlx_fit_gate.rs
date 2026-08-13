@@ -33,17 +33,20 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use gen_core::{
-    GenerationMemory, LoadSpec, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
-    MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
-    MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract,
-    MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
-    OffloadPolicy, PerComponentBytes, TransformerComponent, WeightsSource,
+    GenerationMemory, LoadSpec, MemoryBackend, MemoryBackendRealization, MemoryBudget,
+    MemoryCacheState, MemoryConformanceState, MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery,
+    MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryEvidence,
+    MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryParityContract, MemoryParityResult, MemoryProviderContract,
+    MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision,
+    Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
     EvidenceVerdict, Geometry as CalibrationGeometry, LoadShapeKey, StaleEvidenceReason,
     StrategyRung,
 };
+use serde::Deserialize;
 use serde_json::{Map as JsonObject, Value};
 
 use crate::fit_gate::resolve_offload;
@@ -55,6 +58,202 @@ use crate::{WorkerError, WorkerResult};
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
 const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecodeQualityFixtureWire {
+    seed: u64,
+    production_latent_provenance: String,
+    production_latent_sha256: String,
+    dense_output_sha256: String,
+    tiled_output_sha256: String,
+    observed_error: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecodeQualityGeometryWire {
+    width: u32,
+    height: u32,
+    batch: u32,
+    frames: u32,
+    reference_count: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DecodeQualityDispositionWire {
+    Admitted,
+    Refused { reason: String },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecodeGeometryPolicyWire {
+    quality_abi: u32,
+    family: String,
+    resolved_route: String,
+    backend: String,
+    tier: String,
+    mode: String,
+    overlay: Option<String>,
+    geometry: DecodeQualityGeometryWire,
+    use_pid: bool,
+    tile_edge: u32,
+    overlap: u32,
+    metric: String,
+    maximum_error: u32,
+    fixtures: Vec<DecodeQualityFixtureWire>,
+    production_evidence_sha256: String,
+    disposition: DecodeQualityDispositionWire,
+}
+
+impl DecodeGeometryPolicyWire {
+    fn into_core(self, model_id: &str) -> WorkerResult<MemoryDecodeGeometryPolicy> {
+        if self.resolved_route != model_id {
+            return Err(WorkerError::InvalidPayload(format!(
+                "decode-quality policy route {:?} cannot authorize model {:?}",
+                self.resolved_route, model_id
+            )));
+        }
+        let backend = match self.backend.as_str() {
+            "mlx" => MemoryBackend::Mlx,
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "MLX decode-quality policy cannot use backend {other:?}"
+                )))
+            }
+        };
+        let tier = match self.tier.as_str() {
+            "bf16" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: None,
+                component_precision_floors: &[],
+            },
+            "q4" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Q4),
+                component_precision_floors: &[],
+            },
+            "q8" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Q8),
+                component_precision_floors: &[],
+            },
+            "nvfp4" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Nvfp4),
+                component_precision_floors: &[],
+            },
+            "fp32" => MemoryNumericTier {
+                precision: Precision::Fp32,
+                quant: None,
+                component_precision_floors: &[],
+            },
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "unsupported decode-quality tier {other:?}"
+                )))
+            }
+        };
+        let mode = match self.mode.as_str() {
+            "text_to_image" => MemoryMode::TextToImage,
+            "image_to_image" => MemoryMode::ImageToImage,
+            "edit" => MemoryMode::Edit,
+            other => MemoryMode::Other(other.to_owned()),
+        };
+        let disposition = match self.disposition {
+            DecodeQualityDispositionWire::Admitted => MemoryDecodeQualityDisposition::Admitted,
+            DecodeQualityDispositionWire::Refused { reason } => {
+                MemoryDecodeQualityDisposition::Refused { reason }
+            }
+        };
+        Ok(MemoryDecodeGeometryPolicy {
+            quality_abi: self.quality_abi,
+            family: self.family,
+            resolved_route: self.resolved_route,
+            backend,
+            tier,
+            mode,
+            overlay: self.overlay,
+            geometry: MemoryGeometry {
+                width: self.geometry.width,
+                height: self.geometry.height,
+                batch: self.geometry.batch,
+                frames: self.geometry.frames,
+                reference_count: self.geometry.reference_count,
+            },
+            use_pid: self.use_pid,
+            tile_edge: self.tile_edge,
+            overlap: self.overlap,
+            metric: self.metric,
+            maximum_error: self.maximum_error,
+            fixtures: self
+                .fixtures
+                .into_iter()
+                .map(|fixture| MemoryDecodeQualityFixture {
+                    seed: fixture.seed,
+                    production_latent_provenance: fixture.production_latent_provenance,
+                    production_latent_sha256: fixture.production_latent_sha256,
+                    dense_output_sha256: fixture.dense_output_sha256,
+                    tiled_output_sha256: fixture.tiled_output_sha256,
+                    observed_error: fixture.observed_error,
+                })
+                .collect(),
+            production_evidence_sha256: self.production_evidence_sha256,
+            disposition,
+        })
+    }
+}
+
+/// Read the semantic P9 table from the model's derived static contract. This does not read or
+/// mutate the performance/calibration bundle: quality rows have their own ABI, hashes, and runtime
+/// path. Missing policy preserves the historical provider contract and its estimated fallback.
+pub(crate) fn decode_quality_policies_from_manifest(
+    manifest: &JsonObject<String, Value>,
+    model_id: &str,
+) -> WorkerResult<Vec<MemoryDecodeGeometryPolicy>> {
+    let Some(contract) = manifest
+        .get("mlx")
+        .and_then(Value::as_object)
+        .and_then(|mlx| mlx.get("memoryStrategyContract"))
+    else {
+        return Ok(Vec::new());
+    };
+    let implementations = contract
+        .get("implementations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "mlx.memoryStrategyContract.implementations must be an array".to_owned(),
+            )
+        })?;
+    let mut policies = Vec::new();
+    for implementation in implementations {
+        let Some(ranges) = implementation.get("parameterRanges") else {
+            continue;
+        };
+        let Some(rows) = ranges.get("decodeGeometryPolicies") else {
+            continue;
+        };
+        if implementation.get("rung").and_then(Value::as_str) != Some("bounded_decode") {
+            return Err(WorkerError::InvalidPayload(
+                "decodeGeometryPolicies may be declared only by bounded_decode".to_owned(),
+            ));
+        }
+        let rows = rows.as_array().ok_or_else(|| {
+            WorkerError::InvalidPayload("decodeGeometryPolicies must be an array".to_owned())
+        })?;
+        for row in rows {
+            let wire: DecodeGeometryPolicyWire =
+                serde_json::from_value(row.clone()).map_err(|error| {
+                    WorkerError::InvalidPayload(format!("invalid decode-quality policy: {error}"))
+                })?;
+            policies.push(wire.into_core(model_id)?);
+        }
+    }
+    Ok(policies)
+}
 
 /// Load-invariant inputs used to estimate each request without putting geometry or strategy in the
 /// generator cache key.
@@ -1656,6 +1855,11 @@ fn estimate_floor_weights_bytes(
 fn estimate_floor_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
+    tier: MemoryNumericTier,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    use_pid: bool,
 ) -> Option<gen_core::MemoryStrategyParameters> {
     let smallest = |strategy: MemoryStrategy,
                     pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
@@ -1669,13 +1873,34 @@ fn estimate_floor_parameters(
             .min()
             .map(Some)
     };
+    let (decode_tile_edge, decode_overlap) = if engaged.contains(&MemoryStrategy::BoundedDecode) {
+        let decode = contract.capability(MemoryStrategy::BoundedDecode)?;
+        if decode.parameters.decode_geometry_policies.is_empty() {
+            (
+                decode.parameters.decode_tile_edges.iter().copied().min(),
+                decode.parameters.decode_overlaps.iter().copied().min(),
+            )
+        } else {
+            let policy = contract
+                .decode_geometry_policy(
+                    MemoryDecodePolicyQuery {
+                        tier,
+                        mode_key,
+                        overlay,
+                        geometry,
+                        use_pid,
+                    },
+                    None,
+                )
+                .ok()??;
+            (Some(policy.tile_edge), Some(policy.overlap))
+        }
+    } else {
+        (None, None)
+    };
     Some(gen_core::MemoryStrategyParameters {
-        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
+        decode_tile_edge,
+        decode_overlap,
         attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
             &ranges.attention_chunk_sizes
         })?,
@@ -1714,6 +1939,7 @@ fn synthesize_estimate_ladder(
     mode_key: &str,
     overlay: Option<&str>,
     geometry: MemoryGeometry,
+    use_pid: bool,
     calibration_fingerprint: Option<&str>,
     bases: &[MeasuredRungBasis],
 ) -> Vec<SynthesizedEstimate> {
@@ -1734,6 +1960,9 @@ fn synthesize_estimate_ladder(
             continue;
         }
         let engaged = contract.engaged_composition(strategy);
+        let exact_parameters = estimate_floor_parameters(
+            contract, &engaged, plan.tier, mode_key, overlay, geometry, use_pid,
+        );
 
         // 1. Fitted-curve basis: the closest measured geometry below the request, else the
         //    smallest above it (whose clamp-at-1.0 scaling degenerates to the measurement itself).
@@ -1769,9 +1998,15 @@ fn synthesize_estimate_ladder(
                 (below, if below { area as i128 } else { -(area as i128) })
             })
             .and_then(|basis| {
+                let mut parameters = basis.parameters;
+                if engaged.contains(&MemoryStrategy::BoundedDecode) {
+                    let exact = exact_parameters?;
+                    parameters.decode_tile_edge = exact.decode_tile_edge;
+                    parameters.decode_overlap = exact.decode_overlap;
+                }
                 let selection = MemorySelection {
                     strategy,
-                    parameters: basis.parameters,
+                    parameters,
                     tier: plan.tier,
                 };
                 if contract.validate_selection(&selection).is_err() {
@@ -1844,7 +2079,7 @@ fn synthesize_estimate_ladder(
 
         // 2. Weights + headroom floor — no measured basis, so the binding-phase constraint does
         //    not gate it (scope sentence on the constraint's doc).
-        let Some(parameters) = estimate_floor_parameters(contract, &engaged) else {
+        let Some(parameters) = exact_parameters else {
             continue;
         };
         let selection = MemorySelection {
@@ -2410,6 +2645,7 @@ fn evaluate_request_with_budget_using_bundle(
             mode_key,
             inputs.overlay.as_deref(),
             geometry,
+            inputs.use_pid,
             calibration_fingerprint,
             &admission.estimate_bases,
         )
@@ -4344,6 +4580,51 @@ pub fn full_finetune_memory_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quality_policy_json(route: &str) -> Value {
+        serde_json::json!({
+            "qualityAbi": 1,
+            "family": "sdxl",
+            "resolvedRoute": route,
+            "backend": "mlx",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": null,
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1, "referenceCount": 0 },
+            "usePid": false,
+            "tileEdge": 896,
+            "overlap": 192,
+            "metric": "max_abs_rgb_u8",
+            "maximumError": 48,
+            "fixtures": [
+                { "seed": 7, "productionLatentProvenance": "fixture@revision seed=7", "productionLatentSha256": "a".repeat(64), "denseOutputSha256": "b".repeat(64), "tiledOutputSha256": "c".repeat(64), "observedError": 31 },
+                { "seed": 99, "productionLatentProvenance": "fixture@revision seed=99", "productionLatentSha256": "d".repeat(64), "denseOutputSha256": "e".repeat(64), "tiledOutputSha256": "f".repeat(64), "observedError": 42 }
+            ],
+            "productionEvidenceSha256": "0".repeat(64),
+            "disposition": { "kind": "admitted" }
+        })
+    }
+
+    #[test]
+    fn manifest_quality_reader_is_route_bound_and_keeps_absence_legacy() {
+        assert!(
+            decode_quality_policies_from_manifest(&JsonObject::new(), "realvisxl")
+                .unwrap()
+                .is_empty()
+        );
+
+        let manifest = serde_json::json!({
+            "mlx": { "memoryStrategyContract": { "implementations": [{
+                "rung": "bounded_decode",
+                "parameterRanges": { "decodeGeometryPolicies": [quality_policy_json("realvisxl")] }
+            }] } }
+        });
+        let manifest = manifest.as_object().unwrap();
+        let rows = decode_quality_policies_from_manifest(manifest, "realvisxl").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].resolved_route, "realvisxl");
+        assert!(decode_quality_policies_from_manifest(manifest, "realvisxl_lightning").is_err());
+    }
 
     #[test]
     fn prepared_component_accounting_uses_token_size_and_propagates_stale_errors() {
@@ -7042,6 +7323,7 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
+            false,
             None,
             std::slice::from_ref(&basis),
         );
@@ -7072,6 +7354,7 @@ mod tests {
             "text_to_image",
             None,
             request_geometry,
+            false,
             None,
             std::slice::from_ref(&basis),
         );
@@ -7089,6 +7372,124 @@ mod tests {
             "the fitted estimate's raw peak is the area-scaled measured envelope (the estimate \
              margin is applied later, by the selector)"
         );
+    }
+
+    #[test]
+    fn geometry_quality_policy_keys_estimated_decode_without_disabling_legacy_fallbacks() {
+        use gen_core::{
+            MemoryDecodeGeometryPolicy, MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture,
+            MEMORY_DECODE_QUALITY_ABI,
+        };
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        let admitted_geometry = MemoryGeometry {
+            width: 1280,
+            height: 1280,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let quality = MemoryDecodeGeometryPolicy {
+            quality_abi: MEMORY_DECODE_QUALITY_ABI,
+            family: "test".to_owned(),
+            resolved_route: contract.provider_id.clone(),
+            backend: gen_core::MemoryBackend::Mlx,
+            tier: fixture_plan().tier,
+            mode: MemoryMode::TextToImage,
+            overlay: None,
+            geometry: admitted_geometry,
+            use_pid: false,
+            tile_edge: 768,
+            overlap: 192,
+            metric: "max_abs_rgb_u8".to_owned(),
+            maximum_error: 48,
+            fixtures: [(7, 'a', 'b', 'c'), (99, 'd', 'e', 'f')]
+                .into_iter()
+                .map(|(seed, latent, dense, tiled)| MemoryDecodeQualityFixture {
+                    seed,
+                    production_latent_provenance: format!("fixture@revision seed={seed}"),
+                    production_latent_sha256: latent.to_string().repeat(64),
+                    dense_output_sha256: dense.to_string().repeat(64),
+                    tiled_output_sha256: tiled.to_string().repeat(64),
+                    observed_error: 40,
+                })
+                .collect(),
+            production_evidence_sha256: String::new(),
+            disposition: MemoryDecodeQualityDisposition::Admitted,
+        }
+        .seal();
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode");
+        decode.parameters.decode_tile_edges = vec![768];
+        decode.parameters.decode_overlaps = vec![192];
+        decode.parameters.decode_geometry_policies = vec![quality];
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
+
+        let plan = fixture_plan();
+        let admitted = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            admitted_geometry,
+            false,
+            None,
+            &[],
+        );
+        let selected = admitted
+            .iter()
+            .find(|candidate| candidate.selection.strategy == MemoryStrategy::BoundedDecode)
+            .expect("admitted coordinate gets an estimated decode candidate");
+        assert_eq!(selected.selection.parameters.decode_tile_edge, Some(768));
+        assert_eq!(selected.selection.parameters.decode_overlap, Some(192));
+
+        let refused = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1536,
+                height: 1536,
+                ..admitted_geometry
+            },
+            false,
+            None,
+            &[],
+        );
+        assert!(refused.iter().all(|candidate| !contract
+            .engages(candidate.selection.strategy, MemoryStrategy::BoundedDecode)));
+
+        // A provider that has not adopted the P9 table retains the pre-P9 smallest-range path.
+        let legacy = fixture_generator();
+        let legacy_contract = legacy.contract.as_ref().expect("legacy contract");
+        let legacy_candidates = synthesize_estimate_ladder(
+            legacy_contract,
+            &plan,
+            "text_to_image",
+            None,
+            admitted_geometry,
+            false,
+            None,
+            &[],
+        );
+        let legacy_decode = legacy_candidates
+            .iter()
+            .find(|candidate| candidate.selection.strategy == MemoryStrategy::BoundedDecode)
+            .expect("empty P9 table preserves estimated fallback");
+        assert_eq!(
+            legacy_decode.selection.parameters.decode_tile_edge,
+            Some(512)
+        );
+        assert_eq!(legacy_decode.selection.parameters.decode_overlap, Some(128));
     }
 
     #[test]

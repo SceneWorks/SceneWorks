@@ -403,7 +403,13 @@ async fn generate_sdxl_advanced_stream(
     let prompt = request.prompt.clone();
     let negative_prompt = negative_prompt.clone();
     let adapter_count = adapters.len();
-    let spec = sdxl_advanced_spec(weights_dir, quant, adapters, ip_adapter_dir);
+    let decode_quality_policies = crate::mlx_fit_gate::decode_quality_policies_from_manifest(
+        &request.model_manifest_entry,
+        &request.model,
+    )?;
+    let spec = sdxl_advanced_spec(weights_dir, quant, adapters, ip_adapter_dir)
+        .with_resolved_route(request.model.clone())
+        .with_decode_geometry_policies(decode_quality_policies);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         "sdxl",

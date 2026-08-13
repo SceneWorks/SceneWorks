@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use gen_core::{
     AdapterKind, AdapterSpec, FileStatFingerprint, Generator, LoadShape, LoadSpec,
-    MemoryCacheState, MoeExpert, OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
+    MemoryCacheState, MemoryDecodeGeometryPolicy, MoeExpert, OffloadPolicy, PinnedWeightsFile,
+    Precision, Quant, WeightsSource,
 };
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -65,6 +66,10 @@ static GENERATOR_WORKER: OnceLock<mpsc::Sender<GeneratorJob>> = OnceLock::new();
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoadIdentity {
     engine_id: String,
+    /// Exact catalog route and its packaged semantic decode policy are load identity: a warm shared
+    /// engine must not retain a sibling checkpoint's authority or an older policy table.
+    resolved_route: Option<String>,
+    decode_geometry_policies: Vec<MemoryDecodeGeometryPolicy>,
     weights: CacheWeightsSource,
     quantize: Option<Quant>,
     precision: Precision,
@@ -169,6 +174,8 @@ impl LoadIdentity {
         spec.validate_prepared_file_pins()?;
         Ok(Self {
             engine_id: engine_id.to_owned(),
+            resolved_route: spec.resolved_route.clone(),
+            decode_geometry_policies: spec.decode_geometry_policies.clone(),
             weights: CacheWeightsSource::from_spec(spec, &spec.weights)?,
             quantize: spec.quantize,
             precision: spec.precision,
@@ -1627,6 +1634,18 @@ mod tests {
         assert_ne!(
             LoadIdentity::from_load_spec("lens", &q4),
             LoadIdentity::from_load_spec("lens", &same_dir_q8)
+        );
+    }
+
+    #[test]
+    fn cache_key_includes_exact_shared_route_identity() {
+        let weights = WeightsSource::Dir(PathBuf::from("/models/shared-sdxl"));
+        let realvis = LoadSpec::new(weights.clone()).with_resolved_route("realvisxl");
+        let lightning = LoadSpec::new(weights).with_resolved_route("realvisxl_lightning");
+        assert_ne!(
+            LoadIdentity::from_load_spec("sdxl", &realvis),
+            LoadIdentity::from_load_spec("sdxl", &lightning),
+            "one shared engine must not reuse a sibling catalog route's loaded contract"
         );
     }
 

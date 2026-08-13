@@ -6754,6 +6754,16 @@ async fn generate_stream(
     // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
     // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
     spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+    // P9: a shared engine such as `sdxl` serves several independently pinned catalog routes. Bind
+    // the exact resolved model id into the provider contract before cache/load so geometry-quality
+    // evidence from one checkpoint can never authorize a sibling route.
+    let decode_quality_policies = crate::mlx_fit_gate::decode_quality_policies_from_manifest(
+        &request.model_manifest_entry,
+        &request.model,
+    )?;
+    spec = spec
+        .with_resolved_route(request.model.clone())
+        .with_decode_geometry_policies(decode_quality_policies);
     let plain_text_to_image = matches!(request.mode.as_str(), "image_generation" | "text_to_image")
         && identity_init.is_none()
         && edit_refs.is_empty()
