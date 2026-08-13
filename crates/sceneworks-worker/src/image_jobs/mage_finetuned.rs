@@ -209,6 +209,36 @@ fn mage_finetuned_raw_settings(request: &ImageRequest, steps: u32, guidance: f32
     raw
 }
 
+/// Build the per-image request for a generated Mage full fine-tune. The checkpoint inherits the
+/// undistilled Base descriptor, including true-CFG negative prompts; keeping this pure makes the
+/// accepted request surface independently testable without loading model weights.
+#[allow(clippy::too_many_arguments)]
+fn mage_finetuned_generation_request(
+    prompt: String,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: f32,
+    preview: gen_core::PreviewSink,
+    cancel: &CancelFlag,
+) -> GenerationRequest {
+    GenerationRequest {
+        prompt,
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance: Some(guidance),
+        preview,
+        cancel: cancel.clone(),
+        ..Default::default()
+    }
+}
+
 /// Real fine-tuned Mage-Flow base generation (sc-15036): resolve the trained transformer dir and
 /// the installed base's shared components, load once through `load_finetuned`, and render each
 /// image on the blocking thread. The `Box<dyn Generator>` is bespoke (not registry-cached) — the
@@ -263,6 +293,8 @@ async fn generate_mage_finetuned_stream(
         1.0..=20.0,
     );
     let raw_settings = mage_finetuned_raw_settings(request, steps, guidance);
+    let negative_prompt = (!request.negative_prompt.trim().is_empty())
+        .then(|| request.negative_prompt.clone());
 
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
@@ -299,18 +331,17 @@ async fn generate_mage_finetuned_stream(
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
-                let request = GenerationRequest {
+                let request = mage_finetuned_generation_request(
                     prompt,
+                    negative_prompt.clone(),
                     width,
                     height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    guidance: Some(guidance),
+                    seed,
+                    steps,
+                    guidance,
                     preview,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
+                    &cancel,
+                );
                 let output = match model.generate(&request, &mut *on_progress) {
                     Ok(output) => output,
                     Err(_) if cancel.is_cancelled() => return Ok(None),

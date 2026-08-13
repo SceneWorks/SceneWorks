@@ -520,15 +520,17 @@ pub(crate) async fn run_image_detail_job(
         // a missing component fails here, before provider load, with the shared actionable error.
         let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
             resolve_sdxl_components(&request.model_manifest_entry, settings)?;
+        let mut admission_paths = vec![
+            weights_dir.as_path(),
+            control_file.as_path(),
+            crate::conditioning_fit::weights_source_path(&vae_fp16_fix),
+        ];
+        admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
         admit_candle_base_floor(
             &model,
             "SDXL detail",
             settings,
-            &[
-                weights_dir.as_path(),
-                control_file.as_path(),
-                crate::conditioning_fit::weights_source_path(&vae_fp16_fix),
-            ],
+            &admission_paths,
         )
         .await?;
         runtime_cuda::providers::sdxl::SdxlDetailPaths {

@@ -330,6 +330,17 @@ fn krea_imported_available(request: &ImageRequest, settings: &Settings) -> bool 
     {
         return false;
     }
+    // Hires.fix currently re-enters the generic two-pass helper, whose first pass has no way to
+    // carry Krea's imported edit/img2img/pose conditioning. Keep plain t2i (including load-time
+    // adapters) available, but fail closed for conditioned shapes instead of returning a successful
+    // image that silently ignored the user's source or pose.
+    if request.hires_fix.enabled
+        && (request.mode == "edit_image"
+            || !pose_entries(request).is_empty()
+            || krea_imported_img2img_requested(request))
+    {
+        return false;
+    }
     // A pose set inside edit mode is no lane anywhere (the builtin edit lane rejects it too), and
     // outside edit mode it is the strict-pose control surface — pose-control-capable backend only.
     if !pose_entries(request).is_empty() {
@@ -367,6 +378,13 @@ fn krea_imported_available(request: &ImageRequest, settings: &Settings) -> bool 
         return false;
     }
     matches!(resolve_imported_krea_dit(request, settings), Ok(Some(_)))
+}
+
+/// The imported lane keys img2img on the request shape it advertises, not the optional `ui.img2img`
+/// presentation hint in `modelManifestEntry`. LAN/API clients may submit the same family-validated
+/// shape without UI metadata; treating that as t2i would silently drop the source.
+fn krea_imported_img2img_requested(request: &ImageRequest) -> bool {
+    request.mode != "edit_image" && non_empty(&request.reference_asset_id)
 }
 
 /// True when this is an imported single-file Krea 2 **strict-pose** job a native backend serves: a
@@ -959,38 +977,39 @@ async fn generate_krea_imported_stream(
     })?;
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
+    let is_edit = request.mode == "edit_image";
+
+    // Resolve adapters before Candle admission so every file the native loader will make resident
+    // participates in the floor. Edit conditioning is resolved alongside the stack on both native
+    // backends and is still completed before any model allocation.
+    let (adapters, edit_conditioning) =
+        resolve_krea_imported_adapters_and_edit(request, settings, project_path)?;
+    let adapter_count = adapters.len();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
         let text_encoder = base_dir.join("text_encoder");
         let vae = base_dir.join("vae");
+        let mut admission_paths = vec![dit.as_path(), text_encoder.as_path(), vae.as_path()];
+        admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
         admit_candle_base_floor(
             &request.model,
             "Krea imported",
             settings,
-            &[dit.as_path(), text_encoder.as_path(), vae.as_path()],
+            &admission_paths,
         )
         .await?;
     }
 
-    let is_edit = request.mode == "edit_image";
-
     // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
     // img2img lane uses (`resolve_generic_lane_conditioning`'s generic arm), and it is CROSS-PLATFORM —
-    // `model_supports_img2img` + `resolve_img2img_init_generic` are the shared candle/MLX helpers, so BOTH
-    // the MLX and candle imported lanes get img2img. Resolved on the async side (decode → `Send` `Image`
+    // `resolve_img2img_init_generic` is the shared candle/MLX helper, so BOTH native imported lanes
+    // get img2img. Resolved on the async side (decode → `Send` `Image`
     // moved into the worker thread). Only for a NON-edit job; an edit resolves its own conditioning below.
-    let img2img = if model_supports_img2img(request) && !is_edit {
+    let img2img = if krea_imported_img2img_requested(request) {
         resolve_img2img_init_generic(request, settings, project_path)?
     } else {
         None
     };
-
-    // Resolve the job LoRA stack into engine `AdapterSpec`s (sc-14111) and, for an `edit_image` job,
-    // the fitted source reference(s) + the required identity-edit adapter (sc-14119). Both pinned
-    // native loaders consume the same resolved stack.
-    let (adapters, edit_conditioning) =
-        resolve_krea_imported_adapters_and_edit(request, settings, project_path)?;
-    let adapter_count = adapters.len();
 
     let (width, height) = (request.width, request.height);
     let steps =

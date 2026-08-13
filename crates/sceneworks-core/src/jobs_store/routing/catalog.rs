@@ -1102,6 +1102,12 @@ pub(crate) fn imported_image_request_family_eligible(
     let has_loras = has_nonempty_array(payload, "loras");
     let has_poses = has_nonempty_nested_array(payload, "advanced", "poses");
     let has_phases = has_nonempty_nested_array(payload, "advanced", "phases");
+    let has_hires_fix = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     // A fused SDXL checkpoint contains the complete denoiser + dual text encoders + VAE, so its
     // single-file lane is not Krea's bare-transformer assembly surface. Both native loaders accept
@@ -1151,6 +1157,13 @@ pub(crate) fn imported_image_request_family_eligible(
         return false;
     }
     let is_edit = payload.get("mode").and_then(Value::as_str).map(str::trim) == Some("edit_image");
+
+    // Imported Krea hires currently serves only unconditioned t2i. The generic two-pass helper has
+    // no imported edit/img2img/pose conditioning inputs, so reject those combinations at claim time
+    // just as the worker does instead of returning a render that silently dropped them.
+    if has_hires_fix && (is_edit || has_poses || has_nonempty_string(payload, "referenceAssetId")) {
+        return false;
+    }
 
     // Strict pose (a non-empty `advanced.poses`): the imported pose-control surface. The trained
     // Krea pose branch is a `control_scale`-scaled residual folded onto the frozen DiT at load —
@@ -2031,6 +2044,8 @@ mod tests {
             assert!(mlx(&p), "t2i/img2img eligible on MLX");
             assert!(candle(&p), "t2i/img2img eligible on candle");
         }
+        let plain_hires = payload(serde_json::json!({ "hiresFix": { "enabled": true } }));
+        assert!(mlx(&plain_hires) && candle(&plain_hires));
 
         // LoRAs + edit: both providers expose the adapter path.
         let t2i_lora = payload(serde_json::json!({ "loras": [{ "id": "adapter" }] }));
@@ -2072,6 +2087,33 @@ mod tests {
         }));
         assert!(mlx(&pose_with_lora), "pose + LoRA on MLX");
         assert!(candle(&pose_with_lora), "pose + LoRA on candle");
+
+        // The imported two-pass helper cannot preserve conditioning yet, so both scheduler lanes
+        // fail closed instead of accepting an img2img/edit/pose request and returning t2i output.
+        for (label, extra) in [
+            (
+                "img2img + hires",
+                serde_json::json!({
+                    "referenceAssetId": "asset-1", "hiresFix": { "enabled": true }
+                }),
+            ),
+            (
+                "edit + hires",
+                serde_json::json!({
+                    "mode": "edit_image", "sourceAssetId": "s",
+                    "hiresFix": { "enabled": true }
+                }),
+            ),
+            (
+                "pose + hires",
+                serde_json::json!({
+                    "advanced": { "poses": [{}] }, "hiresFix": { "enabled": true }
+                }),
+            ),
+        ] {
+            let p = payload(extra);
+            assert!(!mlx(&p) && !candle(&p), "{label} rejected on both");
+        }
 
         // Shapes the pose render loop would silently drop stay rejected on EVERY backend: the
         // plural reference set, a bare source, edit mode, and the base-tier identity shapes.

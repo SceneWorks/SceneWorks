@@ -13946,6 +13946,8 @@ fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
         ("PuLID fallback", include_str!("pulid_candle.rs"), "overlays.extend(adapters.iter()"),
         ("Z-Image ComfyUI", include_str!("zimage_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
         ("FLUX.2 ComfyUI", include_str!("flux2_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
+        ("Krea imported", include_str!("krea_imported.rs"), "admission_paths.extend(adapters.iter()"),
+        ("SDXL detail", include_str!("detail.rs"), "admission_paths.extend(adapters.iter()"),
     ] {
         assert!(
             source.contains(marker),
@@ -15320,6 +15322,20 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         krea_imported_available(&img2img, &settings),
         "an img2img referenceAssetId (mode t2i) is accepted"
     );
+    assert!(
+        krea_imported_img2img_requested(&img2img),
+        "the admitted reference shape must engage img2img even without optional ui.img2img metadata"
+    );
+
+    let plain_hires = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "hiresFix": { "enabled": true },
+        "modelManifestEntry": base.clone()
+    }));
+    assert!(
+        krea_imported_available(&plain_hires, &settings),
+        "plain imported Krea t2i keeps its supported hires pass"
+    );
 
     // A LoRA stack and the edit surface are admitted wherever the native loader accepts adapters.
     let t2i_lora = request(json!({
@@ -15395,6 +15411,40 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         assert!(
             !krea_imported_available(&pose, &settings),
             "a pose set is rejected on a backend without pose-control support"
+        );
+    }
+
+    for (label, extra) in [
+        (
+            "img2img + hires",
+            json!({ "referenceAssetId": "r", "hiresFix": { "enabled": true } }),
+        ),
+        (
+            "edit + hires",
+            json!({
+                "mode": "edit_image", "sourceAssetId": "s",
+                "hiresFix": { "enabled": true }
+            }),
+        ),
+        (
+            "pose + hires",
+            json!({
+                "advanced": { "poses": [{ "id": "a" }] },
+                "hiresFix": { "enabled": true }
+            }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": "kreamania_variant5",
+            "modelManifestEntry": base.clone()
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(
+            !krea_imported_available(&request(payload), &settings),
+            "{label} must fail closed instead of dropping conditioning"
         );
     }
 
@@ -15494,9 +15544,9 @@ fn imported_edit_requires_the_identity_edit_lora() {
 
 /// The imported Krea lane threads a resolved img2img reference into a single `Conditioning::Reference`
 /// (strength carried) on the Turbo t2i descriptor, and a plain txt2img job into the empty conditioning
-/// (sc-14071). Also pins the manifest→worker seam: the `ui.img2img` flag the core stamps on an imported
-/// krea_2 entry (sc-14071 Part B) is exactly what `model_supports_img2img` reads to engage the img2img
-/// resolve. Pure — no reference-asset I/O or generator load. Runs on the cross-platform path so the
+/// (sc-14071). Also pins the API→worker seam: the admitted `referenceAssetId` shape engages img2img
+/// without relying on optional UI presentation metadata. Pure — no reference-asset I/O or generator
+/// load. Runs on the cross-platform path so the
 /// candle imported lane's img2img threading is covered too.
 #[cfg(any(
     target_os = "macos",
@@ -15522,23 +15572,23 @@ fn krea_imported_conditioning_threads_the_img2img_reference() {
         "plain txt2img carries no conditioning"
     );
 
-    // Manifest→worker seam: the `ui.img2img` flag `apply_family_studio_surface_defaults` stamps on an
-    // imported krea_2 entry (Part B) is what `model_supports_img2img` reads to engage the img2img arm.
-    let img2img_entry = request(json!({
+    // API→worker seam: a LAN client need not echo the UI hint for the shape the route advertises.
+    let img2img_entry_without_ui_hint = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
-        "modelManifestEntry": { "family": "krea_2", "ui": { "img2img": true } }
+        "referenceAssetId": "asset-1",
+        "modelManifestEntry": { "family": "krea_2" }
     }));
     assert!(
-        model_supports_img2img(&img2img_entry),
-        "the stamped ui.img2img flag engages the img2img resolve"
+        krea_imported_img2img_requested(&img2img_entry_without_ui_hint),
+        "referenceAssetId engages imported Krea img2img without ui.img2img"
     );
-    let no_flag = request(json!({
+    let plain = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "modelManifestEntry": { "family": "krea_2" }
     }));
     assert!(
-        !model_supports_img2img(&no_flag),
-        "without ui.img2img the lane stays plain txt2img"
+        !krea_imported_img2img_requested(&plain),
+        "without a reference the lane stays plain txt2img"
     );
 }
 
@@ -16328,6 +16378,35 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             "{label} must not route to the Candle fine-tuned lane"
         );
     }
+}
+
+/// The generated Mage base inherits the undistilled Base descriptor's true-CFG negative-prompt
+/// surface. Pin the actual per-image request builder so accepted LAN/API input cannot be recorded in
+/// asset provenance while disappearing before provider dispatch.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn mage_finetuned_generation_request_threads_negative_prompt() {
+    let cancel = CancelFlag::new();
+    let request = mage_finetuned_generation_request(
+        "portrait".to_owned(),
+        Some("blurry, watermark".to_owned()),
+        1024,
+        1024,
+        42,
+        28,
+        4.5,
+        gen_core::PreviewSink::default(),
+        &cancel,
+    );
+    assert_eq!(
+        request.negative_prompt.as_deref(),
+        Some("blurry, watermark")
+    );
+    assert_eq!(request.guidance, Some(4.5));
+    assert_eq!(request.seed, Some(42));
 }
 
 /// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint
