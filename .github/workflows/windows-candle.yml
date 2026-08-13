@@ -702,17 +702,29 @@ jobs:
             throw "the LTX Eros smoke wrote no output directory: $out"
           }
           $mp4 = Join-Path $out 'ltx_eros.mp4'
-          $videoOnly = Join-Path $out 'ltx_eros.video-only.mp4'
+          $videoOnly = Join-Path $out 'ltx_eros.rendered-frames.mp4'
           $frames = Join-Path $out 'frames\frame_%05d.png'
           $audio = Join-Path $out 'audio.wav'
           & ffmpeg -hide_banner -loglevel warning -nostdin -y -framerate 25 -start_number 0 -i $frames -c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p -r 25 $videoOnly
           if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed to encode the LTX Eros video stream' }
-          # Match the product's LTX mux contract: copy the encoded H.264 stream, encode the WAV as
-          # AAC, inherit metadata from the video input, and bound the container by the shorter input.
-          # The exact 153-frame assertion below makes any unintended `-shortest` truncation fatal.
+          # Preserve the full 153-frame renderer output above, then separately match the product's
+          # LTX mux contract: copy H.264, encode the WAV as AAC, and bound the user-visible file by
+          # the shorter input. The 6-second audio is intentionally shorter than the 153-frame LTX
+          # lattice (6.12 seconds), so `-shortest` trims the product-faithful MP4 at that boundary.
           & ffmpeg -hide_banner -loglevel warning -nostdin -y -i $videoOnly -i $audio -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k -shortest -map_metadata 0 -movflags +faststart $mp4
           if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed to mux the LTX Eros evidence MP4' }
-          Remove-Item -LiteralPath $videoOnly -Force
+
+          $renderedProbePath = Join-Path $out 'ffprobe-rendered-frames.json'
+          & ffprobe -v error -count_frames -show_entries 'stream=index,codec_name,codec_type,width,height,r_frame_rate,nb_read_frames,duration:format=duration' -of json $videoOnly | Out-File -LiteralPath $renderedProbePath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'ffprobe failed on the complete LTX Eros rendered-frame video' }
+          $renderedProbe = Get-Content -Raw -LiteralPath $renderedProbePath | ConvertFrom-Json
+          $renderedVideo = $renderedProbe.streams | Where-Object { $_.codec_type -eq 'video' } | Select-Object -First 1
+          if (-not $renderedVideo -or $renderedVideo.codec_name -ne 'h264' -or $renderedVideo.width -ne 768 -or $renderedVideo.height -ne 512) {
+            throw 'complete LTX Eros rendered-frame video must contain h264 768x512 video'
+          }
+          if ($renderedVideo.r_frame_rate -ne '25/1' -or [int]$renderedVideo.nb_read_frames -ne 153) {
+            throw "complete LTX Eros rendered-frame video must contain exactly 153 frames at 25 fps, got $($renderedVideo.nb_read_frames) at $($renderedVideo.r_frame_rate)"
+          }
 
           $probePath = Join-Path $out 'ffprobe-mp4.json'
           & ffprobe -v error -count_frames -show_entries 'stream=index,codec_name,codec_type,width,height,r_frame_rate,nb_read_frames,sample_rate,channels,duration:format=duration' -of json $mp4 | Out-File -LiteralPath $probePath -Encoding utf8
@@ -723,8 +735,9 @@ jobs:
           if (-not $video -or $video.codec_name -ne 'h264' -or $video.width -ne 768 -or $video.height -ne 512) {
             throw 'encoded LTX Eros MP4 must contain h264 768x512 video'
           }
-          if ($video.r_frame_rate -ne '25/1' -or [int]$video.nb_read_frames -ne 153) {
-            throw "encoded LTX Eros MP4 must contain exactly 153 frames at 25 fps, got $($video.nb_read_frames) at $($video.r_frame_rate)"
+          $productFrames = [int]$video.nb_read_frames
+          if ($video.r_frame_rate -ne '25/1' -or $productFrames -lt 150 -or $productFrames -gt 151) {
+            throw "product-faithful LTX Eros MP4 must retain 150 or 151 frames at the 6-second audio boundary, got $productFrames at $($video.r_frame_rate)"
           }
           if (-not $sound -or $sound.codec_name -ne 'aac') {
             throw 'encoded LTX Eros MP4 must contain AAC audio'
@@ -740,22 +753,25 @@ jobs:
           }
 
           # One output frame (40 ms) is the maximum tolerated timestamp/container rounding error.
-          # This is wide enough for AAC packet/time-base rounding. Together with the exact frame
-          # assertion above, it rejects a missing frame and an audio track that represents the raw
-          # 6.00 s rather than all 153 duration-derived frames (153 / 25 = 6.12 s).
-          $expectedDurationSeconds = 153.0 / 25.0
+          # The complete renderer output is 153 / 25 = 6.12 seconds. The manifest-default request,
+          # source audio, and product-faithful `-shortest` MP4 are 6 seconds; checking the two
+          # timelines independently prevents a valid product mux from masquerading as frame loss.
+          $renderedDurationSeconds = 153.0 / 25.0
+          $productDurationSeconds = 6.0
           $durationToleranceSeconds = 1.0 / 25.0
-          function Assert-DurationNear([string]$label, $actualValue) {
+          function Assert-DurationNear([string]$label, $actualValue, [double]$expectedDurationSeconds) {
             if ($null -eq $actualValue) { throw "$label duration is missing" }
             $actualSeconds = [Convert]::ToDouble($actualValue, [Globalization.CultureInfo]::InvariantCulture)
             if ([Math]::Abs($actualSeconds - $expectedDurationSeconds) -gt ($durationToleranceSeconds + 0.000001)) {
               throw "$label duration $actualSeconds is not within $durationToleranceSeconds s of $expectedDurationSeconds s"
             }
           }
-          Assert-DurationNear 'source WAV container' $wavProbe.format.duration
-          Assert-DurationNear 'MP4 video stream' $video.duration
-          Assert-DurationNear 'MP4 audio stream' $sound.duration
-          Assert-DurationNear 'MP4 container' $probe.format.duration
+          Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds
+          Assert-DurationNear 'complete rendered-frame container' $renderedProbe.format.duration $renderedDurationSeconds
+          Assert-DurationNear 'source WAV container' $wavProbe.format.duration $productDurationSeconds
+          Assert-DurationNear 'product MP4 video stream' $video.duration $productDurationSeconds
+          Assert-DurationNear 'product MP4 audio stream' $sound.duration $productDurationSeconds
+          Assert-DurationNear 'product MP4 container' $probe.format.duration $productDurationSeconds
 
           $metadata = Get-Content -Raw -LiteralPath (Join-Path $out 'metadata.json') | ConvertFrom-Json
           if ($metadata.captureKind -ne 'current-candle-route-baseline' -or $metadata.request.seed -ne 18902) {
@@ -779,8 +795,12 @@ jobs:
             ffmpeg = ((& ffmpeg -version | Select-Object -First 1 | Out-String).Trim())
           }
           $runnerMetadata | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $out 'runner.json') -Encoding utf8
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mp4).Hash.ToLowerInvariant()
-          "$hash  ltx_eros.mp4" | Out-File -LiteralPath (Join-Path $out 'sha256.txt') -Encoding ascii
+          $productHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mp4).Hash.ToLowerInvariant()
+          $renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $videoOnly).Hash.ToLowerInvariant()
+          @(
+            "$productHash  ltx_eros.mp4"
+            "$renderedHash  ltx_eros.rendered-frames.mp4"
+          ) | Out-File -LiteralPath (Join-Path $out 'sha256.txt') -Encoding ascii
       - name: Upload the LTX Eros acceptance evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -788,10 +808,12 @@ jobs:
           name: sc-18902-ltx-eros-baseline-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ltx_eros.mp4
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ltx_eros.rendered-frames.mp4
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/audio.wav
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/stills/*.png
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/metadata.json
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ffprobe-mp4.json
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ffprobe-rendered-frames.json
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ffprobe-wav.json
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/runner.json
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/sha256.txt
