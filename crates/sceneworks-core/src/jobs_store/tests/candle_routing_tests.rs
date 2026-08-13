@@ -933,7 +933,6 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
             json!({ "mode": "edit_image", "sourceAssetId": "a" }),
         ),
         ("flux_dev", json!({ "referenceAssetId": "a" })),
-        ("flux_schnell", json!({ "loras": [{ "name": "x" }] })),
         (
             "qwen_image",
             json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
@@ -967,6 +966,19 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
         assert!(
             !image_request_candle_eligible(model, &object(payload.clone())),
             "{model} conditioning shape must fall back to torch: {payload}"
+        );
+    }
+}
+
+#[test]
+fn flux1_lora_stays_on_candle() {
+    for model in ["flux_schnell", "flux_dev"] {
+        assert!(
+            image_request_candle_eligible(
+                model,
+                &object(json!({ "prompt": "x", "loras": [{ "name": "x" }] }))
+            ),
+            "{model} LoRA must stay on Candle"
         );
     }
 }
@@ -1249,7 +1261,7 @@ fn explicit_quantization_falls_back_to_torch_image_and_video() {
     ));
     // NOTE: qwen_image USED to be a dense-only counter-example here; sc-11020 moved it to
     // CANDLE_QUANT_MODELS (its turnkey q4/q8 packed tiers load off-Mac), so its quant tier-select now
-    // STAYS on candle — covered by `qwen_image_quant_tier_select_stays_on_candle`.
+    // STAYS on candle — covered by `qwen_image_quant_and_lora_stay_on_candle`.
     assert!(!video_request_candle_eligible(
         "wan_2_2",
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
@@ -1266,12 +1278,12 @@ fn explicit_quantization_falls_back_to_torch_image_and_video() {
 }
 
 #[test]
-fn qwen_image_quant_tier_select_stays_on_candle() {
+fn qwen_image_quant_and_lora_stay_on_candle() {
     // sc-11020 (epic 9083): base `qwen_image` is a turnkey packed-quant candle family — its q4/q8/bf16
     // subdirs load off-Mac via `standard_tier_subdir` (sc-8669) and the tiers are GPU-measured
     // (sc-10969), so a `mlxQuantize` tier-select now STAYS on candle instead of enforce-failing
     // `candle_unsupported` at routing (the routing half sc-9983 flipped for krea/ideogram/boogu but
-    // missed qwen). A LoRA still defers — base qwen advertises no candle inference LoRA.
+    // missed qwen). sc-18477 also admits its native Candle LoRA/LoKr path.
     for bits in [4, 8] {
         assert!(
             image_request_candle_eligible(
@@ -1286,8 +1298,8 @@ fn qwen_image_quant_tier_select_stays_on_candle() {
         "qwen_image",
         &object(json!({ "prompt": "x" }))
     ));
-    // A LoRA request is still refused — no candle inference LoRA on base qwen.
-    assert!(!image_request_candle_eligible(
+    // A LoRA request stays on Candle and reaches the strict adapter loader.
+    assert!(image_request_candle_eligible(
         "qwen_image",
         &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
     ));
@@ -1318,7 +1330,7 @@ fn z_image_quant_tier_select_stays_on_candle() {
 }
 
 #[test]
-fn flux2_turnkey_quant_tier_select_stays_on_candle() {
+fn flux2_turnkey_quant_and_lora_stay_on_candle() {
     // sc-10222 (epic 9083): the LAST families carrying the "engine wired, router half missed" skew
     // (sc-9983 krea/ideogram/boogu, sc-11020 qwen). `flux2_klein_9b`/`_kv`/`flux2_dev` are worker
     // `STANDARD_TIER_MODELS` members whose `SceneWorks/flux2-*-mlx` turnkeys ship q4/q8/bf16 packed
@@ -1347,13 +1359,13 @@ fn flux2_turnkey_quant_tier_select_stays_on_candle() {
                 "{model} dense/plain shape must stay candle-eligible"
             );
         }
-        // No candle inference LoRA on any FLUX.2 id, so a LoRA is still refused.
+        // sc-18477: every published FLUX.2 tier applies LoRA/LoKr natively.
         assert!(
-            !image_request_candle_eligible(
+            image_request_candle_eligible(
                 model,
                 &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
             ),
-            "{model} LoRA must still defer (quant and LoRA are decoupled caps)"
+            "{model} LoRA must stay on Candle"
         );
     }
     // `_true_v2` is deliberately NOT flipped: the wikeeyang fine-tune installs by convert-at-install
@@ -1366,6 +1378,10 @@ fn flux2_turnkey_quant_tier_select_stays_on_candle() {
     assert!(!image_request_candle_eligible(
         "flux2_klein_9b_true_v2",
         &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+    ));
+    assert!(image_request_candle_eligible(
+        "flux2_klein_9b_true_v2",
+        &object(json!({ "prompt": "x", "loras": [{ "name": "x" }] }))
     ));
 }
 
@@ -1496,10 +1512,9 @@ fn lens_conditioning_shapes_fall_back_to_torch() {
 }
 
 #[test]
-fn sd3_5_quant_stays_on_candle_but_lora_and_conditioning_defer() {
-    // sc-7880 (epic 7982): the candle SD3.5 descriptor advertises supported_quants: [Q4, Q8] but
-    // supports_lora: false, so — unlike Lens — an explicit quant request stays on the candle lane
-    // while a LoRA (and every conditioning shape) is refused and remains queued.
+fn sd3_5_quant_and_lora_stay_on_candle_but_conditioning_defers() {
+    // sc-7880 (epic 7982) + sc-18477: the Candle SD3.5 descriptor advertises Q4/Q8 and native
+    // LoRA/LoKr. Quant and adapter requests stay on Candle; unsupported conditioning still defers.
     for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
         // Plain txt2img is eligible.
         assert!(
@@ -1516,13 +1531,13 @@ fn sd3_5_quant_stays_on_candle_but_lora_and_conditioning_defer() {
                 "{model} Q{bits} request should stay on candle"
             );
         }
-        // A LoRA defers (SD3.5 has no inference-LoRA candle path yet).
+        // A LoRA stays on the strict native adapter path.
         assert!(
-            !image_request_candle_eligible(
+            image_request_candle_eligible(
                 model,
                 &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
             ),
-            "{model} with a LoRA must fall back to torch"
+            "{model} with a LoRA must stay on Candle"
         );
         // Every conditioning shape defers (txt2img only).
         for case in [

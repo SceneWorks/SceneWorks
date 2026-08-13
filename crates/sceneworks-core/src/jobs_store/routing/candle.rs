@@ -402,19 +402,16 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     {
         return false;
     }
-    // Lens / Lens-Turbo and Krea 2 Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request OR a LoRA stays
-    // on the candle lane for them (Krea gained Q4/Q8 in sc-9607, joining Lens in the both-set — sc-9983).
-    // Z-Image (Turbo/base), SD3.5 (sc-7880), the Ideogram/Boogu packed families (sc-9607), and Qwen-Image
-    // (sc-11020) accept Q4/Q8 but NOT inference LoRA (quant stays, LoRA defers). Z-Image's value is a
-    // pre-packed tier SELECT, not an on-the-fly quantization request; the shared gate intentionally
-    // covers both forms. Every other candle family advertises neither and defers both. The
-    // two capabilities are decoupled: `supports_lora` and `supports_quant` each consult the both-set plus
-    // their own list.
+    // Adapter-capable families are derived from the same audited capability table as quant support.
+    // Some accept both adapters and Q4/Q8 (including Z-Image, Qwen, FLUX.2, SD3.5, Lens, Krea, and
+    // SDXL), while others accept only adapters or only quant. A quant value may select a pre-packed
+    // tier rather than request on-the-fly quantization; the gate intentionally covers both forms.
+    // The two capabilities remain decoupled and fail closed through their separate derived lists.
     let supports_lora =
         CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_LORA_MODELS.contains(&model);
     let supports_quant =
         CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model);
-    // LoRAs: not in the candle lane unless the family advertises adapters (Lens / Krea).
+    // LoRAs: not in the candle lane unless the audited family row advertises adapters.
     if !supports_lora
         && payload
             .get("loras")

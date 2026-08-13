@@ -745,21 +745,37 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
     const lane = await source(path);
     const verifyAt = lane.indexOf(`- name: Verify ${file} is a real dump, not a restamp`);
     assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
+    if (path.endsWith("macos-mlx.yml")) {
+      const hostedAt = lane.indexOf("\n  macos-checks:");
+      const naxAt = lane.indexOf("\n  nax-worker:");
+      assert.ok(
+        hostedAt < verifyAt && verifyAt < naxAt,
+        "the weights-free MLX facts producer belongs on the hosted Mac job, not the M5/NAX pool",
+      );
+      assert.doesNotMatch(
+        lane.slice(naxAt),
+        /Verify capabilities\.mlx\.json|Upload fresh MLX capability facts/,
+        "the NAX-only job must not duplicate the hosted MLX facts producer",
+      );
+    }
     // Re-dump to a SCRATCH dir and compare. Dumping over the checked-in file would make the
     // comparison vacuous and mutate the tree on a red run.
     assert.match(lane, /bin dump-engine-capabilities/, path);
 
     // LAST on the PR path. A step failure aborts the job, and this one goes red on exactly the
     // routine pin-bump PRs where nobody re-dumped — so placed earlier it would cancel the coverage
-    // each lane uniquely carries (macOS: `nax_guard`; Windows: the only PR run of
+    // each lane uniquely carries (macOS: the hosted full workspace suite; Windows: the only PR run of
     // `cargo test -p sceneworks-worker --features backend-candle`). A missing dump must not suppress
     // unrelated verdicts.
     //
-    // "Last" means last among steps that RUN on a pull request, not last in the file: macos-mlx.yml
-    // keeps a long `workflow_dispatch`-only calibration tail after it, which is skipped on every PR
-    // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
+    // "Last" means last among steps that RUN in the same job on a pull request. The Mac workflow has
+    // a later, separate NAX job; bounding this scan at the next job key keeps its M5-only steps out.
+    // Asserting the ordering rather than mere presence is
     // the point — nothing else would notice an unconditional step being appended later.
-    for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+    const afterVerify = lane.slice(verifyAt);
+    const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
+    const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
+    for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
       if (/^name: Upload fresh (?:MLX|Candle) capability facts/m.test(block)) {
         assert.match(block, /if: \$\{\{ always\(\) \}\}/);
         assert.match(block, /uses: actions\/upload-artifact@[0-9a-f]{40}/);

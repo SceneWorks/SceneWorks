@@ -671,7 +671,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // that could not be routed. This is the identical "engine wired, router half missed" skew sc-9983
     // (krea/ideogram/boogu) and sc-11020 (qwen_image) each closed; the diagnostic tell is exactly the one
     // recorded there — a family in `STANDARD_TIER_MODELS` with a `candle.vramGbByTier` block that is not
-    // in `CANDLE_QUANT_MODELS`. NOT `candle_quant_lora`: neither advertises candle inference LoRA.
+    // in a quant-capable routing set. sc-18477 adds user LoRA/LoKr on every published tier.
     //
     // The load `Quant` stays `None` on klein regardless (its `mlx.denseTextEncoderTier` declaration keeps its bf16 Qwen3 text
     // encoder full-precision); `mlxQuantize` here is a turnkey tier-SELECT — which pre-quantized subdir
@@ -784,10 +784,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // Kolors now applies LoRA/LoKr through the vendored adaptable SDXL UNet on dense and packed tiers;
     // bf16 still resolves to Quant::None (dense), verbatim.
     ModelCaps::new("kolors", true, true, false, false, true),
-    // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. UNLIKE the
-    // other candle families it DOES advertise on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is
-    // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from quant/LoRA
-    // refusal. Lens was the LAST whole-model torch-only image family — once it routed, the per-model
+    // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. It
+    // advertises on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is set. Lens was the LAST
+    // whole-model torch-only image family — once it routed, the per-model
     // torch-only image epic seam matched nothing and was retired (sc-8951).
     ModelCaps::new("lens", true, true, false, false, true),
     ModelCaps::new("lens_turbo", true, true, false, false, true),
@@ -1288,9 +1287,8 @@ pub fn candle_routed_image_models() -> &'static [&'static str] {
 }
 
 derive_model_list! {
-    /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
-    /// Lens-Turbo and Krea 2 Turbo (derived from [`IMAGE_MODEL_CAPS`]`.candle_quant_lora`, sc-9495; Krea
-    /// added sc-9983 once sc-9607 flipped its `supported_quants`). For these a LoRA or an explicit quant
+    /// The candle image families that accept Q4/Q8 generation requests AND LoRA/LoKr adapters
+    /// (derived from [`IMAGE_MODEL_CAPS`]`.candle_quant_lora`). For these a LoRA or an explicit quant
     /// request stays on candle instead of being refused. Subset of [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_QUANT_LORA_MODELS, IMAGE_MODEL_CAPS, candle_quant_lora
 }
@@ -1306,11 +1304,9 @@ derive_model_list! {
 }
 
 derive_model_list! {
-    /// The candle image families that advertise inference LoRA/LoKr but NOT on-the-fly quant (derived from
-    /// [`IMAGE_MODEL_CAPS`]`.candle_lora`, sc-9495). Currently EMPTY: Krea 2 Turbo was the sole member until
-    /// sc-9983 moved it to [`CANDLE_QUANT_LORA_MODELS`] (sc-9607 gave it Q4/Q8 too). Kept as the vocabulary
-    /// for the next candle family that advertises LoRA but not quant. The mirror of [`CANDLE_QUANT_MODELS`];
-    /// both plus [`CANDLE_QUANT_LORA_MODELS`] are disjoint and all consulted by the gate. Subset of
+    /// The candle image families that advertise inference LoRA/LoKr but NOT Q4/Q8 generation requests
+    /// (derived from [`IMAGE_MODEL_CAPS`]`.candle_lora`). The mirror of [`CANDLE_QUANT_MODELS`]; both
+    /// plus [`CANDLE_QUANT_LORA_MODELS`] are disjoint and all are consulted by the gate. Subset of
     /// [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_LORA_MODELS, IMAGE_MODEL_CAPS, candle_lora
 }
