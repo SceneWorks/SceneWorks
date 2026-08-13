@@ -1088,6 +1088,7 @@ mod tests {
             "modelManifestEntry": {
                 "id": imported_id,
                 "family": "krea_2",
+                "importSourceShape": "transformer_file",
                 "paths": { "model": "/app/models/imports/kreamania_variant4" }
             },
         });
@@ -1102,6 +1103,7 @@ mod tests {
             "modelManifestEntry": {
                 "id": imported_id,
                 "family": "krea_2",
+                "importSourceShape": "transformer_file",
                 "modelPath": "/app/models/imports/kreamania_variant4.safetensors"
             },
         });
@@ -1163,6 +1165,7 @@ mod tests {
         let entry = json!({
             "id": imported_id,
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         });
 
