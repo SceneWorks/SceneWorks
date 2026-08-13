@@ -8095,7 +8095,11 @@ mod tests {
         decode.parameters.decode_tile_edges = vec![640, 768];
         decode.parameters.decode_overlaps = vec![160, 192];
         decode.parameters.decode_geometry_policies.push(second);
-        assert!(contract.conformance_errors().is_empty());
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
         let paired = synthesize_estimate_ladder(
             contract,
             &plan,
@@ -8159,6 +8163,7 @@ mod tests {
         exact_refusal.disposition = MemoryDecodeQualityDisposition::Refused {
             reason: "seed 99 exceeded the exact semantic threshold".to_owned(),
         };
+        exact_refusal.fixtures.last_mut().unwrap().observed_error = 52;
         exact_refusal.production_evidence_sha256.clear();
         exact_refusal = exact_refusal.seal();
         contract
@@ -8169,7 +8174,11 @@ mod tests {
             .parameters
             .decode_geometry_policies
             .push(exact_refusal);
-        assert!(contract.conformance_errors().is_empty());
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
         let exact_refused = synthesize_estimate_ladder(
             contract,
             &plan,
