@@ -4720,6 +4720,7 @@ fn apply_model_catalog_entry(
     download_context: Option<DownloadContext>,
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
+    builtin_model_ids: &std::collections::HashSet<String>,
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
@@ -4728,12 +4729,23 @@ fn apply_model_catalog_entry(
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    // Ownership and routing authority are deliberately separate. A user overlay on a builtin is
+    // removable (deleting it restores builtin defaults), but it cannot reclassify that protected id
+    // as an imported checkpoint and bypass/trigger source-shaped provider validation.
     let user_managed = user_model_ids.contains(model_id);
+    let builtin_routing_authority = builtin_model_ids.contains(model_id);
     object.insert(
         "catalogScope".to_owned(),
-        Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+        Value::String(
+            if builtin_routing_authority {
+                "builtin"
+            } else {
+                "user"
+            }
+            .to_owned(),
+        ),
     );
-    stamp_legacy_import_source_shape(object, data_dir, user_managed);
+    stamp_legacy_import_source_shape(object, data_dir, !builtin_routing_authority);
     object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
     object.insert(
         "installState".to_owned(),
@@ -5071,6 +5083,7 @@ async fn load_model_catalog_inputs(
         Vec<Value>,
         Vec<Option<DownloadContext>>,
         std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
     ),
     ApiError,
 > {
@@ -5080,6 +5093,10 @@ async fn load_model_catalog_inputs(
     let user =
         load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
     let user_model_ids = user
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    let builtin_model_ids = builtin
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
@@ -5095,13 +5112,13 @@ async fn load_model_catalog_inputs(
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((models, download_contexts, user_model_ids))
+    Ok((models, download_contexts, user_model_ids, builtin_model_ids))
 }
 
 async fn estimate_current_model_catalog_sizes(
     state: &AppState,
 ) -> Result<HashMap<ModelSizeCacheKey, Option<u64>>, ApiError> {
-    let (_, download_contexts, _) = load_model_catalog_inputs(state).await?;
+    let (_, download_contexts, _, _) = load_model_catalog_inputs(state).await?;
     Ok(estimate_model_catalog_sizes(state, &download_contexts, true).await)
 }
 
@@ -5110,10 +5127,12 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     // sweep) so tests can assert request-scoped and process-shared reuse.
     #[cfg(test)]
     crate::test_note_model_catalog_build();
-    let (models, download_contexts, user_model_ids) = load_model_catalog_inputs(state).await?;
+    let (models, download_contexts, user_model_ids, builtin_model_ids) =
+        load_model_catalog_inputs(state).await?;
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
+    let builtin_model_ids = Arc::new(builtin_model_ids);
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -5121,6 +5140,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
+    let builtin_model_ids_for_sweep = builtin_model_ids.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -5135,6 +5155,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     download_context,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
+                    &builtin_model_ids_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -5232,18 +5253,18 @@ pub(crate) async fn resolve_model_manifest_entry(
     };
     let builtin_entry = find(&builtin);
     let user_entry = find(&user);
-    let catalog_scope = if user_entry.is_some() {
-        Some("user")
-    } else if builtin_entry.is_some() {
+    let catalog_scope = if builtin_entry.is_some() {
         Some("builtin")
+    } else if user_entry.is_some() {
+        Some("user")
     } else {
         None
     };
     let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
     if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
-        // The merged worker-facing entry must carry the same scope as `/models`. Candle's imported
-        // preflight uses this field to distinguish a protected builtin id from a caller-owned
-        // same-family checkpoint; omitting it makes a supported builtin look imported.
+        // The merged worker-facing entry must carry the same routing authority as `/models`.
+        // A user manifest may override builtin presentation/defaults without turning the protected
+        // builtin identity into an imported checkpoint. Genuine user-only ids remain user-scoped.
         object.insert("catalogScope".to_owned(), Value::String(scope.to_owned()));
         stamp_legacy_import_source_shape(object, &state.settings.data_dir, scope == "user");
     }
@@ -8280,6 +8301,28 @@ mod imported_lora_advertisement_tests {
         let mut qwen = entry("external_qwen", "qwen-image");
         qwen.insert("catalogScope".to_owned(), json!("external"));
         apply_imported_provider_surface_for_lanes(&mut qwen, false, true);
-        assert!(qwen.get("ui").is_none());
+        assert_eq!(qwen["capabilities"], json!(["text_to_image"]));
+        assert_eq!(qwen["ui"], json!({}));
+        assert!(qwen.get("runtimeQuantTiers").is_none());
+        assert_eq!(qwen["loraCompatibility"], json!({}));
+
+        let mut mage_on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_mlx, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_mlx, true, false);
+        assert!(mage_on_mlx["capabilities"]
+            .as_array()
+            .is_some_and(|values| values.contains(&json!("text_to_image"))));
+        assert_eq!(
+            mage_on_mlx["runtimeQuantTiers"],
+            json!(["q4", "q8", "bf16"])
+        );
+
+        let mut mage_on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_candle, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_candle, false, true);
+        assert!(mage_on_candle["capabilities"]
+            .as_array()
+            .is_some_and(|values| !values.contains(&json!("text_to_image"))));
+        assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
     }
 }
