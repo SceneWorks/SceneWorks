@@ -31,6 +31,8 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use gen_core::StagedResidencyAvailability;
 use gen_core::{
     GenerationMemory, LoadSpec, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
     MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
@@ -610,7 +612,7 @@ fn active_component_floors(
     }
 }
 
-fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
+pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
     match tier.quant {
         Some(gen_core::Quant::Q4) => "q4",
         Some(gen_core::Quant::Q8) => "q8",
@@ -2676,7 +2678,7 @@ fn evaluate_request_with_budget_using_bundle(
 }
 
 #[cfg(target_os = "macos")]
-fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
+pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
     // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
     // remain committed. This makes A→B→A independent of B's freed scratch without reloading A.
     mlx_rs::memory::clear_cache();
@@ -2757,7 +2759,7 @@ pub(crate) fn evaluate_request(
 /// would SIGKILL. `supports_sequential_offload` is precisely the provider's own machine-readable
 /// attestation that it wired that lifecycle (the gen-core discovery signal, sc-11126). Reading it
 /// per-engine makes the gate self-maintaining: every family the mlx-gen Phase-1 fan-out wires
-/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu/bernini alongside the earlier
+/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu alongside the earlier
 /// sdxl/z-image/qwen/lens/krea families) is covered the moment its descriptor advertises the bit, with
 /// no lockstep edit here. An engine that does not separate a text encoder (e.g. sensenova's fused MoT,
 /// `footprint` te=0) leaves the bit `false` and is correctly never offered `Sequential` — a no-op that
@@ -2776,6 +2778,26 @@ pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
         .generators()
         .find(|reg| (reg.descriptor)().id == engine_id)
         .is_some_and(|reg| (reg.descriptor)().capabilities.supports_sequential_offload)
+}
+
+/// Whether `engine_id` physically stages heavyweight phases, either because the provider exposes
+/// the selectable [`OffloadPolicy::Sequential`] control or because it does so unconditionally.
+///
+/// This is static descriptor truth for publication and capability reporting. Load-time selection
+/// must continue to use [`engine_supports_sequential`]: an unconditional-only provider does not
+/// consume `OffloadPolicy::Sequential`, so treating this broader predicate as authorization to set
+/// that control would turn an accurate declaration into a no-op request.
+#[cfg(test)]
+pub(crate) fn engine_engages_staged_residency(engine_id: &str) -> bool {
+    crate::inference_runtime::media()
+        .generators()
+        .find(|reg| (reg.descriptor)().id == engine_id)
+        .is_some_and(|reg| {
+            (reg.descriptor)()
+                .capabilities
+                .staged_residency_availability()
+                != StagedResidencyAvailability::Absent
+        })
 }
 
 /// Emulate a smaller Mac: force the total-unified-memory budget (GB). Set e.g.
@@ -2930,18 +2952,103 @@ pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumer
     }
 }
 
+/// Resolve the numeric tier that the loaded video checkpoint actually carries.
+///
+/// Provider-owned resolution runs first for video loaders that carry their tier outside
+/// `LoadSpec.quantize` (currently Wan TI2V-5B). LTX then resolves its immutable `split_model.json`.
+/// An explicit assertion that disagrees with the checkpoint fails closed before selection.
+pub(crate) fn resolved_video_numeric_tier(
+    engine_id: &str,
+    spec: &LoadSpec,
+) -> WorkerResult<MemoryNumericTier> {
+    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. MLX Wan
+    // TI2V-5B reads its immutable packed config/header surface and also carries the Q4 text-encoder
+    // Q8 floor; deriving from `LoadSpec.quantize` here would misprice the normal prepacked load,
+    // whose request-side quant hint is deliberately `None`.
+    #[cfg(target_os = "macos")]
+    if let Some(tier) =
+        runtime_macos::resolved_video_memory_numeric_tier(engine_id, spec).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} admission cannot resolve the provider-owned numeric tier: {error}"
+            ))
+        })?
+    {
+        return Ok(tier);
+    }
+    if engine_id != "ltx_2_3" {
+        return Ok(spec_numeric_tier(engine_id, spec));
+    }
+    let root = match &spec.weights {
+        WeightsSource::Dir(path) => path,
+        WeightsSource::File(path) => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "ltx_2_3 admission expected a model directory, got {}",
+                path.display()
+            )));
+        }
+    };
+    let manifest_path = root.join("split_model.json");
+    let resolved_quant = if manifest_path.exists() {
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "ltx_2_3 admission cannot read {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+        let value: Value = serde_json::from_str(&raw).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "ltx_2_3 admission cannot parse {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+        if value
+            .get("quantized")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            match value
+                .get("quantization_bits")
+                .and_then(Value::as_i64)
+                .unwrap_or(4)
+            {
+                4 => Some(gen_core::Quant::Q4),
+                8 => Some(gen_core::Quant::Q8),
+                bits => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "ltx_2_3 admission refuses unsupported packed checkpoint tier q{bits} in {}",
+                        manifest_path.display()
+                    )));
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if spec.quantize != resolved_quant && spec.quantize.is_some() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "ltx_2_3 admission quant assertion {:?} disagrees with checkpoint tier {:?} in {}",
+            spec.quantize,
+            resolved_quant,
+            manifest_path.display()
+        )));
+    }
+    Ok(MemoryNumericTier {
+        precision: spec.precision,
+        quant: resolved_quant,
+        component_precision_floors: active_component_floors(
+            declared_component_floors(engine_id),
+            resolved_quant,
+        ),
+    })
+}
+
 /// The activation-headroom allowance this load already charges — the same
 /// [`HeadroomAllowance`] the load-time residency gate uses (sc-18814 exposes it so the video gate
 /// reuses that number instead of inventing one).
 pub(crate) fn spec_headroom_bytes(engine_id: &str, spec: &LoadSpec) -> u64 {
     gib_to_bytes(spec_component_bytes(engine_id, spec).2.total_gb)
-}
-
-/// The live unified-memory budget in GiB, honoring the small-Mac emulation cap — the same figure
-/// [`decide_residency`] budgets against. `None` off macOS or when the probe fails, which the video
-/// gate treats as no signal (never block).
-pub(crate) fn live_unified_budget_gb() -> Option<f64> {
-    resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb()).map(|b| b.total_gb)
 }
 
 /// Read the small-Mac cap from the environment. `Some(gb)` only for a positive number.
@@ -4093,6 +4200,55 @@ pub fn full_finetune_memory_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ltx_video_tier_is_checkpoint_bound_when_the_load_assertion_is_absent() {
+        let fixture = tempfile::tempdir().expect("ltx split fixture");
+        let spec = || LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned()));
+
+        let dense = resolved_video_numeric_tier("ltx_2_3", &spec()).expect("absent manifest");
+        assert_eq!(dense.quant, None);
+
+        for (bits, expected) in [(4, gen_core::Quant::Q4), (8, gen_core::Quant::Q8)] {
+            std::fs::write(
+                fixture.path().join("split_model.json"),
+                serde_json::json!({ "quantized": true, "quantization_bits": bits }).to_string(),
+            )
+            .unwrap();
+            let tier = resolved_video_numeric_tier("ltx_2_3", &spec())
+                .unwrap_or_else(|error| panic!("q{bits} checkpoint resolves: {error}"));
+            assert_eq!(tier.quant, Some(expected));
+        }
+
+        std::fs::write(
+            fixture.path().join("split_model.json"),
+            r#"{"quantized":false,"quantization_bits":8}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved_video_numeric_tier("ltx_2_3", &spec())
+                .unwrap()
+                .quant,
+            None,
+            "quantized:false is a dense bf16 checkpoint even when a stale bits field remains"
+        );
+    }
+
+    #[test]
+    fn ltx_video_tier_assertion_mismatch_fails_closed() {
+        let fixture = tempfile::tempdir().expect("ltx split fixture");
+        std::fs::write(
+            fixture.path().join("split_model.json"),
+            r#"{"quantized":true,"quantization_bits":8}"#,
+        )
+        .unwrap();
+        let asserted_q4 = LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned()))
+            .with_quant(gen_core::Quant::Q4);
+        let error = resolved_video_numeric_tier("ltx_2_3", &asserted_q4)
+            .expect_err("a q4 assertion may not price a q8 checkpoint")
+            .to_string();
+        assert!(error.contains("disagrees"));
+    }
 
     /// sc-18237: every shipped Qwen binding must describe a load shape the production route can
     /// execute. Native Qwen is deliberately deferred under both Resident and Sequential policies;
@@ -12006,7 +12162,7 @@ mod tests {
                 "{id}: earlier-wired family must stay sequential-capable"
             );
         }
-        // The sc-10840 Phase-1 fan-out families are AUTO-covered by the capability query with no
+        // The sc-10840 selectable Phase-1 fan-out families are AUTO-covered by the capability query with no
         // allowlist edit here — the whole point of deriving from the descriptor bit. A newly-wired
         // engine (e.g. `sd3_5_large`) is sequential-capable the moment its provider advertises the bit.
         for id in [
@@ -12036,7 +12192,6 @@ mod tests {
             "boogu_image",
             "boogu_image_turbo",
             "boogu_image_edit",
-            "bernini",
         ] {
             assert!(
                 engine_supports_sequential(id),
@@ -12048,6 +12203,76 @@ mod tests {
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
         // BIT, not mere registry membership.
         assert!(!engine_supports_sequential("sensenova_u1_8b"));
+    }
+
+    /// Static ladder publication needs the broader descriptor fact: a provider may physically
+    /// stage every request without exposing a selectable Sequential control (SC-18816). This list
+    /// deliberately contains both selectable and unconditional providers. The memory-matrix
+    /// generator parses this exact positive sweep, while runtime load selection remains pinned to
+    /// `engine_supports_sequential` above.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
+        for id in [
+            "sdxl",
+            "z_image",
+            "z_image_control",
+            "z_image_turbo",
+            "z_image_turbo_control",
+            "qwen_image",
+            "qwen_image_edit",
+            "qwen_image_control",
+            "lens",
+            "lens_turbo",
+            "krea_2_turbo",
+            "krea_2_raw",
+            "krea_2_edit",
+            "krea_2_turbo_edit",
+            "krea_2_turbo_control",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "sana_1600m",
+            "sana_sprint_1600m",
+            "flux1_schnell",
+            "flux1_dev",
+            "flux1_dev_control",
+            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
+            "flux2_dev",
+            "flux2_dev_control",
+            "flux2_dev_edit",
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            "kolors",
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "boogu_image",
+            "boogu_image_turbo",
+            "boogu_image_edit",
+            "bernini",
+            "bernini_renderer",
+            "krea_realtime_14b",
+            "ltx_2_3",
+            "scail2_14b",
+            "wan2_2_i2v_14b",
+            "wan2_2_t2v_14b",
+            "wan2_2_ti2v_5b",
+            "wan2_2_vace_fun_14b",
+            "wan_vace",
+        ] {
+            assert!(
+                engine_engages_staged_residency(id),
+                "{id}: registered staged-residency declaration must remain visible to the ladder"
+            );
+        }
+        assert!(!engine_engages_staged_residency("sensenova_u1_8b"));
+        assert!(!engine_engages_staged_residency("no_such_engine_xyz"));
     }
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a

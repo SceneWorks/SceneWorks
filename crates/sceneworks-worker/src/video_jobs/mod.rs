@@ -1094,18 +1094,23 @@ fn resolve_video_seed(request: &VideoRequest) -> i64 {
 /// The asset's video family, from the resolved manifest entry when present, else
 /// inferred from the model id (parity with the Python `VIDEO_MODEL_TARGETS` family).
 fn resolve_family(request: &VideoRequest) -> String {
-    if let Some(family) = request
-        .model_manifest_entry
+    resolve_catalog_video_family(&request.model, &request.model_manifest_entry)
+}
+
+/// Resolve the catalog family without constructing a second [`VideoRequest`]. Both asset planning
+/// and the pre-generation admission funnel call this exact policy so a custom manifest family can
+/// neither inherit the built-in curve nor be recorded under a different family than was graded.
+fn resolve_catalog_video_family(model_id: &str, model_manifest_entry: &JsonObject) -> String {
+    if let Some(family) = model_manifest_entry
         .get("family")
         .and_then(Value::as_str)
+        .filter(|family| !family.trim().is_empty())
     {
-        if !family.trim().is_empty() {
-            return family.to_owned();
-        }
+        return family.to_owned();
     }
-    if is_ltx_model(&request.model) {
+    if is_ltx_model(model_id) {
         "ltx-video".to_owned()
-    } else if request.model.starts_with("wan") {
+    } else if model_id.starts_with("wan") {
         "wan-video".to_owned()
     } else {
         "video".to_owned()

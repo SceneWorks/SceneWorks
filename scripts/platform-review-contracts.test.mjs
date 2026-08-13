@@ -272,6 +272,39 @@ test("Rust Docker dependency layers include every memory-strategy adapter target
   }
 });
 
+test("Rust Docker builders copy every production generated embed from sceneworks-core", async () => {
+  const coreSources = await Promise.all(
+    ["memory_calibration.rs", "video_memory_curves.rs"].map((file) =>
+      source(`crates/sceneworks-core/src/${file}`),
+    ),
+  );
+  const generatedEmbeds = new Set(
+    [
+      ...coreSources
+        .join("\n")
+        .matchAll(/include_str!\("\.\.\/\.\.\/\.\.\/(docs\/generated\/[^"\n]+)"\)/g),
+    ].map((match) => match[1]),
+  );
+  assert.deepEqual(
+    [...generatedEmbeds].sort(),
+    [
+      "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+      "docs/generated/memory-calibration-evidence.json",
+      "docs/generated/video-memory-curves.json",
+    ],
+  );
+
+  const dockerfile = await source("docker/rust.Dockerfile");
+  for (const path of generatedEmbeds) {
+    const copy = `COPY ${path} ./docs/generated/`;
+    assert.equal(
+      dockerfile.split(copy).length - 1,
+      2,
+      `${path} must be present in both the ordinary and Candle Rust builder contexts`,
+    );
+  }
+});
+
 test("all three manifest scripts import the shared JSONC parser", async () => {
   for (const scriptPath of [
     "scripts/check-scaffold.mjs",

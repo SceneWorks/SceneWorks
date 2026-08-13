@@ -14,7 +14,11 @@ import {
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
   physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
-import { calibrationBinding } from "./generate-memory-matrix.mjs";
+import {
+  calibrationBinding,
+  planEntryMatchesEvidenceRecord,
+  planEntryTargetsCoordinate,
+} from "./generate-memory-matrix.mjs";
 
 // sc-17774: the runner stamps each record with the provider's inference compile-closure digest.
 // These tests drive synthetic repositories with no inference crate layout, so the derivation is
@@ -807,6 +811,186 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
     "bounded_decode",
   ];
   assert.ok(calibrationBinding(composition, cell).reasons.includes("composition-mismatch"));
+});
+
+test("frame-aware matrix binding requires an exact planned temporal capture (sc-18817)", () => {
+  const record = complete({
+    backend: "mlx",
+    loadShape: "deferred_materialization",
+    artifact: {
+      repository: "SceneWorks/ltx-2.3-mlx",
+      resolvedRevision: "d".repeat(40),
+      variant: "q8",
+    },
+    target: {
+      modelId: "ltx_2_3",
+      provider: "ltx_2_3",
+      tier: "q8",
+      mode: "text_to_video",
+      overlay: "none",
+      geometry: { width: 768, height: 512, batch: 1, frames: 241 },
+    },
+    strategy: {
+      rung: "staged_residency",
+      engagedRungs: ["resident", "staged_residency"],
+      parameters: {},
+    },
+    calibrationFingerprint: "ltx-q8-temporal-fit-v1",
+  });
+  const cell = {
+    calibrationFingerprint: record.calibrationFingerprint,
+    engagedRungs: record.strategy.engagedRungs,
+    strategyParameters: record.strategy.parameters,
+    geometryEnvelope: {
+      resolutions: ["768x512", "1280x704"],
+      durations: [4, 6, 8, 10, 12, 15],
+      fps: [24, 25, 30],
+    },
+    evidence: {
+      loadability: [{
+        repository: record.artifact.repository,
+        revision: record.artifact.resolvedRevision,
+        variant: record.artifact.variant,
+      }],
+    },
+  };
+  const planEntry = {
+    name: "mlx-ltx-q8-staged-768x512-f241",
+    evidenceScope: "authoritative",
+    backend: record.backend,
+    loadShape: record.loadShape,
+    target: structuredClone(record.target),
+    rung: record.strategy.rung,
+    engagedRungs: [...record.strategy.engagedRungs],
+    calibrationFingerprint: record.calibrationFingerprint,
+    fixture: record.fixture,
+    cases: [{ parameters: {}, expectedResult: "passed" }],
+  };
+  const coordinate = {
+    modelId: record.target.modelId,
+    provider: record.target.provider,
+    backend: record.backend,
+    tier: record.target.tier,
+    mode: record.target.mode,
+    overlay: record.target.overlay,
+    rung: record.strategy.rung,
+  };
+
+  assert.equal(planEntryTargetsCoordinate(planEntry, coordinate), true);
+  const differentGeometry = structuredClone(planEntry);
+  differentGeometry.target.geometry = { width: 1280, height: 704, batch: 7, frames: 449 };
+  assert.equal(
+    planEntryTargetsCoordinate(differentGeometry, coordinate),
+    true,
+    "coordinate planning remains geometry-independent",
+  );
+  assert.equal(planEntryMatchesEvidenceRecord(planEntry, record), true);
+  assert.deepEqual(
+    calibrationBinding(record, cell, {
+      exactPlanEntries: [planEntry],
+      modality: "video",
+    }),
+    { eligible: true, reasons: [] },
+    "an exact planned frame count binds on a temporal video cell",
+  );
+
+  assert.ok(
+    calibrationBinding(record, cell, { exactPlanEntries: [], modality: "video" })
+      .reasons.includes("capture-geometry-unplanned"),
+    "an otherwise valid multi-frame receipt cannot bind without an exact plan entry",
+  );
+
+  const outsideEnvelope = structuredClone(record);
+  outsideEnvelope.target.geometry.width = 640;
+  outsideEnvelope.target.geometry.height = 640;
+  const outsidePlan = structuredClone(planEntry);
+  outsidePlan.target.geometry = structuredClone(outsideEnvelope.target.geometry);
+  assert.equal(planEntryMatchesEvidenceRecord(outsidePlan, outsideEnvelope), true);
+  assert.ok(
+    calibrationBinding(outsideEnvelope, cell, {
+      exactPlanEntries: [outsidePlan],
+      modality: "video",
+    }).reasons.includes("geometry-out-of-envelope"),
+    "being explicitly planned does not override the manifest spatial envelope",
+  );
+
+  const wrongFrames = structuredClone(planEntry);
+  wrongFrames.target.geometry.frames = 121;
+  assert.equal(planEntryMatchesEvidenceRecord(wrongFrames, record), false);
+  assert.ok(
+    calibrationBinding(record, cell, {
+      exactPlanEntries: [wrongFrames],
+      modality: "video",
+    }).reasons.includes("capture-geometry-unplanned"),
+    "frame count is matched directly rather than inferred from duration or FPS",
+  );
+
+  const nonTemporalCell = structuredClone(cell);
+  delete nonTemporalCell.geometryEnvelope.durations;
+  delete nonTemporalCell.geometryEnvelope.fps;
+  assert.ok(
+    calibrationBinding(record, nonTemporalCell, {
+      exactPlanEntries: [planEntry],
+      modality: "video",
+    }).reasons.includes("frames-out-of-envelope"),
+    "an exact plan cannot make a non-temporal cell accept multi-frame evidence",
+  );
+});
+
+test("the exact evidence-plan matcher covers every capture-identity axis (sc-18817)", () => {
+  const record = complete({
+    backend: "mlx",
+    loadShape: "deferred_materialization",
+    target: {
+      modelId: "ltx_2_3",
+      provider: "ltx_2_3",
+      tier: "q8",
+      mode: "text_to_video",
+      overlay: "none",
+      geometry: { width: 768, height: 512, batch: 1, frames: 241 },
+    },
+    strategy: {
+      rung: "staged_residency",
+      engagedRungs: ["resident", "staged_residency"],
+      parameters: {},
+    },
+    calibrationFingerprint: "ltx-q8-temporal-fit-v1",
+  });
+  const entry = {
+    backend: record.backend,
+    loadShape: record.loadShape,
+    target: structuredClone(record.target),
+    rung: record.strategy.rung,
+    engagedRungs: [...record.strategy.engagedRungs],
+    calibrationFingerprint: record.calibrationFingerprint,
+  };
+  const mutations = [
+    ["backend", (candidate) => { candidate.backend = "candle"; }],
+    ["model", (candidate) => { candidate.target.modelId = "ltx_2_3_eros"; }],
+    ["provider", (candidate) => { candidate.target.provider = "ltx_2_3_distilled"; }],
+    ["tier", (candidate) => { candidate.target.tier = "q4"; }],
+    ["mode", (candidate) => { candidate.target.mode = "image_to_video"; }],
+    ["overlay", (candidate) => { candidate.target.overlay = "lora"; }],
+    ["rung", (candidate) => { candidate.rung = "resident"; }],
+    ["width", (candidate) => { candidate.target.geometry.width = 1280; }],
+    ["height", (candidate) => { candidate.target.geometry.height = 704; }],
+    ["batch", (candidate) => { candidate.target.geometry.batch = 2; }],
+    ["frames", (candidate) => { candidate.target.geometry.frames = 121; }],
+    ["load shape", (candidate) => { candidate.loadShape = "eager_materialization"; }],
+    ["fingerprint", (candidate) => { candidate.calibrationFingerprint = "foreign"; }],
+    ["engaged composition", (candidate) => { candidate.engagedRungs = ["resident"]; }],
+  ];
+
+  assert.equal(planEntryMatchesEvidenceRecord(entry, record), true);
+  for (const [axis, mutate] of mutations) {
+    const candidate = structuredClone(entry);
+    mutate(candidate);
+    assert.equal(
+      planEntryMatchesEvidenceRecord(candidate, record),
+      false,
+      `${axis} mismatch must reject the plan entry`,
+    );
+  }
 });
 
 test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", async () => {
