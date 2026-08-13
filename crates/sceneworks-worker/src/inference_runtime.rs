@@ -234,6 +234,10 @@ pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Genera
 /// Resolve one validated imported source shape and operation to the ordinary provider descriptor
 /// that will load it. Missing is an explicit unsupported answer; callers must not union sibling
 /// routes by family.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn imported_model_descriptor(
     family: &str,
     source: gen_core::ImportedModelSource,

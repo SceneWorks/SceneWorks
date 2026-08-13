@@ -1503,8 +1503,7 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 /// child symlink cannot inherit trust from its parent.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn resolve_prepared_adapter_file(
     lora: &Value,
