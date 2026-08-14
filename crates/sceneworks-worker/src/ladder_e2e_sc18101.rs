@@ -170,30 +170,17 @@ fn quant_for_tier(tier: &str) -> Option<gen_core::Quant> {
     }
 }
 
-/// Routes for which `image_jobs::apply_measured_mlx_load_shape` (`image_jobs/base.rs`) forces
-/// `LoadShape::DeferredMaterialization` on a directory load — mirrored here rather than called.
-///
-/// WHY MIRRORED, given that calling the real function would be strictly better: `base.rs` is one of
-/// the sixteen sources `docs/generated/memory-matrix.json` fingerprints (`SOURCE_PATHS.imageRouting`
-/// in `scripts/generate-memory-matrix.mjs`). Widening that function's visibility by one keyword
-/// rotates `generatedFrom.sceneWorksRevision`, which reds `npm run check:memory-matrix` until the
-/// whole 860 KB artifact and every manifest binding's `matrixSourceRevision` are regenerated — a
-/// large, merge-queue-hostile diff for a test-only visibility change. A test harness is not worth
-/// that, so the predicate is restated here and [`load_shape_mirror_matches_the_documented_routes`]
-/// keeps the restatement honest.
-///
-/// This matters because the load shape decides which rungs exist at all: mlx-gen-z-image and
-/// mlx-gen-lens declare `BoundedTransformerResidency` `Implemented` only under
-/// `DeferredMaterialization`, while plain mlx-gen-krea requires that load shape together with the
-/// `OffloadPolicy::Sequential` selected independently by the load-time residency gate.
-const DEFERRED_MATERIALIZATION_ROUTES: &[&str] = &[
-    "qwen_image",
-    "qwen_image_edit",
-    "lens",
-    "lens_turbo",
-    "krea_2_turbo",
-    "sdxl",
-];
+/// Catalog routes whose exact bounded-transformer declaration intersects the typed production
+/// route registry. This deliberately parses the shipped manifest through the same typed helper as
+/// production; no Rust-source text or hand-maintained provider mirror participates.
+fn deferred_materialization_routes() -> std::collections::BTreeSet<String> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    crate::memory_route_registry::declared_mlx_deferred_routes(
+        manifest["models"].as_array().expect("models array"),
+    )
+}
 
 /// The resolved-artifact provenance for a subject, derived from the shipped binding that names its
 /// provider AND tier — `None` only when no such binding exists.
@@ -260,7 +247,7 @@ fn production_spec(engine: &str, tier_dir: &std::path::Path, tier: &str) -> Load
     let deferred = match engine {
         "lens" => quant == Some(gen_core::Quant::Q4),
         "lens_turbo" => quant.is_none(),
-        other => DEFERRED_MATERIALIZATION_ROUTES.contains(&other),
+        other => deferred_materialization_routes().contains(other),
     };
     if deferred {
         spec = spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization);
@@ -1343,42 +1330,26 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
 
 // ---------------------------------------------------------------------------------------------
 
-/// The deferred-materialization mirror must name exactly the routes `image_jobs/base.rs` names.
-///
-/// `apply_measured_mlx_load_shape_for_request` is private and lives in an `include!`d,
-/// macOS-gated file, so the coupling cannot be a direct call without rotating the memory-matrix
-/// source fingerprint (see [`DEFERRED_MATERIALIZATION_ROUTES`]). It can still be a TEXT coupling:
-/// the engine ids are single-line double-quoted literals in that source, which is exactly the shape
-/// the matrix's own comment-stripping fingerprint guarantees stays load-bearing. A route added to
-/// or removed from the production list therefore reds this test instead of silently changing what
-/// the ignored scenarios exercise.
+/// The deferred-materialization population is derived from typed manifest declarations, including
+/// the alias route whose catalog id differs from its provider id.
 #[test]
-fn load_shape_mirror_matches_the_documented_routes() {
-    let base = include_str!("image_jobs/base.rs");
-    let start = base
-        .find("fn apply_measured_mlx_load_shape_for_request")
-        .expect("image_jobs/base.rs declares apply_measured_mlx_load_shape_for_request");
-    // Bound the slice to the function itself: the first line-start `}` after the signature. A
-    // fixed-width window would run into the neighbouring test module, whose fixtures are full of
-    // quoted component names.
-    let end = base[start..]
-        .find("\n}\n")
-        .expect("the function has a line-start closing brace");
-    let body = &base[start..start + end];
-    for route in DEFERRED_MATERIALIZATION_ROUTES {
-        assert!(
-            body.contains(&format!("\"{route}\"")),
-            "{route} is mirrored here but no longer named by apply_measured_mlx_load_shape_for_request"
-        );
+fn load_shape_population_is_typed_and_manifest_derived() {
+    let routes = deferred_materialization_routes();
+    for route in [
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
+        "chroma1_hd",
+        "chroma1_base",
+        "chroma1_flash",
+        "kolors",
+        "z_image",
+        "z_image_edit",
+    ] {
+        assert!(routes.contains(route), "missing declared route {route}");
     }
-    // And the converse: no OTHER engine id appears in that function. Counting quoted literals is
-    // enough — the function names engine ids and nothing else.
-    let quoted = body.match_indices('"').count();
-    assert_eq!(
-        quoted,
-        DEFERRED_MATERIALIZATION_ROUTES.len() * 2,
-        "apply_measured_mlx_load_shape_for_request names a route this harness does not mirror"
-    );
+    assert!(!routes.contains("z_image_turbo"));
+    assert!(!routes.contains("z_image_turbo_control"));
 }
 
 /// The one margin coupling the compiler cannot check: that `{}`-formatting a policy constant

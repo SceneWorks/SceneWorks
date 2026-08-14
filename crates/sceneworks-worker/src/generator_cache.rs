@@ -4,9 +4,9 @@ use std::thread;
 use std::time::Duration;
 
 use gen_core::{
-    AdapterKind, AdapterSpec, FileStatFingerprint, Generator, LoadShape, LoadSpec,
-    MemoryCacheState, MemoryDecodeGeometryPolicy, MoeExpert, OffloadPolicy, PinnedWeightsFile,
-    Precision, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, FileStatFingerprint, Generator, LoadShape,
+    LoadShapeDeclarationResult, LoadSpec, MemoryCacheState, MemoryDecodeGeometryPolicy, MoeExpert,
+    OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
 };
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -101,6 +101,7 @@ pub(crate) struct LoadIdentity {
 pub(crate) struct ExecutionPolicy {
     pub(crate) offload_policy: OffloadPolicy,
     pub(crate) load_shape: LoadShape,
+    pub(crate) load_shape_declaration_result: LoadShapeDeclarationResult,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,6 +178,7 @@ impl LoadIdentity {
     }
 
     pub(crate) fn try_from_load_spec(engine_id: &str, spec: &LoadSpec) -> gen_core::Result<Self> {
+        spec.validate_load_shape_declaration()?;
         spec.validate_prepared_file_pins()?;
         Ok(Self {
             engine_id: engine_id.to_owned(),
@@ -264,6 +266,7 @@ impl ExecutionPolicy {
         Self {
             offload_policy: spec.offload_policy,
             load_shape: spec.load_shape,
+            load_shape_declaration_result: spec.load_shape_declaration_result,
         }
     }
 }
@@ -284,6 +287,8 @@ fn log_warm_policy_mismatch(
         loadedLoadShape = ?loaded_policy.load_shape,
         requestedOffloadPolicy = ?requested_policy.offload_policy,
         requestedLoadShape = ?requested_policy.load_shape,
+        loadedLoadShapeDeclarationResult = ?loaded_policy.load_shape_declaration_result,
+        requestedLoadShapeDeclarationResult = ?requested_policy.load_shape_declaration_result,
         "serving the cached generator under its cold-load policy"
     );
 }
@@ -1240,12 +1245,31 @@ mod tests {
         let staged_deferred = staged
             .clone()
             .with_load_shape(LoadShape::DeferredMaterialization);
+        let declared_applied = base.clone().with_applied_load_shape_declaration();
+        let declared_refused = base.clone().with_refused_load_shape_declaration();
 
-        let specs = [&base, &staged, &deferred, &staged_deferred];
+        let specs = [
+            &base,
+            &staged,
+            &deferred,
+            &staged_deferred,
+            &declared_applied,
+            &declared_refused,
+        ];
         let identities = specs.map(|spec| LoadIdentity::from_load_spec("z_image_turbo", spec));
         assert!(
             identities.iter().all(|identity| identity == &identities[0]),
-            "offload policy and load shape are request policy, not load identity"
+            "offload, load shape, and declaration authority are request policy, not load identity"
+        );
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &base),
+            LoadIdentity::from_load_spec("z_image_turbo", &declared_refused),
+            "a declaration refusal must not force a weights reload",
+        );
+        assert_ne!(
+            ExecutionPolicy::from_load_spec(&base),
+            ExecutionPolicy::from_load_spec(&declared_refused),
+            "NotEvaluated+Eager and Refused+Eager are distinct request policy",
         );
 
         let policies = specs.map(ExecutionPolicy::from_load_spec);
@@ -1253,7 +1277,7 @@ mod tests {
             for right in (left + 1)..policies.len() {
                 assert_ne!(
                     policies[left], policies[right],
-                    "the four residency/materialization combinations remain distinct policy intents"
+                    "residency/materialization/declaration combinations remain distinct policy intents"
                 );
             }
         }
@@ -2140,6 +2164,7 @@ mod tests {
                 loaded_policy: ExecutionPolicy {
                     offload_policy: OffloadPolicy::Resident,
                     load_shape: LoadShape::EagerMaterialization,
+                    load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
                 },
                 external_committed_bytes: 0,
                 reclaimable_weight_bytes: 0,
@@ -2187,6 +2212,8 @@ mod tests {
                             loaded_policy: ExecutionPolicy {
                                 offload_policy: OffloadPolicy::Sequential,
                                 load_shape: LoadShape::DeferredMaterialization,
+                                load_shape_declaration_result:
+                                    LoadShapeDeclarationResult::NotEvaluated,
                             },
                             external_committed_bytes: 0,
                             reclaimable_weight_bytes: 0,
@@ -2205,6 +2232,7 @@ mod tests {
                 ExecutionPolicy {
                     offload_policy: OffloadPolicy::Sequential,
                     load_shape: LoadShape::DeferredMaterialization,
+                    load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
                 }
             )
         );
@@ -2215,6 +2243,7 @@ mod tests {
                 ExecutionPolicy {
                     offload_policy: OffloadPolicy::Sequential,
                     load_shape: LoadShape::DeferredMaterialization,
+                    load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
                 }
             )
         );

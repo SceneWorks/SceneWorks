@@ -13933,6 +13933,42 @@ mod tests {
             gen_core::LoadShape::DeferredMaterialization,
             "the shipped Z-Image rung-4 binding must be producible by the production cold-load route"
         );
+        let eager_edit = eager
+            .clone()
+            .with_resolved_route("z_image_edit")
+            .with_refused_load_shape_declaration();
+        let refused_edit = with_selected_sequential_shape("z_image_turbo", eager_edit);
+        assert_eq!(refused_edit.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            refused_edit.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "the shared provider id must not bypass z_image_edit's declaration/predicate refusal"
+        );
+        let admitted_edit = eager
+            .clone()
+            .with_resolved_route("z_image_edit")
+            .with_applied_load_shape_declaration();
+        assert_eq!(
+            with_selected_sequential_shape("z_image_turbo", admitted_edit).load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+        );
+        for provider in ["anima_base", "chroma1_base", "kolors", "z_image"] {
+            let refused = eager
+                .clone()
+                .with_resolved_route(provider)
+                .with_refused_load_shape_declaration();
+            let refused = with_selected_sequential_shape(provider, refused);
+            assert_eq!(refused.offload_policy, OffloadPolicy::Sequential);
+            assert_eq!(
+                refused.load_shape,
+                gen_core::LoadShape::EagerMaterialization,
+                "{provider}: a same-id declaration refusal must survive the late sequential shaper",
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                gen_core::LoadShapeDeclarationResult::Refused,
+            );
+        }
 
         let qwen_resident = eager
             .clone()
