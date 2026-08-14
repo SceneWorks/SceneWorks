@@ -788,16 +788,30 @@ pub(crate) async fn create_audio_job(
 /// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an
 /// integral value stays integral.
 ///
+/// `pub(crate)` only so `a_fractional_resolved_duration_keeps_the_manifests_own_decimal` can assert
+/// the encoding directly rather than through a whole enqueue round-trip.
+///
 /// The wire has always carried `"duration": 5`, not `5.0` — `ContractNumber` preserves whatever the
 /// caller sent, and every shipped `defaults.duration` is a whole number. Writing an `f32` straight
 /// in flattens that (`Value::from(5.0_f32)` is `5.0`), a gratuitous contract change that the
 /// payload-normalization tests correctly catch.
-fn contract_number(value: f32) -> Value {
+pub(crate) fn contract_number(value: f32) -> Value {
     if value.fract() == 0.0 {
-        Value::from(value as i64)
-    } else {
-        Value::from(value)
+        return Value::from(value as i64);
     }
+    // A FRACTIONAL default must round-trip to the decimal the manifest declared, not to the f32's
+    // binary expansion (sc-17159). `Value::from(f32)` widens to `f64`, so MiniMax-H3's
+    // `defaults.duration: 5.1667` was enqueued as `5.1666998863220215` — numerically harmless
+    // (`VideoRequest` reads it back as the same f32 and lands on frame 124) but not EQUAL to any of
+    // the fourteen values in that model's `limits.durations`, which is the menu the duration
+    // dropdown preselects against and the set a recipe replay is compared to. Every video model
+    // before this family had a whole-number default, so the fractional branch had never carried a
+    // shipped value.
+    //
+    // `f32::to_string` emits the shortest decimal that reproduces the f32 exactly ("5.1667"), so
+    // parsing that back yields the manifest's own number. The fallback keeps the historical shape
+    // for any value whose text somehow does not re-parse.
+    serde_json::from_str(&value.to_string()).unwrap_or_else(|_| Value::from(value))
 }
 
 /// The typed route that owns `job_type`, or `None` for every job type the generic
