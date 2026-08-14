@@ -464,6 +464,10 @@ enum CandleImageRoute {
     /// the off-Mac twin of [`ImageRoute::KreaImported`], required because imported IDs are not registry
     /// engine IDs and would otherwise fall through to the procedural stub.
     KreaImported,
+    /// Strict-pose control over an imported Krea DiT, one image per pose.
+    KreaImportedControl,
+    /// A generated full-fine-tune Mage transformer paired with the installed Base TE/VAE.
+    MageFinetuned,
     /// Off-Mac twin of [`ImageRoute::SdxlImported`], loaded by candle from the fused checkpoint plus
     /// the three caller-staged SDXL components.
     SdxlImported,
@@ -728,6 +732,8 @@ impl CandleImageRoute {
             | CandleImageRoute::KreaEdit
             | CandleImageRoute::KreaTurboOnRaw
             | CandleImageRoute::KreaMultiPhase
+            | CandleImageRoute::KreaImported
+            | CandleImageRoute::KreaImportedControl
             | CandleImageRoute::SdxlImported
             | CandleImageRoute::KreaControl => true,
             CandleImageRoute::CandleTxt2Img => {
@@ -750,6 +756,7 @@ impl CandleImageRoute {
             | CandleImageRoute::Flux2Control
             | CandleImageRoute::Flux1Control
             | CandleImageRoute::KreaControl => pose_entries(request).len() as u32,
+            CandleImageRoute::KreaImportedControl => pose_entries(request).len() as u32,
             CandleImageRoute::InstantId => instantid_image_count(request, settings),
             CandleImageRoute::QwenEdit
                 if qwen_edit_candle::qwen_edit_candle_pose_count(request)
@@ -789,6 +796,8 @@ impl CandleImageRoute {
                     .unwrap_or(STUB_ADAPTER)
             }
             CandleImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
+            CandleImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
+            CandleImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             CandleImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             CandleImageRoute::SdxlIpAdapter => sdxl_ipadapter::SDXL_IPADAPTER_ENGINE,
             CandleImageRoute::KolorsIpAdapter => kolors_ipadapter::KOLORS_IPADAPTER_ENGINE,
@@ -931,10 +940,14 @@ fn resolve_candle_image_route(
         // for this t2i story (sc-13883). The candle twin of the MLX `resolve_image_route` `KreaTurboOnRaw`
         // arm; placed AFTER the edit lane, BEFORE the generic txt2img arm.
         Some(CandleImageRoute::KreaTurboOnRaw)
+    } else if krea_imported_control_available(request, settings) {
+        Some(CandleImageRoute::KreaImportedControl)
     } else if krea_imported_available(request, settings) {
         // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
         // this bespoke route must claim them before the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
+    } else if mage_finetuned_available(request, settings) {
+        Some(CandleImageRoute::MageFinetuned)
     } else if sdxl_imported_available(request, settings) {
         Some(CandleImageRoute::SdxlImported)
     } else if zimage_comfyui_available(request, settings) {
@@ -10254,8 +10267,8 @@ mod candle_label_tests {
             "the fail-closed route guard must admit ConvRot adapters before the load seam"
         );
         assert!(
-            !CandleImageRoute::KreaImported.applies_request_loras(&request),
-            "imported Krea adapters remain owned by sc-18480 and must fail closed on Candle"
+            CandleImageRoute::KreaImported.applies_request_loras(&request),
+            "the imported Krea lane must preserve the user adapters added by sc-18480"
         );
         assert!(
             CandleImageRoute::KolorsEdit.applies_request_loras(&request),

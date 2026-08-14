@@ -658,20 +658,49 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         "a non-edit imported-Krea img2img referenceAssetId must be candle-eligible (sc-14071)"
     );
 
-    // LoRAs (sc-14111) and the Kontext edit surface (sc-14119) stay OFF candle — its native
-    // single-file loader takes no adapters yet (sc-14135) — along with every base-tier-only shape
-    // (mask, character, strict pose, multi-phase) and the plural edit-reference set on a non-edit
-    // job (that is the edit surface).
+    // The pinned Candle provider accepts adapters, Kontext edit, and strict pose over the imported
+    // DiT. These shapes must route to the same bespoke worker lanes that advertise them.
+    for extra in [
+        json!({ "loras": [{ "id": "adapter_1" }] }),
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "source_1",
+            "loras": [{ "id": "edit", "conditioningRole": "image_edit" }]
+        }),
+        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({
+            "loras": [{ "id": "style" }],
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
+    ] {
+        let mut payload = plain.clone();
+        payload
+            .as_object_mut()
+            .expect("payload object")
+            .extend(extra.as_object().expect("extra object").clone());
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(payload.clone())),
+            "supported imported-Krea shape must route on candle: {payload}"
+        );
+    }
+
+    // Every shape the bespoke imported handlers would otherwise ignore remains fail-closed.
     let mut unsupported_shapes = Vec::new();
     for extra in [
-        json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
-        json!({ "mode": " edit_image ", "sourceAssetId": "source_1" }),
-        json!({ "mode": "edit_image", "referenceAssetIds": ["scene_1", "person_1"] }),
+        json!({ "mode": "edit_image" }),
         json!({ "referenceAssetIds": ["reference_1"] }),
+        json!({ "sourceAssetId": "source_1" }),
         json!({ "maskAssetId": "mask_1" }),
         json!({ "characterId": "character_1" }),
-        json!({ "loras": [{ "id": "adapter_1" }] }),
-        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({
+            "sourceAssetId": "source_1",
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "source_1",
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
         json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
     ] {
         let mut payload = plain.clone();
@@ -701,20 +730,10 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
     }))));
 }
 
-/// A strict-pose set on an imported Krea 2 checkpoint is served on MLX (the pose control branch
-/// folds onto the file-loaded DiT) but NOT on candle, whose native single-file entrypoint threads
-/// no control overlay. This pins the shape of that asymmetry so the candle refusal stays a LOUD,
-/// terminal, named gap rather than a job that silently never routes:
-///   * `image_job_is_candle_eligible` is false, so no candle worker ever claims it — the claim gate
-///     and the worker's `KREA_IMPORTED_SUPPORTS_POSE_CONTROL` agree;
-///   * `candle_supported` returns `Err(reason)`, which is what makes the enforce sweep
-///     (`fail_unsupported_candle_jobs`) fail it terminally with a named feature instead of routing
-///     it to the grace-window "no candle worker yet" sweep, where it would sit queued forever.
-///
-/// The MLX half of the same payload is asserted alongside it, so a future change that quietly drops
-/// the imported pose surface on BOTH backends cannot pass this test by making the candle half green.
+/// The imported Krea strict-pose set must be claimed by both native backends and must pass Candle's
+/// terminal support oracle, proving scheduler eligibility and the worker capability stay aligned.
 #[test]
-fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
+fn imported_krea_pose_routes_to_both_native_backends() {
     let pose = json!({
         "projectId": "project_1",
         "model": "kreamania_variant4",
@@ -732,15 +751,12 @@ fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
         "MLX serves the imported pose set through the native control entrypoint"
     );
     assert!(
-        !image_job_is_candle_eligible(&job),
-        "candle's single-file entrypoint threads no control overlay, so it must not claim the job"
+        image_job_is_candle_eligible(&job),
+        "Candle serves the imported pose set through its native control entrypoint"
     );
-
-    let reason = candle_supported(&job)
-        .expect_err("an imported pose set must be a NAMED candle gap, not a silent never-route");
     assert!(
-        !reason.feature.trim().is_empty() && !reason.detail.trim().is_empty(),
-        "the terminal failure must name the feature and explain it: {reason:?}"
+        candle_supported(&job).is_ok(),
+        "the Candle enforce sweep must agree that imported strict pose is executable"
     );
 }
 

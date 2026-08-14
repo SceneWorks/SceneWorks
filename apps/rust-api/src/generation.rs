@@ -43,16 +43,16 @@ pub(crate) async fn create_image_job(
     // edit. The worker's format-guard + reseed net remains the fallback if the expansion is unavailable.
     let caption_request = crate::ideogram::caption_request_for_ideogram(&job_payload);
     // Keyed off the POST-preset job_payload["model"], NOT the DTO's payload.model — see the
-    // matching note in create_video_job (sc-12300). apply_recipe_preset_to_image_payload above
-    // may have replaced the model with the preset's own when the caller omitted one, which
-    // leaves payload.model stale and would resolve the DEFAULT model's entry.
-    let model_id = job_payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(payload.model.as_str())
-        .to_owned();
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
-    // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
+    // matching note in create_video_job (sc-12300). The shared canonicalizer reads the final
+    // payload and also owns retry/duplicate, so no alternate image boundary can retain
+    // caller-supplied manifest metadata.
+    let model_manifest_entry =
+        crate::jobs::canonicalize_image_model_payload(&state, &job_type, &mut job_payload)
+            .await?
+            .ok_or_else(|| {
+                ApiError::internal("image model canonicalization returned no catalog entry")
+            })?;
+    // The model's declared `defaults.resolution`, keyed off the canonical post-preset entry for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
     // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
     // size rendered a blanket 1024x1024 — HALF the declared 2048x2048 on the four sensenova_u1_8b
@@ -80,7 +80,6 @@ pub(crate) async fn create_image_job(
             job_payload.insert("count".to_owned(), Value::from(count));
         }
     }
-    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,
         Some(&payload.project_id),

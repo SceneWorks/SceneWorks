@@ -4664,7 +4664,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Person detect/track is ported (sc-3488 / sc-3633/3634/3709) → supported, no epic.
     assert_eq!(epic("personDetect"), None);
     assert!(mac.features["personDetect"].supported);
-    // Smart-select segmentation is native-MLX SAM3 on Mac (sc-6105) → supported, no epic.
+    // Smart-select segmentation is native SAM3 on MLX and Candle (sc-6105 / sc-18480).
     assert_eq!(epic("imageSegment"), None);
     assert!(mac.features["imageSegment"].supported);
     assert_eq!(epic("datasetCaptioning"), None);
@@ -4708,6 +4708,10 @@ fn mac_capabilities_master_switch_and_infra_features() {
     let windows = mac_capabilities("windows", false);
     assert!(windows.features["imageUpscaleSeedvr2"].supported);
     assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());
+    assert!(windows.features["imageSegment"].supported);
+    assert!(windows.features["imageSegment"].reason.is_none());
+    assert!(inert.features["imageSegment"].supported);
+    assert!(inert.features["imageSegment"].reason.is_none());
     // AuraSR is dropped as an offered engine off-Mac too (sc-5499): unsupported on Windows (and Linux),
     // not just under active Mac gating — so the web picker hides it on every platform.
     assert!(!windows.features["imageUpscaleAuraSr"].supported);
@@ -6682,7 +6686,12 @@ fn image_detail_routes_to_mlx_worker() {
         initial_status: None,
     };
 
-    for model in ["sdxl", "realvisxl"] {
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
         let job = store
             .create_job(detail_job(
                 json!({ "model": model, "sourceAssetId": "asset_src" }),
@@ -6735,6 +6744,99 @@ fn image_detail_routes_to_mlx_worker() {
         .expect("mlx claims lycoris detail job");
     assert_eq!(claimed.id, lycoris.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
+    let store = store("candle-routing-native-utilities");
+    register_gpu_worker(
+        &store,
+        "worker-candle",
+        "0",
+        vec![
+            WorkerCapability::Gpu,
+            WorkerCapability::ImageDetail,
+            WorkerCapability::ImageSegment,
+            WorkerCapability::DatasetAnalysis,
+            WorkerCapability::Unknown("candle".to_owned()),
+        ],
+    );
+
+    let utility_job = |job_type, payload: Value| CreateJob {
+        job_type,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: "auto".to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    };
+
+    for (label, job_type, payload) in [
+        (
+            "SDXL detail",
+            JobType::ImageDetail,
+            json!({ "model": "illustrious_xl_v2", "sourceAssetId": "asset_src" }),
+        ),
+        (
+            "SAM3 box segment",
+            JobType::ImageSegment,
+            json!({ "sourceAssetId": "asset_src", "box": [8, 12, 64, 80] }),
+        ),
+        (
+            "CLIP dataset analysis",
+            JobType::DatasetAnalysis,
+            json!({ "datasetId": "dataset-1", "items": [] }),
+        ),
+    ] {
+        let job = store
+            .create_job(utility_job(job_type, payload))
+            .unwrap_or_else(|_| panic!("{label} job creates"));
+        let claimed = store
+            .claim_next_job("worker-candle")
+            .expect("candle claim succeeds")
+            .unwrap_or_else(|| panic!("candle claims {label}"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                    worker_id: Some("worker-candle".to_owned()),
+                },
+            )
+            .expect("complete native utility job");
+    }
+
+    let unsupported = store
+        .create_job(utility_job(
+            JobType::ImageDetail,
+            json!({ "model": "flux2_dev", "sourceAssetId": "asset_src" }),
+        ))
+        .expect("unsupported detail job creates");
+    assert!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("candle decline succeeds")
+            .is_none(),
+        "a coarse image_detail advertisement must not claim a non-SDXL request"
+    );
+    assert_eq!(
+        store.get_job(&unsupported.id).expect("job remains").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]

@@ -3854,6 +3854,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
+        if matches!(job.job_type, JobType::ImageDetail) && !image_detail_native_eligible(job) {
+            return false;
+        }
         // The candle worker advertises only the base `video_generate` (txt2video); refuse the
         // advanced video job types and every non-eligible `video_generate` shape.
         if matches!(

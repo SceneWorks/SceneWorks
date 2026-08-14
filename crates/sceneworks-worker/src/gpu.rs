@@ -218,6 +218,17 @@ pub(crate) fn with_candle_capabilities(
                 &mut gpu.capabilities,
                 [WorkerCapability::FaceLikenessCompare],
             );
+            // SDXL-family tile detail and SAM3 box smart-select are bespoke job surfaces rather
+            // than registry modalities, so advertise the concrete handlers explicitly. The SAM3
+            // handler rejects point prompts before I/O because the pinned Candle provider exposes
+            // box PVS only; the capability truthfully advertises the executable box surface.
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::ImageDetail,
+                    WorkerCapability::ImageSegment,
+                ],
+            );
             // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
             // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
@@ -1087,9 +1098,8 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation, served in-process by `segment_jobs::run_image_segment_job` (the
         // box-PVS path of the sc-4926 SAM3 stack). The Image Editor smart-select tool's
-        // backend: a box prompt → a binary inpaint mask asset. Advertised ONLY here (there is no
-        // off-Mac standalone image-segment lane), so a segment job routes to the Mac worker by
-        // construction.
+        // backend: a box prompt → a binary inpaint mask asset. The off-Mac Candle worker advertises
+        // the sibling box-PVS handler explicitly in `with_candle_capabilities`.
         WorkerCapability::ImageSegment,
         // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
         // (`mlx-gen-seedvr2`), served in-process by `video_jobs::run_video_upscale_job` —
