@@ -953,10 +953,24 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // in `video_mode_is_mlx_eligible` — the generic arm would have handed `minimax_h3_ref` the
     // t2v/i2v it cannot do while refusing the one mode it can.
     //
-    // Every candle column is false, and that is a statement about the LANE rather than about VRAM:
-    // the manifest declares NO `candle` block and every download row is `platforms: ["macos"]`, so
-    // macOS is the only platform this family installs on. sc-17156 adds the candle lane and flips
-    // these columns with it. Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
+    // Every candle column is false, and that is a statement about the LANE rather than about VRAM.
+    //
+    // sc-17156 landed a real candle t2va + fl2va generator (`candle-gen-minimax-h3`, registered in
+    // `candle-gen-catalog`) and gave `minimax_h3` a `candle` block, so the OLD reason for these
+    // columns — "there is no candle code" — no longer holds. They stay false for a different and
+    // still-sufficient reason: **there is nothing off-Mac to install.** Every download row is
+    // `platforms: ["macos"]` and the hosted tiers are MLX-packed by the MLX lane's `convert`, while
+    // the candle provider advertises `supported_quants: &[]`, has no tier loader, and reads a raw
+    // upstream `MiniMaxAI/MiniMax-H3` snapshot this catalog hosts no row for. Flipping a column here
+    // would route a job to a lane that cannot obtain weights — reachability without an artifact,
+    // which is the GH #2074 shape inverted.
+    //
+    // `minimax_h3_ref` additionally has no candle path at all: `ref2va` is default-denied at the
+    // provider's conditioning allowlist until sc-17157 ports `transformer_ref`.
+    //
+    // What flips these columns is a downloadable candle artifact plus the measured VRAM ceiling the
+    // `candle` block currently omits (`measured: false`) — not the existence of the generator.
+    // Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
     VideoModelCaps::new("minimax_h3", true, false, false, false),
     VideoModelCaps::new("minimax_h3_ref", true, false, false, false),
 ];
