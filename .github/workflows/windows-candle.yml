@@ -709,8 +709,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed to encode the LTX Eros video stream' }
           # Preserve the full 153-frame renderer output above, then separately match the product's
           # LTX mux contract: copy H.264, encode the WAV as AAC, and bound the user-visible file by
-          # the shorter input. The 6-second audio is intentionally shorter than the 153-frame LTX
-          # lattice (6.12 seconds), so `-shortest` trims the product-faithful MP4 at that boundary.
+          # the shorter input. Synchronized audio may include up to the 153-frame LTX lattice
+          # boundary (6.12 seconds), so `-shortest` trims the product-faithful MP4 to its exact
+          # recorded duration rather than the six-second request scalar.
           & ffmpeg -hide_banner -loglevel warning -nostdin -y -i $videoOnly -i $audio -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k -shortest -map_metadata 0 -movflags +faststart $mp4
           if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed to mux the LTX Eros evidence MP4' }
 
@@ -737,7 +738,7 @@ jobs:
           }
           $productFrames = [int]$video.nb_read_frames
           if ($video.r_frame_rate -ne '25/1' -or $productFrames -lt 150 -or $productFrames -gt 151) {
-            throw "product-faithful LTX Eros MP4 must retain 150 or 151 frames at the 6-second audio boundary, got $productFrames at $($video.r_frame_rate)"
+            throw "product-faithful LTX Eros MP4 must retain 150 or 151 frames at the synchronized-audio boundary, got $productFrames at $($video.r_frame_rate)"
           }
           if (-not $sound -or $sound.codec_name -ne 'aac') {
             throw 'encoded LTX Eros MP4 must contain AAC audio'
@@ -752,12 +753,27 @@ jobs:
             throw 'LTX Eros source WAV must contain signed 16-bit little-endian PCM audio'
           }
 
+          $metadata = Get-Content -Raw -LiteralPath (Join-Path $out 'metadata.json') | ConvertFrom-Json
+          if ($metadata.captureKind -ne 'current-candle-route-baseline' -or $metadata.request.seed -ne 18902) {
+            throw 'LTX Eros metadata does not identify the fixed current-route baseline and seed'
+          }
+          if ($metadata.request.width -ne 768 -or $metadata.request.height -ne 512 -or $metadata.request.durationSeconds -ne 6 -or $metadata.request.fps -ne 25 -or $metadata.request.steps -ne 8) {
+            throw 'LTX Eros metadata drifted from the shipped manifest defaults'
+          }
+
           # One output frame (40 ms) is the maximum tolerated timestamp/container rounding error.
-          # The complete renderer output is 153 / 25 = 6.12 seconds. The manifest-default request,
-          # source audio, and product-faithful `-shortest` MP4 are 6 seconds; checking the two
-          # timelines independently prevents a valid product mux from masquerading as frame loss.
+          # LTX emits on its own temporal/audio lattices: this exact baseline returned 153 video
+          # frames (6.12 s) and 6.09 s of synchronized PCM for a six-second request. Bind each
+          # encoded duration to the renderer's recorded output instead of pretending every stream
+          # must equal the request scalar exactly.
           $renderedDurationSeconds = 153.0 / 25.0
-          $productDurationSeconds = 6.0
+          $requestedProductDurationSeconds = 6.0
+          $audioDurationSeconds = [Convert]::ToDouble($metadata.result.audio.durationSeconds, [Globalization.CultureInfo]::InvariantCulture)
+          if ($audioDurationSeconds -lt $requestedProductDurationSeconds -or $audioDurationSeconds -gt $renderedDurationSeconds) {
+            throw "LTX Eros synchronized audio duration $audioDurationSeconds s must stay between the requested $requestedProductDurationSeconds s and rendered-frame $renderedDurationSeconds s timelines"
+          }
+          $productBoundarySeconds = [Math]::Min($renderedDurationSeconds, $audioDurationSeconds)
+          $productVideoDurationSeconds = $productFrames / 25.0
           $durationToleranceSeconds = 1.0 / 25.0
           function Assert-DurationNear([string]$label, $actualValue, [double]$expectedDurationSeconds) {
             if ($null -eq $actualValue) { throw "$label duration is missing" }
@@ -768,18 +784,11 @@ jobs:
           }
           Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds
           Assert-DurationNear 'complete rendered-frame container' $renderedProbe.format.duration $renderedDurationSeconds
-          Assert-DurationNear 'source WAV container' $wavProbe.format.duration $productDurationSeconds
-          Assert-DurationNear 'product MP4 video stream' $video.duration $productDurationSeconds
-          Assert-DurationNear 'product MP4 audio stream' $sound.duration $productDurationSeconds
-          Assert-DurationNear 'product MP4 container' $probe.format.duration $productDurationSeconds
-
-          $metadata = Get-Content -Raw -LiteralPath (Join-Path $out 'metadata.json') | ConvertFrom-Json
-          if ($metadata.captureKind -ne 'current-candle-route-baseline' -or $metadata.request.seed -ne 18902) {
-            throw 'LTX Eros metadata does not identify the fixed current-route baseline and seed'
-          }
-          if ($metadata.request.width -ne 768 -or $metadata.request.height -ne 512 -or $metadata.request.durationSeconds -ne 6 -or $metadata.request.fps -ne 25 -or $metadata.request.steps -ne 8) {
-            throw 'LTX Eros metadata drifted from the shipped manifest defaults'
-          }
+          Assert-DurationNear 'source WAV stream' $wavAudio.duration $audioDurationSeconds
+          Assert-DurationNear 'source WAV container' $wavProbe.format.duration $audioDurationSeconds
+          Assert-DurationNear 'product MP4 video stream' $video.duration $productVideoDurationSeconds
+          Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds
+          Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds
 
           $runnerMetadata = [ordered]@{
             story = 'SC-18902'
