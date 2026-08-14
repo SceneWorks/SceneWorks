@@ -2036,7 +2036,7 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
 
     // The EXEMPT engines (sc-12344's recorded reason: their on-disk bytes are not their loaded set,
     // so a byte-derived floor would wall-reject working cards — see `vram_gate::wan_weight_components`).
-    for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
+    for model in ["ltx_2_3", "svd"] {
         let engine_id = candle_video_engine_id(model).expect("a candle video engine");
         assert_eq!(
             crate::vram_gate::wan_weight_bytes(engine_id, root),
@@ -2044,6 +2044,11 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
             "{model} → {engine_id} is exempt by decision; gating it on a dir sum would over-count"
         );
     }
+    assert_eq!(
+        candle_video_engine_id("ltx_2_3_eros"),
+        None,
+        "SC-18902 removed Eros from the Candle universe; it is not a fit-gate exemption"
+    );
 
     // Mochi rides its own frame-dependent gate (sc-12306), never this one.
     assert_eq!(
