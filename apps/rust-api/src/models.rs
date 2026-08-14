@@ -2630,12 +2630,6 @@ mod download_receipt_tests {
                     .is_some(),
                 "{os}: base LTX-2.3 remains downloadable"
             );
-            apply_platform_availability(candle_base.as_object_mut().unwrap(), os);
-            assert_ne!(
-                candle_base.get("usable").and_then(Value::as_bool),
-                Some(false),
-                "{os}: base LTX-2.3 remains usable"
-            );
         }
 
         let entry = builtin_models_entry("ltx_2_3_eros");
@@ -2656,8 +2650,16 @@ mod download_receipt_tests {
             .expect("macOS Eros remains downloadable");
         let macos_state = install_state_for(Some(macos_context), &macos, temp.path());
         assert!(macos_state.downloadable);
-        apply_platform_availability(macos.as_object_mut().unwrap(), "macos");
-        assert_ne!(macos.get("usable").and_then(Value::as_bool), Some(false));
+        let mut macos_projection = vec![base.clone(), entry.clone()];
+        retain_models_for_os(&mut macos_projection, "macos");
+        assert_eq!(
+            macos_projection
+                .iter()
+                .filter_map(|model| model.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["ltx_2_3", "ltx_2_3_eros"],
+            "macOS catalog and Model Manager retain both LTX products"
+        );
 
         for os in ["windows", "linux"] {
             let mut candle = entry.clone();
@@ -2682,12 +2684,16 @@ mod download_receipt_tests {
                 !state.installed,
                 "{os}: filtered remote files must not resurrect a picker row"
             );
-            apply_platform_availability(candle.as_object_mut().unwrap(), os);
-            assert_eq!(candle.get("usable").and_then(Value::as_bool), Some(false));
-            assert!(candle
-                .get("unavailableReason")
-                .and_then(Value::as_str)
-                .is_some_and(|reason| reason.contains("Apple Silicon MLX")));
+            let mut projection = vec![base.clone(), entry.clone()];
+            retain_models_for_os(&mut projection, os);
+            assert_eq!(
+                projection
+                    .iter()
+                    .filter_map(|model| model.get("id").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+                vec!["ltx_2_3"],
+                "{os}: Model Manager/catalog must omit Eros and preserve base LTX-2.3"
+            );
         }
     }
 
@@ -4648,7 +4654,6 @@ fn apply_model_catalog_entry(
     // (retained) top-level installState/installedPath fields — nothing existing regresses.
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
-    apply_platform_availability(object, std::env::consts::OS);
     apply_mac_and_mlx_fields(object, data_dir);
     apply_imported_lora_advertisement(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
@@ -4660,23 +4665,6 @@ fn apply_model_catalog_entry(
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
     sceneworks_core::preview_support::apply_to_model_entry(object);
     Ok(model)
-}
-
-/// Apply whole-model platform availability after install-state projection. `macOnly` historically
-/// was an advisory label for image models, so this is deliberately limited to video entries, where
-/// it now denotes an absent off-Mac execution route. Keeping the entry in Model Manager preserves
-/// removal/provenance visibility, while `usable: false` keeps every generation picker and download
-/// offer aligned with the worker's route table.
-fn apply_platform_availability(object: &mut JsonObject, os: &str) {
-    let video_mac_only = object.get("type").and_then(Value::as_str) == Some("video")
-        && object.get("macOnly").and_then(Value::as_bool) == Some(true);
-    if video_mac_only && os != "macos" {
-        object.insert("usable".to_owned(), Value::Bool(false));
-        object.insert(
-            "unavailableReason".to_owned(),
-            Value::String("This video model requires the Apple Silicon MLX backend.".to_owned()),
-        );
-    }
 }
 
 type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
@@ -4901,6 +4889,11 @@ async fn load_model_catalog_inputs(
     for model in &mut models {
         retain_downloads_for_os(model, std::env::consts::OS);
     }
+    // A video entry marked `macOnly` has no executable off-Mac route. Remove it from the live
+    // catalog itself (and therefore Model Manager, Studio pickers, and job creation), rather than
+    // leaving a disabled card that still advertises a withdrawn product. Image `macOnly` remains an
+    // advisory legacy label and is deliberately unaffected.
+    retain_models_for_os(&mut models, std::env::consts::OS);
     let download_contexts = models
         .iter()
         .map(model_download_context)
@@ -5135,6 +5128,18 @@ pub(crate) fn retain_downloads_for_os(model: &mut Value, os: &str) {
             None => true,
         },
     );
+}
+
+/// Remove whole video products that have no route on `os`. This is intentionally narrower than the
+/// legacy image-model `macOnly` label: only video entries use it as a catalog-withdrawal contract.
+fn retain_models_for_os(models: &mut Vec<Value>, os: &str) {
+    if os == "macos" {
+        return;
+    }
+    models.retain(|model| {
+        model.get("type").and_then(Value::as_str) != Some("video")
+            || model.get("macOnly").and_then(Value::as_bool) != Some(true)
+    });
 }
 
 pub(crate) fn model_download(model: &Value) -> Option<Value> {
