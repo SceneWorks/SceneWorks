@@ -536,6 +536,9 @@ pub(crate) async fn create_model_download_job(
     for co_requisite in
         model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref())
     {
+        if co_requisite_satisfied_by_exact_legacy_rename(&state.settings.data_dir, &co_requisite) {
+            continue;
+        }
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
@@ -3099,6 +3102,50 @@ mod download_receipt_tests {
                 "{model_id}: nothing is missing once every component is staged, got {:?}",
                 installed.missing_required_files
             );
+
+            // Existing installs predate the upstream repo rename and keep the exact immutable CLIP
+            // snapshot under the legacy cache namespace. The catalog must continue to call those
+            // installs ready instead of offering a repair that would fetch the same ~3.95 GB blob
+            // again; the worker uses the same validator-proven plain source and hard-links the
+            // canonical namespace cache-only when the filesystem supports it.
+            let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+            let clip = co_requisites
+                .iter()
+                .find(|download| {
+                    download.get("repo").and_then(Value::as_str) == Some(rename.current_repo)
+                })
+                .expect("live MMAudio manifest has the canonical CLIP component");
+            let clip_revision = clip.get("revision").and_then(Value::as_str).unwrap();
+            let clip_files = string_array_field(clip, "files");
+            std::fs::remove_dir_all(
+                huggingface_repo_cache_path(data_dir, rename.current_repo).unwrap(),
+            )
+            .unwrap();
+            let legacy_repo = huggingface_repo_cache_path(data_dir, rename.legacy_repo).unwrap();
+            let legacy_snapshot = legacy_repo.join("snapshots").join(clip_revision);
+            for file in &clip_files {
+                let path = legacy_snapshot.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+
+                    let blob = legacy_repo.join("blobs").join("clip-blob");
+                    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+                    std::fs::write(&blob, b"existing cached weights").unwrap();
+                    symlink(&blob, &path).unwrap();
+                }
+                #[cfg(not(unix))]
+                std::fs::write(path, b"existing cached weights").unwrap();
+            }
+
+            let legacy_installed =
+                install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+            assert!(
+                legacy_installed.installed,
+                "{model_id}: the exact legacy CLIP snapshot remains a complete offline install"
+            );
+            assert!(legacy_installed.missing_required_files.is_empty());
         }
     }
 
@@ -3414,16 +3461,7 @@ fn install_state_for(
                     .iter()
                     .filter(|download| co_requisite_variant(download).as_deref() == Some(tier))
                     .all(|download| {
-                        download
-                            .get("repo")
-                            .and_then(Value::as_str)
-                            .and_then(|repo| huggingface_repo_cache_path(data_dir, repo))
-                            .map(|path| {
-                                huggingface_cache_health(
-                                    &path,
-                                    &string_array_field(download, "files"),
-                                )
-                            })
+                        co_requisite_cache_health(data_dir, download)
                             .is_some_and(|health| health.installed)
                     })
             });
@@ -3449,9 +3487,7 @@ fn install_state_for(
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
-            let files = string_array_field(&co_requisite, "files");
-            let health = huggingface_repo_cache_path(data_dir, repo)
-                .map(|path| huggingface_cache_health(&path, &files));
+            let health = co_requisite_cache_health(data_dir, &co_requisite);
             if health.as_ref().is_some_and(|health| health.installed) {
                 continue;
             }
@@ -3500,6 +3536,96 @@ fn install_state_for(
             missing_required_files: Vec::new(),
             update_available: false,
         }
+    }
+}
+
+/// Resolve install-state health for a hard/soft co-requisite, including exact cache-only aliases
+/// for upstream repository renames. This deliberately does not mutate the cache while serving the
+/// catalog. It lets an existing immutable legacy snapshot remain usable/installed; the worker's
+/// load-time resolver then consumes the same validated plain source and hard-links the canonical
+/// cache namespace from those local bytes when possible.
+fn co_requisite_cache_health(
+    data_dir: &FsPath,
+    download: &Value,
+) -> Option<HuggingFaceCacheHealth> {
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let files = string_array_field(download, "files");
+    let exact_rename = download
+        .get("revision")
+        .and_then(Value::as_str)
+        .and_then(|revision| {
+            sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+        });
+    let current = match exact_rename {
+        Some(rename) => {
+            exact_rename_side_cache_health(data_dir, rename.current_repo, rename, &files)
+        }
+        None => huggingface_repo_cache_path(data_dir, repo)
+            .map(|path| huggingface_cache_health(&path, &files)),
+    };
+    if current.as_ref().is_some_and(|health| health.installed) {
+        return current;
+    }
+
+    let exact_legacy = exact_rename.and_then(|rename| {
+        exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+    });
+
+    match (current, exact_legacy) {
+        (_, Some(legacy)) if legacy.installed => Some(legacy),
+        (Some(current), _) if current.incomplete => Some(current),
+        (_, Some(legacy)) if legacy.incomplete => Some(legacy),
+        (current, legacy) => current.or(legacy),
+    }
+}
+
+fn co_requisite_satisfied_by_exact_legacy_rename(data_dir: &FsPath, download: &Value) -> bool {
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return false;
+    };
+    let files = string_array_field(download, "files");
+    let Some(rename) =
+        sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+    else {
+        return false;
+    };
+    exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+        .is_some_and(|health| health.installed)
+}
+
+/// Evaluate an exact legacy alias with the same canonical-source confinement used by the worker's
+/// load-time relink. A readable symlink is not sufficient: if it escapes the legacy repository
+/// cache, treating it as installed would suppress the canonical repair download even though the
+/// worker must reject it.
+fn exact_rename_side_cache_health(
+    data_dir: &FsPath,
+    repo: &str,
+    rename: &sceneworks_core::hf_repo_renames::HuggingFaceRepoRename,
+    files: &[String],
+) -> Option<HuggingFaceCacheHealth> {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !huggingface_repo_cache_exists(&repo_root) {
+        return Some(HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: Vec::new(),
+        });
+    }
+    let snapshot = repo_root.join("snapshots").join(rename.revision);
+    if sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+        &huggingface_hub_cache_dir(data_dir),
+        &repo_root,
+        &snapshot,
+        rename,
+    )
+    .is_some()
+    {
+        Some(HuggingFaceCacheHealth::installed())
+    } else {
+        Some(HuggingFaceCacheHealth::missing(files.to_vec()))
     }
 }
 

@@ -4029,8 +4029,8 @@
       ]
     },
     {
-      "key": "apple/DFN5B-CLIP-ViT-H-14-384@01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
-      "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
+      "key": "apple/DFN5B-CLIP-ViT-H-14-378@01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
+      "repo": "apple/DFN5B-CLIP-ViT-H-14-378",
       "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
       "resolvedSha": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
       "servedRepo": "apple/DFN5B-CLIP-ViT-H-14-378",

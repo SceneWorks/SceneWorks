@@ -1865,6 +1865,185 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
     Some(dir)
 }
 
+/// Resolve the one immutable file whose Hugging Face repository was renamed upstream.
+///
+/// HF's cache namespace includes the repository id, so correcting a manifest from a dead alias to
+/// its canonical id would otherwise strand already-downloaded multi-GB blobs under the old cache
+/// directory. The shared core declaration is deliberately exact (old id, new id, revision, and
+/// files): this is a cache-only migration, never a network fallback and never permission to borrow
+/// bytes from a different revision. The shared validator returns the confined plain blob path behind
+/// a normal HF snapshot symlink. Returning that file path, rather than the snapshot directory, is
+/// important on Windows: opening the snapshot reparse point can fail with
+/// `ERROR_UNTRUSTED_MOUNT_POINT` even after the link target was independently validated.
+///
+/// The preferred result is a hard-linked canonical entry with no duplicate storage. If that
+/// cache-only materialization cannot be completed safely (for example, the filesystem does not
+/// support hardlinks or a pre-existing destination escapes the canonical cache namespace), return
+/// the already-validated plain legacy source directly. Never repair or copy the legacy snapshot:
+/// this exact single-file seam must not duplicate the ~3.95 GB blob on a no-hardlink filesystem.
+fn resolve_renamed_hf_single_file(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+) -> Option<PathBuf> {
+    resolve_renamed_hf_single_file_using(data_dir, repo, revision, files, |source, destination| {
+        std::fs::hard_link(source, destination)
+    })
+}
+
+/// Create or resolve a relative directory below an already-canonical cache root without following
+/// a pre-existing component symlink outside that root. Components are handled one at a time so no
+/// `create_dir_all` call can write through an unvalidated parent.
+fn ensure_confined_subdirectory(canonical_root: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut current = canonical_root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return None;
+        };
+        let next = current.join(component);
+        match std::fs::symlink_metadata(&next) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&next) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(_) => return None,
+                }
+            }
+            Err(_) => return None,
+        }
+        let canonical_next = std::fs::canonicalize(&next).ok()?;
+        if !canonical_next.is_dir() || !canonical_next.starts_with(canonical_root) {
+            return None;
+        }
+        current = canonical_next;
+    }
+    Some(current)
+}
+
+fn resolve_renamed_hf_single_file_using(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+    hard_link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Option<PathBuf> {
+    let rename =
+        sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, files)?;
+    let [file] = rename.files else {
+        return None;
+    };
+    let hub_cache_root = huggingface_hub_cache_dir(data_dir);
+
+    // Prefer an already-complete canonical cache, but use the validator-returned plain source path
+    // rather than joining through its snapshot entry. This is both the fast path and the Windows
+    // reparse-safe path.
+    if let Some(source) = confined_renamed_hf_single_file(data_dir, rename.current_repo, rename) {
+        return Some(source);
+    }
+
+    let legacy_repo_dir = huggingface_repo_cache_path(data_dir, rename.legacy_repo)?;
+    let legacy_snapshot = safe_join(&legacy_repo_dir.join("snapshots"), revision).ok()?;
+    let (_legacy_snapshot, sources) =
+        sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+            &hub_cache_root,
+            &legacy_repo_dir,
+            &legacy_snapshot,
+            rename,
+        )?;
+    let [legacy_source] = sources.as_slice() else {
+        return None;
+    };
+    let legacy_source = legacy_source.to_path_buf();
+
+    // Build the canonical destination only after proving both its repository root and snapshot
+    // remain inside the configured Hub cache. `safe_join` prevents lexical traversal, while the
+    // canonical checks also reject pre-existing directory symlinks that redirect writes outside
+    // the cache.
+    let current_source = (|| {
+        std::fs::create_dir_all(&hub_cache_root).ok()?;
+        let canonical_hub_root = std::fs::canonicalize(&hub_cache_root).ok()?;
+        let current_repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+        std::fs::create_dir_all(&current_repo_dir).ok()?;
+        let canonical_current_root = std::fs::canonicalize(&current_repo_dir).ok()?;
+        if !canonical_current_root.starts_with(&canonical_hub_root) {
+            return None;
+        }
+        let current_snapshot = ensure_confined_subdirectory(
+            &canonical_current_root,
+            &Path::new("snapshots").join(revision),
+        )?;
+
+        let relative = Path::new(file);
+        let relative_parent = relative.parent()?;
+        let canonical_parent = ensure_confined_subdirectory(&current_snapshot, relative_parent)?;
+        let destination = canonical_parent.join(relative.file_name()?);
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                // A racing writer or pre-existing entry is accepted only through the same exact
+                // confinement validator used by the API. Do not traverse it here.
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match hard_link(&legacy_source, &destination) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(_) => return None,
+                }
+            }
+            Err(_) => return None,
+        }
+        confined_renamed_hf_single_file(data_dir, rename.current_repo, rename)
+    })();
+
+    if let Some(current_source) = current_source {
+        tracing::info!(
+            event = "hf_renamed_repo_cache_relinked",
+            legacy_repo = rename.legacy_repo,
+            repo,
+            revision,
+            source = %current_source.display(),
+            "re-linked a renamed Hugging Face repository file from the existing cache"
+        );
+        Some(current_source)
+    } else {
+        tracing::info!(
+            event = "hf_renamed_repo_cache_legacy_fallback",
+            legacy_repo = rename.legacy_repo,
+            repo,
+            revision,
+            source = %legacy_source.display(),
+            "using the validated plain legacy Hugging Face file because canonical cache materialization is unavailable"
+        );
+        Some(legacy_source)
+    }
+}
+
+/// Resolve the validator-proven plain file behind one side of an exact repository rename. The
+/// returned path is confined to that repository cache and never requires the caller to traverse the
+/// snapshot's final symlink/reparse point.
+fn confined_renamed_hf_single_file(
+    data_dir: &Path,
+    repo: &str,
+    rename: &sceneworks_core::hf_repo_renames::HuggingFaceRepoRename,
+) -> Option<PathBuf> {
+    let [_file] = rename.files else {
+        return None;
+    };
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    let snapshot = safe_join(&repo_root.join("snapshots"), rename.revision).ok()?;
+    sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+        &huggingface_hub_cache_dir(data_dir),
+        &repo_root,
+        &snapshot,
+        rename,
+    )
+    .and_then(|(_, sources)| match sources.as_slice() {
+        [source] => Some(source.to_path_buf()),
+        _ => None,
+    })
+}
+
 /// Resolve a model's **caller-provisioned components** (epic 13657, sc-13679) — the generic worker
 /// seam that turns a provider's [`gen_core::ModelDescriptor::required_components`] advertisement into
 /// the resolved local paths a caller stages in [`gen_core::LoadSpec::components`] (via
@@ -1979,15 +2158,41 @@ pub(crate) fn resolve_co_requisites_for_tier(
                     "{model_id}: the '{component_id}' co-requisite download declares no `repo`"
                 ))
             })?;
-        // Resolve the co-requisite's snapshot cache-only. A co-requisite pins an immutable `revision`
+        let files: Vec<String> = download
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Resolve the co-requisite's cache location cache-only. A co-requisite pins an immutable `revision`
         // (F-029, required by sc-13659) — read THAT exact `snapshots/<sha>/` (like the inference-side
         // `hf_get_pinned`), never `refs/main`, so a companion weight pinned to a non-main commit in a
         // SHARED repo (chatterbox's `ve.safetensors` @ 5bb1f6ee, alongside the primary `refs/main`
         // snapshot) resolves correctly. An unpinned co-requisite falls back to the `refs/main`-preferring
         // resolver.
-        let snapshot = match download.get("revision").and_then(Value::as_str) {
-            Some(revision) => huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision),
-            None => huggingface_snapshot_dir(&settings.data_dir, repo),
+        enum ComponentCacheLocation {
+            ExactRenamedFile(PathBuf),
+            Snapshot(PathBuf),
+        }
+        let location = match download.get("revision").and_then(Value::as_str) {
+            Some(revision)
+                if sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(
+                    repo, revision, &files,
+                )
+                .is_some() =>
+            {
+                resolve_renamed_hf_single_file(&settings.data_dir, repo, revision, &files)
+                    .map(ComponentCacheLocation::ExactRenamedFile)
+            }
+            Some(revision) => huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+                .map(ComponentCacheLocation::Snapshot),
+            None => huggingface_snapshot_dir(&settings.data_dir, repo)
+                .map(ComponentCacheLocation::Snapshot),
         }
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -1996,47 +2201,48 @@ pub(crate) fn resolve_co_requisites_for_tier(
                  predownload {repo} for an offline install"
             ))
         })?;
-        let files: Vec<&str> = download
-            .get("files")
-            .and_then(Value::as_array)
-            .map(|files| files.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        let source = match files.as_slice() {
-            // A single LITERAL filename resolves to that file (chatterbox's `ve.safetensors`). A
-            // single GLOB does not: it names a set, so it must take the directory arm below like any
-            // other multi-entry predicate (sc-14980 — Mage's `["q4/text_encoder/*"]`). Without this
-            // guard the pattern is `safe_join`ed verbatim, `is_file()` is false for a path with a
-            // literal `*` in it, and a correctly-installed component reports as missing.
-            [file] if !file.contains(['*', '?', '[']) => {
-                // `file` comes from the payload `modelManifestEntry`; confine it under the snapshot so
-                // a `..`/absolute entry can't stage an arbitrary host file as this component's weights
-                // (on Windows `join` with an absolute path replaces the base entirely) (sc-13583).
-                let path = safe_join(&snapshot, file)?;
-                if !path.is_file() {
-                    return Err(WorkerError::InvalidPayload(format!(
+        let source = match location {
+            // The exact rename validator already proved this plain path is the one declared file,
+            // readable and confined to the current or legacy repository cache. Do not join back
+            // through the snapshot symlink: Windows may reject that reparse point at open time.
+            ComponentCacheLocation::ExactRenamedFile(path) => gen_core::WeightsSource::File(path),
+            ComponentCacheLocation::Snapshot(snapshot) => match files.as_slice() {
+                // A single LITERAL filename resolves to that file (chatterbox's `ve.safetensors`). A
+                // single GLOB does not: it names a set, so it must take the directory arm below like any
+                // other multi-entry predicate (sc-14980 — Mage's `["q4/text_encoder/*"]`). Without this
+                // guard the pattern is `safe_join`ed verbatim, `is_file()` is false for a path with a
+                // literal `*` in it, and a correctly-installed component reports as missing.
+                [file] if !file.contains(['*', '?', '[']) => {
+                    // `file` comes from the payload `modelManifestEntry`; confine it under the snapshot so
+                    // a `..`/absolute entry can't stage an arbitrary host file as this component's weights
+                    // (on Windows `join` with an absolute path replaces the base entirely) (sc-13583).
+                    let path = safe_join(&snapshot, file)?;
+                    if !path.is_file() {
+                        return Err(WorkerError::InvalidPayload(format!(
                         "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
                          from the cached snapshot — reinstall {model_id} to repair it"
                     )));
+                    }
+                    gen_core::WeightsSource::File(path)
                 }
-                gen_core::WeightsSource::File(path)
-            }
-            [] => gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?),
-            _ => {
-                // Multi-file components are staged as directories because providers join their own
-                // internal paths, but the pre-load all-or-nothing contract still requires every
-                // manifest-declared file or pattern to be present. The declared patterns are
-                // SNAPSHOT-relative (they are what the downloader fetched), while `subdir` narrows
-                // what the provider is handed — so check against the snapshot, stage the subdir.
-                for file in &files {
-                    if !snapshot_contains_declared_file(&snapshot, file)? {
-                        return Err(WorkerError::InvalidPayload(format!(
+                [] => gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?),
+                _ => {
+                    // Multi-file components are staged as directories because providers join their own
+                    // internal paths, but the pre-load all-or-nothing contract still requires every
+                    // manifest-declared file or pattern to be present. The declared patterns are
+                    // SNAPSHOT-relative (they are what the downloader fetched), while `subdir` narrows
+                    // what the provider is handed — so check against the snapshot, stage the subdir.
+                    for file in &files {
+                        if !snapshot_contains_declared_file(&snapshot, file)? {
+                            return Err(WorkerError::InvalidPayload(format!(
                             "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
                              from the cached snapshot — reinstall {model_id} to repair it"
                         )));
+                        }
                     }
+                    gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?)
                 }
-                gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?)
-            }
+            },
         };
         components.insert(component_id.to_owned(), source);
     }
@@ -6381,7 +6587,7 @@ mod co_requisite_tests {
         const MMAUDIO_REV: &str = "eb13a1a98fdbec91753775c57b074ccdfc60587c";
         const CLIP: (&str, &str, &str, &str) = (
             "clip",
-            "apple/DFN5B-CLIP-ViT-H-14-384",
+            "apple/DFN5B-CLIP-ViT-H-14-378",
             "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
             "open_clip_pytorch_model.bin",
         );
@@ -6486,6 +6692,432 @@ mod co_requisite_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn mmaudio_clip_repo_rename_relinks_the_existing_pinned_cache_without_a_fetch() {
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let (_, canonical_clip_repo, clip_revision, clip_file) = *components
+            .iter()
+            .find(|(id, _, _, _)| *id == "clip")
+            .expect("clip component present");
+        let legacy_clip = stage_snapshot_file(
+            data_dir.path(),
+            rename.legacy_repo,
+            clip_revision,
+            clip_file,
+        );
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(data_dir.path(), repo, revision, file);
+            }
+        }
+
+        let resolved = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect("the canonical manifest re-links the exact legacy pinned CLIP cache");
+        let gen_core::WeightsSource::File(canonical_clip) =
+            resolved.get("clip").expect("resolved CLIP component")
+        else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        let expected = huggingface_repo_cache_path(data_dir.path(), canonical_clip_repo)
+            .expect("canonical repo cache")
+            .join("snapshots")
+            .join(clip_revision)
+            .join(clip_file);
+        assert_eq!(
+            canonical_clip,
+            &std::fs::canonicalize(&expected).expect("canonical linked file")
+        );
+        assert_eq!(
+            std::fs::read(canonical_clip).expect("read canonical link"),
+            b"weights"
+        );
+        assert!(legacy_clip.is_file(), "the source cache remains intact");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(
+                std::fs::metadata(&legacy_clip)
+                    .expect("legacy metadata")
+                    .ino(),
+                std::fs::metadata(canonical_clip)
+                    .expect("canonical metadata")
+                    .ino(),
+                "the corrected repo must hard-link the existing blob, not copy or fetch it"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_current_snapshot_symlink_resolves_to_its_validated_plain_blob() {
+        use std::os::unix::fs::symlink;
+
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let current_repo =
+            huggingface_repo_cache_path(data_dir.path(), rename.current_repo).unwrap();
+        let current_snapshot = current_repo.join("snapshots").join(rename.revision);
+        let current_blob = current_repo.join("blobs").join("clip-blob");
+        std::fs::create_dir_all(&current_snapshot).unwrap();
+        std::fs::create_dir_all(current_blob.parent().unwrap()).unwrap();
+        std::fs::write(&current_blob, b"canonical blob bytes").unwrap();
+        symlink(&current_blob, current_snapshot.join(rename.files[0])).unwrap();
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(data_dir.path(), repo, revision, file);
+            }
+        }
+
+        let resolved = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect("the exact current cache resolves without traversing its snapshot symlink");
+        let gen_core::WeightsSource::File(resolved_clip) = &resolved["clip"] else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        assert_eq!(
+            resolved_clip,
+            &std::fs::canonicalize(&current_blob).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(resolved_clip).unwrap(),
+            b"canonical blob bytes"
+        );
+        assert!(
+            !huggingface_repo_cache_path(data_dir.path(), rename.legacy_repo)
+                .unwrap()
+                .exists(),
+            "a valid current cache must not consult or create the legacy namespace"
+        );
+    }
+
+    #[test]
+    fn renamed_snapshot_migration_uses_validated_legacy_when_hardlinks_are_unavailable() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_file = stage_snapshot_file(
+            temp.path(),
+            rename.legacy_repo,
+            rename.revision,
+            rename.files[0],
+        );
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        let resolved = resolve_renamed_hf_single_file_using(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "fixture filesystem has no hardlinks",
+                ))
+            },
+        )
+        .expect("an unsupported hardlink must fall back to the validated legacy file");
+
+        let canonical_file = huggingface_repo_cache_path(temp.path(), rename.current_repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rename.revision)
+            .join(rename.files[0]);
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&legacy_file).unwrap(),
+            "a no-hardlink filesystem must not duplicate a multi-GB immutable blob"
+        );
+        assert!(
+            !canonical_file.exists(),
+            "the direct legacy fallback must not copy the blob into the canonical namespace"
+        );
+        assert_eq!(std::fs::read(&legacy_file).unwrap(), b"weights");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_single_file_symlink_source_bypasses_reparse_when_hardlinks_are_unavailable() {
+        use std::os::unix::fs::symlink;
+
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_repo = huggingface_repo_cache_path(temp.path(), rename.legacy_repo).unwrap();
+        let legacy_snapshot = legacy_repo.join("snapshots").join(rename.revision);
+        let legacy_blob = legacy_repo.join("blobs").join("clip-blob");
+        std::fs::create_dir_all(&legacy_snapshot).unwrap();
+        std::fs::create_dir_all(legacy_blob.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_blob, b"validated blob bytes").unwrap();
+        symlink(&legacy_blob, legacy_snapshot.join(rename.files[0])).unwrap();
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        let resolved = resolve_renamed_hf_single_file_using(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "fixture filesystem has no hardlinks",
+                ))
+            },
+        )
+        .expect("the validated plain blob is the no-hardlink fallback");
+
+        assert_eq!(resolved, std::fs::canonicalize(&legacy_blob).unwrap());
+        assert_eq!(std::fs::read(&resolved).unwrap(), b"validated blob bytes");
+        assert!(
+            std::fs::symlink_metadata(legacy_snapshot.join(rename.files[0]))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the exact rename seam must not rewrite the legacy snapshot symlink"
+        );
+        assert!(
+            !huggingface_repo_cache_path(temp.path(), rename.current_repo)
+                .unwrap()
+                .join("snapshots")
+                .join(rename.revision)
+                .join(rename.files[0])
+                .exists(),
+            "the fallback must not copy the blob into the canonical namespace"
+        );
+
+        // Exercise the actual co-requisite resolver through the same fallback. Poisoning only the
+        // canonical snapshot directory makes materialization unavailable while the validated
+        // legacy blob remains exactly the cache state the API reports as installed.
+        let current_repo = huggingface_repo_cache_path(temp.path(), rename.current_repo).unwrap();
+        std::fs::remove_dir_all(&current_repo).unwrap();
+        std::fs::create_dir_all(&current_repo).unwrap();
+        let outside_snapshots = temp.path().join("outside-snapshots");
+        std::fs::create_dir_all(&outside_snapshots).unwrap();
+        symlink(&outside_snapshots, current_repo.join("snapshots")).unwrap();
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(temp.path(), repo, revision, file);
+            }
+        }
+        let resolved_components = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(temp.path().to_path_buf()),
+        )
+        .expect("production resolution uses the validated plain legacy blob");
+        let gen_core::WeightsSource::File(resolved_clip) = &resolved_components["clip"] else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        assert_eq!(
+            resolved_clip,
+            &std::fs::canonicalize(&legacy_blob).unwrap(),
+            "production must return the validator-proven plain blob path, not its snapshot symlink"
+        );
+        assert_eq!(
+            std::fs::read(resolved_clip).unwrap(),
+            b"validated blob bytes"
+        );
+        assert!(
+            !outside_snapshots.join(rename.revision).exists(),
+            "production must not create through the poisoned canonical snapshot directory"
+        );
+    }
+
+    #[test]
+    fn renamed_snapshot_migration_is_race_safe_and_rejects_wrong_revision() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        stage_snapshot_file(
+            temp.path(),
+            rename.legacy_repo,
+            rename.revision,
+            rename.files[0],
+        );
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                resolve_renamed_hf_single_file(
+                    temp.path(),
+                    rename.current_repo,
+                    rename.revision,
+                    &files,
+                )
+            });
+            let second = scope.spawn(|| {
+                resolve_renamed_hf_single_file(
+                    temp.path(),
+                    rename.current_repo,
+                    rename.revision,
+                    &files,
+                )
+            });
+            assert!(first.join().unwrap().is_some());
+            assert!(second.join().unwrap().is_some());
+        });
+        assert!(resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            "wrong-revision",
+            &files,
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_snapshot_migration_rejects_a_legacy_file_escaping_its_repo_cache() {
+        use std::os::unix::fs::symlink;
+
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_snapshot = huggingface_repo_cache_path(temp.path(), rename.legacy_repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rename.revision);
+        std::fs::create_dir_all(&legacy_snapshot).unwrap();
+        let outside = temp.path().join("outside.bin");
+        std::fs::write(&outside, b"not cache-owned").unwrap();
+        symlink(&outside, legacy_snapshot.join(rename.files[0])).unwrap();
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        assert!(resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_snapshot_migration_falls_back_to_validated_legacy_for_destination_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_file = stage_snapshot_file(
+            temp.path(),
+            rename.legacy_repo,
+            rename.revision,
+            rename.files[0],
+        );
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+        let current_repo = huggingface_repo_cache_path(temp.path(), rename.current_repo).unwrap();
+        std::fs::create_dir_all(&current_repo).unwrap();
+
+        let outside_snapshots = temp.path().join("outside-snapshots");
+        std::fs::create_dir_all(&outside_snapshots).unwrap();
+        symlink(&outside_snapshots, current_repo.join("snapshots")).unwrap();
+        let resolved_file = resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+        )
+        .expect("a poisoned canonical directory must fall back to the valid legacy file");
+        assert_eq!(resolved_file, std::fs::canonicalize(&legacy_file).unwrap());
+        assert!(
+            !outside_snapshots.join(rename.revision).exists(),
+            "validation must happen before creating a directory through an escaping parent"
+        );
+
+        std::fs::remove_file(current_repo.join("snapshots")).unwrap();
+        let current_snapshot = current_repo.join("snapshots").join(rename.revision);
+        std::fs::create_dir_all(&current_snapshot).unwrap();
+        let outside_file = temp.path().join("outside-destination.bin");
+        std::fs::write(&outside_file, b"outside must not be accepted").unwrap();
+        symlink(&outside_file, current_snapshot.join(rename.files[0])).unwrap();
+        let resolved_file = resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+        )
+        .expect("a poisoned canonical file must fall back to the valid legacy file");
+        assert_eq!(resolved_file, std::fs::canonicalize(&legacy_file).unwrap());
+        assert_eq!(
+            std::fs::read(&outside_file).unwrap(),
+            b"outside must not be accepted"
+        );
+
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(temp.path(), repo, revision, file);
+            }
+        }
+        let resolved = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(temp.path().to_path_buf()),
+        )
+        .expect("production must use the validated legacy snapshot without following the poison");
+        let gen_core::WeightsSource::File(resolved_clip) =
+            resolved.get("clip").expect("resolved CLIP component")
+        else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        assert_eq!(
+            std::fs::canonicalize(resolved_clip).unwrap(),
+            std::fs::canonicalize(&legacy_file).unwrap(),
+            "the worker must load the confined legacy file that made the catalog ready"
+        );
+        assert_eq!(
+            std::fs::read(&outside_file).unwrap(),
+            b"outside must not be accepted",
+            "the poisoned canonical destination remains untouched"
+        );
     }
 
     #[test]
