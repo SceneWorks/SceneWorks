@@ -160,30 +160,25 @@ pub(crate) fn ensure_video_engine_weights(
     if krea_realtime_engine_id(&request.model).is_some() {
         resolve_krea_realtime_tier_dir_and_quant(settings, request)?;
     }
-    // MiniMax-H3 (epic 17137 / sc-17159). It is MLX-routed from this commit — every gate from the
-    // API allow-list to `video_mode_is_mlx_eligible` now admits its declared modes — but the mlx
-    // engine is NOT in the pinned inference revision, so no arm of `resolve_video_route` matches
-    // its ids and every job lands on `VideoRoute::Stub`. Without this refusal the stub would hand
-    // the user a PROCEDURAL FAKE CLIP — silently, since a generated-looking mp4 with the requested
-    // geometry is indistinguishable from a real render until watched. That is precisely the
-    // degradation sc-4176 added this gate to prevent, and the same arm Mochi and Krea each needed.
+    // MiniMax-H3 (epic 17137 / sc-19508). Without an arm here a MiniMax-H3 job whose engine or
+    // weights are absent falls to `VideoRoute::Stub` and the user is handed a PROCEDURAL FAKE CLIP
+    // — silently, since a generated-looking mp4 at the requested geometry is indistinguishable from
+    // a real render until watched. That is the degradation sc-4176 added this gate to prevent, and
+    // the same arm Mochi and Krea each needed.
     //
-    // Unconditional rather than snapshot-resolving on purpose: installed weights would not make it
-    // renderable. What makes it renderable is the pin bump (sc-18650) landing
-    // `platform_runtime::providers::minimax_h3` plus the `generate_minimax_h3` dispatch arm
-    // (sc-19508, which REPLACES this arm with the real tier resolver rather than deleting it —
-    // an unprovisioned install must still fail loudly); until then "no engine" is the honest reason
-    // and a weights check would misreport it as "download the tier".
-    // `crates/sceneworks-worker/src/pinned_engine_geometry.rs` carries the two mechanisms that
-    // force this arm to be revisited: `REV_WITHOUT_MINIMAX_H3` (fires on any pin move) and
-    // `minimax_h3_arrival_tripwire` (stops COMPILING the moment the provider is importable).
-    if sceneworks_core::video_request::is_minimax_h3_model(&request.model) {
-        return Err(WorkerError::Engine(format!(
-            "{} cannot render in this build: the MiniMax-H3 MLX engine is not in the pinned \
-             inference revision yet (sc-18650). No output was produced.",
-            request.model
-        )));
-    }
+    // sc-17159 filled this slot with an UNCONDITIONAL refusal carrying a hard-coded "not in the
+    // pinned inference revision" string, because at that commit there was no dispatch arm to fall
+    // through to. sc-19508 substitutes the real gate rather than deleting the guard: it now asks
+    // the REGISTRY whether the engine is linked, checks the conditioning shape against the entry's
+    // DiT partition, and then runs the real tier + shared-component resolver — so a job still fails
+    // loudly at the current pin, an unprovisioned install still fails loudly after the pin bump,
+    // and each failure names its own cause instead of one string covering all three.
+    //
+    // `crates/sceneworks-worker/src/pinned_engine_geometry.rs` still carries the two mechanisms
+    // that force the GEOMETRY tie-in to be revisited on a pin move: `REV_WITHOUT_MINIMAX_H3` and
+    // `minimax_h3_arrival_tripwire`. Neither is touched here — this arm no longer depends on the
+    // pin being any particular revision, which is the point.
+    super::minimax_h3::ensure_minimax_h3_renderable(request, settings)?;
     Ok(())
 }
 
@@ -1303,6 +1298,15 @@ pub(super) struct VideoGenInput {
     /// takes the bespoke uncached load path (`load_from_comfyui_experts`) instead of the registry
     /// snapshot; `None` on every other job.
     pub(super) comfyui: Option<ComfyuiWanExperts>,
+    /// MiniMax-H3's tiered DiT directory (epic 17137, sc-19508) — staged in
+    /// `LoadSpec::components["transformer"]`. `None` on every other model.
+    ///
+    /// MiniMax-H3 is the first video family whose tiered weights live in a DIFFERENT repo from its
+    /// shared components: the pre-quantized DiT partitions come from `SceneWorks/minimax-h3-mlx`
+    /// while the text encoder, tokenizer and both VAEs come from the upstream `MiniMaxAI/MiniMax-H3`
+    /// snapshot. `model_dir` (⇒ `spec.weights`) can only name one root, so the other has to ride the
+    /// components map — the same mechanism LTX's optional `uncensored_enhancer` uses.
+    pub(super) dit_component_dir: Option<PathBuf>,
     /// Residency policy for the load (sc-12631). Defaults to [`OffloadPolicy::Resident`] — the historical
     /// video behavior (every component held for the whole run). The candle A14B (two 14B experts swapped
     /// one-resident-at-a-time) and the dense 5B (TE/VAE flushed off-GPU around the denoise, sc-13175) flip
@@ -1351,6 +1355,7 @@ impl Default for VideoGenInput {
             text_encoder_dir: None,
             uncensored_enhancer_dir: None,
             comfyui: None,
+            dit_component_dir: None,
             offload_policy: OffloadPolicy::Resident,
         }
     }
@@ -1387,17 +1392,30 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // is currently an explicit Z-Image load shape, independent of phase residency (SC-15998).
         load_shape: Default::default(),
         // Named model components (epic 13657). Video providers advertise no `required_components`, so the
-        // map is empty by default. The one exception is LTX-2.3's OPTIONAL `uncensored_enhancer` (sc-2845
-        // / sc-13664): when a `useUncensoredEnhancer` job resolved the amoral 4-bit Gemma snapshot, stage
-        // it here so the provider loads it on demand instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` /
-        // HF-cache scan. Absent ⇒ empty map, the video load path unchanged.
-        components: input
-            .uncensored_enhancer_dir
-            .clone()
-            .map(|dir| {
-                BTreeMap::from([("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))])
-            })
-            .unwrap_or_default(),
+        // map is empty by default. Two OPTIONAL components ride it:
+        //
+        // * LTX-2.3's `uncensored_enhancer` (sc-2845 / sc-13664): when a `useUncensoredEnhancer` job
+        //   resolved the amoral 4-bit Gemma snapshot, stage it here so the provider loads it on demand
+        //   instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan.
+        // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
+        //   different repo from its shared components, and `weights` can only name one root.
+        //
+        // Both absent ⇒ empty map, the video load path unchanged. The two never co-occur (different
+        // families), but they are collected rather than branched so adding a third cannot silently
+        // drop one.
+        components: [
+            input
+                .uncensored_enhancer_dir
+                .clone()
+                .map(|dir| ("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))),
+            input
+                .dit_component_dir
+                .clone()
+                .map(|dir| ("transformer".to_owned(), WeightsSource::Dir(dir))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<BTreeMap<_, _>>(),
     }
 }
 
