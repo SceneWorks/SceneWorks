@@ -607,11 +607,23 @@ pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// the peft-LoKr-on-Wan merge has existed since sc-2393, and the old `create_video_adapter` torch
 /// gate was a routing caution, never an engine limit.
 pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    video_request_is_mlx_eligible(&job.job_type, &job.payload)
+}
+
+/// The `(job_type, payload)` form of [`video_job_is_mlx_eligible`] — the same predicate, reachable
+/// before a [`JobSnapshot`] exists (sc-19504). `create_video_job` holds exactly this pair at
+/// enqueue time and must be able to ask the REAL gate whether any lane will claim the job it is
+/// about to write; a second, re-typed copy of these rules is the false-green shape that let
+/// GH #2074 and sc-15328 ship. See [`super::gaps::video_request_is_claimable_by_any_lane`].
+pub(crate) fn video_request_is_mlx_eligible(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+) -> bool {
     // The base `video_generate` job type plus the advanced job types: the clip-conditioning
     // `video_extend` / `video_bridge` (sc-3522, LTX IC-LoRA) and `person_replace` (sc-3521 →
     // Wan-VACE). The per-model/per-mode gate below keeps each mode to its capable engines.
     if !matches!(
-        job.job_type,
+        job_type,
         JobType::VideoGenerate
             | JobType::VideoExtend
             | JobType::VideoBridge
@@ -619,7 +631,7 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     ) {
         return false;
     }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
@@ -631,12 +643,11 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     // `mode` — a missing/stale `mode` on those types must not fall through to the
     // `image_to_video` default and route incorrectly. The base `video_generate` type reads
     // the payload `mode` (default `image_to_video`, mirroring `video_request_from_job`).
-    let mode = match job.job_type {
+    let mode = match job_type {
         JobType::VideoExtend => "extend_clip",
         JobType::VideoBridge => "video_bridge",
         JobType::PersonReplace => "replace_person",
-        _ => job
-            .payload
+        _ => payload
             .get("mode")
             .and_then(Value::as_str)
             .unwrap_or("image_to_video"),

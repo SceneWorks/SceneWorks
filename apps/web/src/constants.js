@@ -789,7 +789,10 @@ const seededFallbackModels = [
     id: "wan_2_2_i2v_14b",
     name: "Wan2.2 14B (I2V)",
     type: "video",
-    capabilities: ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+    // No `first_last_frame` (sc-19504): neither engine has a keyframe path on the A14B. This mirror
+    // is what the picker reads BEFORE the catalog loads, so a stale capability here re-offers the
+    // dead tab for that whole window — `declared video capabilities are all offerable` pins it.
+    capabilities: ["image_to_video", "extend_clip", "video_bridge"],
     defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
     limits: {
       durations: [3, 4, 5],
