@@ -3805,8 +3805,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
             return false;
         }
-        // Video upscale (epic 4811 / sc-4816): the mlx worker runs the native SeedVR2 engine
-        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; this is mac-only by construction.
+        // Video upscale (epic 4811 / sc-4816): the MLX worker runs the native SeedVR2 engine
+        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; Candle owns the same SeedVR2-only
+        // contract off-Mac.
         if matches!(job.job_type, JobType::VideoUpscale) && !video_upscale_job_is_mlx_eligible(job)
         {
             return false;

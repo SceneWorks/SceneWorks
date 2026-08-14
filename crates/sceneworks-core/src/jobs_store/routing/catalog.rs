@@ -332,7 +332,8 @@ pub struct MacCapabilities {
 pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilities {
     // `std::env::consts::OS` is `"macos"` (the API host's OS, passed by the capabilities handler);
     // accept the legacy `"darwin"` alias defensively. Drives the platform-intrinsic engine flags
-    // (e.g. `imageUpscaleSeedvr2`, which is Mac-only) rather than the gating-rollout flag.
+    // (e.g. `imageUpscaleSeedvr2`, which follows native MLX or Candle availability) rather than the
+    // gating-rollout flag.
     let is_mac = matches!(platform, "macos" | "darwin");
     // SeedVR2 has a backend on Mac (native MLX) and on Windows + Linux (the candle CUDA/NVIDIA port:
     // Windows sc-5928, Linux sc-5160 — candle is CPU+CUDA cross-platform so Linux rides the Windows
@@ -455,11 +456,9 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
-        // Video upscaling is net-new on Mac (epic 4811 / sc-4816): the native-MLX SeedVR2
-        // engine gives SceneWorks its first video upscaler, running in-process on the macOS
-        // MLX worker. There is no fallback (mac-only), so this feature is
-        // the gate for the Video Studio "Upscale" action. Must agree with the VideoUpscale arm
-        // of `mac_rust_supported` (what the UI shows == what routing accepts).
+        // SeedVR2 gives SceneWorks its first video upscaler: native MLX on Mac (epic 4811 / sc-4816)
+        // and native Candle/CUDA on Windows/Linux (sc-5928 / sc-5160). This platform feature gates
+        // the Video Studio "Upscale" action and must agree with routing.
         "videoUpscale".to_owned(),
         MacFeatureSupport {
             supported: true,
@@ -713,12 +712,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // (standard_tier_subdir), so a quant tier-select AND a LoRA both stay on the candle lane for the
     // plain few-step txt2img shape → `candle_quant_lora`. bf16 still resolves to Quant::None (dense).
     ModelCaps::new("realvisxl_lightning", true, true, false, false, true),
-    // InstantID on RealVisXL (sc-3345): MLX-only id — single-identity + the 11-view angle set route to
-    // the native `mlx-gen-instantid` provider (candle serves it via the bespoke `instantid_candle_eligible`
-    // lane, not the txt2img gate, so it is NOT a candle-routed txt2img id).
+    // InstantID on RealVisXL (sc-3345): identity-only id — single-identity + the 11-view angle set use
+    // native MLX on Mac and the bespoke `instantid_candle_eligible` lane off-Mac. It is intentionally
+    // NOT a candle-routed plain-txt2img id.
     ModelCaps::new("instantid_realvisxl", true, false, false, false, false),
-    // PuLID-FLUX on FLUX.1-dev (sc-3344): MLX-only id — `character_image` with a reference face (candle
-    // serves it via the bespoke `pulid_flux_candle_eligible` lane, not the txt2img gate).
+    // PuLID-FLUX on FLUX.1-dev (sc-3344): `character_image` with a reference face runs through native
+    // MLX or the bespoke `pulid_flux_candle_eligible` lane, not the plain txt2img gate.
     ModelCaps::new("pulid_flux_dev", true, false, false, false, false),
     // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). Pure txt2img on candle.
     ModelCaps::new("chroma1_hd", true, true, false, true, false),
@@ -835,7 +834,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // image-caps row.
     ModelCaps::new("krea_2_raw", true, true, false, false, true),
     // Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841 / sc-7871 MLX; sc-7880 candle):
-    // pure txt2img. Candle advertises Q4/Q8 (sc-7879) and applies LoRA/LoKr on every tier.
+    // txt2img plus singular-reference latent-init img2img (epic 8588 A4 / sc-10189). Candle advertises
+    // Q4/Q8 (sc-7879) and applies LoRA/LoKr on every tier.
     ModelCaps::new("sd3_5_large", true, true, false, false, true),
     ModelCaps::new("sd3_5_large_turbo", true, true, false, false, true),
     ModelCaps::new("sd3_5_medium", true, true, false, false, true),

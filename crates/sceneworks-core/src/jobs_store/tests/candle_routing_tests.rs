@@ -2994,7 +2994,8 @@ fn mlx_worker_claims_seedvr2_video_upscale_and_refuses_other_engines() {
         &mlx,
         &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
     ));
-    // A non-SeedVR2 engine is refused by the mlx worker (mac-only; nowhere else to run).
+    // A non-SeedVR2 engine is refused by the MLX worker; the off-Mac Candle lane enforces the same
+    // SeedVR2-only contract.
     assert!(!worker_supports_job(
         &mlx,
         &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "aura-sr" }))

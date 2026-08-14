@@ -50,6 +50,7 @@ import {
   derivePreviewSupport,
   parseBespokePreviewRoutes,
   parseEngineModelTable,
+  parsePulidPreviewRoutes,
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
 } from "../src/data/previewSupportDerivation.js";
@@ -67,6 +68,12 @@ const qwenEditCandlePath = fileURLToPath(
     "../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
     import.meta.url,
   ),
+);
+const pulidMlxPath = fileURLToPath(
+  new URL("../../../crates/sceneworks-worker/src/image_jobs/pulid.rs", import.meta.url),
+);
+const pulidCandlePath = fileURLToPath(
+  new URL("../../../crates/sceneworks-worker/src/image_jobs/pulid_candle.rs", import.meta.url),
 );
 // The declared backend list (sc-17119). Read from the Rust const rather than the directory listing,
 // because the directory listing cannot see a file that was never written.
@@ -127,11 +134,18 @@ assertBackendCoverage(
   "audio",
 );
 
+const bespokePreviewRoutes = [
+  ...parseBespokePreviewRoutes(readFileSync(qwenEditCandlePath, "utf8")),
+  ...parsePulidPreviewRoutes(
+    readFileSync(pulidMlxPath, "utf8"),
+    readFileSync(pulidCandlePath, "utf8"),
+  ),
+];
 const catalog = derivePreviewSupport(
   parseEngineModelTable(readFileSync(enginesPath, "utf8")),
   factsFiles,
   audioFactsFiles,
-  parseBespokePreviewRoutes(readFileSync(qwenEditCandlePath, "utf8")),
+  bespokePreviewRoutes,
 );
 
 writeFileSync(manifestPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");

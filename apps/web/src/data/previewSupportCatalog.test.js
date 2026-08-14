@@ -6,6 +6,7 @@ import {
   derivePreviewSupport,
   parseBespokePreviewRoutes,
   parseEngineModelTable,
+  parsePulidPreviewRoutes,
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
   PREVIEW_SUPPORT_GENERATOR,
@@ -16,6 +17,8 @@ import previewSupport from "./previewSupport.json";
 // style.txt / builtin.styles.jsonc pair).
 import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
 import qwenEditCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs?raw";
+import pulidMlxSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid.rs?raw";
+import pulidCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid_candle.rs?raw";
 import previewSupportManifestRaw from "../../../../config/manifests/builtin.preview-support.jsonc?raw";
 // The inference pin itself. `verifyEngineCapabilityFacts` in scripts/bump-inference.mjs compares the
 // facts files against it, but that script runs only when someone bumps THROUGH it — CI never invokes
@@ -56,7 +59,12 @@ const audioFactsEntries = Object.entries(audioFactsModules)
 const audioFactsFiles = audioFactsEntries.map((entry) => entry.facts);
 
 const rows = parseEngineModelTable(enginesSource);
-const bespokePreviewRoutes = parseBespokePreviewRoutes(qwenEditCandleSource);
+const qwenPreviewRoutes = parseBespokePreviewRoutes(qwenEditCandleSource);
+const pulidPreviewRoutes = parsePulidPreviewRoutes(pulidMlxSource, pulidCandleSource);
+const bespokePreviewRoutes = [
+  ...qwenPreviewRoutes,
+  ...pulidPreviewRoutes,
+];
 const derived = derivePreviewSupport(rows, factsFiles, audioFactsFiles, bespokePreviewRoutes);
 const bespokePreviewKeys = new Set(
   bespokePreviewRoutes.map((route) => `${route.modelId}\u0000${route.backend}`),
@@ -142,7 +150,7 @@ describe("preview-support catalog: the artifacts are derived, not authored", () 
 
 describe("preview-support catalog: bespoke Candle Qwen-Edit preview", () => {
   it("derives the two live catalog routes from the worker's exact sink-bearing declaration", () => {
-    expect(bespokePreviewRoutes).toEqual([
+    expect(qwenPreviewRoutes).toEqual([
       { modelId: "qwen_image_edit_2511", backend: "candle", supportsPreview: true },
       {
         modelId: "qwen_image_edit_2511_lightning",
@@ -150,7 +158,7 @@ describe("preview-support catalog: bespoke Candle Qwen-Edit preview", () => {
         supportsPreview: true,
       },
     ]);
-    for (const route of bespokePreviewRoutes) {
+    for (const route of qwenPreviewRoutes) {
       expect(previewSupport.models[route.modelId]?.[route.backend]).toBe(true);
     }
   });
@@ -170,6 +178,40 @@ describe("preview-support catalog: bespoke Candle Qwen-Edit preview", () => {
         { modelId: "not_a_shipped_model", backend: "candle", supportsPreview: true },
       ]),
     ).toThrow(/unknown MODEL_TABLE id/);
+  });
+});
+
+describe("preview-support catalog: direct-dispatch PuLID preview", () => {
+  it("derives both native preview sinks from their exact worker requests", () => {
+    expect(pulidPreviewRoutes).toEqual([
+      {
+        modelId: "pulid_flux_dev",
+        backend: "mlx",
+        supportsPreview: true,
+        directDispatch: true,
+      },
+      {
+        modelId: "pulid_flux_dev",
+        backend: "candle",
+        supportsPreview: true,
+        directDispatch: true,
+      },
+    ]);
+    expect(previewSupport.models.pulid_flux_dev).toEqual({ candle: true, mlx: true });
+  });
+
+  it("fails closed if either direct request drops its live sink", () => {
+    const withoutMlxSink = pulidMlxSource.replace(/\n\s*preview,\n/, "\n");
+    expect(() => parsePulidPreviewRoutes(withoutMlxSink, pulidCandleSource)).toThrow(
+      /MLX GenerationRequest has no live preview sink/,
+    );
+    const withoutCandleSink = pulidCandleSource.replace(
+      /\n\s*preview:\s*preview\.clone\(\),\n/,
+      "\n",
+    );
+    expect(() => parsePulidPreviewRoutes(pulidMlxSource, withoutCandleSink)).toThrow(
+      /Candle PulidFluxRequest has no live preview sink/,
+    );
   });
 });
 

@@ -132,6 +132,28 @@ describe("ImageStudio Save as Preset", () => {
     expect(document.body.textContent).not.toContain("Custom size overrides the Aspect dropdown");
   });
 
+  it("normalizes a retired style-variations launch into the live Text mode", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({
+      createImageJob,
+      selectedAsset: { id: "asset-1", type: "image", name: "Legacy render" },
+      studioLaunch: {
+        id: "legacy-style-launch",
+        view: "Image",
+        assetId: "asset-1",
+        mode: "style_variations",
+      },
+    }));
+
+    const textTab = [...container.querySelectorAll(".mode-tabs button")]
+      .find((button) => button.textContent === "Text");
+    expect(textTab?.getAttribute("aria-selected")).toBe("true");
+
+    await click([...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Generate"));
+    expect(createImageJob.mock.calls[0][0].mode).toBe("text_to_image");
+  });
+
   it("snapshots the current config into a preset payload without the seed", async () => {
     const context = baseContext();
     await render(context);
@@ -165,7 +187,7 @@ describe("ImageStudio Save as Preset", () => {
           scope: "project",
           workflow: "text_to_image",
           model: "z_image_turbo",
-          modes: ["text_to_image", "character_image", "style_variations"],
+          modes: ["text_to_image", "character_image"],
         },
       ],
     });
@@ -812,11 +834,11 @@ describe("ImageStudio model picker capability gating", () => {
 
   // One model per capability class so each mode's picker can be checked in isolation.
   const T2I = { ...Z_IMAGE, id: "t2i_only", name: "T2I Only", capabilities: ["text_to_image"] };
-  const VARIATIONS = {
+  const T2I_ALTERNATE = {
     ...Z_IMAGE,
-    id: "variations_model",
-    name: "Variations Model",
-    capabilities: ["text_to_image", "style_variations"],
+    id: "alternate_t2i_model",
+    name: "Alternate T2I Model",
+    capabilities: ["text_to_image"],
   };
   const EDIT_ONLY = { ...Z_IMAGE, id: "edit_only", name: "Edit Only", capabilities: ["edit_image", "image_to_image"] };
   const CHARACTER_ONLY = { ...Z_IMAGE, id: "character_only", name: "Character Only", capabilities: ["character_image"] };
@@ -866,11 +888,11 @@ describe("ImageStudio model picker capability gating", () => {
     [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === label);
 
   it("Text tab lists only text_to_image models, excluding edit-only and character-only (sc-5549)", async () => {
-    await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
+    await render(baseContext({ imageModels: [EDIT_ONLY, T2I, T2I_ALTERNATE, CHARACTER_ONLY] }));
 
     const options = modelOptionValues();
     expect(options).toContain("t2i_only");
-    expect(options).toContain("variations_model"); // declares text_to_image
+    expect(options).toContain("alternate_t2i_model");
     expect(options).not.toContain("edit_only");
     expect(options).not.toContain("character_only");
   });

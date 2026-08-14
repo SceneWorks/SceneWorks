@@ -2,7 +2,7 @@
 // zimage), the candle edit handlers (*_edit_candle.rs), and the video I2V resolve paths
 // (video_jobs.rs). Kept in base.rs — included on macOS AND the `backend-candle` lane (and nowhere
 // else) — so `crate::image_jobs::fit_engine_image` resolves on exactly the lanes that call it. Moved
-// here from the macOS-only flux2.rs (sc-6231; the sc-6139 fit-mode refactor left it macOS-gated, which
+// here from the macOS MLX flux2.rs (sc-6231; the sc-6139 fit-mode refactor left the shared helper macOS-gated, which
 // broke the candle build because video_jobs.rs / the candle edit handlers call it). No `#[cfg]` here:
 // availability follows base.rs's own include cfg, which matches the callers'.
 
@@ -108,18 +108,18 @@ enum ImageRoute {
     /// An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
     /// `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
     /// assembly lane, which pairs the imported transformer with a resident `krea_2` base tier (shared
-    /// Qwen3-VL TE / Qwen VAE / tokenizer) and loads via the S0b MLX native single-file entrypoint. A
+    /// Qwen3-VL TE / Qwen VAE / tokenizer) and loads through the native MLX or Candle single-file
+    /// entrypoint. A
     /// builtin Krea id (`krea_2_turbo` / `krea_2_raw`, in `MODEL_TABLE`) never reaches here —
     /// `resolve_imported_krea_dit` returns `None` for it, so the snapshot-dir Krea path is untouched.
-    /// txt2img only (a bare imported DiT carries no conditioning components).
+    /// The resident base tier supplies the img2img/edit conditioning and LoRA/LoKr components.
     KreaImported,
     /// An imported/user single-file Krea 2 checkpoint carrying a **strict-pose set** (a non-empty
     /// `advanced.poses` outside edit mode): the trained pose control-branch overlay rides the
-    /// FILE-LOADED imported DiT via the MLX native control entrypoint
-    /// (`load_control_from_native_dit_file`), one image per pose — the imported twin of
+    /// FILE-LOADED imported DiT via the native MLX or Candle control entrypoint, one image per pose
+    /// — the imported twin of
     /// [`ImageRoute::KreaControl`]. Claimed BEFORE the plain [`ImageRoute::KreaImported`] arm so a
-    /// pose set gets the per-pose count + control render instead of per-image t2i. MLX-only
-    /// (`KREA_IMPORTED_SUPPORTS_POSE_CONTROL`); the candle imported lane has no control path.
+    /// pose set gets the per-pose count + control render instead of per-image generation.
     KreaImportedControl,
     /// A fused SDXL LDM/A1111 single-file checkpoint. The file carries the UNet, both text encoders,
     /// and VAE; tokenizer assets are borrowed from the installed SDXL base turnkey.
@@ -262,9 +262,9 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
         // `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
         // assembly lane. A builtin Krea id never claims this (`resolve_imported_krea_dit` returns `None`
-        // for a `MODEL_TABLE` id), so the generic `mlx_available` snapshot-dir arm below is unchanged for
-        // builtin Krea. The imported id is in no `MODEL_TABLE`, so `mlx_available` is `false` for it — this
-        // arm is what routes it to real MLX generation at all (S0d marked it Mac-routable; this loads it).
+        // for a `MODEL_TABLE` id), so the generic registry-backed snapshot-dir arms are unchanged for
+        // builtin Krea. Imported ids are not in `MODEL_TABLE`; the bespoke MLX/Candle gates claim them
+        // here for text-to-image, img2img/edit, and adapter-bearing generation.
         Some(ImageRoute::KreaImported)
     } else if sdxl_imported_available(request, settings) {
         Some(ImageRoute::SdxlImported)
@@ -379,8 +379,8 @@ impl ImageRoute {
             // Multi-phase (S4) is likewise plain per-image: `count` renders, each its own seed, driven
             // through the phase plan. No angle/pose grouping.
             | ImageRoute::KreaMultiPhase
-            // Imported single-file Krea 2 (S0c) is plain per-image txt2img: `count` renders, each its own
-            // seed. No angle/pose grouping (a bare imported DiT carries no conditioning).
+            // Imported single-file Krea 2 renders `count` images here for text-to-image or reference/edit
+            // conditioning; strict-pose requests use the separate control route above.
             | ImageRoute::KreaImported
             | ImageRoute::SdxlImported
             // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
@@ -943,8 +943,9 @@ fn resolve_candle_image_route(
     } else if krea_imported_control_available(request, settings) {
         Some(CandleImageRoute::KreaImportedControl)
     } else if krea_imported_available(request, settings) {
-        // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
-        // this bespoke route must claim them before the generic/external fall-through.
+        // Imported/user Krea 2 single-file generation: external IDs are absent from
+        // `is_candle_engine`, so this bespoke text-to-image/img2img/edit route must claim them before
+        // the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
     } else if mage_finetuned_available(request, settings) {
         Some(CandleImageRoute::MageFinetuned)
@@ -5692,7 +5693,8 @@ fn resolve_identity_init(
 /// The single `Conditioning::Reference` this produces is routed by the engine to
 /// `generate_turbo_img2img` (sc-10135), whose `preprocess_init_image` LANCZOS-resizes the reference to
 /// the output W×H — so, like Z-Image's [`resolve_identity_init`], the reference is fed raw (the
-/// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea's t2i-only surface).
+/// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea Turbo's
+/// reference-guided img2img surface).
 ///
 /// Available to the candle lane too (sc-10134): the candle `generate_candle_stream` calls this to resolve
 /// the Krea 2 Turbo img2img init off-Mac, feeding the same `(image, strength)` into `generate_one`'s

@@ -16,16 +16,15 @@
 // ## Why the result is engine-KEYED and not a boolean
 //
 // `supports_streaming` is a property of the model, so the audio catalog ships one flag. Preview
-// support is a property of **the engine that runs it**: during epic 16948's rollout `krea_2_turbo`
-// is `true` on MLX/macOS and `false` on candle/Windows — same model id, same app version, two
-// answers. It does not fully collapse when the epic completes either: SenseNova-U1 is candle-only
-// and MLX never wired it (sc-16960), so at least one route stays split permanently. A single
-// shipped boolean is wrong in every ordering, so the derived value is a `{ backend: bool }` map.
+// support is a property of **the engine that runs it**. Provider routes and preview sinks can land
+// independently on MLX and Candle, so the same model id and app version can temporarily have two
+// answers. A single shipped boolean is wrong in that ordering, so the derived value is a
+// `{ backend: bool }` map even when the current routes happen to agree.
 //
 // ## Absence is UNKNOWN, never false
 //
 // A backend key is emitted only when that backend's facts file actually contains the engine id. A
-// backend that never registered the engine (no candle Mage, no MLX SenseNova), or a backend whose
+// backend that never registered a given engine, or a backend whose
 // facts file has not been dumped on this checkout, produces NO key — the consumer reads that as
 // "unknown" and renders exactly as it did before this story. Under-claiming is invisible;
 // over-claiming would leave a placeholder up forever on a route that never emits.
@@ -294,6 +293,38 @@ export function parseBespokePreviewRoutes(rustSource) {
 }
 
 /**
+ * Parse the direct-dispatch PuLID preview routes from both platform worker implementations.
+ * PuLID is intentionally absent from MODEL_TABLE: MLX loads the registry engine through its
+ * identity route and Candle calls its bespoke provider by name. The exact model constants and live
+ * request sinks in these two files are therefore the authority for the derived catalog entries.
+ */
+export function parsePulidPreviewRoutes(mlxSource, candleSource) {
+  if (typeof mlxSource !== "string" || typeof candleSource !== "string") {
+    throw new Error("parsePulidPreviewRoutes: expected MLX and Candle PuLID source text");
+  }
+  const mlx = stripRustComments(mlxSource, "parsePulidPreviewRoutes: pulid.rs");
+  const candle = stripRustComments(candleSource, "parsePulidPreviewRoutes: pulid_candle.rs");
+  const modelId = /const\s+PULID_MODEL:\s*&str\s*=\s*"([a-z0-9_]+)";/.exec(mlx)?.[1];
+  const candleModelId =
+    /const\s+PULID_CANDLE_MODEL:\s*&str\s*=\s*"([a-z0-9_]+)";/.exec(candle)?.[1];
+  if (!modelId || modelId !== candleModelId) {
+    throw new Error("parsePulidPreviewRoutes: platform model declarations are missing or disagree");
+  }
+  if (!/GenerationRequest\s*\{[\s\S]*?\bpreview,\s*[\s\S]*?\};/.test(mlx)) {
+    throw new Error("parsePulidPreviewRoutes: MLX GenerationRequest has no live preview sink");
+  }
+  if (!/PulidFluxRequest\s*\{[\s\S]*?\bpreview:\s*preview\.clone\(\),[\s\S]*?\};/.test(candle)) {
+    throw new Error("parsePulidPreviewRoutes: Candle PulidFluxRequest has no live preview sink");
+  }
+  return ["mlx", "candle"].map((backend) => ({
+    modelId,
+    backend,
+    supportsPreview: true,
+    directDispatch: true,
+  }));
+}
+
+/**
  * Parse one declared `&[&str]` backend list out of
  * `crates/sceneworks-worker/src/engine_capability_facts.rs`.
  *
@@ -546,7 +577,7 @@ const byBackendName = (left, right) =>
  * @param {{sceneworksId: string, engineId: string}[]} rows from {@link parseEngineModelTable}
  * @param {{backend: string, generatedFrom?: object, engines: object[]}[]} factsFiles media stage-1 dumps
  * @param {{backend: string, registry: string, generatedFrom?: object, engines: object[]}[]} audioFactsFiles audio stage-1 dumps
- * @param {{modelId: string, backend: string, supportsPreview: boolean}[]} bespokePreviewRoutes exact direct-dispatch routes parsed from worker source
+ * @param {{modelId: string, backend: string, supportsPreview: boolean, directDispatch?: boolean}[]} bespokePreviewRoutes exact direct-dispatch routes parsed from worker source
  * @returns the canonical catalog object both artifacts are written from
  */
 export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = [], bespokePreviewRoutes = []) {
@@ -611,13 +642,14 @@ export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = [], bes
     if (
       typeof route?.modelId !== "string" ||
       typeof route?.backend !== "string" ||
-      route?.supportsPreview !== true
+      route?.supportsPreview !== true ||
+      ![undefined, true].includes(route?.directDispatch)
     ) {
       throw new Error(
         `derivePreviewSupport: malformed bespoke preview route ${JSON.stringify(route)}`,
       );
     }
-    if (!modelIds.has(route.modelId)) {
+    if (!modelIds.has(route.modelId) && route.directDispatch !== true) {
       throw new Error(
         `derivePreviewSupport: bespoke preview route names unknown MODEL_TABLE id ${route.modelId}`,
       );

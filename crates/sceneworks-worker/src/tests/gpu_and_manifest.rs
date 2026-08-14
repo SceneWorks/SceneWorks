@@ -350,8 +350,8 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6539: Dataset Doctor one-tap upscale — reuses the Real-ESRGAN engine, advertised
         // wherever image_upscale is.
         WorkerCapability::DatasetUpscale,
-        // sc-6105: smart-select segmentation (native-MLX SAM3 box-prompt) — Mac-only, advertised
-        // only here so an `image_segment` job routes to the MLX worker by construction.
+        // sc-6105: smart-select segmentation uses native-MLX SAM3 box prompts here; the Candle GPU
+        // descriptor advertises the sibling route off-Mac.
         WorkerCapability::ImageSegment,
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,

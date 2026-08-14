@@ -232,7 +232,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_qwen",
     },
-    // FLUX.2-klein (sc-3025) — MLX-only family (no torch fallback). All three SceneWorks
+    // FLUX.2-klein (sc-3025) — native MLX on Mac and Candle/CUDA off-Mac (no Python fallback). All three SceneWorks
     // variants share the engine's single txt2img model `flux2_klein_9b` (edit + KV-cache
     // are the separate `*_edit`/`*_kv_edit` engine models, story sc-3029); the variants
     // differ only in their weights. Distilled klein runs guidance 1.0 (CFG-free) with no

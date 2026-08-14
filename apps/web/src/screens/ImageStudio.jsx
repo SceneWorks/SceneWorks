@@ -694,7 +694,7 @@ export function ImageStudio() {
       setFaceRestore(false);
     }
     if (launchRequest.characterId) {
-      setMode(launchRequest.mode ?? "character_image");
+      setMode(normalizeImageMode(launchRequest.mode ?? "character_image"));
       setCharacterId(launchRequest.characterId);
       setCharacterLookId(launchRequest.lookId ?? "");
       if (launchRequest.referenceAssetId) {
@@ -705,7 +705,7 @@ export function ImageStudio() {
     if (launchRequest.assetId !== selectedAsset?.id) {
       return;
     }
-    setMode(launchRequest.mode);
+    setMode(normalizeImageMode(launchRequest.mode));
     // Preselect the family-matched edit model resolved at launch time (App.jsx). It's
     // edit-capable by construction, so the availableModels snap-to-first effect leaves
     // it in place; when absent the snap falls back to the default edit model.

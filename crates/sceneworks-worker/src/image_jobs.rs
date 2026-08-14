@@ -3031,8 +3031,8 @@ include!("image_jobs/sdxl_imported.rs");
 // Fine-tuned Mage-Flow base checkpoint routing (sc-15036, epic 14034 F6): the `transformer/`-shaped
 // artifact a FULL base fine-tune writes, paired at load with the installed base's shared text
 // encoder + VAE and rendered through the `load_finetuned` entrypoint that skips the pinned-
-// checkpoint identity guard a fine-tune necessarily fails. macOS/MLX only — the Mage generator is
-// `mac_only` and there is no candle Mage engine.
+// checkpoint identity guard a fine-tune necessarily fails. The shared request path uses native MLX
+// on macOS and the native Candle Mage engine on CUDA hosts.
 include!("image_jobs/mage_finetuned.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.

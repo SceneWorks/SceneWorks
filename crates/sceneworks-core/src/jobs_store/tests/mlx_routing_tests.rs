@@ -448,8 +448,8 @@ fn qwen_edit_without_reference_falls_back_to_torch() {
 
 #[test]
 fn flux2_txt2img_edit_and_lycoris_all_route_mlx() {
-    // FLUX.2 is MLX-only: txt2img (sc-3025), edit/reference (sc-3029), and — since epic 3641 —
-    // third-party LyCORIS all route MLX.
+    // FLUX.2 txt2img (sc-3025), edit/reference (sc-3029), and — since epic 3641 — third-party
+    // LyCORIS all route MLX on Mac; native Candle owns the corresponding off-Mac lanes.
     assert!(flux2_mlx_eligible(&object(
         json!({ "prompt": "a red fox" })
     )));

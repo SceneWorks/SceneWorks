@@ -153,6 +153,10 @@
     "moss_ttsd_v05": {
       "candle": false
     },
+    "pulid_flux_dev": {
+      "mlx": true,
+      "candle": true
+    },
     "qwen_image": {
       "candle": true,
       "mlx": true

@@ -787,8 +787,8 @@ async fn sysctl_memsize_mb() -> Option<u64> {
 
 /// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the
 /// FLUX.2-dev multi-reference edit footprint check (sc-6124). `None` if the probe fails (the guard
-/// then no-ops rather than blocking a possibly-fine job). macOS-only — its sole caller, the FLUX.2
-/// edit path (`image_jobs/flux2.rs`), is itself `#[cfg(target_os = "macos")]`.
+/// then no-ops rather than blocking a possibly-fine job). This helper is macOS-only because its sole
+/// caller is the MLX FLUX.2 edit path; the native Candle lane applies its own device-memory policy.
 #[cfg(target_os = "macos")]
 pub(crate) async fn total_unified_memory_gb() -> Option<f64> {
     sysctl_memsize_mb().await.map(|mb| mb as f64 / 1024.0)

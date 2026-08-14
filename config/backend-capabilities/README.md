@@ -12,14 +12,18 @@ cargo run -p sceneworks-core --bin dump-backend-capability-matrix -- \
   config/backend-capabilities/matrix.json
 ```
 
-The matrix covers every shipped manifest model and every GPU `JobType`. Model rows split
-operation/mode, conditioning shape, user adapter, precision tier, guidance method, and preview
-support; production training targets/network types and utility jobs have dedicated rows. Guidance
+The matrix covers every shipped manifest model, every supported imported custom-model family, and
+every GPU `JobType`. Each model keeps the literal
+catalog claims in `manifestOperations` separate from `evaluatedOperations`, the exhaustive product
+cross-product replayed into `operationAndMode`. That distinction makes an unsupported evaluated mode
+visible without falsely calling it catalog-advertised. Model rows also split conditioning shape, user
+adapter, precision tier, guidance method, and preview support; production training targets/network
+types and utility jobs have dedicated rows. Guidance
 cells are emitted only for manifest-exposed method vocabularies, then checked against backend-specific
 manifest limits, runtime descriptors, and the production route. Image-upscale cells are
 engine-specific, so Real-ESRGAN, SeedVR2, and the intentionally unsupported AuraSR route cannot be
 collapsed into one boolean. `sources` contains SHA-256 digests of the manifest, MLX/Candle scheduler
-predicates, API validation, worker dispatch, UI gates, preview facts, and the rich runtime artifacts
+predicates, imported-family defaults, API validation, worker dispatch, UI gates, preview facts, and the rich runtime artifacts
 under `config/engine-capabilities/runtime/`. Those native artifacts carry descriptor conditioning,
 adapter, quant, preview, trainer-mode and utility-provider truth plus the matching production worker
 capability advertisement. The focused Rust test regenerates and byte-compares the typed document,
@@ -35,7 +39,10 @@ specialist epic whose contract governs that cell where applicable. Candle-only c
 with `preservedCandleOnly: true` rather than normalized away.
 
 `exceptions.json` is intentionally empty at foundation time: no owner approval was invented.
-Future exceptions must provide category, an approver and authority pair declared in
-`authorizedApprovers`, a real ISO calendar date, user-facing behavior, revisit condition, and exact
-matrix cell paths. The generator rejects unauthorized/incomplete records, duplicate ids or cell
-paths, missing paths, and exceptions attached to anything other than an MLX-only cell.
+Schema v2 keeps the capability-axis `category` separate from `decisionType`. Future exceptions must
+classify the decision as `technical_blocker`, `licensing_blocker`, `hardware_floor`,
+`sequencing_choice`, or `product_decision`; provide non-empty evidence; name an approver and authority
+pair declared in `authorizedApprovers`; record a real ISO calendar date, user-facing behavior,
+revisit condition, and exact matrix cell paths whose axis matches the declared `category`. The generator rejects unknown decision types,
+unauthorized/incomplete records, duplicate ids or cell paths, missing paths, and exceptions attached
+to anything other than an MLX-only cell.

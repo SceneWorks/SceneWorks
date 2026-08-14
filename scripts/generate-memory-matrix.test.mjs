@@ -7,6 +7,7 @@ import {
   FAMILY_STORIES,
   MODEL_STORIES,
   SOURCE_PATHS,
+  activeCalibrationPlan,
   assertCellOwnershipIsBackendScoped,
   assertCalibrationPlanTargetsResolvedCoordinates,
   assertCellInventoryMatchesCatalog,
@@ -659,8 +660,8 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async 
   );
   assert.equal(
     shippedCells.length,
-    180,
-    "the full 3-tier x 4-mode x 3-overlay x 5-rung slice must exist",
+    135,
+    "the full 3-tier x 3-active-mode x 3-overlay x 5-rung slice must exist after style retirement",
   );
   assert.deepEqual(
     shippedCells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
@@ -2896,9 +2897,9 @@ test("every conformance and characterization state carries a definition (sc-1606
 test("publication keeps every planned, measured, bound and cited coordinate — and nothing else", async () => {
   const resolved = await buildMatrix({ publish: false });
   const publishedDocument = await buildMatrix();
-  const plan = JSON.parse(
+  const plan = activeCalibrationPlan(JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
-  );
+  ));
 
   const planned = plannedCellIds(plan, resolved.cells);
   assert.ok(planned.size > 100, "the shipped plan must target a substantial set of coordinates");
@@ -3247,8 +3248,17 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
   // that capability `edit_image`, so they matched ZERO coordinates. Nothing caught it —
   // `expectedEngagedRungs` just returned null, and `memory-calibration.schema.json` types `mode` as a
   // free string — and a capture run against them would have produced records binding to nothing.
-  const plan = JSON.parse(
+  const rawPlan = JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
+  );
+  const retiredStyleRows = rawPlan.providers.filter(
+    (entry) => entry.target.mode === "style_variations",
+  );
+  assert.ok(retiredStyleRows.length > 0, "historical style captures remain provenance");
+  const plan = activeCalibrationPlan(rawPlan);
+  assert.ok(
+    plan.providers.every((entry) => entry.target.mode !== "style_variations"),
+    "retired product modes are excluded from the active calibration plan",
   );
 
   // The shipped plan is clean, which is the property worth pinning: every entry addresses something.

@@ -15,7 +15,8 @@ use super::wan::{generate_video, VideoGenInput};
 // SeedVR2 video upscale (epic 4811, sc-4816): the net-new `video_upscale` job —
 // SceneWorks' first video upscaler. Decode the source clip -> native-MLX SeedVR2
 // one-step super-resolution (temporal chunking + overlap is internal to the engine)
-// -> encode + source-audio passthrough. macOS-only (no torch path). Reuses the shared
+// -> encode + source-audio passthrough. Native MLX on Mac and Candle/CUDA off-Mac (no Python path).
+// Reuses the shared
 // encode pipeline (`encode_media`) + the streaming engine driver (`generate_video`).
 // ---------------------------------------------------------------------------
 

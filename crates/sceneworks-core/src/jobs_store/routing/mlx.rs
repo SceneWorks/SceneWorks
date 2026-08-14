@@ -591,8 +591,9 @@ pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
         // `edit_reference_ids` (base.rs) accepts, in the same priority: the two-reference scene+person
         // set (`referenceAssetIds`, epic 10871 — scene = image 1, person = image 2, `sourceAssetId`
         // null), a single `referenceAssetId`, or a plain `sourceAssetId`. Checking only `sourceAssetId`
-        // here stranded the two-ref form: the mlx worker refused it and, with no torch/candle Krea edit
-        // lane on Mac, it sat on "Waiting for an available GPU worker" forever.
+        // here stranded the two-ref form: the MLX worker refused it and no other Mac worker owns the
+        // native Krea edit lane, so it sat on "Waiting for an available GPU worker" forever. The
+        // off-Mac Candle route has the same edit surface through its own routing predicate.
         return is_krea_edit
             && conditioned_reference_count(payload, true, 2).is_some()
             && !krea_edit_has_unsupported_carrier(payload);
@@ -605,11 +606,10 @@ pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// list, a `referenceAssetId`, or a `sourceAssetId`. Mirrors that worker helper so the router and
 /// the worker agree on what counts as a runnable edit.
 /// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.
-/// The native `mlx-gen-sd3` engine serves the **text-to-image** surface only (Large + Medium run true
-/// CFG, Turbo is the CFG-free few-step distill); there is no source/reference/edit path, so an
-/// `edit_image` request is rejected (the same defensive shape Krea / Lens reject). This keeps
-/// `model_mac_support`'s `features.edit` false for all three (it probes with `mode: edit_image`).
-/// macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so nothing defers.
+/// The native `mlx-gen-sd3` engine serves text-to-image plus reference-guided latent-init img2img
+/// (`referenceAssetId`, epic 8588 A4 / sc-10189). It does not expose the semantic `edit_image` job
+/// shape, so that distinct mode remains rejected. The family also runs through Candle/CUDA off-Mac;
+/// this predicate describes only the MLX half of the shared catalog contract.
 pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
@@ -673,10 +673,9 @@ fn sana_has_malformed_quant_carrier(payload: &Map<String, Value>) -> bool {
 /// `edit_image` request is rejected, the same defensive shape SANA / SD3.5 / Krea / Lens use. All
 /// three variants share the engine and differ only in checkpoint + step/guidance defaults.
 ///
-/// Anima is `mlx_routed` with `candle_routed = false`, so this predicate is the ONLY thing that can
-/// make an Anima job claimable: the mlx worker refuses a job it is not eligible for
-/// (`worker_supports_job`) and no candle lane advertises the family. A missing arm here left
-/// every Anima job queued on "Waiting for an available worker." forever.
+/// Anima is routed through MLX on Mac and the native Candle lane off-Mac (sc-10676). This predicate
+/// owns only MLX request eligibility; Candle applies its sibling catalog/descriptor gate. A missing
+/// MLX arm still leaves Mac jobs queued on "Waiting for an available worker."
 pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
@@ -927,8 +926,8 @@ pub(crate) fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// `mlx-gen-seedvr2`. `aura-sr` (a 617M-param historical GigaGAN backend) was dropped on Mac after
 /// the sc-3668 port-or-drop spike, so the mlx worker refuses it and it remains queued.
 /// Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
-/// SeedVR2 is Mac-only here (a Windows/Linux Candle backend is the separate sc-5157); the Mac UI
-/// gating + `imageUpscaleSeedvr2` capability keep it off non-Mac pickers.
+/// SeedVR2 runs here through MLX on Mac and through the native Candle/CUDA backend on Windows/Linux
+/// (sc-5928 / sc-5160). The platform capability mirrors those two production lanes.
 pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageUpscale) {
         return false;

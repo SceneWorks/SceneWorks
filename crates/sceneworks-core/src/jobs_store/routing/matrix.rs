@@ -38,6 +38,8 @@ const ROUTING_CATALOG: &str = include_str!("catalog.rs");
 const ROUTING_MLX: &str = include_str!("mlx.rs");
 const ROUTING_CANDLE: &str = include_str!("candle.rs");
 const ROUTING_GAPS: &str = include_str!("gaps.rs");
+const MODEL_IMPORT_DEFAULTS: &str = include_str!("../../lora_family.rs");
+const BASE_WEIGHT_IMPORTS: &str = include_str!("../../base_weights.rs");
 const API_VALIDATION: &str = include_str!("../../../../../apps/rust-api/src/jobs.rs");
 const API_GENERATION: &str = include_str!("../../../../../apps/rust-api/src/generation.rs");
 const API_CONTRACT_ENTRY: &str = include_str!("../../../../../apps/rust-api/src/lib.rs");
@@ -47,6 +49,16 @@ const WORKER_IMAGE_DISPATCH: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/base.rs");
 const WORKER_IMAGE_QWEN_EDIT_CANDLE: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/qwen_edit_candle.rs");
+const WORKER_IMAGE_PULID: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/pulid.rs");
+const WORKER_IMAGE_PULID_CANDLE: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/pulid_candle.rs");
+const WORKER_IMAGE_KREA_IMPORTED: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/krea_imported.rs");
+const WORKER_IMAGE_MAGE_FINETUNED: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/mage_finetuned.rs");
+const WORKER_IMAGE_SDXL_IMPORTED: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/sdxl_imported.rs");
 const WORKER_ENGINE_TABLE: &str = include_str!("../../../../sceneworks-worker/src/engines.rs");
 const WORKER_GPU_CAPABILITIES: &str = include_str!("../../../../sceneworks-worker/src/gpu.rs");
 const WORKER_VIDEO_DISPATCH: &str =
@@ -77,6 +89,7 @@ const SCHEDULER: &str = include_str!("../../jobs_store.rs");
 const TRAINING_CATALOG: &str = include_str!("../../training.rs");
 const WEB_IMAGE_REQUEST: &str = include_str!("../../../../../apps/web/src/imageJobRequest.js");
 const WEB_IMAGE_ADVANCED: &str = include_str!("../../../../../apps/web/src/imageJobAdvanced.js");
+const WEB_FALLBACK_CATALOG: &str = include_str!("../../../../../apps/web/src/constants.js");
 const WEB_MAC_GATING: &str = include_str!("../../../../../apps/web/src/macGating.js");
 const WEB_PREVIEW_GATING: &str = include_str!("../../../../../apps/web/src/previewSupport.js");
 const WEB_SIMPLE_JOBS: &str = include_str!("../../../../../apps/web/src/simple/simpleJobs.js");
@@ -104,6 +117,7 @@ pub struct BackendCapabilityMatrix {
     pub summary: MatrixSummary,
     pub sources: BTreeMap<String, String>,
     pub models: Vec<ModelCapabilityRow>,
+    pub imported_families: Vec<ImportedFamilyCapabilityRow>,
     pub gpu_job_types: Vec<JobCapabilityRow>,
     pub training_kernels: Vec<TrainingCapabilityRow>,
     pub exceptions: Vec<ExceptionRecord>,
@@ -113,10 +127,26 @@ pub struct BackendCapabilityMatrix {
 #[serde(rename_all = "camelCase")]
 pub struct MatrixSummary {
     pub model_count: usize,
+    pub imported_family_count: usize,
     pub cell_count: usize,
     pub mlx_only_cell_count: usize,
     pub candle_only_cell_count: usize,
     pub exception_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedFamilyCapabilityRow {
+    pub family: String,
+    pub synthetic_model_id: String,
+    pub manifest_operations: Vec<String>,
+    pub evaluated_operations: Vec<String>,
+    pub operation_and_mode: Vec<CapabilityCell>,
+    pub conditioning_shape: Vec<CapabilityCell>,
+    pub user_adapters: Vec<CapabilityCell>,
+    pub precision_tier: Vec<CapabilityCell>,
+    pub guidance_method: Vec<CapabilityCell>,
+    pub preview: CapabilityCell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +156,7 @@ pub struct ModelCapabilityRow {
     pub family: String,
     pub model_type: String,
     pub manifest_operations: Vec<String>,
+    pub evaluated_operations: Vec<String>,
     pub operation_and_mode: Vec<CapabilityCell>,
     pub conditioning_shape: Vec<CapabilityCell>,
     pub user_adapters: Vec<CapabilityCell>,
@@ -174,10 +205,22 @@ pub struct ParityObligation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionType {
+    TechnicalBlocker,
+    LicensingBlocker,
+    HardwareFloor,
+    SequencingChoice,
+    ProductDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExceptionRecord {
     pub id: String,
     pub category: String,
+    pub decision_type: DecisionType,
+    pub evidence: String,
     pub approver: String,
     pub authority: String,
     pub approved_date: String,
@@ -186,7 +229,7 @@ pub struct ExceptionRecord {
     pub cells: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExceptionRegister {
     schema_version: u32,
@@ -327,7 +370,7 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
         .map_err(|error| format!("parse builtin.preview-support.jsonc: {error}"))?;
     let exceptions: ExceptionRegister = serde_json::from_str(EXCEPTIONS)
         .map_err(|error| format!("parse backend capability exception register: {error}"))?;
-    if exceptions.schema_version != 1 {
+    if exceptions.schema_version != 2 {
         return Err(format!(
             "unsupported backend capability exception schema {}",
             exceptions.schema_version
@@ -349,6 +392,7 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
     }
     models.sort_by(|left, right| left.id.cmp(&right.id));
 
+    let imported_families = imported_family_rows(&mlx_facts, &candle_facts)?;
     let gpu_job_types = gpu_job_rows(&manifest, &mlx_facts, &candle_facts)?;
     let training_kernels = training_rows(&mlx_facts, &candle_facts)?;
     validate_obligations(
@@ -359,17 +403,19 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
     )?;
     let summary = matrix_summary(
         &models,
+        &imported_families,
         &gpu_job_types,
         &training_kernels,
         exceptions.records.len(),
     );
 
     Ok(BackendCapabilityMatrix {
-        schema_version: 3,
+        schema_version: 4,
         generated_by: GENERATOR.to_owned(),
         summary,
         sources: source_digests(),
         models,
+        imported_families,
         gpu_job_types,
         training_kernels,
         exceptions: exceptions.records,
@@ -378,6 +424,7 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
 
 fn matrix_summary(
     models: &[ModelCapabilityRow],
+    imported_families: &[ImportedFamilyCapabilityRow],
     jobs: &[JobCapabilityRow],
     training: &[TrainingCapabilityRow],
     exception_count: usize,
@@ -408,6 +455,20 @@ fn matrix_summary(
         }
         count(&model.preview);
     }
+    for family in imported_families {
+        for cells in [
+            family.operation_and_mode.as_slice(),
+            family.conditioning_shape.as_slice(),
+            family.user_adapters.as_slice(),
+            family.precision_tier.as_slice(),
+            family.guidance_method.as_slice(),
+        ] {
+            for cell in cells {
+                count(cell);
+            }
+        }
+        count(&family.preview);
+    }
     for job in jobs {
         for cell in &job.requests {
             count(cell);
@@ -418,6 +479,7 @@ fn matrix_summary(
     }
     MatrixSummary {
         model_count: models.len(),
+        imported_family_count: imported_families.len(),
         cell_count,
         mlx_only_cell_count,
         candle_only_cell_count,
@@ -431,7 +493,8 @@ fn model_row(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<ModelCapabilityRow, String> {
-    let manifest_operations = manifested_operations(model);
+    let manifest_operations = literal_manifest_operations(model);
+    let evaluated_operations = evaluated_operations(model);
     let is_image = model.model_type == "image";
     let is_video = model.model_type == "video";
     let mut operation_and_mode = Vec::new();
@@ -441,7 +504,7 @@ fn model_row(
     let mut guidance_method = Vec::new();
 
     if is_image {
-        for operation in &manifest_operations {
+        for operation in &evaluated_operations {
             operation_and_mode.push(operation_cell(model, operation, mlx_facts, candle_facts)?);
         }
         for adapter in ["lora", "lokr"] {
@@ -456,7 +519,7 @@ fn model_row(
             }
         }
     } else if is_video {
-        for mode in &manifest_operations {
+        for mode in &evaluated_operations {
             let payload = video_payload(&model.id, mode);
             let job_type = video_job_type(mode);
             let job = probe_job(job_type, &model.id, payload)?;
@@ -524,6 +587,7 @@ fn model_row(
         family: model.family.clone(),
         model_type: model.model_type.clone(),
         manifest_operations,
+        evaluated_operations,
         operation_and_mode,
         conditioning_shape,
         user_adapters,
@@ -533,8 +597,15 @@ fn model_row(
     })
 }
 
-fn manifested_operations(model: &ManifestModel) -> Vec<String> {
+fn literal_manifest_operations(model: &ManifestModel) -> Vec<String> {
     let mut operations = model.capabilities.clone();
+    operations.sort();
+    operations.dedup();
+    operations
+}
+
+fn evaluated_operations(model: &ManifestModel) -> Vec<String> {
+    let mut operations = literal_manifest_operations(model);
     if model.ui.get("img2img").and_then(Value::as_bool) == Some(true) {
         operations.push("image_to_image".to_owned());
     }
@@ -547,6 +618,173 @@ fn manifested_operations(model: &ManifestModel) -> Vec<String> {
     operations.sort();
     operations.dedup();
     operations
+}
+
+fn imported_probe_job(
+    model: &ManifestModel,
+    entry: &Map<String, Value>,
+    job_type: JobType,
+    mut payload: Value,
+) -> Result<JobSnapshot, String> {
+    payload
+        .as_object_mut()
+        .expect("imported probe payload is an object")
+        .insert(
+            "modelManifestEntry".to_owned(),
+            Value::Object(entry.clone()),
+        );
+    probe_job(job_type, &model.id, payload)
+}
+
+fn source_has_ordered_fragments(source: &str, fragments: &[&str]) -> bool {
+    let source = strip_jsonc_comments(source);
+    let mut rest = source.as_str();
+    for fragment in fragments {
+        let Some(index) = rest.find(fragment) else {
+            return false;
+        };
+        rest = &rest[index + fragment.len()..];
+    }
+    true
+}
+
+fn imported_preview_sink(family: &str, source: &str) -> bool {
+    match family {
+        // Each file compiles one shared sink-bearing request closure around backend-specific MLX
+        // and Candle loader arms. Ordered, comment-stripped fragments keep an unrelated helper or
+        // comment from preserving this claim after the production request drops its sink.
+        "krea_2" | "sdxl" => source_has_ordered_fragments(
+            source,
+            &[
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+                "let request = GenerationRequest {",
+                "preview,",
+                "model.generate(&request",
+            ],
+        ),
+        "mage-flow" => source_has_ordered_fragments(
+            source,
+            &[
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+                "let request = mage_finetuned_generation_request(",
+                "guidance,",
+                "preview,",
+                "&cancel,",
+                "model.generate(&request",
+            ],
+        ),
+        _ => false,
+    }
+}
+
+fn imported_family_rows(
+    mlx_facts: &RuntimeDescriptorFacts,
+    candle_facts: &RuntimeDescriptorFacts,
+) -> Result<Vec<ImportedFamilyCapabilityRow>, String> {
+    let mut rows = Vec::new();
+    for family in crate::base_weights::IMPORT_SUPPORTED_FAMILIES {
+        let synthetic_model_id = format!("sc18481_import_probe_{}", family.replace('-', "_"));
+        let mut entry = json!({
+            "id": synthetic_model_id.clone(),
+            "family": family,
+            "type": "image",
+            "modelPath": "/probe/imported-model.safetensors"
+        })
+        .as_object()
+        .cloned()
+        .expect("synthetic imported manifest entry is an object");
+        crate::lora_family::apply_model_manifest_defaults(&mut entry, "image", Some(family));
+        let model: ManifestModel = serde_json::from_value(Value::Object(entry.clone()))
+            .map_err(|error| format!("build imported {family} matrix probe: {error}"))?;
+        let manifest_operations = literal_manifest_operations(&model);
+        let evaluated_operations = evaluated_operations(&model);
+        let mut operation_and_mode = Vec::new();
+        for operation in &evaluated_operations {
+            let (job_type, payload, _) = operation_request(&model, operation)?;
+            let job = imported_probe_job(&model, &entry, job_type, payload)?;
+            let support = cell(
+                operation.clone(),
+                backend_supports(&job, mlx_facts)?,
+                backend_supports(&job, candle_facts)?,
+                gap_for(&model.id, "operation", operation),
+            );
+            if support.mlx != Some(true) || support.candle != Some(true) {
+                return Err(format!(
+                    "supported imported family {family:?} default {operation:?} does not route on both native backends"
+                ));
+            }
+            operation_and_mode.push(support);
+        }
+
+        let mut conditioning_shapes = BTreeSet::new();
+        if model.ui.get("img2img").and_then(Value::as_bool) == Some(true) {
+            conditioning_shapes.insert("reference");
+        }
+        if model.ui.get("editReferences").is_some() {
+            conditioning_shapes.insert("multiReference");
+        }
+        let mut conditioning_shape = Vec::new();
+        for shape in conditioning_shapes {
+            let (job_type, payload) = conditioning_payload(&model, shape, mlx_facts, candle_facts)?;
+            let job = imported_probe_job(&model, &entry, job_type, payload)?;
+            let support = cell(
+                shape.to_owned(),
+                backend_supports(&job, mlx_facts)?,
+                backend_supports(&job, candle_facts)?,
+                gap_for(&model.id, "conditioning", shape),
+            );
+            if support.mlx != Some(true) || support.candle != Some(true) {
+                return Err(format!(
+                    "supported imported family {family:?} default conditioning {shape:?} does not route on both native backends"
+                ));
+            }
+            conditioning_shape.push(support);
+        }
+
+        let mut user_adapters = Vec::new();
+        for adapter in ["lora", "lokr"] {
+            let (job_type, mut payload, _) = operation_request(&model, "text_to_image")?;
+            payload["loras"] = json!([{ "id": "probe", "networkType": adapter }]);
+            let job = imported_probe_job(&model, &entry, job_type, payload)?;
+            user_adapters.push(cell(
+                adapter.to_owned(),
+                backend_supports(&job, mlx_facts)?,
+                backend_supports(&job, candle_facts)?,
+                gap_for(&model.id, "adapter", adapter),
+            ));
+        }
+
+        let preview_source = match *family {
+            "krea_2" => WORKER_IMAGE_KREA_IMPORTED,
+            "mage-flow" => WORKER_IMAGE_MAGE_FINETUNED,
+            "sdxl" => WORKER_IMAGE_SDXL_IMPORTED,
+            _ => "",
+        };
+        let preview_sink = imported_preview_sink(family, preview_source);
+        let (preview_job_type, preview_payload, _) = operation_request(&model, "text_to_image")?;
+        let preview_job = imported_probe_job(&model, &entry, preview_job_type, preview_payload)?;
+        let preview = CapabilityCell {
+            capability: "live_preview".to_owned(),
+            mlx: Some(preview_sink && backend_supports(&preview_job, mlx_facts)?),
+            candle: Some(preview_sink && backend_supports(&preview_job, candle_facts)?),
+            parity_obligation: None,
+            preserved_candle_only: false,
+        };
+        rows.push(ImportedFamilyCapabilityRow {
+            family: (*family).to_owned(),
+            synthetic_model_id,
+            manifest_operations,
+            evaluated_operations,
+            operation_and_mode,
+            conditioning_shape,
+            user_adapters,
+            precision_tier: Vec::new(),
+            guidance_method: Vec::new(),
+            preview,
+        });
+    }
+    rows.sort_by(|left, right| left.family.cmp(&right.family));
+    Ok(rows)
 }
 
 fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescriptorFacts, String> {
@@ -888,9 +1126,26 @@ fn bespoke_image_lane_support(
         return false;
     }
     if backend == "mlx" {
-        return model == "flux2_dev"
-            && category == "conditioning"
-            && capability == "multiReference"
+        return ((matches!(model, "instantid_realvisxl" | "pulid_flux_dev")
+            && category == "operation"
+            && capability == "character_image")
+            || (matches!(
+                model,
+                "z_image_turbo"
+                    | "z_image"
+                    | "qwen_image"
+                    | "flux_dev"
+                    | "krea_2_turbo"
+                    | "flux2_dev"
+                    | "instantid_realvisxl"
+            ) && category == "conditioning"
+                && capability == "control")
+            || (matches!(model, "instantid_realvisxl" | "pulid_flux_dev")
+                && category == "conditioning"
+                && capability == "reference")
+            || (model == "flux2_dev"
+                && category == "conditioning"
+                && capability == "multiReference"))
             && super::mlx::image_job_is_mlx_eligible(job);
     }
     if backend != "candle" {
@@ -900,6 +1155,15 @@ fn bespoke_image_lane_support(
         return false;
     };
     match lane {
+        CandleImageLane::InstantId => {
+            model == "instantid_realvisxl"
+                && matches!(
+                    (category, capability),
+                    ("operation", "character_image")
+                        | ("conditioning", "control")
+                        | ("conditioning", "reference")
+                )
+        }
         CandleImageLane::QwenEdit => {
             matches!(
                 model,
@@ -954,6 +1218,30 @@ fn bespoke_image_lane_support(
         }
         CandleImageLane::KolorsControl => {
             model == "kolors" && category == "conditioning" && capability == "control"
+        }
+        CandleImageLane::QwenControl => {
+            model == "qwen_image" && category == "conditioning" && capability == "control"
+        }
+        CandleImageLane::ZImageControl => {
+            matches!(model, "z_image_turbo" | "z_image")
+                && category == "conditioning"
+                && capability == "control"
+        }
+        CandleImageLane::Flux1Control => {
+            model == "flux_dev" && category == "conditioning" && capability == "control"
+        }
+        CandleImageLane::Flux2Control => {
+            model == "flux2_dev" && category == "conditioning" && capability == "control"
+        }
+        CandleImageLane::KreaControl => {
+            model == "krea_2_turbo" && category == "conditioning" && capability == "control"
+        }
+        CandleImageLane::Pulid => {
+            model == "pulid_flux_dev"
+                && matches!(
+                    (category, capability),
+                    ("operation", "character_image") | ("conditioning", "reference")
+                )
         }
         _ => false,
     }
@@ -1053,12 +1341,12 @@ fn operation_request(
             json!({ "mode": "edit_image", "sourceAssetId": "probe" }),
             true,
         ),
-        "style_variations" | "image_to_image" if model.id.starts_with("flux2_") => (
+        "image_to_image" if model.id.starts_with("flux2_") => (
             JobType::ImageGenerate,
             json!({ "mode": operation, "referenceAssetId": "probe" }),
             true,
         ),
-        "style_variations" | "image_to_image" => (
+        "image_to_image" => (
             JobType::ImageGenerate,
             json!({ "mode": "text_to_image", "referenceAssetId": "probe" }),
             true,
@@ -1136,6 +1424,11 @@ fn descriptor_conditioning_union(
     if model.ui.get("poseLibrary").and_then(Value::as_bool) == Some(true) {
         shapes.insert("control".to_owned());
     }
+    if matches!(model.id.as_str(), "instantid_realvisxl" | "pulid_flux_dev") {
+        // These identity providers are bespoke worker lanes rather than generic registry mappings;
+        // both consume the required face through the production reference carrier.
+        shapes.insert("reference".to_owned());
+    }
     Ok(shapes.into_iter().collect())
 }
 
@@ -1170,13 +1463,12 @@ fn canonical_model_request(
             "edit_image",
             "character_image",
             "image_to_image",
-            "style_variations",
             "image_inpaint",
             "image_detail",
             "vqa",
             "interleave",
         ] {
-            if manifested_operations(model)
+            if evaluated_operations(model)
                 .iter()
                 .any(|item| item == operation)
             {
@@ -1199,7 +1491,7 @@ fn conditioning_payload(
 ) -> Result<(JobType, Value), String> {
     let modality = descriptor_modality(model, mlx, candle)?;
     let (mut job_type, mut payload) = canonical_model_request(model, modality, mlx, candle)?;
-    let operations = manifested_operations(model);
+    let operations = evaluated_operations(model);
 
     match shape {
         "referenceAudio" | "voiceEmbedding" if modality == Some("audio") => {
@@ -1712,6 +2004,11 @@ fn utility_model_cells(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<Vec<CapabilityCell>, String> {
+    // PiD rows are decoder overlays loaded by their owning image model; they are not standalone
+    // person detectors (or any other independently routable utility job).
+    if model.id.starts_with("pid_") {
+        return Ok(Vec::new());
+    }
     let engine_request = match model.id.as_str() {
         "real_esrgan" => Some((
             "engine:real-esrgan",
@@ -1753,11 +2050,6 @@ fn utility_model_cells(
             JobType::ImageDetail,
             json!({ "model": "sdxl", "engine": "controlnet-tile", "sourceAssetId": "probe" }),
         )),
-        id if id.starts_with("pid_") => Some((
-            "person_detect",
-            JobType::PersonDetect,
-            json!({ "sourceAssetId": "probe", "model": id }),
-        )),
         "prompt_refine_anubis_8b" => Some((
             "prompt_refine",
             JobType::PromptRefine,
@@ -1769,9 +2061,9 @@ fn utility_model_cells(
             json!({ "captioner": "joy_caption", "sourceAssetId": "probe" }),
         )),
         "vision_caption_qwen3vl_8b" => Some((
-            "training_caption",
-            JobType::TrainingCaption,
-            json!({ "captioner": "qwen3vl_8b", "sourceAssetId": "probe" }),
+            "image_caption",
+            JobType::PromptRefine,
+            json!({ "task": "image_caption", "imagePath": "probe" }),
         )),
         "clip_vit_l14" => Some((
             "dataset_analysis",
@@ -1781,7 +2073,15 @@ fn utility_model_cells(
         _ => None,
     };
     if let Some((name, job_type, payload)) = engine_request {
-        let job = probe_job(job_type, &model.id, payload)?;
+        // Some catalog utilities name a provider asset while the production request routes through
+        // a base model (the SDXL tile-ControlNet is the concrete case). Honor that explicit route
+        // model instead of overwriting it with the utility catalog id in `probe_job`.
+        let route_model = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(&model.id)
+            .to_owned();
+        let job = probe_job(job_type, &route_model, payload)?;
         return Ok(vec![routed_cell(
             name,
             &model.id,
@@ -2084,6 +2384,27 @@ fn manifest_model_for_operation<'a>(
         .ok_or_else(|| format!("no shipped model declares operation {operation:?}"))
 }
 
+fn manifest_model_for_both_backend_video_operation<'a>(
+    manifest: &'a ManifestRoot,
+    operation: &str,
+    mlx_facts: &RuntimeDescriptorFacts,
+    candle_facts: &RuntimeDescriptorFacts,
+) -> Result<&'a str, String> {
+    for model in manifest
+        .models
+        .iter()
+        .filter(|model| model.capabilities.iter().any(|item| item == operation))
+    {
+        let job = super::canonical_video_route_probe(&model.id, operation)?;
+        if backend_supports(&job, mlx_facts)? && backend_supports(&job, candle_facts)? {
+            return Ok(&model.id);
+        }
+    }
+    Err(format!(
+        "no shipped model routes operation {operation:?} on both native backends"
+    ))
+}
+
 fn manifest_model_of_type<'a>(
     manifest: &'a ManifestRoot,
     model_type: &str,
@@ -2106,6 +2427,24 @@ fn gpu_job_rows(
     let vqa = manifest_model_for_operation(manifest, "vqa")?;
     let interleave = manifest_model_for_operation(manifest, "interleave")?;
     let video = manifest_model_for_operation(manifest, "text_to_video")?;
+    let video_extend = manifest_model_for_both_backend_video_operation(
+        manifest,
+        "extend_clip",
+        mlx_facts,
+        candle_facts,
+    )?;
+    let video_bridge = manifest_model_for_both_backend_video_operation(
+        manifest,
+        "video_bridge",
+        mlx_facts,
+        candle_facts,
+    )?;
+    let person_replace = manifest_model_for_both_backend_video_operation(
+        manifest,
+        "replace_person",
+        mlx_facts,
+        candle_facts,
+    )?;
     let detail = manifest_model_for_operation(manifest, "image_detail")?;
     let audio = manifest_model_of_type(manifest, "audio")?;
     let training_target = crate::training::builtin_training_targets()
@@ -2166,15 +2505,15 @@ fn gpu_job_rows(
             "video_extend",
             "per-model",
             JobType::VideoExtend,
-            video,
-            json!({ "mode": "extend_clip", "sourceClipAssetId": "probe" }),
+            video_extend,
+            video_payload(video_extend, "extend_clip"),
         ),
         (
             "video_bridge",
             "per-model",
             JobType::VideoBridge,
-            video,
-            json!({ "mode": "video_bridge", "sourceClipAssetId": "probe", "bridgeRightClipAssetId": "probe-right" }),
+            video_bridge,
+            video_payload(video_bridge, "video_bridge"),
         ),
         (
             "person_detect",
@@ -2194,8 +2533,8 @@ fn gpu_job_rows(
             "person_replace",
             "per-model",
             JobType::PersonReplace,
-            video,
-            json!({ "mode": "replace_person", "sourceClipAssetId": "probe", "personTrackId": "probe-person", "characterId": "probe-character" }),
+            person_replace,
+            video_payload(person_replace, "replace_person"),
         ),
         (
             "audio_generate",
@@ -2489,6 +2828,7 @@ fn validate_exceptions(register: &ExceptionRegister) -> Result<(), String> {
         for (field, value) in [
             ("id", record.id.as_str()),
             ("category", record.category.as_str()),
+            ("evidence", record.evidence.as_str()),
             ("approver", record.approver.as_str()),
             ("authority", record.authority.as_str()),
             ("approvedDate", record.approved_date.as_str()),
@@ -2531,6 +2871,12 @@ fn validate_exceptions(register: &ExceptionRegister) -> Result<(), String> {
             ));
         }
         for path in &record.cells {
+            if exception_category_for_path(path) != Some(record.category.as_str()) {
+                return Err(format!(
+                    "exception {:?} category {:?} does not match matrix cell {path:?}",
+                    record.id, record.category
+                ));
+            }
             if !cells.insert(path.as_str()) {
                 return Err(format!(
                     "matrix cell {path:?} appears in multiple exceptions"
@@ -2539,6 +2885,33 @@ fn validate_exceptions(register: &ExceptionRegister) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn exception_category_for_path(path: &str) -> Option<&'static str> {
+    if path.starts_with("gpuJobTypes/") {
+        return Some("utility");
+    }
+    if path.starts_with("trainingKernels/") {
+        return Some("training");
+    }
+    if !path.starts_with("models/") {
+        return None;
+    }
+    if path.ends_with("/preview") {
+        return Some("preview");
+    }
+    for (segment, category) in [
+        ("/operationAndMode/", "operation"),
+        ("/conditioningShape/", "conditioning"),
+        ("/userAdapters/", "adapter"),
+        ("/precisionTier/", "precision"),
+        ("/guidanceMethod/", "guidance"),
+    ] {
+        if path.contains(segment) {
+            return Some(category);
+        }
+    }
+    None
 }
 
 fn valid_iso_date(value: &str) -> bool {
@@ -2650,6 +3023,8 @@ fn source_digests() -> BTreeMap<String, String> {
         ("routerMlx", ROUTING_MLX),
         ("routerCandle", ROUTING_CANDLE),
         ("routerGaps", ROUTING_GAPS),
+        ("modelImportDefaults", MODEL_IMPORT_DEFAULTS),
+        ("baseWeightImports", BASE_WEIGHT_IMPORTS),
         ("apiValidation", API_VALIDATION),
         ("apiGeneration", API_GENERATION),
         ("apiContractEntry", API_CONTRACT_ENTRY),
@@ -2659,6 +3034,11 @@ fn source_digests() -> BTreeMap<String, String> {
         ("workerDispatch", WORKER_DISPATCH),
         ("workerImageDispatch", WORKER_IMAGE_DISPATCH),
         ("workerImageQwenEditCandle", WORKER_IMAGE_QWEN_EDIT_CANDLE),
+        ("workerImagePulid", WORKER_IMAGE_PULID),
+        ("workerImagePulidCandle", WORKER_IMAGE_PULID_CANDLE),
+        ("workerImageKreaImported", WORKER_IMAGE_KREA_IMPORTED),
+        ("workerImageMageFinetuned", WORKER_IMAGE_MAGE_FINETUNED),
+        ("workerImageSdxlImported", WORKER_IMAGE_SDXL_IMPORTED),
         ("workerEngineTable", WORKER_ENGINE_TABLE),
         ("workerGpuCapabilities", WORKER_GPU_CAPABILITIES),
         ("workerVideoDispatch", WORKER_VIDEO_DISPATCH),
@@ -2683,6 +3063,7 @@ fn source_digests() -> BTreeMap<String, String> {
         ("descriptorPreviewFacts", PREVIEW),
         ("webImageRequest", WEB_IMAGE_REQUEST),
         ("webImageAdvanced", WEB_IMAGE_ADVANCED),
+        ("webFallbackCatalog", WEB_FALLBACK_CATALOG),
         ("webMacGating", WEB_MAC_GATING),
         ("webPreviewGating", WEB_PREVIEW_GATING),
         ("webSimpleJobs", WEB_SIMPLE_JOBS),
@@ -2914,22 +3295,330 @@ mod tests {
             "the probe must use image_edit + sourceAssetId, like the real editor request"
         );
 
+        for row in &matrix.models {
+            assert!(
+                !row.manifest_operations
+                    .iter()
+                    .any(|operation| operation == "style_variations"),
+                "{} advertises the retired style mode",
+                row.id
+            );
+            assert!(
+                !row.operation_and_mode
+                    .iter()
+                    .any(|cell| cell.capability == "style_variations"),
+                "{} evaluates the retired style mode",
+                row.id
+            );
+        }
+
+        let wan_i2v = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "wan_2_2_i2v_14b")
+            .unwrap();
+        let first_last = wan_i2v
+            .operation_and_mode
+            .iter()
+            .find(|cell| cell.capability == "first_last_frame")
+            .expect("the exhaustive matrix retains unsupported video-mode coverage");
+        assert_eq!(
+            (first_last.mlx, first_last.candle),
+            (Some(false), Some(false))
+        );
+        assert_eq!(
+            wan_i2v.manifest_operations,
+            vec!["extend_clip", "image_to_video", "video_bridge"],
+            "manifestOperations must remain the literal catalog claim"
+        );
+        assert!(wan_i2v
+            .evaluated_operations
+            .iter()
+            .any(|mode| mode == "first_last_frame"));
+        assert_eq!(
+            wan_i2v.operation_and_mode.len(),
+            wan_i2v.evaluated_operations.len(),
+            "the exhaustive video cross-product must remain explicitly evaluated"
+        );
+    }
+
+    #[test]
+    fn sc18481_supported_import_defaults_are_provenanced_and_use_live_family_routes() {
+        let sources = source_digests();
+        assert!(
+            sources.contains_key("modelImportDefaults"),
+            "imported-family defaults must participate in generated artifact provenance"
+        );
+        assert!(
+            sources.contains_key("baseWeightImports"),
+            "the exact supported-import allowlist must participate in artifact provenance"
+        );
+        let matrix = backend_capability_matrix().unwrap();
+        let actual = matrix
+            .imported_families
+            .iter()
+            .map(|row| row.family.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected = crate::base_weights::IMPORT_SUPPORTED_FAMILIES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+
+        for row in &matrix.imported_families {
+            assert!(
+                !matrix
+                    .models
+                    .iter()
+                    .any(|builtin| builtin.id == row.synthetic_model_id),
+                "{} must be proven through a novel imported id, not a builtin proxy",
+                row.family
+            );
+            let (manifest_operations, evaluated_operations) = match row.family.as_str() {
+                "krea_2" => (
+                    &["edit_image", "text_to_image"][..],
+                    &["edit_image", "image_to_image", "text_to_image"][..],
+                ),
+                "mage-flow" | "sdxl" => (&["text_to_image"][..], &["text_to_image"][..]),
+                family => panic!("unreviewed supported import family {family}"),
+            };
+            assert_eq!(
+                row.manifest_operations, manifest_operations,
+                "imported {} literal defaults drifted",
+                row.family
+            );
+            assert_eq!(
+                row.evaluated_operations, evaluated_operations,
+                "imported {} UI-derived operation set drifted",
+                row.family
+            );
+            for cell in &row.operation_and_mode {
+                assert_eq!(
+                    (cell.mlx, cell.candle),
+                    (Some(true), Some(true)),
+                    "imported {}/{} must traverse the live family route on both backends",
+                    row.family,
+                    cell.capability
+                );
+                assert!(cell.parity_obligation.is_none());
+            }
+            let expected_conditioning = if row.family == "krea_2" {
+                &["multiReference", "reference"][..]
+            } else {
+                &[][..]
+            };
+            assert_eq!(
+                row.conditioning_shape
+                    .iter()
+                    .map(|cell| cell.capability.as_str())
+                    .collect::<Vec<_>>(),
+                expected_conditioning
+            );
+            assert!(row
+                .conditioning_shape
+                .iter()
+                .all(|cell| { (cell.mlx, cell.candle) == (Some(true), Some(true)) }));
+            let adapters_should_route = matches!(row.family.as_str(), "krea_2" | "sdxl");
+            for adapter in &row.user_adapters {
+                assert_eq!(
+                    (adapter.mlx, adapter.candle),
+                    (Some(adapters_should_route), Some(adapters_should_route)),
+                    "imported {}/{} adapter truth must come from the live family gate",
+                    row.family,
+                    adapter.capability
+                );
+            }
+            assert!(row.precision_tier.is_empty());
+            assert!(row.guidance_method.is_empty());
+            assert_eq!(
+                (row.preview.mlx, row.preview.candle),
+                (Some(true), Some(true)),
+                "imported {} preview must retain its production worker sink",
+                row.family
+            );
+        }
+    }
+
+    #[test]
+    fn imported_preview_rows_fail_closed_when_the_production_sink_is_removed() {
+        for (family, source) in [
+            ("krea_2", WORKER_IMAGE_KREA_IMPORTED),
+            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED),
+        ] {
+            assert!(imported_preview_sink(family, source));
+            let normalized = source.replace("\r\n", "\n");
+            let without_request_sink = normalized.replacen(
+                "                    preview,\n                    cancel: cancel.clone(),\n                    ..Default::default()",
+                "                    cancel: cancel.clone(),\n                    ..Default::default()",
+                1,
+            );
+            assert_ne!(
+                without_request_sink, normalized,
+                "{family} mutation must apply"
+            );
+            assert!(
+                !imported_preview_sink(family, &without_request_sink),
+                "{family} must not inherit preview from comments or unrelated helpers"
+            );
+        }
+
+        assert!(imported_preview_sink(
+            "mage-flow",
+            WORKER_IMAGE_MAGE_FINETUNED
+        ));
+        let normalized_mage = WORKER_IMAGE_MAGE_FINETUNED.replace("\r\n", "\n");
+        let without_mage_sink = normalized_mage.replacen(
+            "                    guidance,\n                    preview,\n                    &cancel,",
+            "                    guidance,\n                    &cancel,",
+            1,
+        );
+        assert_ne!(without_mage_sink, normalized_mage);
+        assert!(!imported_preview_sink("mage-flow", &without_mage_sink));
+    }
+
+    #[test]
+    fn sc18481_cross_platform_catalog_rows_retain_both_native_text_routes() {
+        let matrix = backend_capability_matrix().unwrap();
         for model in [
-            "lens",
-            "lens_turbo",
-            "chroma1_hd",
-            "chroma1_base",
-            "chroma1_flash",
+            "flux2_klein_9b",
+            "flux2_dev",
+            "sd3_5_large",
+            "sd3_5_medium",
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
         ] {
             let row = matrix.models.iter().find(|row| row.id == model).unwrap();
-            assert!(!row
-                .manifest_operations
-                .iter()
-                .any(|operation| operation == "style_variations"));
-            assert!(!row
+            let text = row
                 .operation_and_mode
                 .iter()
-                .any(|cell| cell.capability == "style_variations"));
+                .find(|cell| cell.capability == "text_to_image")
+                .unwrap_or_else(|| panic!("{model} must expose text_to_image"));
+            assert_eq!(
+                (text.mlx, text.candle),
+                (Some(true), Some(true)),
+                "{model} catalog copy must continue to describe both native backends"
+            );
+        }
+    }
+
+    #[test]
+    fn sc18481_bespoke_identity_routes_are_derived_from_the_live_lane_tables() {
+        let matrix = backend_capability_matrix().unwrap();
+        for model in ["instantid_realvisxl", "pulid_flux_dev"] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let character = row
+                .operation_and_mode
+                .iter()
+                .find(|cell| cell.capability == "character_image")
+                .expect("identity-only model must expose its character operation");
+            assert_eq!(
+                (character.mlx, character.candle),
+                (Some(true), Some(true)),
+                "{model} must follow its exact MLX and Candle identity routes"
+            );
+            assert!(character.parity_obligation.is_none());
+            let reference = row
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == "reference")
+                .expect("identity-only model must expose its required reference conditioning");
+            assert_eq!((reference.mlx, reference.candle), (Some(true), Some(true)));
+        }
+        let pulid = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "pulid_flux_dev")
+            .unwrap();
+        assert_eq!(
+            (pulid.preview.mlx, pulid.preview.candle),
+            (Some(true), Some(true))
+        );
+    }
+
+    #[test]
+    fn sc18481_strict_pose_control_uses_only_real_base_model_lanes() {
+        let matrix = backend_capability_matrix().unwrap();
+        for model in [
+            "z_image_turbo",
+            "z_image",
+            "qwen_image",
+            "flux_dev",
+            "krea_2_turbo",
+            "flux2_dev",
+            "instantid_realvisxl",
+        ] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let control = row
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == "control")
+                .expect("strict-pose model must expose the control conditioning axis");
+            assert_eq!(
+                (control.mlx, control.candle),
+                (Some(true), Some(true)),
+                "{model} must follow its exact production pose lanes"
+            );
+            assert!(control.parity_obligation.is_none());
+        }
+
+        // These edit models consume the pose image as an ordinary reference; they do not own the
+        // strict control lane and must not inherit the base-model supplement above.
+        for model in [
+            "qwen_image_edit_2511_lightning",
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let control = row
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == "control")
+                .expect("pose-as-reference models remain represented in the exhaustive matrix");
+            assert_eq!(
+                (control.mlx, control.candle),
+                (Some(false), Some(false)),
+                "{model} must remain pose-as-reference rather than strict control"
+            );
+        }
+    }
+
+    #[test]
+    fn sc18481_utility_probes_use_their_production_job_shapes() {
+        let matrix = backend_capability_matrix().unwrap();
+        let assert_both = |model: &str, capability: &str| {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let cell = row
+                .operation_and_mode
+                .iter()
+                .find(|cell| cell.capability == capability)
+                .unwrap_or_else(|| panic!("{model} must expose {capability}"));
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "{model}/{capability} must use its live production request"
+            );
+            assert!(cell.parity_obligation.is_none());
+        };
+
+        assert_both("controlnet_tile_sdxl", "image_detail");
+        assert_both("vision_caption_qwen3vl_8b", "image_caption");
+        let vision = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "vision_caption_qwen3vl_8b")
+            .unwrap();
+        assert!(!vision
+            .operation_and_mode
+            .iter()
+            .any(|cell| cell.capability == "training_caption"));
+        for id in ["pid_qwenimage", "pid_flux", "pid_flux2", "pid_sdxl"] {
+            let row = matrix.models.iter().find(|row| row.id == id).unwrap();
+            assert!(
+                row.operation_and_mode.is_empty(),
+                "{id} is a decoder overlay, not a standalone utility route"
+            );
         }
     }
 
@@ -2990,6 +3679,7 @@ mod tests {
             matrix.summary,
             matrix_summary(
                 &matrix.models,
+                &matrix.imported_families,
                 &matrix.gpu_job_types,
                 &matrix.training_kernels,
                 matrix.exceptions.len(),
@@ -3005,6 +3695,7 @@ mod tests {
         both.candle = Some(false);
         let mutated = matrix_summary(
             &models,
+            &matrix.imported_families,
             &matrix.gpu_job_types,
             &matrix.training_kernels,
             matrix.exceptions.len(),
@@ -3045,6 +3736,28 @@ mod tests {
     }
 
     #[test]
+    fn advanced_video_gpu_rows_use_models_that_advertise_each_operation() {
+        let matrix = backend_capability_matrix().unwrap();
+        for job_type in ["video_extend", "video_bridge", "person_replace"] {
+            let row = matrix
+                .gpu_job_types
+                .iter()
+                .find(|row| row.job_type == job_type)
+                .unwrap();
+            let representative = row
+                .requests
+                .iter()
+                .find(|cell| cell.capability == "representative_request")
+                .unwrap();
+            assert_eq!(
+                (representative.mlx, representative.candle),
+                (Some(true), Some(true)),
+                "{job_type} must be probed with a shipped model that owns the operation"
+            );
+        }
+    }
+
+    #[test]
     fn mutation_guards_reject_untracked_gap_and_incomplete_exception() {
         let mut broken = cell(
             "mutated".to_owned(),
@@ -3063,6 +3776,8 @@ mod tests {
         let incomplete = ExceptionRecord {
             id: "ex-1".to_owned(),
             category: "".to_owned(),
+            decision_type: DecisionType::TechnicalBlocker,
+            evidence: "The native implementation is not available.".to_owned(),
             approver: "owner".to_owned(),
             authority: "team:image".to_owned(),
             approved_date: "2026-08-10".to_owned(),
@@ -3071,7 +3786,7 @@ mod tests {
             cells: vec!["gpuJobTypes/mutated".to_owned()],
         };
         let register = ExceptionRegister {
-            schema_version: 1,
+            schema_version: 2,
             authorized_approvers: vec![AuthorizedApprover {
                 name: "owner".to_owned(),
                 authority: "team:image".to_owned(),
@@ -3460,6 +4175,8 @@ mod tests {
         let make = |id: &str, date: &str, cell: &str| ExceptionRecord {
             id: id.to_owned(),
             category: "utility".to_owned(),
+            decision_type: DecisionType::TechnicalBlocker,
+            evidence: "The production backend has no implementation for this request.".to_owned(),
             approver: "Capability Owner".to_owned(),
             authority: "team:runtime".to_owned(),
             approved_date: date.to_owned(),
@@ -3474,7 +4191,7 @@ mod tests {
             }]
         };
         let bad_date = ExceptionRegister {
-            schema_version: 1,
+            schema_version: 2,
             authorized_approvers: authorized(),
             records: vec![make("bad-date", "2026-02-30", "missing")],
         };
@@ -3483,14 +4200,14 @@ mod tests {
         let mut unauthorized = make("unauthorized", "2026-08-10", "missing");
         unauthorized.authority = "team:not-authorized".to_owned();
         assert!(validate_exceptions(&ExceptionRegister {
-            schema_version: 1,
+            schema_version: 2,
             authorized_approvers: authorized(),
             records: vec![unauthorized],
         })
         .is_err());
 
         assert!(validate_exceptions(&ExceptionRegister {
-            schema_version: 1,
+            schema_version: 2,
             authorized_approvers: authorized(),
             records: vec![
                 make("one", "2026-08-10", "same"),
@@ -3527,10 +4244,70 @@ mod tests {
     }
 
     #[test]
+    fn exception_register_rejects_unknown_decision_types_and_empty_evidence() {
+        let unknown = serde_json::from_value::<ExceptionRegister>(json!({
+            "schemaVersion": 2,
+            "authorizedApprovers": [{
+                "name": "Capability Owner",
+                "authority": "team:runtime"
+            }],
+            "records": [{
+                "id": "untyped",
+                "category": "utility",
+                "decisionType": "operation",
+                "evidence": "A capability axis is not a decision classification.",
+                "approver": "Capability Owner",
+                "authority": "team:runtime",
+                "approvedDate": "2026-08-13",
+                "userFacingBehavior": "The control is disabled with an explanation.",
+                "revisitCondition": "Revisit when the native implementation ships.",
+                "cells": ["gpuJobTypes/example"]
+            }]
+        }));
+        assert!(
+            unknown.is_err(),
+            "unknown decisionType must fail serde validation"
+        );
+
+        let mut empty_evidence = ExceptionRecord {
+            id: "no-evidence".to_owned(),
+            category: "utility".to_owned(),
+            decision_type: DecisionType::ProductDecision,
+            evidence: "  ".to_owned(),
+            approver: "Capability Owner".to_owned(),
+            authority: "team:runtime".to_owned(),
+            approved_date: "2026-08-13".to_owned(),
+            user_facing_behavior: "The control is disabled with an explanation.".to_owned(),
+            revisit_condition: "Revisit when the approved product posture changes.".to_owned(),
+            cells: vec!["gpuJobTypes/example".to_owned()],
+        };
+        let register = ExceptionRegister {
+            schema_version: 2,
+            authorized_approvers: vec![AuthorizedApprover {
+                name: "Capability Owner".to_owned(),
+                authority: "team:runtime".to_owned(),
+            }],
+            records: vec![empty_evidence.clone()],
+        };
+        assert!(validate_exceptions(&register).is_err());
+
+        empty_evidence.evidence = "Owner-reviewed product evidence.".to_owned();
+        let register = ExceptionRegister {
+            schema_version: 2,
+            authorized_approvers: register.authorized_approvers,
+            records: vec![empty_evidence],
+        };
+        validate_exceptions(&register).expect("typed decision with evidence must validate");
+    }
+
+    #[test]
     fn exception_register_accepts_authorized_guidance_cell() {
         let exception = ExceptionRecord {
             id: "approved-cfg-pp".to_owned(),
             category: "guidance".to_owned(),
+            decision_type: DecisionType::SequencingChoice,
+            evidence: "The guidance specialist owns the still-open Candle CFG++ implementation."
+                .to_owned(),
             approver: "Guidance Owner".to_owned(),
             authority: "epic-7434".to_owned(),
             approved_date: "2026-08-13".to_owned(),
@@ -3539,7 +4316,7 @@ mod tests {
             cells: vec!["models/sdxl/guidanceMethod/cfg_pp".to_owned()],
         };
         let register = ExceptionRegister {
-            schema_version: 1,
+            schema_version: 2,
             authorized_approvers: vec![AuthorizedApprover {
                 name: "Guidance Owner".to_owned(),
                 authority: "epic-7434".to_owned(),
@@ -3548,6 +4325,12 @@ mod tests {
         };
 
         validate_exceptions(&register).expect("authorized guidance exception should validate");
+        let mut dishonest_category = register.clone();
+        dishonest_category.records[0].category = "operation".to_owned();
+        assert!(
+            validate_exceptions(&dishonest_category).is_err(),
+            "an operation category must not authorize a guidanceMethod cell"
+        );
         let matrix = backend_capability_matrix().unwrap();
         validate_obligations(
             &matrix.models,
@@ -3807,6 +4590,11 @@ mod tests {
             "apiContractEntry",
             "apiDto",
             "workerImageQwenEditCandle",
+            "workerImagePulid",
+            "workerImagePulidCandle",
+            "workerImageKreaImported",
+            "workerImageMageFinetuned",
+            "workerImageSdxlImported",
             "workerVideoDispatch",
             "workerVideoWan",
             "workerVideoVace",
@@ -3821,6 +4609,7 @@ mod tests {
             "workerAudioDispatch",
             "workerUtilityDispatch",
             "webSimpleJobs",
+            "webFallbackCatalog",
             "webSimpleVideo",
             "webVideoValidation",
             "webVideoStudio",
@@ -3829,6 +4618,8 @@ mod tests {
             "webAudioStudio",
             "webUpscaleEngines",
             "webVideoUpscale",
+            "modelImportDefaults",
+            "baseWeightImports",
         ] {
             assert!(
                 sources.contains_key(required),
