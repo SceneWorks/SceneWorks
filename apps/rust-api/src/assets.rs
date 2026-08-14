@@ -165,9 +165,23 @@ pub(crate) async fn import_asset(
                         .await
                         .map_err(|error| ApiError::bad_request(error.to_string()))?;
                     if !value.trim().is_empty() {
-                        provenance = Some(serde_json::from_str(&value).map_err(|error| {
-                            ApiError::bad_request(format!("Invalid provenance JSON: {error}"))
-                        })?);
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&value).map_err(|error| {
+                                ApiError::bad_request(format!("Invalid provenance JSON: {error}"))
+                            })?;
+                        // `provenance` is written into the sidecar's `extra` OBJECT, so anything
+                        // else is refused here rather than reshaped downstream. Any non-blank JSON
+                        // text used to be accepted, including `42`, `"editor"`, `[1,2]` and `null`,
+                        // and the store then made `extra` that value — which since sc-15949 also
+                        // discards an embedded workflow the import had already read out of the
+                        // file. `ProjectStore::import_asset` refuses the same shape, so neither
+                        // layer depends on the other for it.
+                        if !parsed.is_object() {
+                            return Err(ApiError::bad_request(
+                                "Invalid provenance JSON: provenance must be a JSON object",
+                            ));
+                        }
+                        provenance = Some(parsed);
                     }
                 }
                 _ => {}

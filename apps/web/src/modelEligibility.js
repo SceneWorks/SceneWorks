@@ -4,10 +4,10 @@
 // exactly which models qualify. Predicates are capability + Mac-gating only (no install
 // state) — callers layer installState via the helpers at the bottom.
 import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGating.js";
-import { VISION_CAPTION_MODEL_ID } from "./constants.js";
+import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
 
 // Image generation modes a model can serve (ImageStudio mode tabs).
-const IMAGE_MODES = ["text_to_image", "edit_image", "character_image", "style_variations"];
+const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
 
 // Video generation modes a model can advertise (VideoStudio modeOptions).
 export const VIDEO_MODES = [
@@ -46,6 +46,7 @@ export function imageModelServesMode(model, mode, caps) {
   // still can never leak into Text.
   const capabilitiesDeclared = Array.isArray(model?.capabilities);
   const capabilities = capabilitiesDeclared ? model.capabilities : [];
+  if (!IMAGE_MODES.includes(mode)) return false;
   if (mode === "edit_image") {
     return (
       (capabilities.includes("edit_image") || capabilities.includes("image_edit")) &&
@@ -54,9 +55,6 @@ export function imageModelServesMode(model, mode, caps) {
   }
   if (mode === "character_image") {
     return capabilities.includes("character_image") && !macModelFeatureBlock(model, caps, "reference");
-  }
-  if (mode === "style_variations") {
-    return capabilities.includes("style_variations") && !macModelFeatureBlock(model, caps, "reference");
   }
   return !capabilitiesDeclared || capabilities.includes("text_to_image");
 }
@@ -206,6 +204,19 @@ export function visionCaptionModelUsable(model, caps) {
   return true;
 }
 
+// Photo → skeleton pose detection (Pose Library "Create" tab). Like the vision captioner this is
+// a single catalog-pinned UTILITY model rather than a family, so usability is "this IS the detector
+// AND it can run here", not a capability sweep — `dwpose_pose_detector` declares `capabilities: []`,
+// so any capability-shaped predicate would match nothing.
+//
+// No `platforms` / `macOnly` branch, unlike visionCaptionModelUsable: the entry is deliberately
+// unscoped because the `ort` lane runs everywhere (CoreML on macOS, CUDA/CPU off-Mac). Whether the
+// SURFACE is available on a gated Mac is a separate question, answered by the screen's
+// `macFeatureBlock(caps, "poseFromPhoto")` — this predicate is only about the model.
+export function poseDetectModelUsable(model, caps) {
+  return model?.id === POSE_DETECT_MODEL_ID && !macModelBlock(model, caps);
+}
+
 // Character Studio — mirrors CharacterStudio.jsx angle/pose predicates.
 export function angleModelUsable(model, caps) {
   return !macModelBlock(model, caps) && Array.isArray(model?.ui?.viewAngles) && model.ui.viewAngles.length > 0;
@@ -263,6 +274,22 @@ export function hasUsableModelFor(models, predicate, caps) {
       model?.usable !== false &&
       predicate(model, caps),
   );
+}
+
+// The catalog entries among `ids` that a feature needs but doesn't have (epic 17625 made the
+// utility resolvers — DWPose, the person detector — cache-only, so "not installed" is a job-time
+// error, never a mid-job download). Returns them in the order `ids` was given, so the caller's
+// declaration order is the display order.
+//
+// An id with NO catalog entry is treated as SATISFIED and omitted, matching the Pose Library gate:
+// `models` is empty on first render, and an API too old to declare a utility entry still has a
+// worker that resolves it, so "not found" must never read as "missing" — that would block a working
+// install. Only an entry that positively reports missing/incomplete counts.
+export function missingRequiredModels(models, ids) {
+  const catalog = models ?? [];
+  return (ids ?? [])
+    .map((id) => catalog.find((model) => model?.id === id))
+    .filter((model) => model && !modelInstallComplete(model));
 }
 
 // The models to OFFER for download when a screen is gated: catalog models usable on the

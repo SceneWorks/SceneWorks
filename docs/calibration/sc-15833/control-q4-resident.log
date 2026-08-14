@@ -1,0 +1,59 @@
+SC15833_CAPTURED_AT=2026-08-04T12:31:17.9472172Z
+SC15833_SOURCE_V1 {"schema_version":1,"captured_at":"2026-08-04T12:31:17.9472172Z","repositories":{"sceneWorks":{"revision":"a9bb7303420855aeb276da33b31aa826a5d09faa","dirty":false,"matrixSourceRevision":"source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5"},"inference":{"revision":"5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d","dirty":false}},"hardware":{"probe":"CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version","memoryBytes":102641958912,"deviceId":"0","name":"NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition","computeCapability":"12.0","driverVersion":"596.36","runtimeVersion":"CUDA 12.9 (nvcc V12.9.41)"},"inputs":[{"role":"base","path":"E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146","bytes":33582076196,"sha256":"896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b","repository":"SceneWorks/flux2-dev-mlx","resolvedRevision":"2868b1461b2b6e6e05d84e52534df3632b4c7d5d","variant":"q4"},{"role":"control","path":"E:/huggingface/sceneworks-staging/sc15833-flux2-control-b3dcd783/FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors","bytes":8232506680,"sha256":"516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a7a794","repository":"alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union","resolvedRevision":"b3dcd7836a0e926248dac3ccba8fc0853495764b","variant":"union-2602"}]}
+cmd.exe : warning: linker stdout: LINK : warning LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs; use 
+/NODEFAULTLIB:library
+At line:2 char:1090
++ ... capture --test-threads=1'; & $env:ComSpec /d /c $cmdLine 2>&1 | Tee-O ...
++                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: linker...AULTLIB:library:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `sceneworks-worker` (lib test) generated 1 warning
+warning: `sceneworks-worker` (bin "dump-engine-capabilities") generated 1 warning (1 duplicate)
+warning: `sceneworks-worker` (test "cuda_quant_smoke") generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 1.04s
+     Running unittests src\lib.rs (target\release\deps\sceneworks_worker-354460de01d57b5d.exe)
+
+running 1 test
+test flux2_dev_gpu_smoke::flux2_dev_control_candle_gpu_smoke ... [smoke] loading flux2_dev CONTROL (Q4) from E:\huggingface\sceneworks-staging\sc15833-flux2-dev-q4-2868b146 + E:\huggingface\sceneworks-staging\sc15833-flux2-control-b3dcd783\FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors ...
+[smoke] dev control 512x512 @ 28 steps (scale 0.75) ...
+[smoke] dev control 512x512 std 35.88 -> docs/calibration/sc-15833\flux2_dev_control_candle.png sha256=926038aaa404b70e47c54991d77c831db5b88826bf52784d3bb40a0c2eeb7088
+[smoke] DONE: flux2_dev control (candle) coherent
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1268 filtered out; finished in 156.56s
+
+     Running unittests src\bin\dump-engine-capabilities.rs 
+(target\release\deps\dump_engine_capabilities-2ef1f6ae096afd80.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\candle_kernels_patch_guard.rs (target\release\deps\candle_kernels_patch_guard-4b5c30f4374b47b0.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests\cuda_quant_smoke.rs (target\release\deps\cuda_quant_smoke-0258aabc33d0d78f.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\image_workspace_dep_guard.rs (target\release\deps\image_workspace_dep_guard-674e757aa371c0dd.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests\nax_guard.rs (target\release\deps\nax_guard-d3caba16c6b0c8bc.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

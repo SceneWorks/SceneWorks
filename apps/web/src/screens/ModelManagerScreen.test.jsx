@@ -615,7 +615,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
   }
 
   const MODELS = [
-    { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image", "style_variations"], installState: "missing" },
+    { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image"], installState: "missing" },
     { id: "wan_t2v", name: "Wan T2V", type: "video", family: "wan-video", capabilities: ["text_to_video"], installState: "missing" },
     { id: "real_esrgan", name: "Real-ESRGAN", type: "utility", family: "real-esrgan", capabilities: [], installState: "missing" },
   ];
@@ -684,10 +684,12 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(section.querySelectorAll(".model-card").length).toBe(1);
   });
 
-  it("describes each model's capabilities as chips on the card", async () => {
-    await render({ models: [MODELS[0]] });
+  it("describes live capabilities as chips and suppresses the retired style mode", async () => {
+    // A stale imported/catalog record may still carry this legacy token. The Model Manager must
+    // never turn it back into a visible affordance after Image Studio retired the mode.
+    await render({ models: [{ ...MODELS[0], capabilities: ["text_to_image", "style_variations"] }] });
     const chips = [...container.querySelectorAll(".model-capabilities .chip")].map((c) => c.textContent);
-    expect(chips).toEqual(["Text to Image", "Style Variations"]);
+    expect(chips).toEqual(["Text to Image"]);
   });
 
   // sc-8445: Krea Realtime is the first catalog model to advertise all three video generation
@@ -949,7 +951,7 @@ describe("ModelManagerScreen remote memory gating (REST)", () => {
     delete window.__TAURI__;
     apiFetch = vi.fn(async (path) => {
       if (path === "/api/v1/host-capabilities") {
-        return { platform: "macos", unifiedMemoryGb: 16 };
+        return { platform: "macos", memoryKind: "unified", memoryGb: 16 };
       }
       return [];
     });
@@ -982,6 +984,7 @@ describe("ModelManagerScreen remote memory gating (REST)", () => {
       jobs: [],
       loras: [],
       models,
+      macCapabilities: { macGatingActive: true },
       presets: [],
       jobAction: () => {},
       setActiveView: () => {},
@@ -1025,6 +1028,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   let createModelDownloadJob;
   let deleteModelVariant;
   let hostMemoryGb;
+  let hostPlatform;
   let ModelManagerScreen;
   let AppContext;
 
@@ -1032,16 +1036,16 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
 
   // A quant-matrix model in the sc-8508 /models shape: hasVariantMatrix + a per-tier variants[]
   // carrying variant / installState / downloadSizeBytes / footprint. Tiers are sized so the RAM
-  // suggestion lands on q4 at 32 GB (budget 25.6 GB: q4 est 6 GB fits; q8/bf16 overflow) and on bf16
-  // at 512 GB (budget 409 GB: bf16 est 36 GB fits).
+  // suggestion lands on q4 at 32 GB (budget 28.8 GB: q4 estimated peak 18 GB fits; q8/bf16 overflow)
+  // and on bf16 at 512 GB (budget 460.8 GB: bf16 estimated peak 38 GB fits).
   function matrixModel({ installed = [] } = {}) {
     // diskGb (on-disk footprint, req #1 — this is what the row must render) is deliberately distinct
     // from downloadGb (compressed download) so the assertions prove the displayed size comes from
     // footprint.diskSizeBytes, not downloadSizeBytes. The RAM suggestion keys off diskGb.
     const tiers = [
-      { variant: "q4", diskGb: 4, downloadGb: 3 }, // est 6 GB
-      { variant: "q8", diskGb: 18, downloadGb: 15 }, // est 27 GB > 25.6 → excluded at 32 GB
-      { variant: "bf16", diskGb: 24, downloadGb: 20 }, // est 36 GB > 25.6 → excluded at 32 GB
+      { variant: "q4", diskGb: 4, downloadGb: 3 }, // est 18 GB
+      { variant: "q8", diskGb: 18, downloadGb: 15 }, // est 32 GB > 28.8 → excluded at 32 GB
+      { variant: "bf16", diskGb: 24, downloadGb: 20 }, // est 38 GB > 28.8 → excluded at 32 GB
     ];
     return {
       id: "z_image_turbo",
@@ -1081,11 +1085,16 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     delete window.__TAURI__;
     hostMemoryGb = 32;
+    hostPlatform = "macos";
     createModelDownloadJob = vi.fn(async () => ({ id: "job", payload: {} }));
     deleteModelVariant = vi.fn(async () => ({ reclaimedBytes: 1, reclaimedLabel: "18.0 GB" }));
     apiFetch = vi.fn(async (path) => {
       if (path === "/api/v1/host-capabilities") {
-        return { platform: "macos", unifiedMemoryGb: hostMemoryGb };
+        return {
+          platform: hostPlatform,
+          memoryKind: hostPlatform === "macos" ? "unified" : "dedicated",
+          memoryGb: hostMemoryGb,
+        };
       }
       return [];
     });
@@ -1118,6 +1127,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       jobs: [],
       loras: [],
       models,
+      macCapabilities: { macGatingActive: hostPlatform === "macos" },
       presets: [],
       jobAction: () => {},
       setActiveView: () => {},
@@ -1143,6 +1153,20 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   function tierRows() {
     return [...container.querySelectorAll(".model-tier-row")];
   }
+
+  it("uses Candle tier evidence for a dedicated-VRAM host", async () => {
+    hostPlatform = "windows";
+    hostMemoryGb = 12;
+    const model = {
+      ...matrixModel(),
+      candle: { vramGbByTier: { q4: 6, q8: 10, bf16: 20 } },
+    };
+    await render([model]);
+    const suggested = tierRows().find((row) =>
+      row.querySelector(".model-tier-suggested-badge"),
+    );
+    expect(suggested?.textContent).toContain("Q8");
+  });
 
   it("renders a per-tier panel with each tier's size + install state for a matrix model", async () => {
     await render([matrixModel({ installed: ["q8"] })]);

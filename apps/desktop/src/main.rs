@@ -20,6 +20,11 @@ mod cuda_provision_check;
 mod net;
 mod settings;
 mod setup;
+// Source-level guard keeping this crate's test fixtures off the shared temp root (sc-17707).
+// Test-only, and deliberately un-`cfg`-gated by platform: it READS the Windows/Linux provisioner
+// sources, which no macOS build ever compiles.
+#[cfg(test)]
+mod temp_fixture_guard;
 // In-app cross-platform auto-updater (sc-1355): startup check against the GitHub
 // "latest release" pointer, user-prompted download + install + restart.
 mod update;

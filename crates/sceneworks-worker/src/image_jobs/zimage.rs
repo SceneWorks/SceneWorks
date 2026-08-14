@@ -177,6 +177,7 @@ fn zimage_control_generate_one(
     seed: i64,
     steps: u32,
     conditioning: Vec<Conditioning>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -188,6 +189,7 @@ fn zimage_control_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -338,7 +340,7 @@ async fn generate_zimage_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -363,6 +365,7 @@ async fn generate_zimage_control_stream(
                     seed,
                     steps,
                     conditioning,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;
@@ -419,6 +422,7 @@ fn zimage_base_control_generate_one(
     steps: u32,
     guidance: f32,
     conditioning: Vec<Conditioning>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -432,6 +436,7 @@ fn zimage_base_control_generate_one(
         steps: Some(steps),
         guidance: Some(guidance),
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -593,7 +598,7 @@ async fn generate_zimage_base_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -620,6 +625,7 @@ async fn generate_zimage_base_control_stream(
                     steps,
                     guidance,
                     conditioning,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;
@@ -665,46 +671,6 @@ async fn generate_zimage_base_control_stream(
 // (`resolve_identity_init`) were line-for-line copies of the FLUX.2-dev pair. Both now share
 // the single [`identity_strength`] / [`resolve_identity_init`] in base.rs — this lane calls those
 // directly (see `resolve_identity_init(request, settings, project_path)` at the strict-pose streams).
-
-/// Resolve the Z-Image Image-Edit img2img init for `mode == "edit_image"` (epic 3529):
-/// `Some((source, strength))` decoding `sourceAssetId` and pre-fitting it to the output W×H
-/// (crop/pad/outpaint via [`should_fit_edit_source`]/[`fit_engine_image`] — never stretch an
-/// off-aspect source); `None` when not an edit job or no source asset (the caller then falls
-/// back to the identity-init reference path / plain txt2img). `strength` is the torch
-/// `ZImageImg2ImgPipeline` knob (`advanced.strength`, default 0.6) forwarded verbatim to the
-/// engine — its `init_time_step(steps, strength)` matches the diffusers img2img start step.
-/// Both `z_image_edit` and `z_image_turbo` (mode `edit_image`) drive this one path (same
-/// Turbo-weights img2img call in torch).
-fn resolve_zimage_edit_init(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Option<(Image, f32)>> {
-    if request.mode != "edit_image" {
-        return Ok(None);
-    }
-    let Some(asset_id) = request
-        .source_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    else {
-        return Ok(None);
-    };
-    let source = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        asset_id,
-        project_path,
-    )?;
-    let image = if should_fit_edit_source(request) {
-        fit_engine_image(source, request.width, request.height, &request.fit_mode)?
-    } else {
-        source
-    };
-    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0);
-    Ok(Some((image, strength)))
-}
 
 /// The asset `adapter` id for Z-Image (strict-pose shares the base z-image label).
 const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";

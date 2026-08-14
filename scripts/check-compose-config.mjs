@@ -89,6 +89,39 @@ function assertRuntimeDefaults(config, label, options = {}) {
   assertEqual(rustWorker?.environment?.SCENEWORKS_GPU_ID, "cpu", `${label} rust worker gpu mode`);
   assertEqual(rustWorker?.environment?.SCENEWORKS_CONFIG_DIR, "/sceneworks/config", `${label} rust worker config dir`);
   assertServiceMountsTarget(rustWorker, "/sceneworks/config", `${label} rust worker config mount`);
+  // sc-16540: the credential store must be its own writable mount on every service
+  // that touches it, and must NOT resolve under /sceneworks/config — that path is
+  // bind-mounted from the repo checkout by default, and the store is plaintext tokens.
+  for (const [service, serviceLabel] of [
+    [api, "api"],
+    [worker, "candle worker"],
+    [rustWorker, "rust worker"],
+  ]) {
+    assertEqual(
+      service?.environment?.SCENEWORKS_CREDENTIALS_DIR,
+      "/sceneworks/credentials",
+      `${label} ${serviceLabel} credentials dir`,
+    );
+    assertWritableMount(service, "/sceneworks/credentials", `${label} ${serviceLabel} credentials mount`);
+  }
+  assertCredentialsBindOutsideRepo(config, label);
+}
+
+// The credentials bind must default outside the repo working tree — putting it back
+// under ./config or ./data would reinstate exactly the problem sc-16540 fixed.
+function assertCredentialsBindOutsideRepo(config, label) {
+  for (const name of ["api", "worker", "rust-worker"]) {
+    const service = config.services?.[name];
+    const volume = (service?.volumes ?? []).find(
+      (item) => item?.target === "/sceneworks/credentials",
+    );
+    const source = volume?.source ?? "";
+    if (source.startsWith("./") || source === "." || source.startsWith("../")) {
+      throw new Error(
+        `${label} ${name} credentials bind: expected a source outside the repo, got ${source}`,
+      );
+    }
+  }
 }
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "sceneworks-compose-config-"));

@@ -1,0 +1,2485 @@
+{
+  "survey": 15969,
+  "epic": 15448,
+  "description": "Per-family rung-4 (bounded transformer residency) applicability, derived from the pinned inference revision's provider/architecture code. Read by scripts/generate-memory-matrix.mjs, which turns each (family, backend) verdict into the matrix's bounded_transformer_residency cells. Keys are the family group ids from generate-memory-matrix.mjs#familyGroup, which are the family's MLX story id.",
+  "vocabulary": {
+    "structuralApplicability": {
+      "full": "The windowable transformer trunk is ONE uniform stack of interchangeable blocks; a single BlockPlan bounds essentially all of its weight bytes. Only embedders and heads sit outside it.",
+      "partial": "The trunk is not one uniform stack. Any of: it decomposes into two or more separately-indexed stacks (needing a plan each); its single stack mixes block KINDS, so the residency floor is the largest kind rather than an average block; or part of it — a conv trunk, a second resident network — cannot be windowed at all. `blockStacks` names every stack and marks which are windowable. Neither Implemented nor Structurally N/A — recorded as partial rather than rounded to either (SC-15969).",
+      "none": "No uniform sequential block stack exists, so the rung has nothing to bound. Requires `structural` evidence; the matrix cell becomes Structurally N/A.",
+      "requires-different-primitive": "A uniform stack exists, but gen_core::block_window's SHAPE (one carried state, a fresh view per window, release after materialize) cannot express this family's forward. Recorded as a finding rather than as an N/A, per the story: a family that needs a different PRIMITIVE is not a family the rung cannot help. Such a family may never be marked implemented."
+    },
+    "implementation": {
+      "shared-primitive": "Drives gen_core::block_window::run_windowed through a BlockWindowBackend.",
+      "provider-local": "Real block streaming that does NOT go through the shared primitive.",
+      "none": "No block-window code path exists for this family on this backend."
+    },
+    "implementedEntries": "Legacy Cartesian implementation selector: the exact catalog entries whose provider exposes one parameter-identical rung-4 code path. Implementation is per ENTRY, not per family — Krea's Candle contract is gated on the turbo descriptor id, so krea_2_raw does not get it — and a family-level claim would over-report. Mutually exclusive with `implementationScopes`; must be empty exactly when `implementation` is \"none\".",
+    "implementationScopes": "Exact implementation selectors for a family whose entries or tiers publish different rung-4 parameter shapes. Every scope names entries and its own strategyParameters; optional tiers, modes, and overlays narrow the scope. Scopes must not overlap and are mutually exclusive with the legacy implementedEntries/implementedTiers/implementedModes/implementedOverlays fields.",
+    "implementedModes": "Optional narrowing of `implementedEntries` to the catalog modes the implementing provider descriptor actually serves. Needed because the matrix collapses a catalog entry's modes onto one provider id while inference may route them to DIFFERENT descriptors: Candle Krea's edit modes are served by the krea_2_edit descriptor and the krea_2_turbo_edit surface tag, neither of which returns the memory contract, so a mode-blind claim would report rung 4 as implemented on a route that does not expose it. Absent means every mode.",
+    "implementedTiers": "Optional narrowing of legacy `implementedEntries` to measured numeric tiers. Absent means every tier.",
+    "implementedOverlays": "Optional narrowing of `implementedEntries` to the overlay cells admitted by the provider contract. Absent means every overlay. Use this for evidence-gated exclusions such as a contract measured only with no adapter; use `overlayIncompatible` instead when the provider mechanism makes an overlay structurally impossible.",
+    "strategyParameters": "The rung's OWN published parameters for a legacy Cartesian implementation claim. Exact implementationScopes carry this field per scope. Deliberately not the cumulative composition: rung 4 engages lower rungs by cost-order default, but inventing unmeasured values would put unsupported numbers in a cell that reads as evidence.",
+    "overlayIncompatible": "Present when the provider's adapter mechanism makes a windowed block unable to carry an overlay. It makes the overlay cells of the IMPLEMENTED entries/modes Structurally N/A with the cited evidence, and nothing else: on an entry that has no streaming path at all the rung is Missing for the ordinary reason, and calling it structurally exempt would presuppose a path that does not exist. It is reported on the cell as its own `overlayIncompatible` flag rather than by overwriting `structuralApplicability`, whose meaning is about the ARCHITECTURE — Krea's 28-block trunk is windowable whatever its adapters do.",
+    "blockStacks[].entries": "Optional. Present when a stack exists on only some of the family's catalog entries, so a per-entry difference stays machine-readable instead of being rounded into the family verdict.",
+    "requestPeak": {
+      "moves": "Measured to move the REQUEST peak, not merely a phase peak.",
+      "does-not-move": "Measured, and the request peak did not move. Per the epic's non-negotiable this is not a saving and must not be selected by default.",
+      "unmeasured": "No request-peak measurement exists for this family/backend at the pinned revision."
+    },
+    "requestPeak.byTier": "Optional per-tier override of the family/backend request-peak finding. Required when measurements differ by numeric tier; omitted tiers inherit requestPeak.finding.",
+    "requestPeak.scopes": "Optional exact cell selectors for measurements narrower than a whole family/backend or tier. Each selector may name entries, tiers, modes, and overlays; omitted dimensions are wildcards. A matching selector overrides byTier and finding."
+  },
+  "notes": [
+    "Rung 4 requires rung 1 engaged in the same request (gen_core::memory_strategy BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES). That prerequisite is NOT restated per family here: the generator reads it from the same rung-1 predicate it already uses for the staged_residency cells, so a family that gains rung-1 capability stops reporting the prerequisite gap without a survey edit.",
+    "Structural applicability is about the DENOISE trunk. The component-scope axis (Dit / TextEncoder / Both) is a published rung-4 parameter, not a separate rung; where a family's text encoder changes the answer it is recorded in `findings`.",
+    "Overlay compatibility is a property of the provider's ADAPTER MECHANISM, not of the architecture: a provider that installs adapters as forward-time residuals can replay them onto a materialized block, while one that folds a delta into the base weight at load cannot. Only the two families with code evidence either way carry an `overlays` finding.",
+    "Why `unmeasured` is the honest answer almost everywhere, and why a static proxy will not do. docs/sc-16195/resolution-sweep.json measures, at 1024x1024 on the RESIDENT hold-all path, weight residency against activation transient: illustrious q8 4.74 vs 14.04 GiB, sdxl bf16 6.48 vs 14.04, z-image-turbo q4 5.38 vs 14.04, lens q4 16.46 vs 14.04, qwen-image q8 33.45 vs 7.66, krea-2-turbo q8 18.06 vs 7.67. Weight residency is a MINORITY of that peak on three of the six tiers, which is enough to show rung 4 cannot be assumed to move the request peak — but not enough to predict that it will not, because rung 4 is only ever selected in composition with rungs 2 and 3, which attack exactly the transient term those rows are dominated by. Z-Image is the worked case: its resident-path row looks transient-bound, and once the ladder is engaged its request peak is decode-bound at ~4.36 GiB and rung 4 still moved it. So this axis is decided by a per-family measurement of the rung-3 composition against the rung-4 composition, which is what Krea's Candle evidence records and what no other family has.",
+    "What `blockStacks` covers, stated once. It inventories the stacks resident during the DENOISE phase — the trunk a rung-4 window would bound, plus any second network held alongside it (a control branch, an identity path, a second expert), because those set the share of resident transformer weight the rung can actually move. It does NOT inventory text-encoder or vision-tower stacks: those belong to the conditioning phase, they are what rung 1 sheds, and the component-scope parameter (Dit / TextEncoder / Both) is the axis that addresses them. Where a family's encoder changes the rung-4 answer it is recorded in `findings` instead."
+  ],
+  "families": {
+    "15509": {
+      "name": "Mage-Flow",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "One uniform 12-block dual-stream stack. Windowable in principle; the smallest N in the catalog, so the ceiling on the saving is the lowest.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "12",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-mage/src/transformer.rs",
+              "reason": "MageTransformer holds a single `blocks: Vec<MageTransformerBlock>` built over `0..cfg.depth` from one constructor — a uniform sequential stack, each block consuming the previous pair."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-mage/src/config.rs",
+              "reason": "`depth: 12` with `depth_single_blocks = 0` — every block is dual-stream, so the trunk is one homogeneous run rather than a double/single split."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
+              "reason": "The provider contract declares Resident Implemented and every other rung Missing, so no rung-4 code path exists."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Mage-Flow on either backend."
+          },
+          "findings": [
+            "N = 12 is the smallest uniform stack surveyed. A window of 1 bounds trunk weights at 1/12, against ~1/30 on z-image and ~1/60 on Qwen-Image — applicable, but the least leverage per unit of re-materialization cost.",
+            "Mage-Flow is TE-heavy: the conditioning encoder is a full decoder stack of its own (text_encoder/layer.rs). A Dit-scoped window bounds only the 12-block trunk, so the component scope, not the window size, is the parameter that decides whether rung 4 is worth anything here."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo"
+          ],
+          "implementedOverlays": ["none"],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. Mage now drives that trunk through the shared Candle block-window backend for every shipped Candle route without an overlay.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "12",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+              "reason": "The Candle Mage provider publishes a Dit-scoped bounded-transformer-residency contract with a one-block window."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-mage/src/transformer.rs",
+              "reason": "The streamed Mage transformer branch materializes and releases each block window through candle_gen::block_window::run_windowed."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Mage-Flow on either backend."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15510": {
+      "name": "Z-Image",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "z_image",
+            "z_image_edit",
+            "z_image_turbo"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "The shipped rung-4 exemplar, and still partial: the base DiT is three stacks (2 noise refiners, 2 context refiners, 30 unified layers) and only the 30-layer stack is windowed. The control route adds two more — a 15-block control stack, which IS windowed, and a 2-block control refiner, which is not. The refiner blocks stay resident either way.",
+          "blockStacks": [
+            {
+              "name": "noise_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "context_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "layers",
+              "blocks": "30",
+              "windowable": true
+            },
+            {
+              "name": "control_layers",
+              "blocks": "15 (control route only)",
+              "windowable": true,
+              "entries": [
+                "z_image",
+                "z_image_turbo"
+              ]
+            },
+            {
+              "name": "control_noise_refiner",
+              "blocks": "2 (control route only)",
+              "windowable": false,
+              "entries": [
+                "z_image",
+                "z_image_turbo"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/transformer.rs",
+              "reason": "The transformer holds `noise_refiner: Vec<ZImageTransformerBlock>`, `context_refiner: Vec<ZImageContextBlock>` and `layers: Vec<ZImageTransformerBlock>`; the rung-4 arming path records only the `layers` prefix as re-readable, so the two refiner stacks are outside the window."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/control_transformer.rs",
+              "reason": "The control route adds `control_layers: Vec<ZImageControlBlock>` (15 blocks at base places 0,2,...,28) and arms rung 4 for it with the `control_layers` prefix, so the streamer covers the control stack as well as the base trunk."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/block_stream.rs",
+              "reason": "Family-side half of rung 4: rebuilds block n from the snapshot per window and drains the view with `remove_accessed`, driving mlx_gen::block_residency::run_windowed."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
+              "reason": "Declares BoundedTransformerResidency Implemented only when the load is a re-openable `WeightsSource::Dir` with `LoadShape::DeferredMaterialization`, and publishes transformer_window_sizes = [1] plus all three component scopes."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "reason": "Measured on real weights: the staged denoise peak falls 4.653 -> 1.795 GiB (q4), 7.486 -> 2.149 (q8) and 13.362 -> 3.201 (bf16), which moves the request peak off the denoise phase entirely — after rung 4 all three tiers are decode-bound at ~4.36 GiB.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/tests/block_residency_real_weights.rs",
+                "reason": "Real-weight residency suite that exercises the windowed forward against the fully-resident control."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/src/block_residency.rs",
+                "reason": "Module docs carry the measured window ladder (window 1 = 8.0 MiB vs 238.4 MiB resident, linear in window size) and the materialize-guard control."
+              }
+            ]
+          },
+          "findings": [
+            "The window size is INERT above 1 on this family: 30/15/8/4/2 all land on the same peak and an all-covering attribution control matches window 8 exactly, so `TRANSFORMER_WINDOW_SIZES` publishes [1] rather than a ladder.",
+            "Component scope and streamability are two different levers and must not be conflated. Making the encoder streamable at all under Sequential is what let bf16 fit 8 GB (conditioning 8.489 -> 2.718 GiB); the tunable TextEncoder scope cuts conditioning a further 46.5% and moves the request peak 0.0%, which is why the published default is Dit — see gen-core's memory_strategy prerequisite note.",
+            "Overlays are compatible here, in contrast to Krea/Candle: adapters are installed as forward-time residuals and `BlockAdapters` replays the captured list onto each materialized block, so a LoRA-carrying request can still stream.",
+            "The declaration is per LOAD, and the matrix has no load-source axis. Rung 4 is Missing for a single-file / ComfyUI load, because streaming rebuilds blocks from the snapshot per window and an in-memory `Weights` has no re-openable source. Every catalog route here is a `WeightsSource::Dir` registry load, so the cells are right for the routes the matrix covers — but a consumer must not read them as covering a user-imported single-file checkpoint."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "z_image",
+            "z_image_edit",
+            "z_image_turbo"
+          ],
+          "implementedOverlays": [
+            "none",
+            "lora",
+            "control"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "Candle windows the 30-block packed or dense main DiT and the 15-block Fun-Controlnet Union branch through the shared block-window primitive; each 2-block refiner remains resident. Packed-tier LoRA residual plans are retained and replayed onto every materialized main block, so none, LoRA, and strict-control overlays all expose the same request-scoped rung.",
+          "blockStacks": [
+            {
+              "name": "noise_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "context_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "layers",
+              "blocks": "30",
+              "windowable": true
+            },
+            {
+              "name": "control_layers",
+              "blocks": "15 (control route only)",
+              "windowable": true,
+              "entries": [
+                "z_image",
+                "z_image_turbo"
+              ]
+            },
+            {
+              "name": "control_noise_refiner",
+              "blocks": "2 (control route only)",
+              "windowable": false,
+              "entries": [
+                "z_image",
+                "z_image_turbo"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs",
+              "reason": "The CUDA provider contracts publish the full ladder, exact bounded-host-decode/chunk/window candidate ranges, one shared calibration identity, explicit PiD refusal, and overlay-compatible rung-4 support for both registered and bespoke control routes."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/packed_dit.rs",
+              "reason": "The streamed packed DiT retains its host-backed transformer view, materializes one whole main-layer window, and drives candle_gen::block_window::run_windowed with synchronized release and ragged-final-window coverage."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/packed_tier_validate.rs",
+              "reason": "The ignored CUDA real-weight conformance covers packed q4/q8 base and Fun-Controlnet loading plus fixed-seed warm repeat, request-field steering, recoverable errors, and cancellation cleanup."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/sequential_vram_probe.rs",
+              "reason": "The fresh-process CUDA harness selects every rung, installed q4/q8/bf16 tier, optional deterministic LoRA overlay, and active text-to-image mode while recording phase peaks and warm-repeat determinism."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/control_vram_probe.rs",
+              "reason": "The strict-control CUDA harness drives the shipping Fun-Controlnet Union 2.1 checkpoint through every rung and installed tier, recording predecode/decode peaks and fixed-seed output."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "reason": "Fresh-process CUDA calibration on an RTX PRO 6000 Blackwell at 1024² moves the strict-control request envelope from resident 27.117/32.016/40.573 GB (q4/q8/bf16) to approximately 13.6/13.7/13.3 GB with one-block streaming; the denoise phase becomes bounded by a single materialized main/control block window."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15511": {
+      "name": "Qwen-Image",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "qwen_image",
+            "qwen_image_edit_2511",
+            "qwen_image_edit_2511_lightning"
+          ],
+          "implementedTiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "implementedOverlays": [
+            "none",
+            "lora",
+            "identity"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "The shared block-window primitive rebuilds the uniform 60-block base/edit DiT one block at a time for BF16, packed Q4/Q8, and captured LoRA/LoKr residuals. The optional five-block control side branch is structurally windowable but is not implemented by this MLX provider path, so the distinct qwen_image_control provider does not advertise rung 3 or 4.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "60",
+              "windowable": true
+            },
+            {
+              "name": "QwenFunControlBranch blocks",
+              "blocks": "5 (control route only)",
+              "windowable": true,
+              "entries": [
+                "qwen_image_control"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/transformer/transformer.rs",
+              "reason": "QwenTransformer holds a single `blocks: Vec<QwenTransformerBlock>` over `0..cfg.num_layers` (60); everything else is embedders and the output head."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/control_transformer.rs",
+              "reason": "The Fun-Controlnet-Union route adds `QwenFunControlBranch { blocks: Vec<QwenTransformerBlock> }` — 5 FULL dual-stream blocks at `control_layers = [0, 12, 24, 36, 48]` — held in the heavy bundle alongside the 60-block base trunk for the whole denoise."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/block_stream.rs",
+              "reason": "QwenBlockStream reopens the production checkpoint, rebuilds one mapped block per shared window, drains its source aliases, and replays packed quantization plus captured adapter residuals."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
+              "reason": "The load-exact contract publishes DiT window 1 only for sequential deferred directory loads and explicitly leaves bounded attention and transformer residency Missing on qwen_image_control."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "scopes": [
+              {
+                "entries": [
+                  "qwen_image"
+                ],
+                "tiers": [
+                  "bf16",
+                  "q4",
+                  "q8"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              }
+            ],
+            "reason": "Authoritative base/no-overlay ladder runs measured bounded attention versus bounded transformer residency at 64,574,244,508 versus 16,128,899,280 allocator bytes for BF16, 33,921,472,156 versus 15,977,855,160 for Q4, and 44,091,560,604 versus 15,977,855,160 for Q8. SC-16353's separate unbounded-window-60-versus-window-1 same-stream attribution did not move the conditioning-dominated request peak; that control is retained as an attribution result rather than substituted for the rung-3-versus-rung-4 ladder measurements.",
+            "evidence": [
+              {
+                "source": "docs/generated/memory-calibration-evidence.json",
+                "reason": "Authoritative base BF16/Q4/Q8 no-overlay provider records compare complete bounded-attention and bounded-transformer-residency requests on pinned artifacts, fixtures, inference revisions, and calibration fingerprints."
+              }
+            ]
+          },
+          "findings": [
+            "The five-block QwenFunControlBranch is structurally windowable because it is the same uniform QwenTransformerBlock stack, but the MLX control provider does not implement its block stream in this change. It is a real resident remainder, and qwen_image_control is excluded from rung 3/4 instead of inheriting a family-level claim.",
+            "Window 1 is the sole bounded production cadence. The same-stream window-60-versus-window-1 attribution control did not move the conditioning-bound request peak, while the authoritative complete rung-3-versus-rung-4 requests moved the peak by 75.02% for BF16, 52.90% for Q4, and 63.76% for Q8.",
+            "The Q4 and Q8 rung-4 captures passed output-equivalence thresholds, range verification, loadability, cleanup, cancellation/error-path scenarios, and the required negative mutation check."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "qwen_image",
+            "qwen_image_edit_2511"
+          ],
+          "implementedTiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSizes": [
+              1,
+              2,
+              4,
+              8,
+              15,
+              30
+            ],
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "The Candle/CUDA provider reopens the uniform 60-block base/edit DiT from dense mmap tensors or content-addressed packed sidecars and materializes exact shared block windows. The head and tail remain resident. Adapter-bearing requests, including Lightning's built-in LoRA, retain the established additive/folded path and report rung 4 Missing.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "60",
+              "windowable": true
+            },
+            {
+              "name": "QwenFunControlBranch blocks",
+              "blocks": "5 (control route only)",
+              "windowable": true,
+              "entries": [
+                "qwen_image_control"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs",
+              "reason": "The Candle provider publishes the full base/edit ladder, exact candidate ranges and fingerprint, staged prerequisites, explicit PiD/control/adapter exclusions, and request cleanup behavior."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/transformer.rs",
+              "reason": "Dense and packed loaders retain a static source and replay one exact `candle_gen::block_window::BlockPlan` window at a time, with cancellation checks, synchronization before release, and ragged-final-window parity coverage."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "scopes": [
+              {
+                "entries": [
+                  "qwen_image"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "does-not-move"
+              }
+            ],
+            "reason": "SC-15817's representative base-Q4 CUDA capture loaded the exact current artifact and measured the bounded-attention and window-1 transformer compositions at the same 29,700,915,200-byte request peak because conditioning remained dominant. The capture is candidate/gated conformance rather than promotion evidence; unmeasured sibling tiers, modes, and overlays still require their own calibration stories.",
+            "evidence": [
+              {
+                "source": "docs/generated/qwen-candle-five-rung-sc-15817.json",
+                "reason": "Schema-valid real-weight records bind all five rungs to the exact artifact, CUDA device, load shape, paired repository revisions, phase peaks, and passed loadability without promoting a fit."
+              }
+            ]
+          },
+          "findings": [
+            "Head-once/tail-tiled VAE decode exposes 768, 640, 512, 448, 384, 320, and 256 output-pixel tile edges at overlap 64. Overlap 96 remains only the rejected sub-512 experiment arm.",
+            "Lightning and all user-adapter requests preserve their pre-story semantics through the existing additive/folded path and do not inherit the no-overlay rung-4 claim.",
+            "The five-block control branch and PiD decoder remain explicit exclusions rather than being inferred from the family-level base implementation."
+          ]
+        }
+      }
+    },
+    "15512": {
+      "name": "Lens",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "shared-primitive",
+          "implementationScopes": [
+            {
+              "entries": [
+                "lens"
+              ],
+              "tiers": [
+                "q4"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Both"
+              }
+            },
+            {
+              "entries": [
+                "lens_turbo"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "TextEncoder"
+              }
+            }
+          ],
+          "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
+          "blockStacks": [
+            {
+              "name": "blocks",
+              "blocks": "48",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/dit/transformer.rs",
+              "reason": "LensTransformer holds a single `blocks: Vec<LensTransformerBlock>` over `0..cfg.num_layers` (48)."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/text_encoder/gpt_oss.rs",
+              "reason": "The encoder is a uniform stack of GptOssDecoderLayer, so a TextEncoder-scoped window is structurally available too."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/text_encoder/stream.rs",
+              "reason": "LensTextBlockSource rebuilds each exact GptOssDecoderLayer from a re-openable weights view, drains accessed tensors, replays quantization, materializes the carried state, and delegates scheduling to mlx_gen::block_residency::run_windowed."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
+              "reason": "The provider selects two exact calibration routes: `lens` with prepacked Q4 publishes the full shared ladder and Both/window=1, while `lens_turbo` with dense BF16 publishes the legacy TextEncoder/window=1 rung. Other entry/tier combinations, adapters, PiD, and non-deferred loads remain unmeasured."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/registry.rs",
+              "reason": "The registry materializes the text and DiT block streams only when the selected contract admits them, preserving the provider-id, numeric-tier, load-shape, and overlay boundaries established by memory_strategy."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/shared_memory_ladder_real_weights.rs",
+              "reason": "The serial real-Metal harness records that the exact cached Q4 `lens` artifact passed every ladder arm and terminal recovery at 1024²/one step, reducing the full-request peak from 30.497 to 4.696 GiB at rung 4."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "scopes": [
+              {
+                "entries": [
+                  "lens"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              },
+              {
+                "entries": [
+                  "lens_turbo"
+                ],
+                "tiers": [
+                  "bf16"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              },
+              {
+                "entries": [
+                  "lens_turbo"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "does-not-move"
+              }
+            ],
+            "reason": "The current full-ladder run moved base Lens Q4 from 30.497 to 4.696 GiB at rung 4. The legacy Lens-Turbo BF16 request A/B moved 80.084 to 10.037 GiB with TextEncoder/window=1 and identical pixels. Lens-Turbo Q4 remains an explicit counterexample: conditioning fell 3.972 -> 1.861 GiB, but the request peak changed 6.367 -> 6.547 GiB.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/shared_memory_ladder_real_weights.rs",
+                "reason": "Serial real-weight request comparison for base Lens Q4 records the full-ladder rung-4 request-peak reduction and byte-identical output."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/text_encoder_request_peak_real_weights.rs",
+                "reason": "Fresh-process, real-weight request comparison pins the BF16 win and the reproducible Q4 non-win while requiring exact generated-pixel identity."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/text_encoder_window_real_weights.rs",
+                "reason": "Real-weight window sweep records conditioning peaks by window, exact conditioning identity, prompt-length behavior, and a zero-layer mutation control."
+              }
+            ]
+          },
+          "findings": [
+            "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
+            "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
+            "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
+            "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
+            "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
+            "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
+            "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "shared-primitive",
+          "implementationScopes": [
+            {
+              "entries": [
+                "lens",
+                "lens_turbo"
+              ],
+              "tiers": [
+                "q4",
+                "q8"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSizes": [
+                  1,
+                  2,
+                  4,
+                  8,
+                  12,
+                  24
+                ],
+                "transformerWindowComponent": "Dit"
+              }
+            }
+          ],
+          "summary": "Both Candle Lens providers expose the uniform 48-block DiT through the shared block-window driver for exact packed q4/q8, deferred, no-overlay loads. Device-format sidecars are prepared outside the measured request and each selected window transfers only its packed blocks to CUDA.",
+          "blockStacks": [
+            {
+              "name": "blocks",
+              "blocks": "48",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs",
+              "reason": "The `lens` and `lens_turbo` registrations publish provider-specific memory_strategy_contract callbacks. Exact packed q4/q8 deferred loads expose staged residency plus bounded decode, attention, and DiT-window parameters; adapters, PiD, eager loads, dense tiers, and mismatched packed formats fail closed."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/transformer.rs",
+              "reason": "The 48-block DiT reopens content-addressed packed sidecars and drives each request-selected window through candle_gen::block_window::run_windowed without device-to-host reconstruction."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "scopes": [
+              {
+                "entries": [
+                  "lens_turbo"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              }
+            ],
+            "reason": "SC-15819's serial GPU-0 implementation run moved the exact Lens-Turbo q4 1024x1024 one-step request from 30.522 GiB resident live high-water to 3.455 GiB at bounded transformer residency. This is implementation evidence, not entry-level calibration or matrix promotion.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs",
+                "reason": "The ignored `integration_tests::sc15819_real_weights_five_rung_sequence` harness runs every cumulative rung, output parity groups, cancellation, invalid-prerequisite cleanup, and idle-floor recovery against the pinned Lens-Turbo q4 artifact."
+              }
+            ]
+          },
+          "findings": [
+            "The q4 implementation run is entry-, tier-, mode-, overlay-, geometry-, batch-, and step-specific. It does not certify q8, bf16, base `lens`, style variation, adapters, or a reusable fit.",
+            "Base `lens` Candle model-cell ownership belongs to SC-17489 and remains Missing until that story supplies authoritative calibration. SC-15874 retains Lens-Turbo entry-level calibration ownership."
+          ]
+        }
+      }
+    },
+    "15513": {
+      "name": "SenseNova U1",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "One uniform 42-layer decoder stack — but it is BOTH the conditioning encoder and the denoiser, and each layer carries two parallel dense paths of which a forward uses one. The stack shape is fine; the two consequences are findings.",
+          "blockStacks": [
+            {
+              "name": "layers",
+              "blocks": "42 (each holding two parallel dense paths, so ~84 layers' weights)",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/qwen3.rs",
+              "reason": "Qwen3Backbone holds one `layers: Vec<Layer>` over `0..cfg.llm.num_hidden_layers` (42). Each layer carries two parallel DENSE stacks — an understanding path and a generation path (`_mot_gen` weights) — and a forward runs exactly one of them."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/t2i.rs",
+              "reason": "t2i_generate prefills a KV cache on the understanding path, optionally runs an autoregressive think rollout, then denoises by re-running the SAME 42-layer stack on the generation path per step with `update_cache=False`."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for SenseNova."
+          },
+          "findings": [
+            "The `TextEncoder` component scope is structurally N/A for this family: there is no separate text encoder. Conditioning and denoise are the same 42 layers, so the scope axis collapses to a single component and only `Dit` is meaningful.",
+            "Per-block bytes are ~2x what a forward reads, because both dense paths live in the same layer. A window that opens the layer wholesale materializes the unused path too; a useful rung-4 here needs a path-filtered view, which is a loader parameter rather than a change to the primitive.",
+            "The bound must be phase-scoped. Windowing the denoise forward re-materializes the stack once per step; windowing the prefill/think rollout would re-materialize it once per TOKEN. The plan is per-forward-pass, so a rung-4 selection for this family has to name the denoise phase explicitly rather than the generator."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "Same uniform dual-path 42-layer backbone; the Candle provider explicitly declares no sequential-offload capability, so rung 4's prerequisite is absent as well.",
+          "blockStacks": [
+            {
+              "name": "layers",
+              "blocks": "42 (each holding two parallel dense paths, so ~84 layers' weights)",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
+              "reason": "`supports_sequential_offload: false` — the Candle provider declares the rung-1 prerequisite unavailable, and carries no streamed-block loader."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for SenseNova."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15514": {
+      "name": "FLUX.1",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Two uniform sub-stacks — 19 double-stream joint blocks then 38 single-stream blocks. One BlockPlan per sub-stack; the residency floor is one double block, which is the larger of the two block kinds.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "19 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "38 (single)",
+              "windowable": true
+            },
+            {
+              "name": "FluxControlNet blocks",
+              "blocks": "6 (control route only)",
+              "windowable": true,
+              "entries": [
+                "flux_dev"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/transformer.rs",
+              "reason": "FluxTransformer holds `blocks: Vec<JointBlock>` and `single_blocks: Vec<SingleBlock>` built from separate constructors over `num_layers` (19) and `num_single_layers` (38), run as two consecutive loops."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/control_transformer.rs",
+              "reason": "The control route adds `FluxControlNet { blocks: Vec<JointBlock> }` — a partial copy of the base MMDiT, `num_layers: 6` for the shipped Shakker Union-Pro-2.0 — resident alongside the base trunk."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for FLUX.1."
+          },
+          "findings": [
+            "Heterogeneity here does NOT collapse the saving, which is the case the story's warning is aimed at. The two block kinds are internally uniform, so windowing each independently leaves a floor of one double block against a trunk of 19 double + 38 single — a large bound, not a degenerate one. The warning bites when a single outsized block sets the floor, which is not this shape."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "flux_schnell",
+            "flux_dev"
+          ],
+          "implementedModes": [
+            "text_to_image",
+            "character_image"
+          ],
+          "implementedOverlays": [
+            "none",
+            "control",
+            "identity"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1
+          },
+          "summary": "The FLUX.1 schnell/dev Candle lanes rebuild independent windows of the 19 double-stream and 38 single-stream DiT stacks through the shared block-window scheduler. FLUX.1 dev additionally carries one budgeted ControlNet or XLabs IP-Adapter overlay while streaming the base trunk. PuLID, PiD, LoRA, combined overlays, and additional controls remain outside this implementation.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "19 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "38 (single)",
+              "windowable": true
+            },
+            {
+              "name": "FluxControlNet blocks",
+              "blocks": "6 (control route only)",
+              "windowable": false,
+              "entries": [
+                "flux_dev"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs",
+              "reason": "The shared schnell/dev provider contract publishes DiT window size 1 for re-openable directories with DeferredMaterialization. It admits either one typed ControlNet component or one typed XLabs IP-Adapter component (plus its optional image encoder) into the budget, while rejecting combined overlays, extra controls, LoRA, PuLID, and PiD."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/ip_dit.rs",
+              "reason": "The native BFL loader keeps `transformer_blocks.` and `single_transformer_blocks.` as separate streamed namespaces and drives both through the shared block-window scheduler with a one-block window."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/packed_dit.rs",
+              "reason": "The packed/diffusers loader prepares separate device-format sidecar views for the double and single prefixes, then materializes only the selected one-block window instead of preparing the full transformer component."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/control.rs",
+              "reason": "The control route keeps its six-block ControlNet branch resident as a separately budgeted overlay, applies the shared attention plan and cancellation checks there, and streams the native or packed base DiT with absolute residual indices."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/packed_dit.rs",
+              "reason": "The packed XLabs route injects cached image projections at the post-QK-normalization, pre-RoPE seam while preserving absolute block indices under a one-block transformer window; the adapter and optional image encoder are separately budgeted overlay components."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for FLUX.1."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15515": {
+      "name": "Ideogram 4",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "One uniform stack of Ideogram4Block (34 for the base config, 36 for turbo).",
+          "blockStacks": [
+            {
+              "name": "layers",
+              "blocks": "34 (base) / 36 (turbo)",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-ideogram/src/transformer/model.rs",
+              "reason": "Ideogram4Transformer holds a single `layers: Vec<Ideogram4Block>` over `0..cfg.num_layers`, built from one constructor."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-ideogram/src/config.rs",
+              "reason": "`num_layers: 34` and `num_layers: 36` for the two shipped DiT configs."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Ideogram 4."
+          },
+          "findings": []
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "Same uniform stack; the Candle provider declares no sequential-offload capability, so rung 4's prerequisite is absent as well.",
+          "blockStacks": [
+            {
+              "name": "layers",
+              "blocks": "34 (base) / 36 (turbo)",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
+              "reason": "`supports_sequential_offload: false`, and no streamed-block loader."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Ideogram 4."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15516": {
+      "name": "Boogu",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Five uniform sub-stacks — THREE 2-block refiners (context, noise, ref-image) then 8 double-stream and 32 single-stream. One BlockPlan per sub-stack; the 6 refiner blocks are the stated remainder.",
+          "blockStacks": [
+            {
+              "name": "context_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "noise_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "ref_image_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "double_stream_layers",
+              "blocks": "8",
+              "windowable": true
+            },
+            {
+              "name": "single_stream_layers",
+              "blocks": "32",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-boogu/src/transformer/mod.rs",
+              "reason": "BooguTransformer holds five block Vecs: `context_refiner: Vec<PlainBlock>`, `noise_refiner: Vec<ModBlock>` and `ref_image_refiner: Vec<ModBlock>` each built unconditionally over `0..num_refiner_layers`, then `double_stream: Vec<DoubleBlock>` (8) and `single_stream: Vec<ModBlock>` (32)."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-boogu/src/config.rs",
+              "reason": "`num_layers: 40`, `num_double_stream_layers: 8`, `num_refiner_layers: 2` — so 2 x 3 refiner blocks plus a 40-block main trunk."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Boogu."
+          },
+          "findings": [
+            "The refiners are three separate 2-block stacks of two different block types, built whether or not a reference image is supplied. Counting them as one stack understates the resident remainder threefold, which is exactly the quantity a partial verdict exists to state."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Same five sub-stacks; no Candle block-window path.",
+          "blockStacks": [
+            {
+              "name": "context_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "noise_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "ref_image_refiner",
+              "blocks": "2",
+              "windowable": false
+            },
+            {
+              "name": "double_stream_layers",
+              "blocks": "8",
+              "windowable": true
+            },
+            {
+              "name": "single_stream_layers",
+              "blocks": "32",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-boogu",
+              "reason": "The Candle Boogu provider declares no memory_strategy_contract and carries no streamed-block loader."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Boogu."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15517": {
+      "name": "Krea 2",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "krea_2_turbo",
+            "krea_2_raw"
+          ],
+          "implementedOverlays": [
+            "none",
+            "lora"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1
+          },
+          "summary": "The four MLX base descriptors (Turbo, Raw, and both edit routes) rebuild exact windows of the shared 28-block DiT through `mlx_gen::block_residency::run_windowed`. The text-fusion front-end remains resident; pose control retains its separate seven-block branch and contract.",
+          "blockStacks": [
+            {
+              "name": "text_fusion",
+              "blocks": "2 layerwise + 2 refiner",
+              "windowable": false
+            },
+            {
+              "name": "transformer_blocks",
+              "blocks": "28",
+              "windowable": true
+            },
+            {
+              "name": "Krea2ControlBranch blocks",
+              "blocks": "7 expected, checkpoint-derived (control route only)",
+              "windowable": true,
+              "entries": [
+                "krea_2_turbo"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/transformer/mod.rs",
+              "reason": "Krea2Transformer holds `blocks: Vec<SingleStreamBlock>` over `0..cfg.num_layers` (28) behind a separate TextFusionTransformer front-end."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/config.rs",
+              "reason": "`num_layers: 28`, `num_layerwise_text_blocks: 2`, `num_refiner_text_blocks: 2`."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/control.rs",
+              "reason": "The pose-control route adds `Krea2ControlBranch { blocks: Vec<ControlBlock> }`, each a full copy of a base SingleStreamBlock plus a zero-init `proj_out`. The depth is inferred from the overlay checkpoint (`infer_num_blocks`, expected `DEFAULT_N_CONTROL_BLOCKS` = 7) rather than fixed in config."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/transformer/mod.rs",
+              "reason": "`run_blocks` delegates the 28-block schedule to `mlx_gen::block_residency::run_windowed`, materializes each exact Krea block from a fresh lazy weights view, evaluates the carried state, and releases the window before advancing."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
+              "reason": "The per-provider contract publishes DiT window size 1 only for a re-openable directory with Sequential offload and DeferredMaterialization; all q4/q8/bf16 base tiers and real LoRA/LoKr overlays reduced the measured request peak."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_stream.rs",
+              "reason": "`KreaBlockStream` reconstructs one `SingleStreamBlock`, drains the accessed tensor set, and replays packed/dense quantization plus captured forward-time adapters."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/tests/block_residency_real_weights.rs",
+              "reason": "The ignored Apple/Metal harness measures conditioning, denoise, decode, and their request maximum against an otherwise-identical fully resident 28-block attribution control, while asserting byte-identical output."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "reason": "At 512x512/1 step on real Turbo weights, window 1 reduced the full request peak from 11.928 to 5.555 GiB (q4), 17.748 to 5.715 GiB (q8), and 28.660 to 8.383 GiB (bf16). Real q4 LoRA and LoKr controls moved 12.141 to 5.768 and 13.383 to 7.010 GiB. Every paired image was byte-identical.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-krea/tests/block_residency_real_weights.rs",
+                "reason": "Sequential + Deferred resident-stack versus window-1 A/B, with the request peak computed as max(conditioning, denoise, decode) rather than using denoise alone."
+              }
+            ]
+          },
+          "findings": [
+            "Krea is now implemented on both backends, but the contracts are backend-specific: MLX admits the two catalog entries and every base/edit descriptor at q4/q8/bf16, while Candle remains turbo text-to-image only.",
+            "MLX low-rank overlays are compatible. Real LoRA and LoKr A/B runs were byte-identical because the stream captures and replays forward-time residual adapters per block. Dense `.diff`/`.diff_b` patches remain excluded at contract construction because they irreversibly mutate the resident base and cannot be reconstructed from the pristine snapshot.",
+            "The MLX pose-control provider keeps its distinct seven-block branch and memory contract; `implementedOverlays` excludes control cells so base-DiT evidence cannot be misreported as control-route rung-4 coverage."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "krea_2_turbo"
+          ],
+          "implementedModes": [
+            "text_to_image"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1
+          },
+          "overlayIncompatible": {
+            "reason": "Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried onto it.",
+            "structural": [
+              {
+                "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+                "reason": "load-time adapters are incompatible with streamed transformer blocks"
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+                "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+              }
+            ]
+          },
+          "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
+          "blockStacks": [
+            {
+              "name": "text_fusion",
+              "blocks": "2 layerwise + 2 refiner",
+              "windowable": false
+            },
+            {
+              "name": "transformer_blocks",
+              "blocks": "28",
+              "windowable": true
+            },
+            {
+              "name": "Krea2ControlBranch blocks",
+              "blocks": "7 expected, checkpoint-derived (control route only)",
+              "windowable": true,
+              "entries": [
+                "krea_2_turbo"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/transformer/mod.rs",
+              "reason": "`Krea2Transformer::load_block_streamed` builds `TransformerBlocks::Streamed(weights)`, whose forward path materializes each selected window through `candle_gen::block_window::run_windowed`."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen/src/block_window.rs",
+              "reason": "CandleWindowBackend implements `gen_core::block_window::BlockWindowBackend`, and the thin `run_windowed` adapter delegates scheduling to the shared gen-core driver while synchronizing teardown on every exit path."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs",
+              "reason": "Declares BoundedTransformerResidency Implemented with `transformer_window_sizes: [1]` and `transformer_window_materialization: true`. The contract is returned only under `#[cfg(feature = \"cuda\")]` AND only for the turbo descriptor id, so it is absent on a CPU build and on every sibling route."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+              "reason": "`load_dit` selects the streamed loader from `memory.stream_transformer_blocks`, and refuses load-time LoRA/LoKr or a folded diff-patch overlay under streaming."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/control.rs",
+              "reason": "The pose-control route adds `Krea2ControlBranch { blocks: Vec<ControlBlock> }`, each a full copy of a base SingleStreamBlock plus a zero-init `proj_out`. The depth is inferred from the overlay checkpoint (`infer_num_blocks`, expected `DEFAULT_N_CONTROL_BLOCKS` = 7) rather than fixed in config."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "reason": "The manifest's turboFit evidence records the whole-request peak per rung. At 1024x1024 the rung-4 composition lands at 5.676 GiB (q4) / 6.847 (q8) / 8.526 (bf16) against the rung-3 composition's 11.345 / 18.156 / 27.652 — a 50-69% cut in the REQUEST peak, not a phase peak.",
+            "evidence": [
+              {
+                "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+                "reason": "Observed and predicted per-rung request peaks at q4 768x768, q4/q8/bf16 1024x1024, with `engagedCompositions.streamedBlocks` naming the full five-rung composition."
+              }
+            ]
+          },
+          "findings": [
+            "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
+            "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
+          ]
+        }
+      }
+    },
+    "15518": {
+      "name": "FLUX.2 Klein",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Two uniform sub-stacks — 8 double-stream then 24 single-stream — with shared per-stream modulation held outside both.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "8 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "24 (single)",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/transformer.rs",
+              "reason": "Flux2Transformer holds `double_blocks: Vec<DoubleBlock>` and `single_blocks: Vec<SingleBlock>` over `num_double_layers` (8) and `num_single_layers` (24), plus three shared Modulation modules that are not per-block."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for FLUX.2."
+          },
+          "findings": [
+            "Shared modulation is a real difference from FLUX.1: `mod_img`/`mod_txt`/`mod_single` are per-stream, not per-block, so they stay resident across every window. They are small, but a window-size calculation that assumes all trunk weights are per-block will be wrong here.",
+            "The KV-cache variant (flux2_klein_9b_kv) retains reference K/V per layer across the forward. That is activation state, not weight residency, so it does not block the rung — but it does mean the rung-4 saving on that variant is a smaller share of the request peak than on the non-KV twin."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2"
+          ],
+          "implementedModes": [
+            "text_to_image",
+            "edit_image",
+            "character_image"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "SC-15831 wires the shared 8-double + 24-single Candle Klein provider through the common block-window primitive while keeping catalog-entry evidence independent.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "8 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "24 (single)",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs",
+              "reason": "At pinned inference revision fbb00d6b, the Klein-specific contract publishes parity-preserving full-edge bounded decode, bounded attention, and a one-block DiT window over the exact 8 + 24 block domain with its own calibration fingerprint."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/block_stream.rs",
+              "reason": "The shared streamed loader reconstructs exact double- and single-stream block windows from the re-openable snapshot and delegates scheduling and cleanup to candle_gen::block_window."
+            },
+            {
+              "source": "crates/sceneworks-worker/src/image_jobs/base.rs",
+              "reason": "The registered path binds the shared selector to the exact base artifact while KV and True V2 remain fail-closed until their downstream artifact and calibration stories provide entry-specific proof."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "The shared implementation is present, but no final revision-bound SC-15831 rung-4 observation has yet been promoted into this survey."
+          },
+          "findings": [
+            "Sharing provider code does not verify a catalog sibling: the base, KV, and True V2 entries retain separate artifact and calibration ownership (SC-15919, SC-17485, and SC-17486)."
+          ]
+        }
+      }
+    },
+    "15519": {
+      "name": "FLUX.2 dev",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The same FLUX.2 double/single topology as Klein, through the same transformer module, but scaled up: 8 double + 48 single blocks, twice Klein's single stack.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "8 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "48 (single)",
+              "windowable": true
+            },
+            {
+              "name": "Flux2ControlBranch blocks",
+              "blocks": "4 (control route only)",
+              "windowable": true,
+              "entries": [
+                "flux2_dev"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/transformer.rs",
+              "reason": "One Flux2Transformer serves both dev and Klein, so the two-sub-stack shape and the shared per-stream modulation are the same; only the counts and widths differ."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/config.rs",
+              "reason": "`Flux2Config::dev()` is `num_double_layers: 8, num_single_layers: 48` against Klein's 8/24 — the single stack is twice as deep, so dev's window sizing cannot be inherited from Klein's."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/model_control.rs",
+              "reason": "The dev control lane injects branch residuals after selected base double blocks, so a windowed double-stack must keep the per-block injection points aligned with the window ranges."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/transformer.rs#Flux2ControlBranch",
+              "reason": "The Fun-Controlnet-Union route adds `Flux2ControlBranch { blocks: Vec<Flux2ControlBlock>, places }` — 4 blocks at `control_layers = range(0, num_double_layers, 2) = [0, 2, 4, 6]` — held with the base DiT inside `Flux2ControlTransformer` for the whole denoise."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for FLUX.2 dev."
+          },
+          "findings": [
+            "The control lane runs the control branch to completion BEFORE the base double-block loop and injects the resulting residuals per block. Those residuals are alive across the whole double stack, so on the control lane rung 4 bounds the base trunk while the branch output stays resident — a stated remainder rather than a blocker."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "flux2_dev"
+          ],
+          "implementedTiers": [
+            "q4"
+          ],
+          "implementedModes": [
+            "text_to_image"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "SC-15833 wires the 8-double + 48-single Candle dev trunk through the shared block-window primitive for the exact Q4 base text-to-image route.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "8 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "48 (single)",
+              "windowable": true
+            },
+            {
+              "name": "Flux2ControlBranch blocks",
+              "blocks": "4 (control route only)",
+              "windowable": true,
+              "entries": [
+                "flux2_dev"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs",
+              "reason": "At pinned inference revision 5ffd7612, the FLUX.2-dev CUDA contract publishes BoundedTransformerResidency with a one-block DiT window and the exact calibration fingerprint used by SC-15833."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/block_stream.rs",
+              "reason": "The streamed loader reconstructs one exact double- or single-stream block window from the re-openable snapshot and delegates scheduling and teardown to candle_gen::block_window."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/transformer.rs#Flux2ControlBranch",
+              "reason": "The Fun-Controlnet-Union route adds `Flux2ControlBranch { blocks: Vec<Flux2ControlBlock>, places }` — 4 blocks at `control_layers = range(0, num_double_layers, 2) = [0, 2, 4, 6]` — held with the base DiT inside `Flux2ControlTransformer` for the whole denoise."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "scopes": [
+              {
+                "entries": [
+                  "flux2_dev"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              }
+            ],
+            "reason": "SC-15833's exact Q4 base capture measured the bounded-attention request peak at 23,724,359,104 bytes and the one-block transformer composition at 13,537,107,920 bytes, with RGB8 max-absolute error 2 against the resident output. Other tiers, modes, and overlays remain unmeasured.",
+            "evidence": [
+              {
+                "source": "docs/calibration/sc-15833/report.json",
+                "reason": "Strictly ingested real-weight CUDA sessions bind both request peaks, immutable artifact and repository revisions, and independently recomputed output parity."
+              }
+            ]
+          },
+          "findings": []
+        }
+      }
+    },
+    "15520": {
+      "name": "Chroma1",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "summary": "The FLUX MMDiT skeleton with pruned adaLN — 19 double + 38 single uniform sub-stacks windowed through `mlx_gen::block_residency::run_windowed`, plus a small distribution approximator that feeds every block's modulation and stays resident. All three catalog entries are the same provider route (one architecture, one loader, one contract shape), differing only in checkpoint, sampler default and schedule; every measured number is Chroma1-Base's own, never inherited from FLUX.1 or a sibling.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "19 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "38 (single)",
+              "windowable": true
+            },
+            {
+              "name": "ChromaApproximator",
+              "blocks": "5 residual (linear, linear) pairs + 5 norms",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/transformer.rs",
+              "reason": "ChromaTransformer holds `double_blocks: Vec<DoubleBlock>` and `single_blocks: Vec<SingleBlock>` over `num_layers` (19) and `num_single_layers` (38), and drives `mlx_gen::block_residency::run_windowed` over both sub-stacks when a window is selected."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/config.rs",
+              "reason": "`num_layers: 19`, `num_single_layers: 38`."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/transformer.rs#ChromaApproximator",
+              "reason": "`layers: Vec<(Lin, Lin)>` with a parallel `norms: Vec<Array>`, both `approximator_layers` = 5, run as a true residual loop. It is the ENTIRE modulation source for the pruned-adaLN blocks, runs every step, and stays dense while the block stacks quantize — resident weight the window never bounds."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1, 2, 5, 10]`, `TRANSFORMER_WINDOW_SIZE = 1` and `TRANSFORMER_WINDOW_COMPONENTS = [Dit, TextEncoder, Both]` under fingerprint `chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1`. `structurally_streamable` requires Sequential + DeferredMaterialization, `quantize == None` at load (true of all three shipped tiers: q4/q8 are pre-packed and bf16 loads dense; only a re-quantizing dense-source window is refused) and the CLEAN route — any adapter/control/ip-adapter/identity/external-TE/PiD axis fails the window closed. Rungs 2 and 3 are Missing WITH measurements (see `findings`), and the production calibration key names chroma1_base's packed-4-bit tier exactly, failing closed on every other axis (sc-17695)."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/block_stream.rs",
+              "reason": "The rebuildable-block seam `run_windowed` consumes: each DiT block is re-materialized from the snapshot per window and released after use, with a fresh view per window."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/tests/memory_ladder_real_weights.rs",
+              "reason": "The real-weight ladder harness on Chroma1-Base q4 at 1024² records resident 28.0779 GiB, staged 19.2065 GiB (−31.60%) and rung-4 windowed 14.6932 GiB (−23.50% on rung 1) with byte-identical output at every cadence, measures all three window scopes end to end, and re-asserts the withheld rungs' rejections against the production admission path."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "scopes": [
+              {
+                "entries": [
+                  "chroma1_base"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              }
+            ],
+            "reason": "Measured on Chroma1-Base q4 at 1024², 4 steps, true CFG 4.0 (Apple/Metal), fresh generator per row with a discarded warm-up row and `reset_peak_memory` after the load: rung 4 takes the staged request peak 19.2065 → 14.6932 GiB (−23.50%), byte-identical output at every cadence in [1, 2, 5, 10]. The saving is attributed, not assumed — the 4.5133 GiB drop matches the 4.5125 GiB windowable block weight set read from the snapshot's own safetensors `data_offsets`, the whole set to within 0.8 MiB. The scope axis is measured on the same control: `TextEncoder` −0.00% (rung 1 already shed the dense 10.15 GiB T5-XXL before the heavy phase), `Dit` −23.50%, `Both` identical to `Dit` at +22% wall clock (dominated, not wrong). The four cadences are equal-peak alternatives whose ms/step ordering is unresolvable on this instrument (sc-17679). The sibling entries, q8/bf16 tiers and every overlay carry the capability claim, not a measured peak.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/tests/memory_ladder_real_weights.rs",
+                "reason": "Serial real-weight rows record each rung's request peak against the exact staged control and assert byte-identical pixels; `the_window_component_scopes_are_measured_not_inherited` measures all three scopes end to end."
+              }
+            ]
+          },
+          "findings": [
+            "Pruned adaLN makes this family MORE window-friendly than stock FLUX, not less: the blocks carry no `.norm*.linear` weights and take their modulation as a slice of one approximator output computed once per step. That output is a small resident tensor, and the per-block weight bytes a window must materialize are correspondingly smaller.",
+            "Rung 2 is `Missing` on an UNRESOLVED margin, not a clean failure. Tiling the FLUX.1 16-ch VAE decode works and the saving is large (−11.4% to −72.4% of the decode phase across 28 swept geometries at the variant's real 28-step schedule), but the best cell (edge 832 / overlap 256) drifts 53/255 against the 48/255 bar the closest sibling admits — and resampling that one geometry across five production latents gives max-drift 28..82, a 2.9× spread that straddles the bar. Nothing in that supports admission, and calling it a clean rejection would overstate the evidence; resolving it needs a quality methodology (perceptual metric or a family-derived bar) the epic has not agreed on.",
+            "Rung 3 is `Missing` on a measured verdict: `sdpa_budgeted_bhsd` reaches both block stacks and both attention sites and saves −2.27% at the DiT seam (7.1679 → 7.0053 GiB, bit-exact), but the seam sits ~12 GiB inside the staged request peak so the REQUEST moves −0.001% — which per the epic is not a saving. MLX's fused SDPA streams its scores (no materialized [B,H,Sq,Sk] to bound), and Chroma's MMDiT mask is a per-query [B,1,S,S] tensor (85 MiB per CFG branch at 1024²) the bounded kernel must narrow per chunk.",
+            "The rung-4 scope default is `Dit`, and it is measured rather than inherited — the naive phase probe predicts the opposite. T5-XXL is the largest single component (dense bf16 at 10.15 GiB against a 7.14 GiB packed DiT), which makes `TextEncoder` look obviously right; but rung 1 has already shed it before the heavy phase loads, so a `TextEncoder` window moves the request peak −0.00%. The verdict is coupled to rung 2's: a bounded decode would drop the heavy phase below conditioning and flip the binding scope (Kolors/SC-15521 is the same arithmetic with a different decode).",
+            "The cadence domain [1, 2, 5, 10] is published as equal-peak alternatives, not a latency frontier: all four bound the request to 14.6932 GiB, and the ms/step ordering moves with execution-order slots and is unresolvable on this instrument (sc-17679). The default 1 rests on being the tightest weight bound."
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "implementedEntries": [
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd"
+          ],
+          "implementedTiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "implementedOverlays": [
+            "none"
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The Candle provider has the same 19-double/38-single split plus the resident modulation approximator, but exposes neither sequential offload nor a block-window loader.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "19 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "38 (single)",
+              "windowable": true
+            },
+            {
+              "name": "ChromaApproximator",
+              "blocks": "5 residual (linear, linear) pairs + 5 norms",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/transformer.rs",
+              "reason": "ChromaTransformer stores distinct `double_blocks` and `single_blocks` vectors, preserving the same partial two-stack shape as the MLX provider."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/config.rs",
+              "reason": "The Candle descriptor declares `supports_sequential_offload: false`; no memory-strategy or block-window implementation is published."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17410 and the Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until the family loader and authoritative CUDA evidence land."
+          ]
+        }
+      }
+    },
+    "15521": {
+      "name": "Kolors",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "summary": "The SDXL U-Net reused verbatim — eleven Transformer2D at depths [2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2], six at depth 10 and five at depth 2, 70 windowable blocks inside a non-windowable conv trunk — PLUS a ChatGLM3-6B encoder that is a uniform 28-block stack of its own. Kolors is therefore the ladder's first family to publish more than one rung-4 SCOPE: `Dit`, `TextEncoder` and `Both`.",
+          "blockStacks": [
+            {
+              "name": "attentions[*].transformer_blocks (level 1)",
+              "blocks": "2 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "attentions[*].transformer_blocks (level 2 + mid)",
+              "blocks": "10 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "conv/resnet trunk",
+              "blocks": "n/a",
+              "windowable": false
+            },
+            {
+              "name": "ControlNet attentions[*].transformer_blocks",
+              "blocks": "34 TransformerBlocks across 5 Transformer2D stacks (control route only)",
+              "windowable": true,
+              "entries": [
+                "kolors"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/unet.rs",
+              "reason": "Re-exports `mlx_gen_sdxl::UNet2DConditionModel` unchanged — Kolors is the SDXL U-Net plus a context projection, so its rung-4 shape is SDXL's."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/config.rs",
+              "reason": "`UNetConfig::kolors` differs from `sdxl_base` only in `projection_class_embeddings_input_dim`; `transformer_layers_per_block` stays [1, 2, 10]."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/chatglm3.rs",
+              "reason": "The ChatGLM3 encoder is a uniform decoder stack, so a TextEncoder-scoped window is structurally available."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/controlnet.rs",
+              "reason": "The control route adds the SDXL `ControlNet`, a second down-path whose `UNetBlock2D`s carry the same `attentions: Option<Vec<Transformer2D>>` the base UNet does. It has no up path, so at the [1, 2, 10] depths it is 34 TransformerBlocks across 5 Transformer2D modules — 4 at level 1, 20 at level 2, 10 in the mid block — every one running each step."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1, 2, 5, 10]`, `TRANSFORMER_WINDOW_SIZE = 1` and `TRANSFORMER_WINDOW_COMPONENTS = [Dit, TextEncoder, Both]` under fingerprint `kolors-mlx-chatglm3-sdxl-unet-ladder-v1` — deliberately NOT shared with SDXL's, because the numbers do not transfer even though the U-Net module does. `streamable` requires BOTH `load_leaves_blocks_lazy` (unet) and `text_encoder_leaves_blocks_lazy` (ChatGLM3), plus `adapters_are_replayable`, which refuses a LoRA load at the dense bf16 tier."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/tests/memory_ladder_real_weights.rs",
+              "reason": "`the_text_encoder_window_bounds_the_conditioning_bearing_cell` measures all three scopes at bf16/512² against the 11.3644 GiB staged control, and `the_rung_four_stream_replays_an_installed_ip_adapter` proves an IP-armed rung-4 render is reachable in production."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "reason": "Measured on Kolors' own weights (Apple/Metal, byte-identical output), never inherited from SC-15525. Per tier at 1024²/4 steps, rung 4 `Dit` against that tier's own staged control: q4 −7.21% (16.0411 → 14.8840 GiB), q8 −12.72%, bf16 −21.37% — the saving is the whole `transformer_blocks` weight set (1.1468 / 2.1638 / 4.0706 GiB by tier), and the measured saving exceeds the most a windowed-forward peak could give (1.1572 vs a 1.1285 GiB ceiling on q4), which is what proves the phase-separation mechanism. The SCOPE axis is the family's own finding: at bf16/512² against the 11.3644 GiB staged control the three scopes read `Dit` 11.3644 (+0.00%), `TextEncoder` 8.8396 (−22.22%) and `Both` 4.5436 (−60.02%) — because ChatGLM3-6B is larger than the U-Net at every tier (3.98 / 6.64 / 11.63 GiB against 1.80 / 2.84 / 4.80), so at the geometry where conditioning carries the peak the Dit scope alone moves nothing at all. The peak is flat across the whole cadence domain [1,2,5,10]; cadence buys wall clock only (3745 → 1507 ms/step at 1024² q4).",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/tests/memory_ladder_real_weights.rs",
+                "reason": "The full-ladder real-weight harness records each tier's staged control and rung-4 request peak with a warm-up row before every published peak, and asserts byte-identical pixels."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
+                "reason": "The per-tier arithmetic reconciles each measured saving against the summed `transformer_blocks` safetensors bytes, and the three-scope table is measured at bf16/512²."
+              }
+            ]
+          },
+          "findings": [
+            "See the SDXL family entry (SC-15525) for why a U-Net is not Structurally N/A here. Kolors inherits that verdict exactly, because it inherits the module — but it inherits NONE of the numbers, because it conditions on ChatGLM3-6B rather than SDXL's CLIP-L + OpenCLIP-bigG pair, and that inverts which phase carries the request peak at several advertised geometries.",
+            "Kolors is the first family in the ladder to publish a rung-4 SCOPE domain of more than one value: `transformer_window_components = [Dit, TextEncoder, Both]`. The matrix already carries the scope axis as `transformerWindowComponent` inside `strategyParameters` (and `transformerWindowComponents` inside `publishedRanges`), so no schema change was needed to express it — but this is the first time the domain is genuinely three-valued and the choice is load-bearing rather than degenerate.",
+            "The production default stays the TIGHT cadence 1, unlike SDXL's 10, and the `Dit` scope, unlike the `Both` that wins at 512². Both are the provider's declarations; the selector may name any point in the published domains.",
+            "Rungs 2 and 3 are `Missing` WITH measurements. Rung 2 is by a wide margin the biggest lever on this family's ladder — at 1024² q4 it takes the whole staged request from 16.0412 → 9.9981 GiB (−37.67%) for +10% wall clock (925 → 1018 ms/step), against rung 4's −7.21% for +4.2× — and it CLEARS the 48/255 inherited drift bar at 1024² (38) and 1280² (26), but FAILS it at 1536² (69) and 2048² (53). `MemoryParameterRanges::decode_tile_edges` is an absolute pixel domain with no geometry axis, so no fixed edge holds a constant tile fraction across a 2× output range; the unlock is tracked as sc-17678. Rung 3 moves the peak 0.00% at both measured scopes — the request (16.0412 → 16.0410 GiB) and the U-Net seam (5.3652 → 5.3652 GiB, reproduced across three runs) — and is not bit-exact (max|Δeps| 3.929e-3, 16/255 of image movement at one step, 212/255 by four). An earlier revision published the seam as +12.54% from an un-warmed control: MLX's first `run` in a process reads ~4.6-4.8 GiB whichever plan it executes."
+          ],
+          "implementationScopes": [
+            {
+              "entries": [
+                "kolors"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none",
+                "identity"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "kolors"
+              ],
+              "tiers": [
+                "q4",
+                "q8"
+              ],
+              "overlays": [
+                "none",
+                "lora",
+                "identity"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit"
+              }
+            }
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Same SDXL-derived U-Net; the Candle provider declares no sequential-offload capability, so rung 4's prerequisite is absent as well.",
+          "blockStacks": [
+            {
+              "name": "attentions[*].transformer_blocks (level 1)",
+              "blocks": "2 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "attentions[*].transformer_blocks (level 2 + mid)",
+              "blocks": "10 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "conv/resnet trunk",
+              "blocks": "n/a",
+              "windowable": false
+            },
+            {
+              "name": "ControlNet attentions[*].transformer_blocks",
+              "blocks": "34 TransformerBlocks across 5 Transformer2D stacks (control route only)",
+              "windowable": true,
+              "entries": [
+                "kolors"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-kolors/src/config.rs",
+              "reason": "`supports_sequential_offload: false`, and no streamed-block loader."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/controlnet.rs",
+              "reason": "The control route adds the SDXL `ControlNet`, a second down-path whose `UNetBlock2D`s carry the same `attentions: Option<Vec<Transformer2D>>` the base UNet does. It has no up path, so at the [1, 2, 10] depths it is 34 TransformerBlocks across 5 Transformer2D modules — 4 at level 1, 20 at level 2, 10 in the mid block — every one running each step."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Kolors."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15522": {
+      "name": "SD3.5",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Large and Large-Turbo are one uniform 38-block joint stack. Medium is 24 blocks split into two contiguous runs — the leading 13 carry MMDiT-X second attention and a wider AdaLN, the remaining 11 do not — so the family verdict is partial even though two of its three entries are not.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks (Large / Large-Turbo)",
+              "blocks": "38",
+              "windowable": true,
+              "entries": [
+                "sd3_5_large",
+                "sd3_5_large_turbo"
+              ]
+            },
+            {
+              "name": "transformer_blocks[0..13] (Medium, dual-attention)",
+              "blocks": "13",
+              "windowable": true,
+              "entries": [
+                "sd3_5_medium"
+              ]
+            },
+            {
+              "name": "transformer_blocks[13..24] (Medium, plain)",
+              "blocks": "11",
+              "windowable": true,
+              "entries": [
+                "sd3_5_medium"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sd3/src/transformer.rs",
+              "reason": "Sd3Transformer holds one `blocks: Vec<JointBlock>`; the constructor varies each block by `is_dual_attention_block(i)` and by whether it is the last (context_pre_only)."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sd3/src/config.rs",
+              "reason": "`LARGE_NUM_LAYERS = 38` with `dual_attention_layers: 0`; `MEDIUM_NUM_LAYERS = 24` with `dual_attention_layers = 13`."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for SD3.5."
+          },
+          "findings": [
+            "This is the closest thing in the catalog to the story's heterogeneous-block warning, and it still does not collapse: Medium's two kinds are contiguous runs of 13 and 11, so two plans bound the trunk with a floor of one dual-attention block. The last block additionally drops its context branch (`context_pre_only`), which makes it a one-block tail rather than a third kind.",
+            "A single family-wide window size would be wrong here: Large's uniform 38 and Medium's 13+11 split have different per-block bytes, so the window parameter has to be per entry, not per family."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Same Large/Medium split; the Candle provider declares no sequential-offload capability, so rung 4's prerequisite is absent as well.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks (Large / Large-Turbo)",
+              "blocks": "38",
+              "windowable": true,
+              "entries": [
+                "sd3_5_large",
+                "sd3_5_large_turbo"
+              ]
+            },
+            {
+              "name": "transformer_blocks[0..13] (Medium, dual-attention)",
+              "blocks": "13",
+              "windowable": true,
+              "entries": [
+                "sd3_5_medium"
+              ]
+            },
+            {
+              "name": "transformer_blocks[13..24] (Medium, plain)",
+              "blocks": "11",
+              "windowable": true,
+              "entries": [
+                "sd3_5_medium"
+              ]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
+              "reason": "`supports_sequential_offload: false`, and no streamed-block loader."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for SD3.5."
+          },
+          "findings": []
+        }
+      }
+    },
+    "15523": {
+      "name": "SANA",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "One uniform 20-block stack with adaLN-single modulation.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "20",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sana/src/transformer.rs",
+              "reason": "SanaTransformer holds a single `blocks: Vec<SanaBlock>` over `0..cfg.num_layers`, built from one constructor."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sana/src/config.rs",
+              "reason": "`num_layers: 20`."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for SANA."
+          },
+          "findings": [
+            "SANA's blocks carry a depthwise-conv Mix-FFN rather than a plain MLP. That changes per-block byte counts but not the sequential-stack shape the primitive needs.",
+            "The gemma-2-2b-it caption encoder is a uniform decoder stack shared with PiD, so a TextEncoder-scoped window is structurally available for this family too."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "The Candle port retains SANA's uniform 20-block transformer stack, but publishes no sequential-offload or block-window path.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "20",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sana/src/transformer.rs",
+              "reason": "SanaTransformer stores one `blocks: Vec<SanaBlock>` built from the single transformer configuration."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sana/src/model.rs",
+              "reason": "The Candle descriptors declare `supports_sequential_offload: false` and expose no rung-4 contract."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17411 and the Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until the family loader and authoritative CUDA evidence land."
+          ]
+        }
+      }
+    },
+    "15524": {
+      "name": "Anima",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "shared-primitive",
+          "summary": "One uniform 28-block DiT stack over the original Cosmos key naming, windowed through `mlx_gen::block_residency::run_windowed`. The window is declared per LOAD, not per tier: it needs `LoadShape::DeferredMaterialization` (`streamable`) so the stack was never bulk-committed, and rung 1 engaged in the same request so the released phases are what the bound competes against.",
+          "blockStacks": [
+            {
+              "name": "blocks",
+              "blocks": "28",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/transformer.rs",
+              "reason": "The transformer holds a single `blocks: Vec<Block>` over `0..cfg.num_layers`, run as one loop in `run_blocks`."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/config.rs",
+              "reason": "`num_layers: 28` for the DiT; the separate 6-layer figure in the same file is the text conditioner, not the trunk."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1]`, `TRANSFORMER_WINDOW_SIZE = 1` and `TRANSFORMER_WINDOW_COMPONENTS = [Dit]`, under fingerprint `anima-mlx-cosmos-shared-ladder-v1`. The TextEncoder scope is deliberately NOT published: rung 1 already sheds the Qwen3-0.6B tower, and the 6-block conditioner is ~1% of the DiT checkpoint, so the only honest measured value for that scope is 0.0%."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/tests/shared_memory_ladder_real_weights.rs",
+              "reason": "Real-weight window sweep on anima_base bf16 at 1024²: the denoise phase falls 5.229 → 1.110 GiB at window 1 and the request peak falls 5.229 → 4.151 GiB, byte-identical output. Windows 2/4/14/28 are refused (1.497 GiB), so 1 is the whole admitted domain."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "reason": "Measured on anima_base bf16 at 1024² (Apple/Metal). Rung 4 at the published window 1 takes the DENOISE phase 5.229 → 1.110 GiB and the REQUEST peak 5.229 → 4.151 GiB (−20.6%), byte-identical output; the published window measures 1.304 GiB of denoise inside a 4.151 GiB request. Windows 2/4/14/28 are refused, so the domain is [1]. Reproducibility across runs: 1.110 / 1.497 / 1.497 / 1.497 / 1.497 / 5.229 and 1.304 / 4.151 — window 1 differs from the next admitted plan by a real 26% (1.110 vs 1.497). Only anima_base bf16 has been measured; q4/q8 carry the capability claim, not a measured peak.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-anima/tests/shared_memory_ladder_real_weights.rs",
+                "reason": "Serial real-weight request comparison records the rung-4 denoise and request peaks against the exact unwindowed reference and asserts byte-identical pixels."
+              }
+            ]
+          },
+          "findings": [
+            "Anima's Qwen3-0.6B encoder reuses Z-Image's decoder block, which is the same module Z-Image's shipped TE streaming windows. A TextEncoder-scoped rung 4 here is therefore the smallest port in the catalog — the block constructor already exists in a streamed form.",
+            "The scope is published as `Dit` only, and that is a measured decision rather than an omission: rung 1 already sheds the Qwen3-0.6B tower before denoise, and the 6-block `llm_adapter` conditioner is ~1% of the DiT checkpoint, so a TextEncoder scope's only honest measured value on this family is 0.0%.",
+            "Rung 4 is declared per LOAD (`streamable` = `LoadShape::DeferredMaterialization`), not per tier. Anima's only matrix tier today is q4 because the catalog entry has no hosted per-tier download variant — the q4/q8/bf16 matrix is packed on-device by the `anima_quant` converter — so the tier axis of this claim is narrower than the family's real tier surface."
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "implementedEntries": [
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo"
+          ],
+          "implementedOverlays": [
+            "none",
+            "lora"
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "The Candle provider has the same uniform 28-block DiT stack, but exposes neither sequential offload nor a block-window implementation.",
+          "blockStacks": [
+            {
+              "name": "blocks",
+              "blocks": "28",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-anima/src/transformer.rs",
+              "reason": "The Candle Anima transformer stores one `blocks: Vec<Block>` and evaluates it as a sequential trunk."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-anima/src/lib.rs",
+              "reason": "The Candle descriptor declares `supports_sequential_offload: false` and publishes no memory-strategy contract."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17412 and the Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until the family loader and authoritative CUDA evidence land."
+          ]
+        }
+      }
+    },
+    "15525": {
+      "name": "SDXL U-Net (SDXL / RealVisXL / Illustrious)",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "summary": "NOT Structurally N/A. The conv/resnet trunk and its skip connections are not windowable, but each Transformer2D holds a genuine uniform stack of TransformerBlock. SDXL-base has ELEVEN Transformer2D in forward order at depths [2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2] — six at depth 10 and FIVE at depth 2 — for 70 windowable blocks in total. `mlx_gen::block_residency::run_windowed` is driven once per Transformer2D at a shared cadence.",
+          "blockStacks": [
+            {
+              "name": "down/up level 1 attentions[*].transformer_blocks",
+              "blocks": "2 per Transformer2D × 5 stacks (down_blocks.1 ×2, up_blocks.1 ×3) = 10 blocks",
+              "windowable": true
+            },
+            {
+              "name": "down/up level 2 + mid attentions[*].transformer_blocks",
+              "blocks": "10 per Transformer2D × 6 stacks (down_blocks.2 ×2, mid_block ×1, up_blocks.0 ×3) = 60 blocks",
+              "windowable": true
+            },
+            {
+              "name": "conv stem / resnets / down-up skip path",
+              "blocks": "n/a",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/transformer.rs",
+              "reason": "Transformer2D holds `blocks: Vec<TransformerBlock>` built over `0..num_layers` from one constructor — exactly the uniform sequential shape BlockPlan windows, just nested inside the U-Net."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/config.rs",
+              "reason": "`transformer_layers_per_block: [1, 2, 10]` with `down_block_types[0] = DownBlock2D` and `up_block_types` reversed to put the plain block at the highest resolution — so level 0 carries no cross-attention at all and the real sub-stacks are depth 2 and depth 10."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/mod.rs",
+              "reason": "The forward collects down-path skip residuals and pops them on the up path, so those activations are alive across the whole pass."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/mod.rs",
+              "reason": "`windowable_depths` records every windowable sub-stack's depth in forward order — for SDXL-base `[2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2]`: eleven Transformer2D, six at depth 10 and FIVE at depth 2, 70 windowable blocks in total. SC-16355's survey text said four 2-deep sub-stacks; the up path carries `layers_per_block + 1 = 3` attentions, so it is five."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1, 2, 5, 10]` and `TRANSFORMER_WINDOW_SIZE = 10` (SC-17679 moved the default 1 → 10), scope `[Dit]`, under fingerprint `sdxl-mlx-unet-shared-ladder-v3`. `streamable` additionally requires `adapters_are_replayable`, which is true only on an already-packed snapshot — so a LoRA load arms rung 4 at q4/q8 and is refused at dense bf16."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/tests/memory_ladder_real_weights.rs",
+              "reason": "`EXPECTED_RUNG_FOUR` pins per-entry-per-tier coverage: sdxl/bf16, realvisxl/{bf16,q4,q8} and realvisxl_lightning/q4 publish the rung; illustrious_xl_v1/q8 and illustrious_xl_v2/q8 do not."
+            }
+          ],
+          "requestPeak": {
+            "finding": "moves",
+            "scopes": [
+              {
+                "entries": [
+                  "illustrious_xl_v1",
+                  "illustrious_xl_v2"
+                ],
+                "finding": "unmeasured"
+              }
+            ],
+            "reason": "Measured per entry per tier at 1024²/4 steps against that same entry's own staged control, at the shipped cadence (Apple/Metal, byte-identical output): sdxl bf16 19.005 → 14.938 GiB (−21.40%); realvisxl bf16 19.003 → 14.936 (−21.40%); realvisxl q8 17.693 → 15.516 (−12.31%); realvisxl q4 16.654 → 15.493 (−6.97%); realvisxl_lightning q4 16.654 → 15.493 (−6.97%). The saving is the whole `transformer_blocks` weight set (4.071 / 2.166 / 1.149 GiB by tier), so what rung 4 is worth is a function of the tier — a selector sizing it off the q8 row under-buys at bf16 by a factor of three. The peak column is FLAT across the whole cadence domain [1,2,5,10] at every geometry the instrument can resolve, because the peak is taken in the decode rather than in the windowed forward; cadence buys wall clock only (1262 vs 3524 ms/step at 1024²), which is why SC-17679 moved the default to the widest cadence 10. illustrious_xl_v1/v2 are `unmeasured`: their staged peak is realvisxl q8's 17.693 GiB to the millibyte, but rung 4 never ran on them because `streamable` refuses their snapshot (sc-17522).",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/tests/memory_ladder_real_weights.rs",
+                "reason": "`every_catalog_entry_loads_and_publishes_the_ladder` takes each entry's staged control and rung-4 request peak on that entry's own weights and checks which ladder each entry publishes."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+                "reason": "The cadence sweep records the flat peak column across [1,2,5,10] at bf16/q8/q4 × 1024²/768²/512², and the two once-non-flat 512² cells are withdrawn as positional allocator noise (SC-17679)."
+              }
+            ]
+          },
+          "findings": [
+            "The story's first trap is confirmed against the code and the classification is `partial`, not N/A. Its `[0, 2, 10]` shorthand is right about the SHAPE: the config array is [1, 2, 10], but level 0 is a DownBlock2D/UpBlock2D with no attention, so its entry is never read and the effective depths are 2 and 10.",
+            "SC-15525's survey text said SDXL has FOUR 2-deep `Transformer2D` sub-stacks. It is FIVE: the down path contributes two (down_blocks.1) and the up path three, because an up block carries `layers_per_block + 1 = 3` attentions. The full forward-order depth array is [2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2] — eleven Transformer2D, 70 windowable blocks.",
+            "The skip connections bound the SIZE of the win, not its validity. They keep down-path ACTIVATIONS alive across the forward, and rung 4 bounds WEIGHT residency — so the weight bound over each 10-deep sub-stack still holds; what does not shrink is the activation term it is competing against. The measured wins (−6.97% to −21.40% by tier) are that competition priced.",
+            "The rung needs a plan PER Transformer2D, not one per model, and that is what shipped: eleven `BlockPlan`s at a shared cadence. `BlockPlan::new` clamps a window to its stack's depth, so a cadence wider than 2 degrades the five 2-deep sub-stacks to fully resident rather than erroring — which is why the domain is stated once and not per depth, and why 10 is the widest cadence that means anything here.",
+            "Rungs 2 and 3 are `Missing` WITH measurements rather than unattempted. Rung 2's tiled decode works and is the family's biggest lever — 19.0032 → 15.8660 GiB (−16.51%) of request peak for ~7% wall clock, isolated decode 14.360 → 11.237 GiB (−21.7%) at edge 896 — but it is withheld on QUALITY: the inherited sibling drift bar is 48/255, and on the production latent the same 1024²/edge-896/overlap-192 geometry drifts 84/255 (the synthetic-latent sweep read 38, which is why the withholding argument had to be measured on production latents). It fails the bar outright at 1280²/1536²/2048², and `decode_tile_edges` has no geometry axis to vary the edge with output size. Rung 3's `sdpa_budgeted_bhsd` reaches every attention site including the IP-Adapter branch, but moves the peak 0.00% at BOTH measured scopes — the request (19.0032 → 19.0032 GiB) and the U-Net seam (6.5868 → 6.5868 GiB) — and is not bit-exact on its query-row axis (max|Δeps| 5.25e-3 at one step; 57/255 of image movement at one step, a different image by six). An earlier revision published the seam as +5.1% from an un-warmed control; warmed, both U-Nets read +0.00%.",
+            "illustrious_xl_v1 and illustrious_xl_v2 are `Missing` at rung 4 outright, because q8 is their only advertised tier. The cause is the SNAPSHOT, not the architecture: their `unet/` weights are genuinely packed (u32 codes with .scales/.biases, 3.46 GiB, byte-for-byte realvisxl q8's shape) but their `unet/config.json` ships without the `quantization` marker, so `packed_quant_bits` reads nothing, `needs_load_time_quant` returns true, `load_leaves_blocks_lazy` is false and `streamable` refuses. The rung fails closed, which is correct; the repair is a republished snapshot, tracked as sc-17522."
+          ],
+          "implementationScopes": [
+            {
+              "entries": [
+                "sdxl"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "realvisxl"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "realvisxl"
+              ],
+              "tiers": [
+                "q4",
+                "q8"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "realvisxl_lightning"
+              ],
+              "tiers": [
+                "q4"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            }
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The Candle SDXL U-Net has the same windowable Transformer2D sub-stacks inside a non-windowable conv/resnet and skip-connection trunk, with no sequential-offload or block-window path.",
+          "blockStacks": [
+            {
+              "name": "down/up level 1 attentions[*].transformer_blocks",
+              "blocks": "2 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "down/up level 2 + mid attentions[*].transformer_blocks",
+              "blocks": "10 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "conv stem / resnets / down-up skip path",
+              "blocks": "n/a",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/unet/attention.rs",
+              "reason": "Each Candle SpatialTransformer owns a `transformer_blocks: Vec<BasicTransformerBlock>`, preserving the per-Transformer2D windowable sub-stack shape."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
+              "reason": "The Candle SDXL descriptor declares `supports_sequential_offload: false` and publishes no rung-4 implementation."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17413 and the five Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until per-Transformer2D loading and authoritative CUDA evidence land."
+          ]
+        }
+      }
+    },
+    "15526": {
+      "name": "InstantID (SDXL backbone)",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The SDXL U-Net verdict, plus two additional resident structures: the IdentityNet ControlNet and the face IP-Adapter K/V pairs installed into every cross-attention.",
+          "blockStacks": [
+            {
+              "name": "UNet attentions[*].transformer_blocks",
+              "blocks": "2 and 10 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "IdentityNet ControlNet",
+              "blocks": "34 TransformerBlocks across 5 Transformer2D stacks (x2 with the OpenPose ControlNet in pose mode)",
+              "windowable": false
+            },
+            {
+              "name": "conv/resnet trunk",
+              "blocks": "n/a",
+              "windowable": false
+            },
+            {
+              "name": "face Resampler layers",
+              "blocks": "4 perceiver (attention, feed-forward) pairs",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-instantid/src/model.rs",
+              "reason": "InstantId holds `unet: UNet2DConditionModel` and `identitynet: ControlNet` from mlx_gen_sdxl, with the face IP K/V pairs installed into the UNet cross-attentions at load."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/controlnet.rs",
+              "reason": "The ControlNet is a second down-path whose residuals add into the UNet's skip connections and mid output, so it is a parallel trunk one BlockPlan does not cover."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/block.rs",
+              "reason": "A ControlNet's `UNetBlock2D`s carry the same `attentions: Option<Vec<Transformer2D>>` the base UNet does, so at SDXL's [1, 2, 10] depths the IdentityNet is itself 34 TransformerBlocks across 5 Transformer2D modules — 4 at level 1, 20 at level 2, 10 in the mid block. A ControlNet has `down_blocks` and `mid_transformer` and NO up path, so it carries 5 of these modules where the full U-Net carries 6; each runs every step."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for InstantID."
+          },
+          "findings": [
+            "The IP-Adapter K/V pairs are installed INTO the cross-attention modules at load. A windowed sub-stack rebuilt from the snapshot would drop them silently and render an identity-free image with no memory assertion and no compile error, so a rung-4 port here needs the same replay discipline Z-Image uses for adapters.",
+            "InstantID is a bespoke route with no normal provider descriptor, so it also has no rung-1 capability declaration to build the prerequisite on.",
+            "Pose mode holds THREE networks resident — the UNet, the IdentityNet and an OpenPose ControlNet — and the two ControlNets are 34 transformer blocks each, across 5 Transformer2D modules apiece. On that route the windowable share is a minority of the resident transformer weights unless the ControlNets are windowed too, which is a second family-side port, not a parameter."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Same SDXL backbone and IdentityNet on Candle; no block-window path and no sequential-offload declaration.",
+          "blockStacks": [
+            {
+              "name": "UNet attentions[*].transformer_blocks",
+              "blocks": "2 and 10 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "IdentityNet ControlNet",
+              "blocks": "34 TransformerBlocks across 5 Transformer2D stacks (x2 with the OpenPose ControlNet in pose mode)",
+              "windowable": false
+            },
+            {
+              "name": "conv/resnet trunk",
+              "blocks": "n/a",
+              "windowable": false
+            },
+            {
+              "name": "face Resampler layers",
+              "blocks": "4 perceiver (attention, feed-forward) pairs",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
+              "reason": "The Candle SDXL backbone declares `supports_sequential_offload: false` and carries no streamed-block loader."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/block.rs",
+              "reason": "A ControlNet's `UNetBlock2D`s carry the same `attentions: Option<Vec<Transformer2D>>` the base UNet does, so at SDXL's [1, 2, 10] depths the IdentityNet is itself 34 TransformerBlocks across 5 Transformer2D modules — 4 at level 1, 20 at level 2, 10 in the mid block. A ControlNet has `down_blocks` and `mid_transformer` and NO up path, so it carries 5 of these modules where the full U-Net carries 6; each runs every step."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for InstantID."
+          },
+          "findings": [
+            "Pose mode holds THREE networks resident — the UNet, the IdentityNet and an OpenPose ControlNet — and the two ControlNets are 34 transformer blocks each, across 5 Transformer2D modules apiece. On that route the windowable share is a minority of the resident transformer weights unless the ControlNets are windowed too, which is a second family-side port, not a parameter."
+          ]
+        }
+      }
+    },
+    "15527": {
+      "name": "PuLID (FLUX.1 backbone)",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The FLUX.1 double/single verdict, plus an IdFormer whose outputs are injected at fixed block indices through the whole trunk.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "19 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "38 (single)",
+              "windowable": true
+            },
+            {
+              "name": "IdFormer layers",
+              "blocks": "10 perceiver (attention, feed-forward) pairs + 6 mapping MLPs",
+              "windowable": false
+            },
+            {
+              "name": "EVA-CLIP vision blocks",
+              "blocks": "24",
+              "windowable": false
+            },
+            {
+              "name": "PulidCa cross-attention modules",
+              "blocks": "20 (every 2nd double + every 4th single)",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/pulid_flux.rs",
+              "reason": "PulidFlux drives the FLUX.1 transformer with an identity injector; the trunk it windows would be FLUX.1's two uniform sub-stacks."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/transformer.rs",
+              "reason": "The injector is consulted after every double block and after the single blocks it opts into (every 2nd double, every 4th single), so the injection points are per-block-index state a windowed loop must keep aligned."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/ca.rs",
+              "reason": "`PulidCa { ca: Vec<PerceiverAttentionCA> }` — 20 modules, `num_double.div_ceil(2) + num_single.div_ceil(4)`. Unlike the IdFormer and EVA-CLIP, which run once per generate, these fire INSIDE every DiT step, so they are resident for exactly the phase a window would bound."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/idformer.rs",
+              "reason": "`IdFormer { layers: Vec<(PerceiverAttention, FeedForward)> }` at depth 10 plus 6 mapping MLPs (`id_embedding_mapping` and `mapping_{0..4}`). `PulidFlux` holds the FLUX trunk, EVA-CLIP, the IdFormer and the face stack as plain owned fields with no residency seam, so none of it is dropped for the denoise."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for PuLID."
+          },
+          "findings": [
+            "Per-block-index injection is expressible in the primitive as it stands — `run_windowed` hands `apply` the window's `Range<usize>`, so the injector can be consulted by absolute block index inside the window. This is a parameter-threading job, not a change to the primitive's shape.",
+            "PuLID is a bespoke route with no normal provider descriptor, so like InstantID it has no rung-1 capability declaration to build the prerequisite on.",
+            "PuLID has no residency seam at all: the 57-block FLUX trunk, a 24-block EVA-CLIP tower, the 10-layer IdFormer and 20 per-step cross-attention modules are plain owned fields. Rung 4 would bound the trunk while everything else stays resident, so the share of the peak it can move is smaller than the trunk's block count suggests."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "pulid_flux_dev"
+          ],
+          "implementedModes": [
+            "character_image"
+          ],
+          "implementedOverlays": [
+            "identity"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1
+          },
+          "summary": "The bespoke Candle PuLID route now owns a distinct full-request memory contract and lifecycle while delegating its FLUX.1-dev trunk to the shared staged/windowed reference backbone. The exact EVA-CLIP, IdFormer/CA, SCRFD, ArcFace, and BiSeNet bytes remain resident and are priced as five identity components; only the 57-block DiT is windowed. PiD and every non-identity route fail closed.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "19 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "38 (single)",
+              "windowable": true
+            },
+            {
+              "name": "IdFormer layers",
+              "blocks": "10 perceiver (attention, feed-forward) pairs + 6 mapping MLPs",
+              "windowable": false
+            },
+            {
+              "name": "EVA-CLIP vision blocks",
+              "blocks": "24",
+              "windowable": false
+            },
+            {
+              "name": "PulidCa cross-attention modules",
+              "blocks": "20 (every 2nd double + every 4th single)",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-pulid/src/pulid_flux.rs",
+              "reason": "`load_with_memory_context` rebuilds and validates the exact contract from resolved paths before deriving `GenerationMemory`; `generate_with_memory_context` rechecks route and geometry, preserves absolute PuLID injection indices through the shared backbone, and synchronizes CUDA on every terminal request path."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-pulid/src/memory_strategy.rs",
+              "reason": "The provider-specific calibration identity publishes the five-rung candidate ranges, sizes five resident identity components from the actual files, binds character_image + one identity reference, and rejects base-overlay or optimized PiD reuse."
+            },
+            {
+              "source": "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
+              "reason": "The production bespoke route builds that exact contract after provisioning, submits it to the shared selector with mode/overlay/geometry/tier/load-shape identity, retains the returned MemoryRunContext through load and generation, and records the selected strategy/evidence revision."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/ca.rs",
+              "reason": "`PulidCa { ca: Vec<PerceiverAttentionCA> }` — 20 modules, `num_double.div_ceil(2) + num_single.div_ceil(4)`. Unlike the IdFormer and EVA-CLIP, which run once per generate, these fire INSIDE every DiT step, so they are resident for exactly the phase a window would bound."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/idformer.rs",
+              "reason": "`IdFormer { layers: Vec<(PerceiverAttention, FeedForward)> }` at depth 10 plus 6 mapping MLPs (`id_embedding_mapping` and `mapping_{0..4}`). The shared FLUX backbone seam does not window the EVA-CLIP, IdFormer, face stack, or 20 PuLID cross-attention modules; those overlay components remain resident and require their own exact admission budget."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for PuLID."
+          },
+          "findings": [
+            "Rung 4 bounds only the 57-block FLUX trunk. EVA-CLIP, the 10-layer IdFormer, the face stack, and 20 per-step cross-attention modules remain resident and are explicitly priced, so no saving is inferred from block count alone.",
+            "Implementation and loadability do not promote evidence: the shared selector continues to choose resident execution until a current full PuLID identity request is present in the packaged evidence bundle. Base FLUX measurements are a different calibration identity and cannot match."
+          ]
+        }
+      }
+    },
+    "15528": {
+      "name": "Bernini",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "Two uniform 40-block Wan expert stacks, both held resident for the whole denoise and switched between by noise level. Each is windowable; one BlockPlan does not cover the trunk, because the trunk is two models.",
+          "blockStacks": [
+            {
+              "name": "low_noise_model blocks",
+              "blocks": "40",
+              "windowable": true
+            },
+            {
+              "name": "high_noise_model blocks",
+              "blocks": "40",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-wan/src/transformer.rs",
+              "reason": "WanTransformer holds a single `blocks: Vec<Block>`; everything else is patch/text/time embedders and the head. So ONE expert is a uniform stack."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/pipeline.rs",
+              "reason": "The renderer loads `low_noise_model.safetensors` AND `high_noise_model.safetensors` into two WanTransformers, builds a `BExpert` over each, and passes both live into the denoise, which switches on a noise boundary per step. Both stacks are alive across the whole denoise — the trunk is 2 x 40 blocks, not 40."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
+              "reason": "`if !config.dual_model { return Err(...) }` — a single-expert snapshot is refused, so the two-stack shape is the only shape this family has."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/forward.rs",
+              "reason": "Each conditioning source and the noisy target are patch-embedded and concatenated on the token axis, and the packed sequence runs through `WanTransformer::forward_packed` — so the windowable unit is an expert's block stack."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for Bernini."
+          },
+          "findings": [
+            "Dual residency makes this the largest structural rung-4 opportunity in the catalog after Qwen-Image, and for a different reason: 80 blocks are resident while at most one expert's window is in use at any instant. A per-expert plan bounds each, and the idle expert is a whole model that a window schedule could hold at zero.",
+            "The guided-velocity modes run SEVERAL full forward passes per step over different conditioning combos. A window plan is re-walked once per forward, so the re-materialization cost of rung 4 is multiplied by the mode's pass count — a latency consequence to price into the window size, not a correctness problem.",
+            "Bernini already loads and quantizes one expert before the next so only one bf16 dequant transient is resident. That is a LOAD-TIME transient bound; both experts are resident afterwards, so it does not overlap with what rung 4 would do."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The Candle renderer also switches between two uniform Wan expert stacks during denoise. It publishes no sequential-offload or block-window contract, so the two-stack opportunity is in scope but unimplemented.",
+          "blockStacks": [
+            {
+              "name": "low_noise_model blocks",
+              "blocks": "40",
+              "windowable": true
+            },
+            {
+              "name": "high_noise_model blocks",
+              "blocks": "40",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/pipeline.rs",
+              "reason": "The Candle renderer loads the dual-expert Wan snapshot, selects the high- or low-noise expert per timestep, and declares `supports_sequential_offload: false`."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-wan/src/wan14b.rs",
+              "reason": "The shared Candle Wan expert provides the uniform transformer stack used by each Bernini expert but no Bernini block-window loader is wired."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17414 and SC-17480 own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until per-expert streaming and authoritative CUDA evidence land."
+          ]
+        }
+      }
+    }
+  }
+}

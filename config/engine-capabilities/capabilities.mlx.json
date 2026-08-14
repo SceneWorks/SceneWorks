@@ -1,0 +1,334 @@
+{
+  "backend": "mlx",
+  "generatedFrom": {
+    "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
+    "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
+  },
+  "engines": [
+    {
+      "id": "anima_aesthetic",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "anima_base",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "anima_turbo",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "bernini",
+      "modality": "both",
+      "supportsPreview": false
+    },
+    {
+      "id": "bernini_renderer",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "boogu_image",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "boogu_image_edit",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "boogu_image_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "chroma1_base",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "chroma1_flash",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "chroma1_hd",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux1_dev",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux1_dev_control",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux1_schnell",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux2_dev",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux2_dev_control",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux2_dev_edit",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux2_klein_9b",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux2_klein_9b_edit",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "flux2_klein_9b_kv_edit",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "ideogram_4",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "ideogram_4_turbo",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "kolors",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_2_edit",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_2_raw",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_2_turbo",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_2_turbo_control",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_2_turbo_edit",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_realtime_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "lens",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "lens_turbo",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "ltx_2_3",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_base",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_edit",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_edit_base",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_edit_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mochi_1",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "pulid_flux",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "qwen_image",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "qwen_image_control",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "qwen_image_edit",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "sana_1600m",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "sana_sprint_1600m",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "scail2_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "sd3_5_large",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "sd3_5_large_turbo",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "sd3_5_medium",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "sdxl",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "seedvr2",
+      "modality": "both",
+      "supportsPreview": false
+    },
+    {
+      "id": "seedvr2_3b",
+      "modality": "both",
+      "supportsPreview": false
+    },
+    {
+      "id": "seedvr2_7b",
+      "modality": "both",
+      "supportsPreview": false
+    },
+    {
+      "id": "sensenova_u1_8b",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "sensenova_u1_8b_fast",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "svd_xt",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan2_2_i2v_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan2_2_t2v_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan2_2_ti2v_5b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan2_2_vace_fun_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan_vace",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "z_image",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "z_image_control",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "z_image_turbo",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "z_image_turbo_control",
+      "modality": "image",
+      "supportsPreview": true
+    }
+  ]
+}

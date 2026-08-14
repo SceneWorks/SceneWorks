@@ -159,7 +159,10 @@ fn qwen_control_load(
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
-    let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
+    let spec = apply_measured_mlx_load_shape(
+        QWEN_CONTROL_ENGINE_ID,
+        qwen_control_spec(weights_dir, control_weights, quant, adapters),
+    );
     load_control_engine(QWEN_CONTROL_ENGINE_ID, &spec)
 }
 
@@ -178,6 +181,7 @@ fn qwen_control_generate_one(
     guidance: f32,
     conditioning: Vec<Conditioning>,
     use_pid: bool,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -192,6 +196,7 @@ fn qwen_control_generate_one(
         guidance: Some(guidance),
         use_pid,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -334,6 +339,7 @@ async fn generate_qwen_control_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    spec = apply_measured_mlx_load_shape(QWEN_CONTROL_ENGINE_ID, spec);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         QWEN_CONTROL_ENGINE_ID,
@@ -353,7 +359,7 @@ async fn generate_qwen_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -379,6 +385,7 @@ async fn generate_qwen_control_stream(
                     guidance,
                     conditioning,
                     use_pid,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;
@@ -564,10 +571,12 @@ async fn ensure_distill_lora_cached(
     Ok(path)
 }
 
-/// Reference asset ids for a Qwen edit: the character-flow `referenceAssetId`, else the
-/// Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
-/// `ref = referenceAssetId or (sourceAssetId if edit_image)` and the FLUX.2 edit path.
+/// Ordered reference asset ids for a Qwen edit: plural `referenceAssetIds`, the singular
+/// character-flow `referenceAssetId`, or the Image-Edit `sourceAssetId` (edit_image mode).
 fn qwen_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        return request.reference_asset_ids.iter().take(5).cloned().collect();
+    }
     if let Some(id) = request
         .reference_asset_id
         .as_deref()
@@ -607,6 +616,7 @@ fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> 
     let raw = request
         .advanced
         .get("trueCfgScale")
+        .or_else(|| request.advanced.get("imageGuidanceScale"))
         .and_then(|value| {
             value
                 .as_f64()
@@ -665,6 +675,7 @@ fn qwen_edit_generate_one(
     sampler: Option<&str>,
     conditioning: Vec<Conditioning>,
     use_pid: bool,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -680,6 +691,7 @@ fn qwen_edit_generate_one(
         sampler: sampler.map(str::to_owned),
         use_pid,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -834,6 +846,7 @@ async fn generate_qwen_edit_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    spec = apply_measured_mlx_load_shape(engine_id, spec);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -853,7 +866,7 @@ async fn generate_qwen_edit_stream(
             drive_gen_items_scored(
                 tx,
                 seeds.into_iter().zip(prompts),
-                move |index, (seed, prompt), on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     // Pose tier: pair the reference with this pose's DWPose whole-body skeleton
                     // (body + hands 21x2 + face 68 when the pose carries them — sc-6599) as a
                     // `[reference, skeleton]` multi-image set. Reference FIRST: the engine
@@ -897,6 +910,7 @@ async fn generate_qwen_edit_stream(
                         sampler,
                         conditioning,
                         use_pid,
+                        preview,
                         &cancel,
                         on_progress,
                     )?;

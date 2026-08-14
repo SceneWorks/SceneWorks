@@ -2,6 +2,13 @@ name: Check
 
 on:
   pull_request:
+  # RETAINED, though the merge queue was removed on 2026-08-11 (0 integration failures caught
+  # in 103 groups, +21m median tax, every group size 1). No `merge_group` event fires today, so
+  # this costs nothing — and it keeps re-enabling the queue a one-line ruleset change. A
+  # required lane with NO `merge_group:` trigger strands the group until
+  # `check_response_timeout_minutes` evicts its entries, which silently re-orders the queue
+  # rather than failing loudly, so this is the expensive half to have to rediscover.
+  merge_group:
   push:
     branches:
       - main
@@ -29,18 +36,55 @@ jobs:
       - name: Build web production bundle
         run: npm --prefix apps/web run build
 
+  # `parity` IS THE REQUIRED STATUS CHECK, and it is an aggregator — the work fans out into
+  # the four `parity-*` jobs below. They are mutually independent, and running them serially
+  # in one job meant everything queued behind the Rust compile for no reason. Measured
+  # 2026-08-11 over 12 runs: rust 6.8m, closure digests 4.0m, scaffold 1.6m, docker smoke
+  # 6.8m when it fires (4/12) — a 14.2m median job whose longest single member is 6.8m.
+  #
+  # Keeping ONE required context (rather than promoting each split job to its own) means the
+  # ruleset needs no change, and there is no window in which a split-out check has stopped
+  # being covered by `parity` but is not yet required on its own.
   parity:
+    needs: [parity-rust, parity-digests, parity-scaffold, parity-docker]
+    # FAIL CLOSED. Without `if: always()` this job is SKIPPED whenever any `needs:` job fails
+    # or is skipped — and a skipped job reports **Success** to a required status check, which
+    # is exactly the false-green shape documented at the top of changed-paths.yml. So it runs
+    # unconditionally and asserts the results itself.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert every parity job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        # Iterates whatever is in `needs` rather than naming the four jobs, so adding a fifth
+        # `parity-*` job cannot silently go ungraded. The count floor is the other half of
+        # that: deleting a `needs:` entry would otherwise shrink the assertion to a green
+        # no-op instead of failing.
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
+          count="$(jq -r 'length' <<<"$RESULTS")"
+          if [ "$count" -lt 4 ]; then
+            echo "::error::parity expects at least 4 upstream jobs, saw ${count} — a needs: entry was removed"
+            exit 1
+          fi
+          if [ "$(jq -r '[to_entries[] | select(.value.result != "success")] | length' <<<"$RESULTS")" != "0" ]; then
+            echo "::error::one or more parity jobs did not succeed"
+            exit 1
+          fi
+
+  parity-rust:
     runs-on: ubuntu-latest
     env:
-      # Fetch the private inference source once with a scoped credential, then force every build
-      # and build.rs process offline so the token is absent from their environment.
+      # Fetch the pinned inference source once, then force every build and build.rs process
+      # offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
-    # A stalled step (e.g. a transient `docker compose up --build` layer/registry
-    # hang in the Docker smoke) otherwise rides GitHub's 6-hour default timeout,
-    # blocking the PR and holding a runner for hours — this bit PR #1300 / sc-10354
-    # for ~4 h. Cap well above the healthy ~12-15 min parity duration so healthy
-    # runs are unaffected but a wedge fails in minutes with a clear timeout
-    # (sc-10420).
+    # A stalled step otherwise rides GitHub's 6-hour default timeout, blocking the PR and
+    # holding a runner for hours — this bit PR #1300 / sc-10354 for ~4 h. Cap well above the
+    # healthy duration so healthy runs are unaffected but a wedge fails in minutes with a
+    # clear timeout (sc-10420).
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,15 +98,12 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
@@ -77,45 +118,14 @@ jobs:
         # are picked up automatically; e2e/parity-marked tests run in their own
         # later steps against the built Rust API (sc-4180).
         run: python -m pytest -q tests/ -m "not e2e and not parity" --strict-markers
-      - name: Run scaffold and compose checks
-        run: |
-          npm run check
-          npm run check:compose
-          npm run check:docker:rust-api:self-test
-          npm run check:docker:runpod
-          npm run check:docker:runpod:supervisor
-      - name: Guard against NC model weights in a published artifact (sc-10526, epic 10512)
-        # SceneWorks converts weights at install and pulls them at runtime — it never
-        # redistributes them. Baking a Non-Commercial family's weights (Anima /
-        # CircleStone, FLUX NC, Ideogram, Krea, NVIDIA SANA, …) into an installer or
-        # image layer would make us a distributor of a Derivative and attach the NC
-        # obligations. The self-test proves the gate fires on a fake anima-*.safetensors
-        # before the real scan runs over the Docker build context / Tauri resource trees
-        # (config/, crates/, apps/). See docs/packaging-nc-weights-guard.md.
-        run: |
-          node scripts/check-no-nc-weights.mjs --self-test
-          npm run check:nc-weights
-      - name: Guard About→Licenses coverage for shipped models and embedded source
-        # The licenses page records the upstream license + attribution for every model
-        # whose weights SceneWorks downloads — including which ones are NON-COMMERCIAL.
-        # It had drifted to cover only the bundled binaries, Wan2.2/LTX and the audio
-        # models while ~30 image/video/utility primaries (SDXL, FLUX, Krea, Ideogram,
-        # SANA, SD3.5, Anima, the PiD decoders, …) shipped with no entry at all, because
-        # adding a catalog model had no mechanical link to the page. This fails the build
-        # if a downloading model is unclaimed, a claimed id no longer exists, or a
-        # document key is not wired into bundledLicenses.js (which would render an EMPTY
-        # license — worse than a missing one). The same executable guard also
-        # revision-locks the audited inventory of ported/embedded inference source
-        # (Cephes, CMUDICT), forcing every inference pin bump to re-audit upstream
-        # NOTICE/LICENSE-* and production include_str!/include_bytes! sites.
-        run: |
-          node scripts/check-license-coverage.mjs --self-test
-          npm run check:license-coverage
       - name: Guard against gen-core version skew (sc-4482, epic 3720)
         # Fails if more than one distinct `sceneworks-gen-core` rev resolves in the worker's
         # build graph (split contract types can invalidate explicit catalog wiring). `--target all`
         # resolves the macOS-only mlx-gen transitive gen-core even on this Linux lane. The
         # self-test proves the gate fires without a deliberately-broken pin checked in.
+        #
+        # Lives on THIS job because it shells out to `cargo tree`, so it needs the toolchain and
+        # the fetched registry above — it is not a Node guard like its former neighbours.
         run: |
           bash scripts/check-gen-core-skew.sh --self-test
           bash scripts/check-gen-core-skew.sh
@@ -143,6 +153,120 @@ jobs:
         # Same all-skipped guard as the e2e step: a parity run that exercised
         # nothing fails instead of reporting success (sc-8935 / F-133).
         run: python -m pytest -q -m parity --strict-markers
+
+  # Node-only: `npm run check` and its neighbours read Cargo.toml as TEXT (the pin regex in
+  # generate-memory-matrix.mjs) and never invoke cargo, so this needs no Rust toolchain and no
+  # rust-cache — which is what lets it run beside the compile instead of in front of it.
+  parity-scaffold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - name: Run scaffold and compose checks
+        run: |
+          npm run check
+          npm run check:compose
+      - name: Guard against NC model weights in a published artifact (sc-10526, epic 10512)
+        # SceneWorks converts weights at install and pulls them at runtime — it never
+        # redistributes them. Baking a Non-Commercial family's weights (Anima /
+        # CircleStone, FLUX NC, Ideogram, Krea, NVIDIA SANA, …) into an installer or
+        # image layer would make us a distributor of a Derivative and attach the NC
+        # obligations. The self-test proves the gate fires on a fake anima-*.safetensors
+        # before the real scan runs over the Docker build context / Tauri resource trees
+        # (config/, crates/, apps/). See docs/packaging-nc-weights-guard.md.
+        run: |
+          node scripts/check-no-nc-weights.mjs --self-test
+          npm run check:nc-weights
+      - name: Guard About→Licenses coverage for shipped models and embedded source
+        # The licenses page records the upstream license + attribution for every model
+        # whose weights SceneWorks downloads — including which ones are NON-COMMERCIAL.
+        # It had drifted to cover only the bundled binaries, Wan2.2/LTX and the audio
+        # models while ~30 image/video/utility primaries (SDXL, FLUX, Krea, Ideogram,
+        # SANA, SD3.5, Anima, the PiD decoders, …) shipped with no entry at all, because
+        # adding a catalog model had no mechanical link to the page. This fails the build
+        # if a downloading model is unclaimed, a claimed id no longer exists, or a
+        # document key is not wired into bundledLicenses.js (which would render an EMPTY
+        # license — worse than a missing one). The same executable guard also
+        # revision-locks the audited inventory of ported/embedded inference source
+        # (Cephes, CMUDICT), forcing every inference pin bump to re-audit upstream
+        # NOTICE/LICENSE-* and production include_str!/include_bytes! sites.
+        # It additionally fails CLOSED on any production-Rust crate in the pinned
+        # inference revision that is neither covered by a ported-source area nor given
+        # an explicit crateDispositions decision. The marker regex that finds ported
+        # FILES is only a heuristic, and a whole crate already slipped it once —
+        # mlx-gen-krea-realtime described its port in words the regex did not know and
+        # shipped unclassified on a false green (sc-15138 → sc-15191).
+        #
+        # It grades CHECKED-IN audit data against the Cargo pin, so unlike the digest job
+        # below it needs no inference clone.
+        run: |
+          node scripts/check-license-coverage.mjs --self-test
+          npm run check:license-coverage
+
+  parity-digests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - name: Verify the per-lane inference closure digests against real pinned source (sc-17774)
+        # `npm run check` only asserts that config/inference-provider-closures.json is KEYED to the
+        # live pin. It cannot tell a real digest from a hand-edited one, because the derivation needs
+        # inference's source and the SceneWorks checkout does not contain it.
+        #
+        # It does not need to be checked in blind, though: SceneWorks/inference is PUBLIC (#2164
+        # established this after the opposite premise had been believed for some time), so a shallow
+        # fetch of the pinned revision costs seconds, needs no token, and re-derives every lane's
+        # digest for real. Without this step the currency term is checked-in data nothing verifies —
+        # the same fail-open shape this epic removed one level down.
+        run: |
+          set -euo pipefail
+          pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
+          git init -q "$RUNNER_TEMP/inference"
+          git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
+          git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
+          git -C "$RUNNER_TEMP/inference" checkout -q FETCH_HEAD
+          node scripts/inference-closure-digest.mjs --repo "$RUNNER_TEMP/inference" --check
+          # sc-17935: the line above grades ONE file. The CAPTURED half of the comparison — 65 record
+          # digests in the evidence bundle and the calibration bindings in the shipped manifest — was
+          # graded by nothing, and the class was not hypothetical: a constant carrying the comment
+          # "derive it with …" had never been a real derivation and survived all of sc-17774 unnoticed.
+          #
+          # sc-17989 closed the last hole in the manifest half: `turboFit` and `candle.control` were
+          # maintained by hand and unreachable to the locator, so it graded 31 of 33 digests. All 33
+          # are covered now, and a digest that becomes unreachable again fails rather than going
+          # quiet — that regression is what `--verify`'s coverage check exists to catch.
+          #
+          # The backfill re-derives each of those at the revision it was captured at and exits 1 on
+          # any disagreement, so running it in dry mode IS the verification. It needs every captured
+          # revision present, not just the pin, and `--revisions` reports exactly which — from the
+          # same workload computation the check itself uses, so the two cannot drift apart.
+          while read -r rev; do
+            [ -n "$rev" ] || continue
+            git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
+          done < <(node scripts/backfill-closure-digests.mjs --revisions)
+          node scripts/backfill-closure-digests.mjs --repo "$RUNNER_TEMP/inference" --verify
+
+  # Split out because the smoke recompiles the whole workspace inside BuildKit and shares
+  # nothing with the host's rust-cache — ~7m that used to land at the END of a 14m serial job,
+  # so its cost was fully additive to everything above it.
+  #
+  # The `if:` below is a STEP-level skip, so this job still reports success when the gate says
+  # no Docker input changed. That keeps the aggregator honest: it can demand `success` from
+  # every member with no skipped-counts-as-green special case to get wrong later.
+  parity-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
       - name: Decide whether to run the Docker runtime smoke
         id: docker_smoke_gate
         env:
@@ -172,6 +296,63 @@ jobs:
             node scripts/docker-smoke-relevance.mjs --expected-count "$changed_file_count"
       - name: Smoke default Rust API Docker runtime
         if: steps.docker_smoke_gate.outputs.run == 'true'
-        env:
-          SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
         run: npm run check:docker:rust-api
+
+  # THE CANDLE TYPECHECK, ON A HOSTED BOX. The merge queue's whole job is catching semantic
+  # conflicts — two PRs that are individually green and textually non-overlapping, whose MERGE does
+  # not compile. `main` broke exactly that way today (e71b932f: #2134 written against a `temp_db()`
+  # that #2135 had changed the return type of).
+  #
+  # `parity` above catches that class for code the Linux default-feature build compiles, and it is a
+  # required check, so the queue already gates on it. It does NOT compile anything under
+  # `all(not(target_os = "macos"), feature = "backend-candle")` — `vram_gate`, `krea_control_fit`,
+  # the candle-control image modules, `generate_candle_video` and its Mochi fit gates. Until this job
+  # existed the ONLY compiler of that cfg anywhere in CI was windows-candle.yml, which runs on the
+  # self-hosted `cuda` pool at a ~24m median (p90 32m, measured 2026-08-05 over 85 runs) and has no
+  # `merge_group:` trigger — so a candle-side semantic conflict merged green and broke `main` for
+  # everyone behind it. This job is ~4m and hosted, which is what makes it affordable per merge
+  # group where that lane is not.
+  #
+  # It does not need a GPU. `scripts/check-candle-build.mjs` (sc-12356) writes a stub `nvcc` that
+  # satisfies the three build scripts that shell out to the CUDA toolkit, and `cargo clippy`/`check`
+  # NEVER LINK — so the typecheck itself is entirely real on a GPU-less runner. That script has
+  # shipped since sc-12356 but ran nowhere in CI; it was wired only into the pre-push hook, with
+  # `--allow-skip`. This is its first gate.
+  #
+  # SCOPE, so a green here is not over-read: it TYPECHECKS. It cannot RUN candle tests, because
+  # `cargo test` links and that needs a real libcuda. Candle-gated `#[test]` bodies still execute
+  # for the first time on windows-candle.yml. What this gates is the compile class — E0599, E0277,
+  # a cfg-gated symbol gone missing, dead code under `-D warnings` — which is precisely the class a
+  # speculative merge introduces and the class that broke `main` today.
+  candle:
+    runs-on: ubuntu-latest
+    env:
+      # Same posture as `parity`: fetch the pinned inference source once, then force every build
+      # and build.rs process offline so nothing else can reach the network mid-build.
+      CARGO_NET_OFFLINE: "true"
+    # The three cargo invocations are two `check`s and one `clippy`, all warm-cached after the first
+    # run. Sized like `parity` so a wedge fails in minutes rather than riding the 6-hour default
+    # (sc-10420).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          # Kept in lockstep with rust-toolchain.toml by the contract test in
+          # scripts/platform-review-contracts.test.mjs, same as every other lane's input.
+          toolchain: "1.97.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+        with:
+          # A distinct key from `parity`'s: this job compiles the same crates under a different
+          # feature set, so sharing one cache would thrash both.
+          key: candle
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Typecheck the candle backend configuration
+        # No `--allow-skip`: this host is Linux, so `not(target_os = "macos")` holds natively and
+        # there is no cross target to be missing. A "cannot run here" on this runner is a real
+        # failure, not a dev who never opted in.
+        run: npm run rust:check:candle

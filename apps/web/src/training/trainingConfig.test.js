@@ -6,6 +6,7 @@ import {
   configReseedDecision,
   configValidation,
   mergeCustomizedConfigDraft,
+  timestepTypeOptionsForTarget,
   trainingConfigSnapshot,
 } from "./trainingConfig.js";
 
@@ -32,6 +33,26 @@ const target = {
   },
   limits: { networkTypes: ["lora", "lokr"] },
 };
+
+it("scopes the SD3 timestep extensions without dropping the shared uniform mode", () => {
+  expect(timestepTypeOptionsForTarget({ kernel: "anima_lora" })).toEqual([
+    "sigmoid",
+    "linear",
+    "uniform",
+    "weighted",
+  ]);
+  expect(timestepTypeOptionsForTarget({ kernel: "mage_flow_lora" })).not.toContain(
+    "logit_normal",
+  );
+  expect(timestepTypeOptionsForTarget({ kernel: "sd3_lora" })).toEqual([
+    "sigmoid",
+    "linear",
+    "uniform",
+    "weighted",
+    "default",
+    "logit_normal",
+  ]);
+});
 
 const dataset = { id: "ds-1", version: 3, name: "Kelsie" };
 
@@ -143,6 +164,42 @@ describe("trainingConfigSnapshot", () => {
     const draft = configDraftFromTarget(target, dataset, ["auto"]);
     const snap = snapshot({ ...draft, networkType: "lokr", decomposeFactor: "" });
     expect(snap.config.advanced).not.toHaveProperty("decomposeFactor");
+  });
+
+  it("uses the platform-effective full-finetune contract without changing MLX defaults", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    const mlx = snapshot({
+      ...draft,
+      networkType: "full",
+      precision: "bf16",
+      gradientCheckpointing: true,
+    });
+    expect(mlx.config.advanced.networkType).toBe("full");
+    expect(mlx.config.advanced.mixedPrecision).toBe("bf16");
+    expect(mlx.config.advanced.gradientCheckpointing).toBe(true);
+
+    const candleTarget = {
+      ...target,
+      defaults: {
+        ...target.defaults,
+        advanced: {
+          ...target.defaults.advanced,
+          fullFinetuneConfig: {
+            mixedPrecision: "f32",
+            gradientCheckpointing: false,
+          },
+        },
+      },
+    };
+    const candle = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, networkType: "full", precision: "bf16", gradientCheckpointing: true },
+      selectedPreset: null,
+      selectedTarget: candleTarget,
+    });
+    expect(candle.config.advanced.mixedPrecision).toBe("f32");
+    expect(candle.config.advanced.gradientCheckpointing).toBe(false);
+    expect(candle.config.advanced).not.toHaveProperty("fullFinetuneConfig");
   });
 
   it("derives sample prompts from the trigger word", () => {
@@ -358,5 +415,51 @@ describe("mergeCustomizedConfigDraft (sc-11970)", () => {
     const merged = mergeCustomizedConfigDraft(seeded, { steps: "2000" }, new Set(["steps"]));
     expect(merged).not.toBe(seeded);
     expect(seeded.steps).toBe("1000");
+  });
+});
+
+// ControlNet preprocessor provisioning. A `control_branch` run renders its per-image condition with
+// a preprocessor whose resolver is cache-only since epic 17625, so a missing one is a job-time
+// failure — it has to gate Start training, not merely warn beside it.
+describe("configValidation — missing control preprocessor", () => {
+  const dataset = { id: "ds_1", items: [{ id: "i1" }] };
+  const controlTarget = { ...target, id: "krea_pose_control", outputKind: "control_branch" };
+  const draft = () => configDraftFromTarget(controlTarget, dataset, ["auto"]);
+  // Assert on THIS rule's issue rather than the whole summary's `ready`: readiness also depends on
+  // unrelated free-text fields, so a `ready === false` assertion would pass whether or not this rule
+  // fires. Every issue blocks Start training, so the issue's presence IS the block.
+  const preprocessorIssues = (missingControlModels) =>
+    configValidation(draft(), {
+      activeDataset: dataset,
+      selectedTarget: controlTarget,
+      missingControlModels,
+    }).filter((entry) => /to render this run's control condition/.test(entry.message));
+
+  it("blocks Start training and names the model", () => {
+    const issues = preprocessorIssues([{ id: "dwpose_pose_detector", name: "DWPose Pose Detector" }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("DWPose Pose Detector");
+    // An `error`, not a silent `requirement`: nothing on the form explains the dead button, so it
+    // earns a chip (the sc-10501 distinction). `summarize` surfaces errors and hides requirements.
+    expect(summarize(issues).surfaced).toHaveLength(1);
+  });
+
+  it("lists every missing model in one issue", () => {
+    const issues = preprocessorIssues([
+      { id: "person_detector", name: "YOLO11m Person Detector" },
+      { id: "dwpose_pose_detector", name: "DWPose Pose Detector" },
+    ]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("YOLO11m Person Detector and DWPose Pose Detector");
+  });
+
+  // The regression that matters: every LoRA run, and every ControlNet run on a provisioned box,
+  // passes an empty list (or nothing at all) and must be completely unaffected.
+  it("adds no issue when nothing is missing", () => {
+    expect(preprocessorIssues([])).toEqual([]);
+    expect(preprocessorIssues(undefined)).toEqual([]);
+    expect(
+      configValidation(draft(), { activeDataset: dataset, selectedTarget: controlTarget }),
+    ).toEqual(configValidation(draft(), { activeDataset: dataset, selectedTarget: controlTarget, missingControlModels: [] }));
   });
 });

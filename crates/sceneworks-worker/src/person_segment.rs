@@ -21,7 +21,6 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use gen_core::CancelFlag;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Segmenter in Phase 6.
 use runtime_macos::media::weights::Weights;
@@ -41,7 +40,8 @@ pub(crate) use crate::person_segment_sam3_common::{
 /// The production SAM2 size (matches the spike + the `SceneWorks/sam2-mlx` upload).
 const SEG_FILE: &str = "sam2.1_hiera_large.safetensors";
 
-/// Download-on-first-use repo: the converted MLX SAM2 weights owned by SceneWorks
+/// The converted MLX SAM2 weights owned by SceneWorks, installed from the Model Manager as the
+/// `sam2_person_segment` catalog entry (sc-17627) — no longer downloaded on first use
 /// (sc-3707, uploaded from the official Meta `.pt` via `tools/convert_sam2_to_mlx.py`;
 /// bit-identical to the avbiswas reference).
 const SEG_REPO: &str = "SceneWorks/sam2-mlx";
@@ -68,7 +68,7 @@ pub(crate) type BoxNorm = (f64, f64, f64, f64);
 /// Resolve already-present SAM2 weights: an explicit env pin
 /// (`SCENEWORKS_SAM2_WEIGHTS`), then the app cache `<data_dir>/cache/person-segment/`,
 /// then the model dir `<data_dir>/models/person-segment/`. Returns `Ok(None)` when nothing
-/// is staged (then `ensure_segmenter_weights` downloads it).
+/// is staged (then `require_segmenter_weights` turns that into an actionable install error).
 ///
 /// A set-but-missing `SCENEWORKS_SAM2_WEIGHTS` is an operator error: it fails loudly
 /// (`InvalidPayload`) via [`crate::util::resolve_env_file_pin`] instead of silently falling
@@ -82,6 +82,13 @@ pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> WorkerResult<Opt
     )? {
         return Ok(Some(path));
     }
+    // The installed location: whatever the `sam2_person_segment` Model Manager entry cached.
+    if let Some(path) =
+        crate::downloads::resolve_hf_component_file(settings, SEG_REPO, SEG_REVISION, SEG_FILE)
+    {
+        return Ok(Some(path));
+    }
+    // Legacy pre-migration roots, read-only (AC10 of sc-17598) — nothing writes here any more.
     for sub in ["cache/person-segment", "models/person-segment"] {
         let candidate = settings.data_dir.join(sub).join(SEG_FILE);
         if candidate.exists() {
@@ -91,21 +98,17 @@ pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> WorkerResult<Opt
     Ok(None)
 }
 
-/// Resolve the SAM2 weights, downloading them from HuggingFace on first use (into the
-/// app cache) with streaming progress/cancel and size-aware resume.
-pub(crate) async fn ensure_segmenter_weights(
-    settings: &Settings,
-    context: &DownloadContext<'_>,
-) -> WorkerResult<PathBuf> {
-    if let Some(path) = resolve_segmenter_weights(settings)? {
-        return Ok(path);
-    }
-    let target = settings
-        .data_dir
-        .join("cache")
-        .join("person-segment")
-        .join(SEG_FILE);
-    ensure_hf_cached_file(context, SEG_REPO, SEG_REVISION, SEG_FILE, &target).await
+/// The SAM2 weights, or an actionable install error (sc-17629 / sc-17635).
+///
+/// Replaces the former `ensure_segmenter_weights`, which downloaded ~936 MB mid-generation. No
+/// `DownloadContext` parameter, so this lane cannot fetch (epic 17625).
+pub(crate) fn require_segmenter_weights(settings: &Settings) -> WorkerResult<PathBuf> {
+    resolve_segmenter_weights(settings)?.ok_or_else(|| {
+        crate::WorkerError::InvalidPayload(format!(
+            "The SAM2 person segmenter is not installed. Install \"SAM2 Person Segmenter\" from the \
+             Model Manager, or point SCENEWORKS_SAM2_WEIGHTS at a local {SEG_FILE}."
+        ))
+    })
 }
 
 /// Scale a normalized `(x, y, width, height)` box to a pixel-space `[x1, y1, x2, y2]`
@@ -550,7 +553,15 @@ mod tests {
         // Holds the lock for the whole staged mutation AND restores the operator's prior value on
         // drop — including if an assertion below panics, which the hand-rolled restore tail could
         // not. The body re-points `key` freely inside the guard.
-        let _env = crate::test_env::EnvVars::set(&[(key, "")]);
+        // The HF-cache vars are neutralized in the SAME guard (sc-17629): the resolver now consults
+        // the HF cache, so on a machine with this repo already cached the "unset falls through"
+        // case would resolve `Ok(Some(..))` and fail for reasons unrelated to the env pin.
+        let _env = crate::test_env::EnvVars::set(&[
+            (key, ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
         let dir = tempfile::tempdir().expect("tempdir");
         let settings = f011_test_settings(dir.path().to_path_buf());
 
@@ -568,5 +579,98 @@ mod tests {
             "an unset SAM2 pin must fall through to Ok(None), got {unset:?}"
         );
         // `_env` restores the prior value on drop.
+    }
+
+    /// sc-17629 (epic 17625) — SAM2 resolves from the HF cache and can no longer download.
+    mod resolve_only {
+        use super::*;
+
+        fn isolate() -> crate::test_env::EnvVars {
+            crate::test_env::EnvVars::set(&[
+                ("SCENEWORKS_SAM2_WEIGHTS", ""),
+                ("HF_HUB_CACHE", ""),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ])
+        }
+
+        fn stage_install(data_dir: &std::path::Path) -> PathBuf {
+            let snapshot = crate::huggingface_repo_cache_path(data_dir, SEG_REPO)
+                .expect("repo cache path")
+                .join("snapshots")
+                .join(SEG_REVISION);
+            std::fs::create_dir_all(&snapshot).expect("mk snapshot");
+            let path = snapshot.join(SEG_FILE);
+            std::fs::write(&path, b"hf weights").expect("write");
+            path
+        }
+
+        fn stage_legacy(data_dir: &std::path::Path) -> PathBuf {
+            let dir = data_dir.join("cache").join("person-segment");
+            std::fs::create_dir_all(&dir).expect("mk legacy");
+            let path = dir.join(SEG_FILE);
+            std::fs::write(&path, b"legacy weights").expect("write");
+            path
+        }
+
+        /// AC4: an HF-cache-resident install resolves, with nothing downloaded.
+        #[test]
+        fn resolves_an_installed_snapshot_from_the_hf_cache() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            let staged = stage_install(dir.path());
+            assert_eq!(
+                resolve_segmenter_weights(&settings).expect("resolves"),
+                Some(staged)
+            );
+        }
+
+        /// AC10: a pre-migration install still works, so upgrading re-downloads nothing.
+        #[test]
+        fn falls_back_to_the_legacy_cache_dir() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            let legacy = stage_legacy(dir.path());
+            assert_eq!(
+                resolve_segmenter_weights(&settings).expect("resolves"),
+                Some(legacy)
+            );
+        }
+
+        /// The legacy tree drains: the HF cache wins when both exist. Swapping the arms passes the
+        /// previous test and fails this one.
+        #[test]
+        fn prefers_the_hf_cache_over_the_legacy_dir() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            let staged = stage_install(dir.path());
+            stage_legacy(dir.path());
+            assert_eq!(
+                resolve_segmenter_weights(&settings).expect("resolves"),
+                Some(staged)
+            );
+        }
+
+        /// AC7 / S10: absent weights produce an actionable install error, not a download.
+        #[test]
+        fn require_errors_actionably_when_nothing_is_installed() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            let error = require_segmenter_weights(&settings).expect_err("nothing is installed");
+            assert!(
+                format!("{error:?}").contains("Model Manager"),
+                "the error must tell the user how to fix it, got {error:?}"
+            );
+            assert!(
+                matches!(error, crate::WorkerError::InvalidPayload(_)),
+                "a missing install is a caller-actionable payload error — the person-track lane \
+                 routes on exactly this variant to surface it instead of degrading silently, \
+                 got {error:?}"
+            );
+        }
     }
 }

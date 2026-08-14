@@ -1,12 +1,13 @@
-use super::{advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use super::{
-    consume_gen_events, dense_tier_subdir, drive_gen_items, fit_engine_image, load_reference_image,
-    non_empty, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_sdxl_components, resolve_seed,
-    standard_tier_subdir, start_gen_stream, uses_standard_tier_layout, ApiClient, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, SdxlEdit, SdxlEditPaths, SdxlEditRequest,
-    Settings, Value, WorkerError, WorkerResult,
+    admit_candle_base, consume_gen_events, dense_tier_subdir, drive_gen_items, fit_engine_image,
+    load_reference_image, non_empty, pid_effective_dims, pid_output_tier, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
+    resolve_sdxl_components, resolve_seed, standard_tier_subdir, start_gen_stream,
+    uses_standard_tier_layout, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest,
+    JobSnapshot, JsonObject, Path, PathBuf, SdxlEdit, SdxlEditPaths, SdxlEditRequest, Settings,
+    Value, WorkerError, WorkerResult,
 };
+use super::{advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use serde_json::json;
 
 // Candle (Windows/CUDA) SDXL img2img / inpaint / outpaint edit route (sc-5487, epic 5480) — pixel-
@@ -226,6 +227,27 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             "SDXL edit requires edit_image mode + a source image".to_owned(),
         )
     })?;
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_bytes =
+        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "SDXL edit could not determine the resident size of the selected adapter stack"
+                        .to_owned(),
+                )
+            })?;
+    admit_candle_base(
+        request,
+        settings,
+        &sdxl_base,
+        "SDXL edit",
+        CandleBaseEvidence::Ungateable(
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+        ),
+        adapter_bytes,
+        false,
+    )
+    .await?;
     // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
     // source/mask fit so a 2K tier sizes the effective base and the edit source + mask are fit to THAT
     // base (source, mask, and latent stay aligned). `use_pid`/`with_pid` stay paired at the load below.
@@ -354,6 +376,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                 tokenizer_clip_l,
                 tokenizer_clip_bigg,
                 vae_fp16_fix,
+                adapters,
             })
             .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
@@ -367,39 +390,44 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             Ok((model, gen_source, gen_mask))
         },
         move |(model, source, mask), tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = SdxlEditRequest {
-                    prompt,
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    strength,
-                    seed: seed as u64,
-                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above — the engine errors
-                    // if set without a loaded student, so `use_pid` is `pid_weights.is_some()`.
-                    use_pid,
-                    cancel: cancel.clone(),
-                };
-                let result = match &mask {
-                    Some(mask) => model.generate_masked(&req, &source, mask, &mut *on_progress),
-                    None => model.generate(&req, &source, &mut *on_progress),
-                };
-                let out = match result {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "SDXL edit generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
-            })
+                    let req = SdxlEditRequest {
+                        prompt,
+                        negative: negative.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        strength,
+                        seed: seed as u64,
+                        // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above — the engine errors
+                        // if set without a loaded student, so `use_pid` is `pid_weights.is_some()`.
+                        use_pid,
+                        preview,
+                        cancel: cancel.clone(),
+                    };
+                    let result = match &mask {
+                        Some(mask) => model.generate_masked(&req, &source, mask, &mut *on_progress),
+                        None => model.generate(&req, &source, &mut *on_progress),
+                    };
+                    let out = match result {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "SDXL edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                },
+            )
         },
     );
 

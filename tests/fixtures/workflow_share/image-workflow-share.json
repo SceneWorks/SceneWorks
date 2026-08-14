@@ -1,0 +1,53 @@
+{
+  "sceneworksWorkflow": "image",
+  "schemaVersion": 1,
+  "producer": {
+    "name": "SceneWorks",
+    "url": "https://github.com/SceneWorks/SceneWorks",
+    "version": "0.8.1"
+  },
+  "mode": "edit_image",
+  "model": "krea_2_turbo",
+  "prompt": "a lighthouse in heavy fog, cinematic",
+  "negativePrompt": "text, watermark",
+  "seed": 880412,
+  "width": 1024,
+  "height": 1024,
+  "count": 2,
+  "stylePreset": "cinematic",
+  "styleId": "noir_bloom",
+  "fitMode": "crop",
+  "upscale": {
+    "enabled": true,
+    "factor": 2,
+    "engine": "seedvr2",
+    "softness": 0.25
+  },
+  "loras": [
+    {
+      "name": "Foggy Coast",
+      "weight": 0.65,
+      "repo": "acme/foggy-coast"
+    }
+  ],
+  "inputs": [
+    { "kind": "source", "count": 1 },
+    { "kind": "reference", "count": 2 },
+    { "kind": "mask", "count": 1 },
+    { "kind": "control", "count": 1, "controlMode": "canny" }
+  ],
+  "advanced": {
+    "resolution": "1024x1024",
+    "sampler": "euler",
+    "scheduler": "beta",
+    "schedulerShift": 1.15,
+    "steps": 28,
+    "guidanceScale": 3.5,
+    "guidanceMethod": "cfg_pp",
+    "strength": 0.55,
+    "styleId": "noir_bloom",
+    "stylePrompt": "a lighthouse in heavy fog",
+    "controlMode": "canny",
+    "controlScale": 0.9
+  }
+}

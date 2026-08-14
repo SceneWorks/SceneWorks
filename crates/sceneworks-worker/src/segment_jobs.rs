@@ -1,4 +1,4 @@
-//! Smart-select image segmentation on the macOS Rust worker (epic 6087, sc-6105).
+//! Smart-select image segmentation on the native MLX/Candle workers (epic 6087, sc-6105).
 //!
 //! The backend half of the Image Editor's "smart-select" tool (sc-3751): an `image_segment` job
 //! takes a source image asset + a box prompt and returns a binary inpaint mask asset (white-on-black
@@ -7,26 +7,28 @@
 //! (`upscale_jobs`): resolve the `sourceAssetId` against its project, decode, run the engine under
 //! `spawn_blocking`, write one child asset with lineage back to the source.
 //!
-//! Engine (native-MLX **SAM3**, prompt-driven, one checkpoint): a **box** prompt runs SAM3's
+//! Engine (native **SAM3**, prompt-driven, one checkpoint): a **box** prompt runs SAM3's
 //! concept *detector* (`person_segment_sam3::segment_box_blocking` →
 //! `Sam3ImageSegmenter::segment_with_boxes`, sc-4923/sc-6105); **fg/bg click points** run SAM3's
 //! *tracker* single-frame PVS (`person_segment_sam3::segment_points_blocking` →
 //! `Sam3Tracker::segment_points`, sc-6346). Both load from the same `facebook/sam3` checkpoint —
 //! SAM3 does interactive point refinement via its SAM2-lineage tracker, so no second model/download.
 //! Points take precedence when both are present; exactly one path runs per job and both return the
-//! same `maskAssetId` shape. macOS-only, like the SAM3 dependency; the capability is advertised only
-//! by the MLX worker (`gpu.rs mlx_gpu`), so a segment job never routes off-Mac. There is no
-//! torch/candle SAM3 image path yet (a Windows/Linux backport is tracked separately).
+//! same `maskAssetId` shape. The Candle provider exposes the box detector but no tracker point API at
+//! this pin, so point prompts fail before project or weight resolution with an explicit validation
+//! error; the box surface is advertised and dispatched on both native backends.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
 use crate::asset_media::resolve_asset_media;
-use crate::downloads::DownloadContext;
+#[cfg(target_os = "macos")]
 use crate::person_segment_sam3::{
-    ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
+    require_segmenter_weights, segment_box_blocking, segment_points_blocking,
 };
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use crate::person_segment_sam3_candle::{require_segmenter_weights, segment_box_blocking};
 use crate::single_child_asset::{write_single_child_asset, SingleChildAssetSpec};
 use crate::{
     heartbeat, progress_payload, run_blocking_with_heartbeat, update_job, ApiClient, Settings,
@@ -109,10 +111,20 @@ fn parse_points(payload: &JsonObject) -> WorkerResult<Option<Vec<(f32, f32, i32)
     Ok(Some(out))
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn reject_unsupported_candle_points(points: Option<&[(f32, f32, i32)]>) -> WorkerResult<()> {
+    if let Some(points) = points {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Candle SAM3 smart-select currently accepts the box prompt surface; {} interactive point prompt(s) require the MLX tracker lane",
+            points.len()
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_image_segment_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -144,6 +156,11 @@ pub(crate) async fn run_image_segment_job(
     // else a box (SAM3 concept detector, sc-6105). Both use the same SAM3 checkpoint (sc-6346).
     // Exactly one prompt mode runs per job.
     let points = parse_points(payload)?;
+    // The pinned Candle SAM3 provider has no point-prompt API. Reject before project lookup, source
+    // decoding, or weight resolution so this advertised box-only surface cannot silently download
+    // or compute for a request shape it cannot execute.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    reject_unsupported_candle_points(points.as_deref())?;
     let box_xyxy = match &points {
         Some(_) => None,
         None => Some(parse_box(payload)?),
@@ -222,16 +239,8 @@ pub(crate) async fn run_image_segment_job(
         ),
     )
     .await?;
-    let context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Smart-select canceled while fetching SAM3 weights.",
-        fresh_download: false,
-    };
-    // Both prompt modes load the same facebook/sam3 checkpoint — one resolve/download.
-    let (model_path, tokenizer_path) = ensure_segmenter_weights(settings, &context).await?;
+    // Both prompt modes load the same facebook/sam3 checkpoint — one resolve.
+    let (model_path, tokenizer_path) = require_segmenter_weights(settings)?;
 
     update_job(
         api,
@@ -262,28 +271,36 @@ pub(crate) async fn run_image_segment_job(
     // read as if the compute were cancelable. Threading a real flag would require a new engine seam for
     // zero cancellation benefit, so we drop the un-trippable flag instead.
     let (mask, src_w, src_h) = if let Some(points) = points {
-        run_blocking_with_heartbeat(
-            api,
-            settings,
-            &job.id,
-            None,
-            "",
-            "smart-select task",
-            crate::no_cancel_ack(),
-            tokio::task::spawn_blocking(move || {
-                let source_image = crate::image_decode::decode_image_any(&source_path)
-                    .map_err(|e| {
-                        WorkerError::InvalidPayload(format!(
-                            "Source image could not be loaded: {e}"
-                        ))
-                    })?
-                    .to_rgb8();
-                let (src_w, src_h) = (source_image.width(), source_image.height());
-                let mask = segment_points_blocking(model_path, source_image, points)?;
-                Ok::<_, WorkerError>((mask, src_w, src_h))
-            }),
-        )
-        .await?
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            let _ = points;
+            unreachable!("Candle point prompts are rejected before project and weight resolution");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                None,
+                "",
+                "smart-select task",
+                crate::no_cancel_ack(),
+                tokio::task::spawn_blocking(move || {
+                    let source_image = crate::image_decode::decode_image_any(&source_path)
+                        .map_err(|e| {
+                            WorkerError::InvalidPayload(format!(
+                                "Source image could not be loaded: {e}"
+                            ))
+                        })?
+                        .to_rgb8();
+                    let (src_w, src_h) = (source_image.width(), source_image.height());
+                    let mask = segment_points_blocking(model_path, source_image, points)?;
+                    Ok::<_, WorkerError>((mask, src_w, src_h))
+                }),
+            )
+            .await?
+        }
     } else {
         let box_xyxy = box_xyxy.expect("box prompt present when there are no points");
         run_blocking_with_heartbeat(
@@ -337,6 +354,13 @@ pub(crate) async fn run_image_segment_job(
             model: "sam3",
             adapter: "sam3",
             encode_label: "smart-select mask encode task",
+            // Deliberately NO workflow (epic 15945, sc-15948). This asset is not a generated image:
+            // it is a binary selection mask derived from a box prompt plus a concept string, and it
+            // has no generation recipe to replay — sc-15952 would prefill the Image Studio with a
+            // "recipe" that produces nothing. It is also grayscale (`ImageLuma8`), and the chunk
+            // writer encodes RGB8, so embedding would triple a mask's size and change its colour
+            // type, which `writes_one_png_and_builds_the_shared_result_envelope` pins.
+            workflow: None,
         },
         |write| {
             json!({

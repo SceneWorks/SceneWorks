@@ -30,10 +30,12 @@
 //!   qwen_edit_worker_lane_gpu_smoke -- --ignored --nocapture
 //! ```
 
-use gen_core::{CancelFlag, Image, OffloadPolicy, Progress};
+use gen_core::{CancelFlag, Image, OffloadPolicy, PreviewFrame, PreviewSink, Progress};
 use runtime_cuda::providers::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 
-use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
+use super::smoke_support::{
+    env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
+};
 
 /// sc-13534 worker-lane E2E: drive the ACTUAL worker base resolution + `QwenEdit::load` + render for the
 /// candle Qwen-Image-Edit lane on real CUDA. Calls the WORKER's
@@ -143,8 +145,19 @@ fn qwen_edit_worker_lane_gpu_smoke() {
         height: h,
         pixels: vec![128u8; (w * h * 3) as usize],
     };
+    let alternate_reference = Image {
+        width: w,
+        height: h,
+        pixels: (0..(w * h * 3)).map(|i| (i % 251) as u8).collect(),
+    };
 
     let cancel = CancelFlag::new();
+    // sc-16962 preview acceptance: the bespoke edit lane is invoked BY NAME, so the registry cannot
+    // thread a sink for it — `generate_candle_qwen_edit_stream` must set `QwenEditRequest.preview`
+    // itself. This smoke drives the same request struct with a recording sink so the frames the worker
+    // forwards to `WorkerProgressCard` are captured as real bytes on real CUDA, not asserted by shape.
+    let frames: std::sync::Arc<std::sync::Mutex<Vec<PreviewFrame>>> = Default::default();
+    let sink_frames = std::sync::Arc::clone(&frames);
     let req = QwenEditRequest {
         prompt: prompt.clone(),
         negative: negative.clone(),
@@ -154,7 +167,12 @@ fn qwen_edit_worker_lane_gpu_smoke() {
         guidance,
         seed,
         lightning: false,
+        stage_residency: false,
+        memory: None,
         cancel: cancel.clone(),
+        preview: PreviewSink::new(move |frame: PreviewFrame| {
+            sink_frames.lock().expect("preview frames").push(frame);
+        }),
     };
     println!(
         "[worker-smoke] {model}: rendering {w}x{h} @ {steps} steps, guidance {guidance}, seed {seed} ..."
@@ -162,17 +180,39 @@ fn qwen_edit_worker_lane_gpu_smoke() {
     let started = std::time::Instant::now();
     let mut steps_seen = 0u32;
     let out = model_engine
-        .generate(&req, std::slice::from_ref(&reference), &mut |p| {
-            if let Progress::Step { current, .. } = p {
-                steps_seen = steps_seen.max(current);
-            }
-        })
+        .generate(
+            &req,
+            &[reference.clone(), alternate_reference.clone()],
+            &mut |p| {
+                if let Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
         .unwrap_or_else(|e| panic!("{model} generate: {e}"));
+    let plural_frames = {
+        let mut frames = frames.lock().expect("preview frames");
+        let captured = frames.clone();
+        frames.clear();
+        captured
+    };
+    let alternate_out = model_engine
+        .generate(
+            &req,
+            std::slice::from_ref(&alternate_reference),
+            &mut |_| {},
+        )
+        .unwrap_or_else(|e| panic!("{model} alternate-reference generate: {e}"));
+    let alternate_frames = frames.lock().expect("preview frames").clone();
     let elapsed = started.elapsed();
 
     assert_eq!((out.width, out.height), (w, h), "output dims");
     assert_eq!(out.pixels.len(), (w * h * 3) as usize, "RGB8 pixel count");
     assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(
+        mean_abs_frame_delta(&out, &alternate_out) > 0.25,
+        "ordered plural reference pixels must affect the Qwen edit output"
+    );
 
     // Degenerate-decode floor: a coherent edit clears the general per-pixel std-dev bar by a wide
     // margin; a NaN / all-black / flat collapse pulls it toward 0.
@@ -185,10 +225,119 @@ fn qwen_edit_worker_lane_gpu_smoke() {
 
     let png = out_dir.join(format!("{model}_q4_{w}x{h}_s{seed}.png"));
     save_png(&out, &png);
+    save_png(
+        &alternate_out,
+        &out_dir.join(format!("{model}_single_reference_b.png")),
+    );
     println!(
         "[worker-smoke] {model}: q4 edit OK in {:.1}s (std {std:.2}) -> {}",
         elapsed.as_secs_f32(),
         png.display()
+    );
+
+    // ---- sc-16962: the live preview sink actually produced frames ----
+    assert_preview_strip(
+        &plural_frames,
+        steps as u32,
+        w,
+        h,
+        &out_dir,
+        &format!("{model}_q4_plural"),
+    );
+    assert_preview_strip(
+        &alternate_frames,
+        steps as u32,
+        w,
+        h,
+        &out_dir,
+        &format!("{model}_q4_alternate"),
+    );
+}
+
+/// Shared acceptance for a real-weight preview run (epic 16948, sc-16962): the sink received frames,
+/// they are latent-resolution RGB8, one per schedule position with no duplicate or overrun, they
+/// actually EVOLVE (a frozen strip means a stale projection, not a developing image), and the last one
+/// resembles a developing render rather than noise. Writes a contact strip so the run leaves a visual
+/// artefact next to the final image.
+///
+/// Every assertion here fails on an inert `PreviewSink::default()`: no frames arrive at all.
+fn assert_preview_strip(
+    frames: &[PreviewFrame],
+    steps: u32,
+    width: u32,
+    height: u32,
+    out_dir: &std::path::Path,
+    tag: &str,
+) {
+    assert!(
+        !frames.is_empty(),
+        "{tag}: no preview frames arrived — the request carried an inert sink, or this family is not \
+         preview-wired in the pinned inference revision"
+    );
+    // One frame per outer solver step: `current` strictly increases and never overruns `total`. A
+    // multi-eval solver evaluating twice per step must still emit once (the upstream PreviewCounter
+    // dedups), so a duplicate here is a real defect rather than a tolerance.
+    let mut previous = 0u32;
+    for frame in frames {
+        assert!(
+            frame.current > previous,
+            "{tag}: preview positions must strictly increase, saw {} after {previous}",
+            frame.current
+        );
+        assert!(
+            frame.current <= frame.total,
+            "{tag}: preview position {} overruns total {}",
+            frame.current,
+            frame.total
+        );
+        assert_eq!(
+            frame.total, steps,
+            "{tag}: preview total should equal steps"
+        );
+        assert_eq!(
+            frame.image.pixels.len(),
+            (frame.image.width * frame.image.height * 3) as usize,
+            "{tag}: preview frame is not RGB8"
+        );
+        // Latent resolution, not pixel resolution — the whole point of the cheap projection.
+        assert!(
+            frame.image.width < width && frame.image.height < height,
+            "{tag}: preview {}x{} is not latent-resolution for a {width}x{height} render",
+            frame.image.width,
+            frame.image.height
+        );
+        previous = frame.current;
+    }
+    assert!(
+        frames.len() >= 2,
+        "{tag}: expected a developing strip, got a single frame"
+    );
+    let first = &frames[0].image;
+    let last = &frames[frames.len() - 1].image;
+    let evolved = mean_abs_frame_delta(first, last);
+    assert!(
+        evolved > 1.0,
+        "{tag}: the preview strip never changed (mean |Δ| {evolved:.3}) — frames are being emitted but \
+         the projection is not tracking the denoise"
+    );
+    // The developing image should be a live projection, not flat grey.
+    let last_std = image_std(last);
+    assert!(
+        last_std > 1.0,
+        "{tag}: final preview frame is flat (std {last_std:.3})"
+    );
+
+    for frame in frames {
+        let png = out_dir.join(format!("{tag}_preview_{:02}.png", frame.current));
+        save_png(&frame.image, &png);
+    }
+    println!(
+        "[worker-smoke] {tag}: {} preview frames ({}x{} latent), mean |Δ| first→last {evolved:.2}, \
+         final std {last_std:.2} -> {}",
+        frames.len(),
+        last.width,
+        last.height,
+        out_dir.display()
     );
 }
 
@@ -301,7 +450,15 @@ fn qwen_edit_warm_reclaim_gpu_smoke() {
             guidance,
             seed: 42,
             lightning: false,
+            stage_residency: false,
+            memory: None,
             cancel: CancelFlag::new(),
+            // Deliberately INERT here (sc-16962): this smoke measures VRAM occupancy across a
+            // load/drop/reload cycle, and the projection's transient allocation would perturb the very
+            // reading it asserts on. Upstream documents the default sink as seeded-byte-identical to a
+            // render with no preview at all, so the measurement is unchanged. The preview acceptance
+            // lives in `qwen_edit_worker_lane_gpu_smoke` above, which drives the same request struct.
+            preview: PreviewSink::default(),
         };
         let out = engine
             .generate(&req, std::slice::from_ref(&reference), &mut |_| {})

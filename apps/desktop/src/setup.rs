@@ -1,9 +1,16 @@
-//! First-run Python venv bootstrap + startup orchestration (sc-1348).
+//! First-run provisioning + startup orchestration (sc-1348).
 //!
 //! The frontend setup screen calls the `start_setup` command once it is ready to
-//! receive events; this provisions the uv-managed venv (streaming progress),
-//! then spawns the API sidecar, health-gates it, and navigates the window to the
-//! local API. `start_setup` is also the retry entry point.
+//! receive events; this seeds the builtin catalog, runs the platform's first-run
+//! GPU provisioning (streaming progress), then spawns the API sidecar, health-gates
+//! it, and navigates the window to the local API. `start_setup` is also the retry
+//! entry point.
+//!
+//! There is no Python venv on any platform: macOS went MLX-only (epic 3482,
+//! sc-3492/sc-3493) and off-Mac went candle-only (epic 5483 Phase 7, sc-5563). The
+//! slot the uv-managed venv bootstrap used to occupy now holds the CUDA runtime
+//! download on Windows/Linux (`cuda_provision` / `linux_cuda_provision`) — see
+//! `run_startup`.
 
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
 use std::ffi::OsString;
@@ -402,6 +409,13 @@ fn linux_desktop_paths() -> LinuxDesktopPaths {
 /// Per-OS application support root: `~/Library/Application Support/SceneWorks`
 /// (macOS), `%APPDATA%\SceneWorks` (Windows), `$XDG_DATA_HOME/SceneWorks` or
 /// `~/.local/share/SceneWorks` (Linux).
+///
+/// Unused on Linux: every caller (`default_data_dir`, `config_dir`, `settings_file`,
+/// `gpu_runtime_dir`, `huggingface_home`, the cred-IPC socket, the sidecar pidfile) takes
+/// its `#[cfg(all(unix, not(target_os = "macos")))]` branch through `linux_desktop_paths()`
+/// instead, so the XDG arm below is reachable only in principle. Kept whole rather than
+/// cfg'd out so the three platform arms stay readable side by side (sc-16269).
+#[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
 pub fn app_support_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(home) = std::env::var("HOME") {
@@ -485,6 +499,17 @@ pub(crate) fn settings_file() -> PathBuf {
 /// Root for the provisioned native GPU runtime. Linux provisioning (sc-10376)
 /// consumes this path so its runtime stays under the XDG data base; the Windows
 /// value remains `%APPDATA%\SceneWorks\gpu-runtime`.
+///
+/// Gated to exactly the predicate its call sites live under: `cuda_provision`
+/// (module gated `target_os = "windows"` at `main.rs`), `linux_cuda_provision` (whose
+/// `use crate::setup::{emit, gpu_runtime_dir}` is itself `#[cfg(target_os = "linux")]`
+/// — the module's own predicate is wider, `any(target_os = "linux", all(test,
+/// target_os = "windows"))`, but it does not import this symbol on Windows) and
+/// `linux_candle_runtime` (below, `target_os = "linux"`). macOS provisions no native
+/// GPU runtime — it links MLX — so every caller compiles out there and `-D warnings`
+/// promotes the leftover function to a hard error. Found by the macOS desktop lane
+/// added in sc-17026; same failure mode as sc-17007.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn gpu_runtime_dir() -> PathBuf {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1386,18 +1411,11 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // CUDA runtime DLLs by name; prepend the bundled redist dir to the sidecar's
     // PATH so they resolve without a CUDA Toolkit on the machine (sc-5560). No-op on
     // a plain build — the resolver returns None when only the placeholder is staged.
-    #[cfg(target_os = "windows")]
-    if let Some(cuda_dir) = resolve_bundled_cuda_dir(app) {
-        let existing = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![cuda_dir];
-        paths.extend(std::env::split_paths(&existing));
-        if let Ok(joined) = std::env::join_paths(paths) {
-            command = command.env("PATH", joined);
-        }
-    }
-    #[cfg(target_os = "linux")]
-    if let Some(runtime) = linux_candle_runtime() {
-        command = inject_linux_candle_runtime_env(command, &runtime);
+    // Shared with `cuda_device_preflight` so the probe's loader path can't drift from
+    // this one (sc-16247).
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        command = apply_candle_loader_env(app, command);
     }
     // LAN mode (epic 4484): hand the API the user's password as the access token so it
     // requires auth on the now-network-reachable bind. The server ALSO refuses any
@@ -3156,6 +3174,48 @@ pub fn stop_sidecars_for_update(app: &AppHandle) {
     }
 }
 
+/// `nvidia-smi` failing *because NVML itself is version-mismatched* (GH #1966 follow-up).
+///
+/// The remedy here is a REBOOT, and telling this user to "install or update the NVIDIA
+/// driver" — which is what both `CUDA_REQUIREMENT` and `LINUX_CUDA_REQUIREMENT` say — is
+/// actively wrong: their driver is installed and fine, the running kernel module and the
+/// userspace libraries are simply different versions. So this failure has to be split out
+/// of the generic "no usable GPU" bucket before those messages are reached.
+///
+/// Deliberately worded to match `sceneworks-worker`'s `CUDA_DRIVER_MISMATCH`, so a user in
+/// this state reads the same fix wherever it is caught. It is duplicated rather than shared
+/// because the desktop shell does not link the worker crate (that is the whole reason the
+/// device probe is a `SCENEWORKS_GPU_CHECK=1` sidecar spawn); adding a dependency edge just
+/// to share a string constant would be the worse trade.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const NVML_DRIVER_MISMATCH: &str = "The NVIDIA kernel driver and the NVIDIA userspace \
+    libraries on this machine are different versions, so SceneWorks can't use the GPU — \
+    `nvidia-smi` itself is failing to start. This almost always means a driver update has \
+    been installed but the machine has not been rebooted onto it yet — reboot, then reopen \
+    SceneWorks. On an immutable/atomic Linux distribution (Bazzite, Silverblue, Bluefin, …) \
+    a driver update is staged into the NEXT boot, so a reboot is required even if the \
+    machine has been running for days.";
+
+/// Recognize the NVML version-mismatch signature in `nvidia-smi`'s **stderr**, which the
+/// preflights below would otherwise discard along with the exit status.
+///
+/// `nvidia-smi` prints `Failed to initialize NVML: Driver/library version mismatch` (newer
+/// builds append the detected NVML/kernel-module versions on following lines) and exits
+/// non-zero. Matched on the `Driver/library version mismatch` tail alone: it is the stable
+/// half — the `Failed to initialize NVML:` prefix varies across driver branches, and the
+/// version lines are new — and it is specific enough that nothing else in NVML's error
+/// vocabulary collides with it.
+///
+/// Every other `nvidia-smi` failure (absent binary, `Unknown Error`, no permission) keeps
+/// the existing "no usable GPU" verdict: those really can mean the driver is missing or
+/// broken, and a reboot is not the fix.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn nvml_driver_mismatch(stderr: &str) -> Option<&'static str> {
+    stderr
+        .contains("Driver/library version mismatch")
+        .then_some(NVML_DRIVER_MISMATCH)
+}
+
 /// Minimum NVIDIA display driver for the bundled CUDA 12.9 runtime (sc-3676 /
 /// sc-5560): the floor that supports it and forward-JITs the compute_80 PTX.
 #[cfg(target_os = "windows")]
@@ -3213,8 +3273,17 @@ fn cuda_preflight() -> Result<(), String> {
         Ok(output) if output.status.success() => {
             String::from_utf8_lossy(&output.stdout).into_owned()
         }
-        // Missing (no NVIDIA driver) or errored → treat as no usable GPU.
-        _ => return Err(CUDA_REQUIREMENT.to_owned()),
+        // Errored. A version-mismatched NVML is its own condition with its own remedy
+        // (reboot), so check stderr for it before falling back to "no usable GPU" —
+        // otherwise a user whose driver is installed and fine is told to install a driver.
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(nvml_driver_mismatch(&stderr)
+                .unwrap_or(CUDA_REQUIREMENT)
+                .to_owned());
+        }
+        // Couldn't run nvidia-smi at all (no NVIDIA driver) → no usable GPU.
+        Err(_) => return Err(CUDA_REQUIREMENT.to_owned()),
     };
     evaluate_nvidia_preflight(Some(&stdout))
 }
@@ -3335,7 +3404,17 @@ fn linux_cuda_preflight() -> Result<(), String> {
         Ok(output) if output.status.success() => {
             Some(String::from_utf8_lossy(&output.stdout).into_owned())
         }
-        _ => None,
+        // Same split as the Windows probe: a version-mismatched NVML means `nvidia-smi`
+        // exits non-zero with a healthy driver installed, so it must not collapse into
+        // `LINUX_CUDA_REQUIREMENT`'s "install or update the NVIDIA driver".
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            if let Some(guidance) = nvml_driver_mismatch(&stderr) {
+                return Err(guidance.to_owned());
+            }
+            None
+        }
+        Err(_) => None,
     };
     evaluate_linux_nvidia_preflight(stdout.as_deref())
 }
@@ -3384,6 +3463,150 @@ async fn metal_preflight(app: &AppHandle) -> Result<(), String> {
         );
     }
     Err(message)
+}
+
+/// How long to wait for the one-shot CUDA probe before giving up on it.
+///
+/// The probe is ~0.25-0.5 s on a healthy box (measured on a 2x RTX PRO 6000 / driver 596.36
+/// box: ~519 ms cold, ~235 ms warm), so this is ~40x headroom. It exists because `cuInit` on a
+/// wedged driver — a TDR-recovering GPU, a stalled persistence daemon, exactly the sort of
+/// broken driver stack this probe is here to catch — can block indefinitely rather than
+/// returning an error. Without a bound, `run_startup` would never return and the setup screen
+/// would spin forever with no message and no Retry button.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const CUDA_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Shown when the probe itself hangs — a distinct state from any CUDA error, because we never
+/// got one.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const CUDA_PREFLIGHT_TIMED_OUT: &str = "The NVIDIA driver on this machine did not respond when \
+    SceneWorks tried to initialize the GPU. This usually means the driver is wedged or still \
+    recovering. Reboot, then reopen SceneWorks. If it keeps happening, check that `nvidia-smi` \
+    returns promptly — if that hangs too, the driver stack needs attention before SceneWorks \
+    can use the GPU.";
+
+/// Apply the candle loader environment (the provisioned CUDA runtime) to a sidecar command.
+///
+/// The ONE seam for this. `spawn_api`, `supervise_candle_worker`, and `cuda_device_preflight`
+/// all need cudarc to resolve `cudart`/`cublas`/`cublasLt`/`curand`/`nvrtc` by name out of the
+/// first-run-provisioned `gpu-runtime` dir rather than a system CUDA Toolkit (sc-5560). Kept in
+/// one function because the probe MUST see the same loader path the worker will: if they drift,
+/// the probe fails for a reason that has nothing to do with the GPU and — before the severity
+/// split below — could have stranded users on the setup screen (the sc-10353 failure mode,
+/// where a Mac probe missing one env var blocked every fresh install).
+///
+/// Windows prepends the redist dir to `PATH` (the DLL search path); Linux uses the dynamic
+/// linker's `LD_LIBRARY_PATH` via [`inject_linux_candle_runtime_env`]. A no-op before
+/// provisioning completes, when the resolver returns `None`.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn apply_candle_loader_env(app: &AppHandle, command: Command) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(cuda_dir) = resolve_bundled_cuda_dir(app) {
+            let existing = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = vec![cuda_dir];
+            paths.extend(std::env::split_paths(&existing));
+            if let Ok(joined) = std::env::join_paths(paths) {
+                return command.env("PATH", joined);
+            }
+        }
+        command
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        match linux_candle_runtime() {
+            Some(runtime) => inject_linux_candle_runtime_env(command, &runtime),
+            None => command,
+        }
+    }
+}
+
+/// CUDA **device-acquisition** preflight (sc-16247, GH #1966): the off-Mac twin of
+/// [`metal_preflight`], and a strictly deeper gate than the `nvidia-smi`
+/// [`cuda_preflight`] / [`linux_cuda_preflight`] above.
+///
+/// Those probe NVML and check a driver-version floor + compute-capability range; they never
+/// call `cuInit`, so they cannot see a CUDA driver-API initialization failure —
+/// `CUDA_ERROR_SYSTEM_DRIVER_MISMATCH` (803) and friends, where `nvcuda.dll`/`libcuda.so`
+/// and the loaded kernel module are different versions. NVML and CUDA version-check
+/// separately, so a host passes the first and still fails the second, and the failure lands
+/// mid-generation as a raw `DriverError(...)` on the user's Queue screen (GH #1966). This
+/// spawns the bundled `sceneworks-api` sidecar in its one-shot `SCENEWORKS_GPU_CHECK=1` mode,
+/// which acquires a real device and runs a real kernel — the same spawn context, and the same
+/// `runtime_cuda::media::default_device()` seam, the worker will use.
+///
+/// Deliberately runs AFTER GPU-runtime provisioning: the probe needs the downloaded CUDA
+/// runtime DLLs on its loader path to get as far as `cuInit`, so probing before provisioning
+/// would fail for a reason that has nothing to do with the driver.
+///
+/// ## Only a DEFINITE host problem blocks startup
+///
+/// `Err` here stops the app on the setup screen, so it is reserved for exit code 2 — the
+/// sidecar's "this is a driver-class condition and generation cannot work" verdict (see
+/// `gpu_check` / `cuda_failure_is_blocking`). Every other non-zero exit, and a timeout, is
+/// logged and stepped over, because the alternative is locking a user out of Library,
+/// Settings, and everything else over a state that may be transient: a CUDA OOM because
+/// another process (or an orphaned worker from a crashed session) currently holds the GPU
+/// would otherwise make the whole app unopenable. Those users still get the classified,
+/// actionable message from `classify_engine_error` if they start a generation.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+async fn cuda_device_preflight(app: &AppHandle) -> Result<(), String> {
+    // Probe only the lane we are about to start. `candle_runtime_present` is the exact gate
+    // that decides whether `supervise_candle_worker` runs at all; when it is false the desktop
+    // keeps the candle lane dormant, there is no CUDA worker to protect, and a non-candle
+    // sidecar's `cuda_preflight` is a no-op anyway — so skip the spawn rather than pay for a
+    // process that cannot fail meaningfully.
+    if !candle_runtime_present(app) {
+        return Ok(());
+    }
+    let command = api_sidecar_command(app)
+        .map_err(|error| format!("locate api for GPU check: {error}"))?
+        .env("SCENEWORKS_GPU_CHECK", "1");
+    let command = apply_candle_loader_env(app, command);
+    let output = match tokio::time::timeout(CUDA_PREFLIGHT_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            // Couldn't even run the probe. Not evidence about the GPU — don't block on it.
+            log_candle_preflight_skip(&format!("GPU check could not be run: {error}"));
+            return Ok(());
+        }
+        Err(_elapsed) => {
+            // Dropping the future kills the child (tauri's Command owns it), so the wedged
+            // probe does not outlive this call. A hang IS strong evidence of a broken driver
+            // stack, and unlike a transient OOM it will not clear on its own — block on it.
+            return Err(CUDA_PREFLIGHT_TIMED_OUT.to_owned());
+        }
+    };
+    if output.status.code() == Some(0) {
+        return Ok(());
+    }
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.code() == Some(2) && !message.is_empty() {
+        return Err(message);
+    }
+    // Exit 1 (probe failed, but possibly transient), or any other code / a crash with no
+    // reason printed. Record it and let the app start.
+    let detail = if message.is_empty() {
+        format!(
+            "GPU check exited with {:?} and printed no reason",
+            output.status.code()
+        )
+    } else {
+        message
+    };
+    log_candle_preflight_skip(&detail);
+    Ok(())
+}
+
+/// Record a non-blocking GPU-preflight outcome next to the candle worker's own log, which is
+/// where anyone diagnosing "why did generation fail" already looks.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn log_candle_preflight_skip(detail: &str) {
+    append_log(
+        &logs_dir().join("candle-worker.log"),
+        &format!("[desktop] GPU preflight did not pass (continuing anyway): {detail}\n"),
+    );
 }
 
 async fn run_startup(app: AppHandle) {
@@ -3457,6 +3680,20 @@ async fn run_startup(app: AppHandle) {
         emit(&app, "error", error, true);
         return;
     }
+    // CUDA device-acquisition preflight (sc-16247, GH #1966): the off-Mac sibling of the Metal
+    // probe above, and the second, deeper gate behind the `nvidia-smi` check near the top of this
+    // function. That check is NVML and stays exactly where it is — it catches no-GPU / too-old-
+    // driver / unsupported-architecture hosts before the multi-GB runtime download, which is its
+    // whole point. It cannot catch a `cuInit` failure, because NVML and the CUDA driver API
+    // version-check separately; GH #1966 was a host that passed the first and failed the second,
+    // and learned about it as a raw `DriverError(CUDA_ERROR_SYSTEM_DRIVER_MISMATCH, ...)` on the
+    // Queue screen mid-generation. Placed HERE, after provisioning, because the probe needs the
+    // downloaded CUDA runtime on its loader path to reach `cuInit` at all.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    if let Err(error) = cuda_device_preflight(&app).await {
+        emit(&app, "error", error, true);
+        return;
+    }
     // Linux credentials are eagerly handed to the native worker. If Secret Service
     // is unavailable/locked, stop on the visible setup screen with the actionable
     // keyring error instead of spawning a worker without HF/service tokens and
@@ -3520,15 +3757,11 @@ mod path_tests {
         LinuxDesktopPaths::resolve(|name| env.get(name).cloned())
     }
 
-    fn bundle_fixture_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sceneworks-gh-2259-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ))
+    fn bundle_fixture(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("sceneworks-gh-2259-{label}-"))
+            .tempdir()
+            .expect("create isolated bundle fixture")
     }
 
     fn touch(path: &Path) {
@@ -3539,8 +3772,8 @@ mod path_tests {
 
     #[test]
     fn packaged_macos_bundle_uses_native_external_volume_paths() {
-        let root = bundle_fixture_root("external-volume");
-        let bundle = root.join("External Drive").join("SceneWorks.app");
+        let root = bundle_fixture("external-volume");
+        let bundle = root.path().join("External Drive").join("SceneWorks.app");
         let api_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
         let resources = bundle.join("Contents").join("Resources");
         touch(&api_sidecar);
@@ -3558,14 +3791,12 @@ mod path_tests {
                 resources,
             })
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
     fn packaged_macos_bundle_rejects_incomplete_external_copy() {
-        let root = bundle_fixture_root("incomplete-copy");
-        let bundle = root.join("SceneWorks.app");
+        let root = bundle_fixture("incomplete-copy");
+        let bundle = root.path().join("SceneWorks.app");
         let expected_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
         let resources = bundle.join("Contents").join("Resources");
         std::fs::create_dir_all(&resources).expect("create bundle resources");
@@ -3577,14 +3808,12 @@ mod path_tests {
                 && error.contains(&expected_sidecar.display().to_string()),
             "unexpected incomplete-bundle error: {error}"
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
     fn packaged_macos_bundle_rejects_missing_resources() {
-        let root = bundle_fixture_root("missing-resources");
-        let bundle = root.join("SceneWorks.app");
+        let root = bundle_fixture("missing-resources");
+        let bundle = root.path().join("SceneWorks.app");
         let api_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
         let expected_resources = bundle.join("Contents").join("Resources");
         touch(&api_sidecar);
@@ -3596,8 +3825,6 @@ mod path_tests {
                 && error.contains(&expected_resources.display().to_string()),
             "unexpected incomplete-bundle error: {error}"
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
@@ -3618,8 +3845,8 @@ mod path_tests {
     fn foundation_resolves_external_bundle_sidecar_and_resources() {
         use objc2_foundation::{NSBundle, NSURL};
 
-        let root = bundle_fixture_root("foundation-external-volume");
-        let bundle_path = root.join("External Drive").join("SceneWorks.app");
+        let root = bundle_fixture("foundation-external-volume");
+        let bundle_path = root.path().join("External Drive").join("SceneWorks.app");
         let contents = bundle_path.join("Contents");
         let macos = contents.join("MacOS");
         let resources = contents.join("Resources");
@@ -3650,8 +3877,6 @@ mod path_tests {
                 resources,
             })
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
@@ -3827,15 +4052,22 @@ mod linux_candle_tests {
     };
     use std::path::{Path, PathBuf};
 
-    fn runtime_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sceneworks-sc-10375-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ))
+    /// An isolated runtime root that does NOT exist yet, under a guard that removes the
+    /// whole tree on drop.
+    ///
+    /// The `temp_dir()/sceneworks-sc-10375-{label}-{pid}-{nanos}` path this replaces was
+    /// removed by a trailing line in each test, which a panicking test skips (sc-17707).
+    /// The returned path is an uncreated CHILD of the guard rather than the guard's own
+    /// directory, because `linux_runtime_gate_requires_ort_cuda_and_cudnn` asserts the
+    /// pre-provision (root-absent) state stays dormant — handing back an already-created
+    /// directory would silently weaken that to "present but empty".
+    fn runtime_root(label: &str) -> (tempfile::TempDir, PathBuf) {
+        let guard = tempfile::Builder::new()
+            .prefix(&format!("sceneworks-sc-10375-{label}-"))
+            .tempdir()
+            .expect("create isolated test runtime");
+        let root = guard.path().join("runtime");
+        (guard, root)
     }
 
     fn touch(path: &Path) {
@@ -3857,7 +4089,7 @@ mod linux_candle_tests {
 
     #[test]
     fn linux_runtime_gate_requires_ort_cuda_and_cudnn() {
-        let root = runtime_root("presence");
+        let (_guard, root) = runtime_root("presence");
         assert!(
             resolve_linux_candle_runtime(&root).is_none(),
             "pre-provision state must stay dormant"
@@ -3898,8 +4130,6 @@ mod linux_candle_tests {
                 root.join("cuda/lib64"),
             ]
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated test runtime");
     }
 
     #[test]
@@ -4003,7 +4233,7 @@ mod linux_candle_tests {
 
     #[test]
     fn linux_descendants_include_children_spawned_by_non_leader_threads() {
-        let proc_root = runtime_root("proc");
+        let (_guard, proc_root) = runtime_root("proc");
         // PID 100's leader spawned 200, while Tokio-style worker TID 101
         // spawned 300. PID 200 in turn spawned 400 from its own worker thread.
         write_proc_children(&proc_root, 100, 100, "200\n");
@@ -4018,8 +4248,6 @@ mod linux_candle_tests {
             vec![400, 200, 300],
             "post-order discovery must include every task's recursively spawned children"
         );
-
-        std::fs::remove_dir_all(proc_root).expect("remove isolated fake proc tree");
     }
 }
 
@@ -4053,6 +4281,70 @@ mod preflight_tests {
     fn unparseable_driver_does_not_block_a_present_gpu() {
         // The GPU is present; an odd version string shouldn't hard-block startup.
         assert!(evaluate_nvidia_preflight(Some("NVIDIA RTX, not-a-version")).is_ok());
+    }
+}
+
+/// The NVML-mismatch split (GH #1966 follow-up). `nvidia-smi` failing because NVML is
+/// version-mismatched is a REBOOT, not an install — and until this existed both platform
+/// preflights collapsed it into their "install or update the NVIDIA driver" requirement
+/// text, which sends a user with a perfectly good driver off to reinstall it. Worse, that
+/// gate runs BEFORE GPU-runtime provisioning, so it short-circuits `run_startup` and the
+/// deeper `cuda_device_preflight` — the one that already knows the right answer — never runs.
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod nvml_mismatch_tests {
+    use super::{nvml_driver_mismatch, NVML_DRIVER_MISMATCH};
+
+    /// The exact text `nvidia-smi` prints in this state, in both the classic one-line form
+    /// and the newer form that appends the two versions it found.
+    #[test]
+    fn the_nvml_mismatch_signature_maps_to_the_reboot_remedy() {
+        for stderr in [
+            "Failed to initialize NVML: Driver/library version mismatch\n",
+            "Failed to initialize NVML: Driver/library version mismatch\n\
+             NVML library version: 610.43\n",
+        ] {
+            let guidance =
+                nvml_driver_mismatch(stderr).expect("the NVML mismatch signature must be matched");
+            assert_eq!(guidance, NVML_DRIVER_MISMATCH);
+            assert!(
+                guidance.contains("reboot"),
+                "the remedy must name the reboot, got: {guidance}"
+            );
+        }
+    }
+
+    /// The remedy must not tell a user whose driver is installed and healthy to install a
+    /// driver — that is the entire defect this split exists to fix.
+    #[test]
+    fn the_reboot_remedy_does_not_ask_for_a_driver_install() {
+        let lowered = NVML_DRIVER_MISMATCH.to_ascii_lowercase();
+        assert!(
+            !lowered.contains("install or update"),
+            "the mismatch remedy must not repeat the install-a-driver text: {NVML_DRIVER_MISMATCH}"
+        );
+        // The atomic-distro caveat is load-bearing: GH #1966 was a Bazzite host, where the
+        // update is staged into the next boot and uptime can be days.
+        assert!(lowered.contains("bazzite"));
+    }
+
+    /// Every other `nvidia-smi` failure keeps the existing "no usable GPU" verdict. These
+    /// really can mean the driver is missing or broken, and a reboot is not the fix — so
+    /// claiming them here would trade one wrong message for another.
+    #[test]
+    fn unrelated_nvidia_smi_failures_are_not_claimed_as_a_mismatch() {
+        for stderr in [
+            "Failed to initialize NVML: Unknown Error",
+            "Failed to initialize NVML: Insufficient Permissions",
+            "No devices were found",
+            "'nvidia-smi' is not recognized as an internal or external command",
+            "",
+        ] {
+            assert_eq!(
+                nvml_driver_mismatch(stderr),
+                None,
+                "{stderr:?} must not be reported as a driver/library version mismatch"
+            );
+        }
     }
 }
 

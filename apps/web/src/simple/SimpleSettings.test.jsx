@@ -111,3 +111,67 @@ describe("SimpleSettings — durable default-quality write (sc-15136)", () => {
     );
   });
 });
+
+describe("SimpleSettings — embedded-workflow toggle (sc-15953)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    apiFetch.mockClear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    window.localStorage.clear();
+  });
+
+  async function render(props) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={APP_CONTEXT}>
+          <SimpleUiContext.Provider value={SIMPLE_UI}>
+            <SimpleSettings
+              accent="violet"
+              lockedToSimple={false}
+              onAccentChange={vi.fn()}
+              onSimpleDefaultChange={vi.fn()}
+              simpleDefault={false}
+              {...props}
+            />
+          </SimpleUiContext.Provider>
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const toggle = () =>
+    container.querySelector('[aria-label="Include the recipe in generated images"]');
+
+  it("is reachable in the shell a phone gets by default", async () => {
+    // Simple is the default on a phone, so a switch that only existed in the advanced Settings
+    // screen would make "discoverable" untrue for most of the people the disclosure is aimed at.
+    await render({ embedWorkflow: true });
+    expect(container.textContent).toContain("Sharing");
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("forwards a change to the same durable handler the advanced screen uses", async () => {
+    const onEmbedWorkflowChange = vi.fn();
+    await render({ embedWorkflow: true, onEmbedWorkflowChange });
+    await click(toggle());
+    expect(onEmbedWorkflowChange).toHaveBeenCalledWith(false);
+  });
+
+  it("shows the same claims about what travels", async () => {
+    const { EMBEDDED_PROSE_FIELDS } = await import("../workflowEmbed.js");
+    await render({ embedWorkflow: true });
+    for (const [, label] of EMBEDDED_PROSE_FIELDS) {
+      expect(container.textContent).toContain(label);
+    }
+    expect(container.textContent).toContain("Turning this off applies from the next generation");
+  });
+});

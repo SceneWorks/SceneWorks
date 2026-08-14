@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 5,
+  "story": "SC-15833",
+  "capturedInferenceRevision": "1df07115fc187b479c2f138aad54f2141224e788",
+  "compatibleInferenceRevision": "cc5b30a92ab5b0789afee71e38891aa15b8e5357",
+  "method": "compiled artifact identity for changed paths, git object identity for unchanged paths, and shipped-bundle resolved-feature identity, across the Candle FLUX.2 measurement binary's compile closure and its workspace build inputs",
+  "command": "node scripts/inference-artifact-audit.mjs --repo PATH --captured SHA40 --compatible SHA40",
+  "changedClosurePaths": [
+    "crates/contracts/gen-core"
+  ],
+  "auditedObjects": [
+    {
+      "path": "Cargo.toml",
+      "capturedObject": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
+      "compatibleObject": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c"
+    },
+    {
+      "path": "Cargo.lock",
+      "capturedObject": "19267d02f64f58f1500287a912921486c1d2dde1",
+      "compatibleObject": "19267d02f64f58f1500287a912921486c1d2dde1"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "capturedObject": "ae829f875c68c03c367ce92cc05e041036a92d0a",
+      "compatibleObject": "ae829f875c68c03c367ce92cc05e041036a92d0a"
+    },
+    {
+      "path": ".cargo/config.toml",
+      "capturedObject": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
+      "compatibleObject": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45"
+    },
+    {
+      "path": "crates/contracts/gen-core",
+      "capturedObject": "40843310fd8d9e38944e57e2c849100fca35c12d",
+      "compatibleObject": "eff75bd267760a93367bc128d755df0e827472e2"
+    },
+    {
+      "path": "crates/media/candle-gen/candle-gen",
+      "capturedObject": "61150c4e62b3a1516e325c5814e57174f4b34daa",
+      "compatibleObject": "61150c4e62b3a1516e325c5814e57174f4b34daa"
+    },
+    {
+      "path": "crates/media/candle-gen/candle-gen-pid",
+      "capturedObject": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
+      "compatibleObject": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa"
+    },
+    {
+      "path": "crates/media/candle-gen/candle-gen-flux2",
+      "capturedObject": "0fb3439592afc5db4f3fbeec1a0d7e8f27b789ea",
+      "compatibleObject": "0fb3439592afc5db4f3fbeec1a0d7e8f27b789ea"
+    },
+    {
+      "path": "crates/media/candle-gen/vendor/candle-kernels",
+      "capturedObject": "3b8327cf01d346c8068a5e9d096dcdddca440e99",
+      "compatibleObject": "3b8327cf01d346c8068a5e9d096dcdddca440e99"
+    }
+  ],
+  "featureWitness": {
+    "shippedPackage": "runtime-cuda",
+    "scopeRoot": "candle-gen-flux2",
+    "scopeFeatures": "cuda",
+    "target": "x86_64-pc-windows-msvc",
+    "edges": "normal,build",
+    "packages": 173,
+    "measurementDelta": [
+      "candle-gen v0.0.0 (crates/media/candle-gen/candle-gen): measured [cuda,default,testkit] shipped [cuda,default]",
+      "sceneworks-gen-core-testkit v0.1.0 (crates/contracts/gen-core-testkit): measured only"
+    ],
+    "capturedDigest": "sha256:d32630f49cadade469e3e3e7272a8517097fcec50bcff70e973edd5db57bc7e9",
+    "compatibleDigest": "sha256:d32630f49cadade469e3e3e7272a8517097fcec50bcff70e973edd5db57bc7e9"
+  },
+  "auditedArtifact": {
+    "package": "candle-gen-flux2",
+    "kind": "lib test binary",
+    "test": "tests::flux2_dev_probed_generate_for_offload_ab",
+    "profile": "release",
+    "closurePath": "crates/media/candle-gen/candle-gen-flux2",
+    "lane": "cuda",
+    "features": [
+      "cuda"
+    ],
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "cudaRelease": "12.9",
+    "adjudicates": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      ".cargo/config.toml",
+      "crates/contracts/gen-core",
+      "crates/media/candle-gen/candle-gen",
+      "crates/media/candle-gen/candle-gen-pid",
+      "crates/media/candle-gen/candle-gen-flux2",
+      "crates/media/candle-gen/vendor/candle-kernels"
+    ],
+    "capturedDigest": "sha256:0025b7cd627cf0dcb132d5a43218629e77983a736815fa4d26310b86e6ad3451",
+    "compatibleDigest": "sha256:766831f324d27a1f381807bcce058f1c69171a2d2f127114fcfd542e36dad543"
+  }
+}

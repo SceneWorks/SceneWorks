@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { usePoseLibrary } from "../poseLibrary.js";
+import { MAX_JOB_POSES } from "../poseSelection.js";
 
 // Multi-select gallery of OpenPose poses, grouped by category. Controlled: the parent
 // owns `selectedIds` (array) and gets toggles via `onToggle(id)` / `onClear()`. Shared
@@ -10,17 +11,31 @@ import { usePoseLibrary } from "../poseLibrary.js";
 //   * `categoryFilter` — one category grid at a time behind a wrapping chip row (design
 //     handoff sc-8245 Fix 2). Selections still persist ACROSS categories; only the visible
 //     grid swaps. Used by the Image Studio Structure Control panel to cap the panel height.
-export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUserPoses, categoryFilter = false }) {
-  const { poses, categories, loading, error } = usePoseLibrary({ loadUserPoses });
+export function PoseLibraryPicker({
+  selectedIds = [],
+  onToggle,
+  onClear,
+  loadUserPoses,
+  extraPoses,
+  categoryFilter = false,
+  preferredCategory = null,
+}) {
+  const { poses, categories, loading, error } = usePoseLibrary({ loadUserPoses, extraPoses });
   // Which chip's grid is shown (categoryFilter layout only). Default to the design's
   // "standing" when present, else the first available category.
-  const [activeCategory, setActiveCategory] = useState("standing");
+  const [activeCategory, setActiveCategory] = useState(preferredCategory ?? "standing");
+  useEffect(() => {
+    if (preferredCategory) {
+      setActiveCategory(preferredCategory);
+    }
+  }, [preferredCategory]);
   const selected = new Set(selectedIds);
+  const atPoseLimit = selected.size >= MAX_JOB_POSES;
 
-  if (loading) {
+  if (loading && !poses.length) {
     return <p className="muted">Loading pose library…</p>;
   }
-  if (error) {
+  if (error && !poses.length) {
     return <p className="inline-warning">Pose library unavailable: {error}</p>;
   }
   if (!poses.length) {
@@ -37,6 +52,11 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
           Clear
         </button>
       ) : null}
+      {atPoseLimit ? (
+        <span className="field-hint" role="status">
+          Maximum of {MAX_JOB_POSES} poses per job. Deselect one to choose another.
+        </span>
+      ) : null}
     </div>
   );
 
@@ -44,17 +64,33 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
   // layout leaves the .pose-thumb markup untouched so the shared call sites are unchanged.
   const renderThumb = (pose, showCheck = false) => {
     const isSelected = selected.has(pose.id);
+    const selectionDisabled = atPoseLimit && !isSelected;
     return (
       <button
         aria-label={`${isSelected ? "Deselect" : "Select"} pose ${pose.label}`}
         aria-pressed={isSelected}
         className={isSelected ? "pose-thumb selected" : "pose-thumb"}
+        disabled={selectionDisabled}
         key={pose.id}
         onClick={() => onToggle?.(pose.id)}
-        title={pose.label}
+        title={
+          selectionDisabled
+            ? `Maximum of ${MAX_JOB_POSES} poses per job. Deselect one to choose another.`
+            : pose.label
+        }
         type="button"
       >
-        <img alt={pose.label} loading="lazy" src={pose.previewUrl ?? `/${pose.preview}`} />
+        {pose.previewUrl || pose.preview ? (
+          <img alt={pose.label} loading="lazy" src={pose.previewUrl ?? `/${pose.preview}`} />
+        ) : (
+          <span
+            aria-label={`${pose.label} preview unavailable`}
+            className="pose-thumb-placeholder"
+            role="img"
+          >
+            {pose.source === "workflow" ? "Shared workflow pose" : "Preview unavailable"}
+          </span>
+        )}
         <span className="pose-thumb-label">{pose.label}</span>
         {showCheck && isSelected ? (
           <span aria-hidden="true" className="pose-thumb-check">
@@ -70,6 +106,9 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
     // chip/heading read nicely without a hardcoded map (user categories degrade gracefully).
     const labelFor = (category) => {
       const sample = poses.find((pose) => pose.category === category);
+      if (sample?.source === "workflow") {
+        return category;
+      }
       return sample?.label?.replace(/\s*\d+$/, "").trim() || category;
     };
     const active = categories.includes(activeCategory) ? activeCategory : categories[0];
@@ -77,6 +116,8 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
 
     return (
       <div className="pose-library category-filter">
+        {loading ? <p className="muted">Loading saved pose library…</p> : null}
+        {error ? <p className="inline-warning">Saved pose library unavailable: {error}</p> : null}
         {toolbar}
         <div className="pose-chip-row">
           {categories.map((category) => {
@@ -111,6 +152,8 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
 
   return (
     <div className="pose-library">
+      {loading ? <p className="muted">Loading saved pose library…</p> : null}
+      {error ? <p className="inline-warning">Saved pose library unavailable: {error}</p> : null}
       {toolbar}
       {categories.map((category) => {
         const inCategory = poses.filter((pose) => pose.category === category);

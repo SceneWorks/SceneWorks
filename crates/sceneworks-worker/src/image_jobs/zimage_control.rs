@@ -1,14 +1,16 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32_with, resolve_pid_weights, run_candle_strict_control,
-    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError,
-    WorkerResult, ZImageControl, ZImageControlPaths, ZImageControlRequest,
+    pid_effective_dims, pid_output_tier, pose_entries, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_pid_weights,
+    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
+    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl, ZImageControlPaths,
+    ZImageControlRequest,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
+use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 
 // Candle (Windows/CUDA) Z-Image Fun-ControlNet (strict pose) route (sc-5489, epic 5480) —
@@ -50,7 +52,6 @@ const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
 #[cfg(test)]
 pub(super) const ZIMAGE_CTRL_BASE_REVISION: &str = "755999a934909bd5832e20718bb7c639d2a63eb9";
 /// The base Z-Image diffusers repo when the manifest omits `repo` (sc-8379).
-const ZIMAGE_CTRL_BASE_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image";
 /// ControlNet conditioning-scale default (the strict-pose tier).
 pub(super) const ZIMAGE_CTRL_DEFAULT_SCALE: f32 = 1.0;
 /// Base-mode (sc-8680) classifier-free guidance default — the undistilled base `z_image` runs real CFG;
@@ -89,21 +90,18 @@ pub(super) fn is_zimage_base_model(model: &str) -> bool {
     model == "z_image"
 }
 
-/// The default base diffusers repo for this control job's model — Turbo (`Tongyi-MAI/Z-Image-Turbo`) or
-/// the base undistilled `Tongyi-MAI/Z-Image` (sc-8379), selected by the request model id.
+/// Default base repository for this control job. The undistilled route uses the immutable
+/// `SceneWorks/z-image-mlx` tier matrix certified by SC-16170; Turbo keeps its own turnkey.
 pub(super) fn zimage_control_base_default_repo(model: &str) -> &'static str {
-    crate::engines::default_repo_for(model).unwrap_or_else(|| {
-        if is_zimage_base_model(model) {
-            ZIMAGE_CTRL_BASE_DEFAULT_REPO
-        } else {
-            ZIMAGE_CTRL_DEFAULT_REPO
-        }
-    })
+    if is_zimage_base_model(model) {
+        return super::ZIMAGE_MLX_TURNKEY_REPO;
+    }
+    crate::engines::default_repo_for(model).unwrap_or(ZIMAGE_CTRL_DEFAULT_REPO)
 }
 
-/// Resolve the Z-Image base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) → the
-/// HF cache snapshot for the manifest `repo` (default `Tongyi-MAI/Z-Image-Turbo`, or `Tongyi-MAI/Z-Image`
-/// for the base model, sc-8379). `None` ⇒ not present locally (the candle lane refuses the job; no
+/// Resolve the Z-Image base snapshot: an explicit `modelPath` (advanced or manifest) → the HF cache
+/// snapshot for the manifest `repo`; the base model resolves only its immutable certified snapshot.
+/// `None` ⇒ not present locally (the candle lane refuses the job; no
 /// fallback is attempted). Mirrors `resolve_kolors_control_base`.
 pub(super) fn resolve_zimage_control_base(
     request: &ImageRequest,
@@ -128,8 +126,17 @@ pub(super) fn resolve_zimage_control_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model));
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
-        .map(|root| standard_tier_subdir(&root, request)))
+    let snapshot = if is_zimage_base_model(&request.model) && repo == super::ZIMAGE_MLX_TURNKEY_REPO
+    {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            repo,
+            super::ZIMAGE_MLX_TURNKEY_REVISION,
+        )
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, repo)
+    };
+    Ok(snapshot.map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible Z-Image strict-control job: `z_image_turbo` or the base `z_image`
@@ -316,6 +323,7 @@ pub(super) struct ZImageStrictControl {
     /// AND the PiD + Gemma snapshots are cached (Z-Image is the FLUX.1 latent space → `zimage-turbo` alias).
     /// Threaded into `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native VAE decode.
     pid: Option<gen_core::PidWeights>,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -344,6 +352,7 @@ pub(super) fn zimage_strict_control_test_fixture(
             ZIMAGE_CTRL_ENGINE_ID
         },
         pid: None,
+        adapters: Vec::new(),
     }
 }
 
@@ -375,6 +384,24 @@ impl CandleStrictControl for ZImageStrictControl {
         self.height
     }
 
+    /// The Z-Image base snapshot + the Fun-ControlNet overlay, plus the PiD decoder pair when this
+    /// generation opted in — every path [`Self::load`] holds co-resident (sc-16069).
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        let mut overlays = vec![self.controlnet.as_path()];
+        overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
+        ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+            if self.is_base {
+                "Z-Image"
+            } else {
+                "Z-Image Turbo"
+            },
+            "strict-pose Fun-ControlNet branch",
+            &self.snapshot,
+            &overlays,
+        ))
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = ZImageControlPaths {
             snapshot: self.snapshot.clone(),
@@ -382,6 +409,7 @@ impl CandleStrictControl for ZImageStrictControl {
             // Base `z_image` (sc-8680) → the faithful undistilled control path (shift-6.0, ~50-step,
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
+            adapters: self.adapters.clone(),
         };
         let model = ZImageControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
@@ -401,6 +429,8 @@ impl CandleStrictControl for ZImageStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        // Forward the per-item preview sink into the provider; `None` remains the zero-cost default.
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
         // `guidance` + `negative_prompt` drive the base-mode real-CFG denoise; the distilled Turbo path
@@ -420,6 +450,13 @@ impl CandleStrictControl for ZImageStrictControl {
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.pid.is_some(),
+            // Request-scoped lifecycle controls, new on this request in the `8ffa211a` inference pin
+            // (sc-17054). Nothing on the strict-control route selects them — the fit gate's
+            // `GenerationMemory` is plumbed on the generic generation path, not here — and the
+            // default is documented upstream as keeping the historical resident, unbounded path
+            // byte-for-byte unchanged. Wiring the control route to the fit gate is separate work.
+            memory: Default::default(),
+            preview: preview.clone(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -493,6 +530,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         use_pid,
         pid_output_tier(request),
     );
+
     let mut raw_settings = zimage_control_raw_settings(
         request,
         &repo,
@@ -505,6 +543,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
+    let adapters = resolve_adapters(request, settings)?;
     let provider = ZImageStrictControl {
         snapshot: base,
         controlnet,
@@ -518,6 +557,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         negative_prompt,
         engine_id,
         pid: pid_weights,
+        adapters,
     };
 
     run_candle_strict_control(

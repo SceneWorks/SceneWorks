@@ -9,6 +9,7 @@ import {
   acceleratorLoraIndex,
   addPhase,
   buildTurboFinishPhases,
+  deserializePhases,
   effectiveTotalSteps,
   modelSupportsMultiPhase,
   movePhase,
@@ -222,5 +223,56 @@ describe("multiPhaseIssues — the requirement/error split (epic 10644)", () => 
   it("passes a valid canonical list", () => {
     const phases = buildTurboFinishPhases([STYLE, TURBO]);
     expect(summarize(multiPhaseIssues({ enabled: true, phases })).ready).toBe(true);
+  });
+});
+
+describe("deserializePhases", () => {
+  const SELECTED = ["lora_grain", "krea2_turbo_accel"];
+
+  it("resolves each phase's index back to the LoRA id the editor holds", () => {
+    expect(
+      deserializePhases(
+        [
+          { steps: 4, guidance: 3.5, loras: [] },
+          { steps: 4, guidance: 0, loras: [{ index: 1, weight: 0.9 }] },
+        ],
+        SELECTED,
+      ),
+    ).toEqual([
+      { steps: 4, guidance: 3.5, loras: [] },
+      { steps: 4, guidance: 0, loras: [{ id: "krea2_turbo_accel", weight: 0.9 }] },
+    ]);
+  });
+
+  it("round-trips with serializePhases", () => {
+    // The pair has to be an exact inverse, because a replayed schedule is re-emitted by
+    // `serializePhases` on the very next submit — a lossy read would change the image the
+    // second time it ran.
+    const selectedLoras = SELECTED.map((id) => ({ id }));
+    const emitted = [
+      { steps: 4, guidance: 3.5, loras: [] },
+      { steps: 6, guidance: 0, loras: [{ index: 1, weight: 0.9 }] },
+      { steps: 2, guidance: 1.5, loras: [{ index: 0 }] },
+    ];
+    expect(serializePhases(deserializePhases(emitted, SELECTED), selectedLoras)).toEqual(emitted);
+  });
+
+  it("drops a reference to a LoRA that is not there rather than repointing it", () => {
+    // Repointing at a neighbour would silently activate a DIFFERENT adapter, which is worse than
+    // a phase that runs base-only.
+    expect(deserializePhases([{ steps: 4, guidance: 1, loras: [{ index: 7 }] }], SELECTED)).toEqual([
+      { steps: 4, guidance: 1, loras: [] },
+    ]);
+    expect(deserializePhases([{ steps: 4, guidance: 1, loras: [{ index: 0 }] }], [])).toEqual([
+      { steps: 4, guidance: 1, loras: [] },
+    ]);
+  });
+
+  it("collapses duplicates and survives a malformed list", () => {
+    expect(
+      deserializePhases([{ steps: 4, guidance: 1, loras: [{ index: 0 }, { index: 0 }] }], SELECTED),
+    ).toEqual([{ steps: 4, guidance: 1, loras: [{ id: "lora_grain", weight: null }] }]);
+    expect(deserializePhases(null, SELECTED)).toEqual([]);
+    expect(deserializePhases([{}], SELECTED)).toEqual([{ steps: 0, guidance: 0, loras: [] }]);
   });
 });

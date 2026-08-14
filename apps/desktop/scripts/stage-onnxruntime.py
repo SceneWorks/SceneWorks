@@ -5,8 +5,8 @@ The Rust worker links `ort` with `load-dynamic`, so it dlopens onnxruntime at
 runtime from `ORT_DYLIB_PATH` (set by the desktop `setup.rs`). For a packaged,
 Python-free Mac we must bundle that dylib. The macOS arm64 onnxruntime PyPI wheel
 ships exactly the CoreML-enabled `libonnxruntime.<ver>.dylib` the Python rtmlib path
-uses (and that ort 2.0.0-rc.12's ORT API 24 accepts), so we download that wheel (a
-zip) from a pinned PyPI CDN URL, verify its sha256, and extract its
+uses (and that the `ort` crate's requested ORT API accepts), so we download that wheel
+(a zip) from a pinned PyPI CDN URL, verify its sha256, and extract its
 `capi/libonnxruntime*.dylib`.
 
 onnxruntime wheels are CPython-ABI-tagged (cp311/cp312/cp313/cp314), so unlike
@@ -28,8 +28,14 @@ import sys
 import urllib.request
 import zipfile
 
-# ORT 2.0.0-rc.12 requests ONNX Runtime API 24 (>= onnxruntime 1.24); 1.26.0 is the
-# version validated in the sc-3487 spike. Bump in lockstep with the `ort` crate.
+# The `ort` crate requests ONNX Runtime API 26 (its `api-26` feature, pinned in the
+# workspace Cargo.toml), so the dylib staged here must be >= 1.26; 1.26.0 is also the
+# version validated in the sc-3487 spike. The floor comes from that api-N FEATURE, not
+# from ort's rc version — rc.13's DEFAULTS ask for API 27, which no runtime we ship
+# satisfies, and `ort` reports that only at dlopen time as `BadVersion`. Bump in
+# lockstep with the crate and the two Rust provisioners; the pairing is a COMPILE-time
+# assertion beside `PROVISIONED_ONNXRUNTIME_MINOR` in
+# crates/sceneworks-worker/src/pose_jobs.rs.
 ONNXRUNTIME_VERSION = "1.26.0"
 
 # Pinned macOS arm64 wheels keyed by CPython ABI tag. Each entry is the PyPI CDN

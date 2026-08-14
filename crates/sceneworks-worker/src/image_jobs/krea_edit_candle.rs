@@ -1,8 +1,9 @@
 use super::resolve_seed;
 use super::{
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_text_style_gain,
-    resolve_weights_dir, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
+    admit_candle_base, consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_text_style_gain, resolve_weights_dir, safetensors_tensor_bytes_with_prefixes,
+    start_gen_stream, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest, JobSnapshot,
     JsonObject, Path, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
@@ -65,7 +66,7 @@ fn krea_edit_candle_has_lora(request: &ImageRequest) -> bool {
 
 /// Reference asset ids for a Krea edit, in fixed order (image 1 (required) + image 2 (optional)), capped at
 /// [`KREA_EDIT_CANDLE_MAX_REFERENCES`]. The multi-image picker sends the plural `referenceAssetIds`; with
-/// no plural list it falls back to the single Image-Edit `sourceAssetId`. Mirrors
+/// no plural list it falls back to singular `referenceAssetId`, then Image-Edit `sourceAssetId`. Mirrors
 /// `flux2_edit_candle_reference_ids` (capped to the Krea 1..=2 contract).
 fn krea_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !request.reference_asset_ids.is_empty() {
@@ -75,6 +76,14 @@ fn krea_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
             .take(KREA_EDIT_CANDLE_MAX_REFERENCES)
             .cloned()
             .collect();
+    }
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
     }
     if let Some(id) = request
         .source_asset_id
@@ -132,7 +141,8 @@ fn krea_edit_candle_guidance(request: &ImageRequest) -> f32 {
 }
 
 /// Load the Krea edit reference set: the 1..=2 references (plural `referenceAssetIds`, else the single
-/// `sourceAssetId`), each pre-fit to the render W×H (crop / pad / outpaint→pad; `stretch` keeps the legacy
+/// singular `referenceAssetId`, else `sourceAssetId`), each pre-fit to the render W×H (crop / pad /
+/// outpaint→pad; `stretch` keeps the legacy
 /// resize). `render_edit` VAE-encodes each at the target resolution, so pre-fitting keeps an off-aspect
 /// source from stretching. Errors if no source. Shares the geometry with the other edit lanes
 /// ([`fit_engine_image`]).
@@ -146,7 +156,7 @@ fn load_krea_edit_candle_references(
     let ids = krea_edit_candle_reference_ids(request);
     if ids.is_empty() {
         return Err(WorkerError::InvalidPayload(
-            "Krea 2 edit requires a source image (sourceAssetId).".to_owned(),
+            "Krea 2 edit requires one reference image.".to_owned(),
         ));
     }
     let mut references = Vec::with_capacity(ids.len());
@@ -237,6 +247,34 @@ pub(super) async fn generate_candle_krea_edit_stream(
     // The selected LoRAs → adapter specs (the edit LoRA + any user LoRAs), folded into the DiT at load.
     let adapters = resolve_adapters(request, settings)?;
     let adapter_count = adapters.len();
+    let adapter_resident_bytes = adapters
+        .iter()
+        .fold(0_u64, |total, adapter| {
+            total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
+        })
+        // Edit additionally materializes the Qwen3-VL `visual.*` tower at f32 from dense bf16
+        // source tensors, so charge twice their on-disk bytes. The base catalog peak already prices
+        // the language model; prefix accounting avoids charging that large subtree again.
+        .saturating_add(
+            safetensors_tensor_bytes_with_prefixes(&weights_dir.join("text_encoder"), &["visual."])
+                .saturating_mul(2),
+        )
+        // The edit-only Qwen VAE encoder stays f32 like its source. The base peak already includes
+        // the decoder, so count only the encoder and its input quantization convolution.
+        .saturating_add(safetensors_tensor_bytes_with_prefixes(
+            &weights_dir.join("vae"),
+            &["encoder.", "quant_conv."],
+        ));
+    admit_candle_base(
+        request,
+        settings,
+        &weights_dir,
+        "Krea edit",
+        CandleBaseEvidence::Catalog,
+        adapter_resident_bytes,
+        false,
+    )
+    .await?;
     // Telemetry `repo` — the manifest `repo` else the Krea 2 Raw default.
     let repo = request
         .model_manifest_entry
@@ -288,55 +326,60 @@ pub(super) async fn generate_candle_krea_edit_stream(
         },
         move |(components, references), tx, cancel| {
             let (comps, edit, device) = components;
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                // One image per streamed item: `render_edit` batches on `count`, so pass `count = 1` and
-                // the item's seed. The image 1 / image 2 references are passed directly (not via
-                // `conditioning`) in fixed order.
-                let req = gen_core::GenerationRequest {
-                    prompt,
-                    // The worker's `negative_prompt` is a plain String; the engine wants `Option` (empty
-                    // ⇒ no user negative, the Raw CFG uncond branch falls back to "").
-                    negative_prompt: if negative.trim().is_empty() {
-                        None
-                    } else {
-                        Some(negative.clone())
-                    },
-                    width,
-                    height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    guidance: Some(guidance),
-                    text_style_gain,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let result = runtime_cuda::providers::krea::pipeline::render_edit(
-                    &comps,
-                    &edit,
-                    &req,
-                    &references,
-                    distilled,
-                    &device,
-                    &mut *on_progress,
-                );
-                let mut images = match result {
-                    Ok(images) => images,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Krea edit generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                let image = images
-                    .pop()
-                    .ok_or_else(|| WorkerError::Engine("Krea edit produced no image".to_owned()))?;
-                Ok(Some((seed, image.width, image.height, image.pixels)))
-            })
+                    // One image per streamed item: `render_edit` batches on `count`, so pass `count = 1` and
+                    // the item's seed. The image 1 / image 2 references are passed directly (not via
+                    // `conditioning`) in fixed order.
+                    let req = gen_core::GenerationRequest {
+                        prompt,
+                        // The worker's `negative_prompt` is a plain String; the engine wants `Option` (empty
+                        // ⇒ no user negative, the Raw CFG uncond branch falls back to "").
+                        negative_prompt: if negative.trim().is_empty() {
+                            None
+                        } else {
+                            Some(negative.clone())
+                        },
+                        width,
+                        height,
+                        count: 1,
+                        seed: Some(seed as u64),
+                        steps: Some(steps),
+                        guidance: Some(guidance),
+                        text_style_gain,
+                        preview,
+                        cancel: cancel.clone(),
+                        ..Default::default()
+                    };
+                    let result = runtime_cuda::providers::krea::pipeline::render_edit(
+                        &comps,
+                        &edit,
+                        &req,
+                        &references,
+                        distilled,
+                        &device,
+                        &mut *on_progress,
+                    );
+                    let mut images = match result {
+                        Ok(images) => images,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Krea edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    let image = images.pop().ok_or_else(|| {
+                        WorkerError::Engine("Krea edit produced no image".to_owned())
+                    })?;
+                    Ok(Some((seed, image.width, image.height, image.pixels)))
+                },
+            )
         },
     );
 
@@ -356,4 +399,31 @@ pub(super) async fn generate_candle_krea_edit_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn singular_reference_and_plural_order_are_preserved() {
+        let singular = json!({
+            "projectId": "p", "model": "krea_2_raw", "mode": "edit_image",
+            "referenceAssetId": "singular"
+        });
+        let singular =
+            ImageRequest::from_payload(singular.as_object().expect("image request object"));
+        assert_eq!(krea_edit_candle_reference_ids(&singular), vec!["singular"]);
+
+        let plural = json!({
+            "projectId": "p", "model": "krea_2_raw", "mode": "edit_image",
+            "referenceAssetIds": ["scene", "person"]
+        });
+        let plural = ImageRequest::from_payload(plural.as_object().expect("image request object"));
+        assert_eq!(
+            krea_edit_candle_reference_ids(&plural),
+            vec!["scene".to_owned(), "person".to_owned()]
+        );
+    }
 }

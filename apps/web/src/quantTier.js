@@ -119,6 +119,31 @@ export function tierLabel(tier) {
   return TIER_LABELS[tier] ?? tier;
 }
 
+const PRECISION_FLOOR_COMPONENT_LABELS = {
+  textEncoder: "text encoder layers",
+  transformerHead: "transformer head",
+};
+
+/// User-facing label for the effective component profile, not merely the selected base tier.
+/// A q4 Mage tier is mixed-width by design, so presenting it as plain Q4 would hide the same
+/// substitution the worker records in asset telemetry and memory evidence.
+export function effectiveTierLabel(tier, model) {
+  const floors = (model?.precisionFloors ?? []).filter(
+    (floor) => floor?.selectedTier === tier && floor?.residentTier,
+  );
+  if (floors.length === 0) return tierLabel(tier);
+  const grouped = new Map();
+  for (const floor of floors) {
+    const components = grouped.get(floor.residentTier) ?? [];
+    components.push(PRECISION_FLOOR_COMPONENT_LABELS[floor.component] ?? floor.component);
+    grouped.set(floor.residentTier, components);
+  }
+  const suffix = [...grouped.entries()]
+    .map(([residentTier, components]) => `${components.join(" + ")} at ${residentTier.toUpperCase()}`)
+    .join("; ");
+  return `${tierLabel(tier)} — ${suffix}`;
+}
+
 // Whether a tier key is a user-selectable generation tier: a known bits-based quant (bf16/q8/q4) OR one
 // of the candle-only non-bits tiers (INT8-ConvRot, NVFP4). Excludes the "default" pseudo-variant of a
 // single-variant model and non-generation pseudo-tiers like "training". Distinct from `tierQuantize`
@@ -126,6 +151,18 @@ export function tierLabel(tier) {
 // select, via `advanced.convRot` / `advanced.quantTier`).
 export function isSelectableTier(tier) {
   return tierQuantize(tier) !== null || isConvRotTier(tier) || isNvfp4Tier(tier);
+}
+
+// Whether a tier survives the per-host capability gates: the candle-only tiers are hidden when no live
+// worker can serve them; every bits-based tier is unaffected. Both flags default true, which keeps a
+// caller that knows nothing about worker capabilities behaving exactly as before.
+//
+// Extracted so the THREE readers of this rule share one spelling — `installedTiers`, `allPossibleTiers`,
+// and (sc-15400) `tierSuggestion`'s per-tier memory floor, which must not size a host against a tier
+// that host cannot serve.
+export function tierHostEligible(tier, options = {}) {
+  const { convRotEligible = true, nvfp4Eligible = true } = options;
+  return (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
 }
 
 // The installed, selectable quant tiers of a model, in display order. A tier is selectable when it is
@@ -161,11 +198,7 @@ function sortByTierOrder(a, b) {
 }
 
 export function installedTiers(model, options = {}) {
-  const { convRotEligible = true, nvfp4Eligible = true } = options;
-  // Whether a tier survives the per-host capability gates: the candle-only tiers are hidden when no live
-  // worker can serve them; every bits-based tier is unaffected.
-  const hostEligible = (tier) =>
-    (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
+  const hostEligible = (tier) => tierHostEligible(tier, options);
   // Download-matrix models (sc-8508): per-tier DOWNLOAD entries, install-tracked individually.
   if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
     return model.variants
@@ -247,9 +280,7 @@ function tierStateLookup(model) {
 //    than regressing to an empty picker.
 // Returns [] when the model exposes no tier information at all.
 export function allPossibleTiers(model, options = {}) {
-  const { convRotEligible = true, nvfp4Eligible = true } = options;
-  const hostEligible = (tier) =>
-    (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
+  const hostEligible = (tier) => tierHostEligible(tier, options);
   if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
     return model.variants
       .filter(
@@ -281,14 +312,14 @@ export function tierPickerOptions(model, options = {}) {
   const stateFor = tierStateLookup(model);
   return allPossibleTiers(model, options).map((tier) => {
     if (installed.has(tier)) {
-      return { tier, label: tierLabel(tier), disabled: false };
+      return { tier, label: effectiveTierLabel(tier, model), disabled: false };
     }
     // A tier present-but-torn reports cacheState "incomplete" (never "installed"); a cleanly-absent one
     // reports "missing"/undefined. Distinguish so a torn tier reads as "re-download", not "not
     // downloaded" — the torn case is exactly the crash this whole change exists to prevent.
     const suffix =
       stateFor(tier)?.cacheState === "incomplete" ? "download incomplete" : "not downloaded";
-    return { tier, label: `${tierLabel(tier)} — ${suffix}`, disabled: true };
+    return { tier, label: `${effectiveTierLabel(tier, model)} — ${suffix}`, disabled: true };
   });
 }
 

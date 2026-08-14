@@ -195,18 +195,53 @@ fn parse_chatterbox_ve_pin(contents: &str) -> Result<ChatterboxVePin, String> {
 /// How an existing manifest file is treated when seeding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedMode {
-    /// Overwrite an existing manifest. The desktop seeds this way on every launch
-    /// so the builtin catalog tracks the app version; user customizations live in
-    /// the separate `user.*.jsonc` files, which seeding never touches.
+    /// Overwrite an existing manifest unconditionally. The desktop seeds this way on
+    /// every launch so the builtin catalog tracks the app version; user customizations
+    /// live in the separate `user.*.jsonc` files, which seeding never touches.
     Overwrite,
-    /// Only write a manifest that is missing. The API seeds this way when its config
-    /// dir is EXPLICIT (`SCENEWORKS_CONFIG_DIR` set — a repo checkout or a Compose bind
-    /// mount) so that dir stays authoritative: it fills gaps but never clobbers a copy
-    /// the operator is editing (and never dirties a checked-out `config/`). When the API
-    /// falls back to the platform-default app-owned dir it seeds `Overwrite` instead, so a
-    /// directly-launched binary refreshes its builtin catalog on launch rather than serving
-    /// a stale seed after an upgrade (sc-10212; see `seed_mode_for_config_dir` in rust-api).
+    /// Keep the on-disk builtin manifests in sync with the binary's embedded copy,
+    /// rewriting a file only when it is missing OR its bytes have drifted from the
+    /// embedded copy. The API seeds this way when its config dir is EXPLICIT
+    /// (`SCENEWORKS_CONFIG_DIR` set — a repo checkout or a Compose/RunPod bind mount /
+    /// persistent volume).
+    ///
+    /// The `builtin.*.jsonc` files are app-owned: nothing edits them at runtime (every
+    /// install/hide/customization writes `user.*.jsonc` or a project manifest instead),
+    /// so the on-disk copy is purely a materialized cache of the embedded bytes. A copy
+    /// that no longer matches the running binary is therefore always stale — e.g. a
+    /// persisted seed left untouched across a binary upgrade, the exact failure that hid
+    /// the sc-10193 img2img flag AND the Krea Turbo memory-ladder curves (a directly
+    /// launched API kept serving a months-old `builtin.models.jsonc`) — and must be
+    /// refreshed. A byte-identical file is left untouched so a matching repo checkout is
+    /// never dirtied and the API's mtime-keyed manifest cache is not needlessly busted.
+    /// Operator customizations belong in `user.*.jsonc`, which this never writes.
+    /// (sc-10212; see `seed_mode_for_config_dir` in rust-api.)
+    SyncFromEmbedded,
+    /// Fill only genuinely-missing manifests; never touch a file that already exists.
+    /// This is the OPT-IN escape hatch for a fully operator-provisioned config dir — a
+    /// deployment that intentionally ships its OWN `builtin.*.jsonc` (e.g. a Compose bind
+    /// mount of a customized catalog, or the contract-snapshot test harness) and wants it
+    /// used verbatim. Unlike [`SyncFromEmbedded`] it does NOT self-heal drift: the operator
+    /// owns these files and is responsible for keeping them current, so a stale copy is
+    /// preserved rather than refreshed. Never selected by default — the API reaches it only
+    /// when the operator sets the explicit opt-in env (see `seed_mode_for_config_dir`).
     IfMissing,
+}
+
+/// Whether the seed must (re)write `target` for this `embedded` copy under `mode`.
+///
+/// `Overwrite` always writes. `SyncFromEmbedded` writes only when the on-disk copy is
+/// absent or has drifted from the embedded bytes, so an up-to-date file (a matching repo
+/// checkout, or an already-current seed) is left untouched while a stale seed left by an
+/// older binary is refreshed in place; an unreadable file counts as drifted → rewrite.
+/// `IfMissing` writes only when the file is absent, preserving any operator-provided copy.
+/// Pure so the decision is unit-tested without touching the filesystem.
+fn manifest_needs_write(existing: Option<&[u8]>, embedded: &[u8], mode: SeedMode) -> bool {
+    match mode {
+        SeedMode::Overwrite => true,
+        SeedMode::SyncFromEmbedded => existing != Some(embedded),
+        SeedMode::IfMissing => existing.is_none(),
+    }
 }
 
 /// Write the builtin manifests into `config_dir/manifests` according to `mode`.
@@ -218,8 +253,9 @@ pub enum SeedMode {
 /// windows a bare temp+rename left open — a power loss after the rename leaving a
 /// zero-length `builtin.*.jsonc` (sc-8949), and two processes seeding concurrently
 /// colliding on a shared deterministic temp name (sc-1633). A crash therefore
-/// cannot leave a truncated manifest that parses to an empty/broken catalog and
-/// then gets skipped by a later `IfMissing` seeding.
+/// cannot leave a truncated manifest that parses to an empty/broken catalog: under
+/// [`SeedMode::SyncFromEmbedded`] a truncated/drifted file no longer matches the
+/// embedded copy and is rewritten on the next seed rather than skipped.
 ///
 /// Returns an error — annotated with which manifest failed — if any required
 /// manifest can't be installed, so callers can abort startup rather than serving
@@ -231,7 +267,8 @@ pub fn seed_builtin_manifests(config_dir: &Path, mode: SeedMode) -> std::io::Res
     })?;
     for &(name, contents) in BUILTIN_MANIFESTS {
         let target = dir.join(name);
-        if mode == SeedMode::IfMissing && target.exists() {
+        let existing = std::fs::read(&target).ok();
+        if !manifest_needs_write(existing.as_deref(), contents.as_bytes(), mode) {
             continue;
         }
         crate::store_util::atomic_write(&target, contents.as_bytes())
@@ -670,6 +707,37 @@ mod tests {
         }
     }
 
+    /// A fresh Eros install must carry the external Gemma encoder required by both native backends.
+    #[test]
+    fn eros_fresh_install_provisions_the_shared_gemma_encoder() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value = serde_json::from_str(&stripped).expect("manifest parses");
+        let eros = manifest["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|model| model["id"] == "ltx_2_3_eros")
+            .expect("Eros model");
+        let gemma = eros["downloads"]
+            .as_array()
+            .expect("downloads")
+            .iter()
+            .find(|download| {
+                download["repo"] == "SceneWorks/ltx-2.3-mlx" && download["coRequisite"] == true
+            })
+            .expect("Eros must install the shared Gemma bundle on a clean machine");
+        assert_eq!(gemma["files"], serde_json::json!(["gemma/*"]));
+        assert_eq!(gemma["revision"].as_str().map(str::len), Some(40));
+        for platform in ["macos", "windows", "linux"] {
+            assert!(
+                gemma["platforms"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == platform)),
+                "Gemma co-requisite must provision {platform}"
+            );
+        }
+    }
+
     /// A full 40-char lowercase-hex commit SHA — the only revision shape the F-029 pin
     /// authority accepts (`^[0-9a-f]{40}$`, mirrored from model-manifest.schema.json).
     fn is_full_sha_revision(revision: &str) -> bool {
@@ -851,7 +919,7 @@ mod tests {
     #[test]
     fn seeds_every_manifest_into_a_fresh_dir() {
         let temp = tempfile::tempdir().expect("temp dir");
-        seed_builtin_manifests(temp.path(), SeedMode::IfMissing).expect("seeding succeeds");
+        seed_builtin_manifests(temp.path(), SeedMode::SyncFromEmbedded).expect("seeding succeeds");
 
         let dir = temp.path().join("manifests");
         for (name, contents) in BUILTIN_MANIFESTS {
@@ -868,24 +936,116 @@ mod tests {
     }
 
     #[test]
-    fn if_missing_never_clobbers_an_existing_manifest() {
+    fn manifest_needs_write_refreshes_missing_or_drifted_only_when_syncing() {
+        let embedded = b"embedded-bytes";
+        // Overwrite always rewrites, regardless of what is on disk.
+        assert!(manifest_needs_write(None, embedded, SeedMode::Overwrite));
+        assert!(manifest_needs_write(
+            Some(embedded),
+            embedded,
+            SeedMode::Overwrite
+        ));
+        // SyncFromEmbedded: missing or drifted (incl. an unreadable file → None) is rewritten;
+        // a byte-identical file is left untouched so a matching checkout is not dirtied.
+        assert!(manifest_needs_write(
+            None,
+            embedded,
+            SeedMode::SyncFromEmbedded
+        ));
+        assert!(manifest_needs_write(
+            Some(b"stale-seed"),
+            embedded,
+            SeedMode::SyncFromEmbedded
+        ));
+        assert!(!manifest_needs_write(
+            Some(embedded),
+            embedded,
+            SeedMode::SyncFromEmbedded
+        ));
+        // IfMissing: fill only a genuinely-absent file; preserve any provided copy (even if it
+        // drifts from the embedded bytes — the operator owns it).
+        assert!(manifest_needs_write(None, embedded, SeedMode::IfMissing));
+        assert!(!manifest_needs_write(
+            Some(b"operator-provided"),
+            embedded,
+            SeedMode::IfMissing
+        ));
+        assert!(!manifest_needs_write(
+            Some(embedded),
+            embedded,
+            SeedMode::IfMissing
+        ));
+    }
+
+    #[test]
+    fn if_missing_preserves_a_provided_manifest_and_fills_only_the_gaps() {
         let temp = tempfile::tempdir().expect("temp dir");
         let dir = temp.path().join("manifests");
         std::fs::create_dir_all(&dir).expect("create manifests dir");
-        let edited = dir.join("builtin.models.jsonc");
-        std::fs::write(&edited, "{ \"models\": [] } // operator edit").expect("seed existing");
+        // A fully operator-provisioned config dir intentionally ships its OWN builtin.models.jsonc
+        // (the sc-15504 opt-out via SCENEWORKS_OWN_MANIFESTS; also how the contract-snapshot harness
+        // injects a synthetic catalog). IfMissing must use it verbatim, drift from the embedded copy
+        // and all.
+        let provided = dir.join("builtin.models.jsonc");
+        let provided_body = "{ \"models\": [ { \"id\": \"operator-model\" } ] }";
+        std::fs::write(&provided, provided_body).expect("seed provided");
 
         seed_builtin_manifests(temp.path(), SeedMode::IfMissing).expect("seeding succeeds");
 
-        // The operator's copy is left untouched...
         assert_eq!(
-            std::fs::read_to_string(&edited).expect("read existing"),
-            "{ \"models\": [] } // operator edit"
+            std::fs::read_to_string(&provided).expect("read provided"),
+            provided_body,
+            "IfMissing never overwrites an operator-provided manifest"
         );
-        // ...while the genuinely-missing manifests are still filled in.
+        // ...while genuinely-missing manifests are still filled from the embedded copy.
         assert_eq!(
-            std::fs::read_to_string(dir.join("builtin.loras.jsonc")).expect("loras written"),
+            std::fs::read_to_string(dir.join("builtin.styles.jsonc")).expect("styles written"),
+            embedded("builtin.styles.jsonc")
+        );
+    }
+
+    #[test]
+    fn sync_refreshes_a_drifted_manifest_but_leaves_an_identical_one_untouched() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let dir = temp.path().join("manifests");
+        std::fs::create_dir_all(&dir).expect("create manifests dir");
+
+        // A stale seed left by an older binary (e.g. a persisted RunPod volume without the Krea
+        // Turbo `turboFit` curves) — its bytes differ from the embedded copy.
+        let drifted = dir.join("builtin.models.jsonc");
+        std::fs::write(&drifted, "{ \"models\": [] } // months-old seed").expect("seed drifted");
+        // An already-current copy, byte-identical to the embedded manifest.
+        let current = dir.join("builtin.loras.jsonc");
+        std::fs::write(&current, embedded("builtin.loras.jsonc")).expect("seed current");
+        let current_mtime = std::fs::metadata(&current)
+            .and_then(|meta| meta.modified())
+            .expect("current mtime");
+
+        seed_builtin_manifests(temp.path(), SeedMode::SyncFromEmbedded).expect("seeding succeeds");
+
+        // The drifted manifest is refreshed to the embedded copy — the whole point of the fix.
+        assert_eq!(
+            std::fs::read_to_string(&drifted).expect("read refreshed"),
+            embedded("builtin.models.jsonc"),
+            "SyncFromEmbedded refreshes a manifest that drifted from the running binary"
+        );
+        // The byte-identical manifest is left untouched: same content, and the seed did not rewrite
+        // it (mtime unchanged), so a matching checkout is never dirtied and the mtime-keyed cache holds.
+        assert_eq!(
+            std::fs::read_to_string(&current).expect("read current"),
             embedded("builtin.loras.jsonc")
+        );
+        assert_eq!(
+            std::fs::metadata(&current)
+                .and_then(|meta| meta.modified())
+                .expect("current mtime after"),
+            current_mtime,
+            "an already-current manifest is not rewritten"
+        );
+        // Genuinely-missing manifests are still filled in.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("builtin.styles.jsonc")).expect("styles written"),
+            embedded("builtin.styles.jsonc")
         );
     }
 

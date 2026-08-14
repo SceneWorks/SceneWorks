@@ -1,13 +1,13 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    consume_gen_events, curated_image_menu, drive_gen_items_scored, load_reference_image,
-    non_empty, normalize_sampling_knob, read_advanced_sampling_knobs,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    admit_conditioning_paths, consume_gen_events, curated_image_menu, drive_gen_items_scored,
+    load_reference_image, non_empty, normalize_sampling_knob, read_advanced_sampling_knobs,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
     resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
     ApiClient, Image, ImagePlan, ImageRequest, IpAdapterKolors, IpAdapterKolorsPaths,
     IpAdapterKolorsRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
     WorkerResult,
 };
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
 use serde_json::json;
 
@@ -314,6 +314,22 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         .collect();
     let total = work.len();
     let negative_prompt = request.negative_prompt.clone();
+    let adapters = resolve_adapters(request, settings)?;
+
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the Kolors base held co-resident with
+    // the IP-Adapter overlay. This lane loads through the UNcached `start_gen_stream` with a bespoke
+    // `IpAdapterKolorsPaths`, so it reaches neither the `generate_candle_stream` `vram_gate` nor the
+    // `generator_cache` `apply_residency_policy`; before this it allocated unchecked.
+    let mut admission_overlays = vec![ip_adapter.as_path()];
+    admission_overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
+    admit_conditioning_paths(
+        settings,
+        "Kolors",
+        "IP-Adapter",
+        &kolors_base,
+        &admission_overlays,
+    )
+    .await?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -323,6 +339,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             let paths = IpAdapterKolorsPaths {
                 kolors_base,
                 ip_adapter,
+                adapters,
             };
             let model = IpAdapterKolors::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("Kolors IP-Adapter load failed: {error}"))
@@ -342,53 +359,58 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             // `IpAdapterKolors::generate` takes `&mut self` (it sets the IP image tokens on the UNet
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;
-            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = IpAdapterKolorsRequest {
-                    prompt,
-                    negative: negative_prompt.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    ip_adapter_scale: ip_scale,
-                    seed: seed as u64,
-                    sampler: sampler.clone(),
-                    scheduler: scheduler.clone(),
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &reference, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Kolors IP-Adapter generation failed: {error}"
-                        )));
+            drive_gen_items_scored(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                // Score this finished image against the cached source embedding (sc-4411). Clone paid
-                // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        Some(likeness_source_ref.as_str()),
-                    )
-                });
-                Ok(Some((
-                    seed,
-                    out.width,
-                    out.height,
-                    out.pixels,
-                    face_likeness,
-                )))
-            })
+                    let req = IpAdapterKolorsRequest {
+                        prompt,
+                        negative: negative_prompt.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        ip_adapter_scale: ip_scale,
+                        seed: seed as u64,
+                        sampler: sampler.clone(),
+                        scheduler: scheduler.clone(),
+                        preview,
+                        cancel: cancel.clone(),
+                    };
+                    let out = match model.generate(&req, &reference, &mut *on_progress) {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Kolors IP-Adapter generation failed: {error}"
+                            )));
+                        }
+                    };
+                    // Score this finished image against the cached source embedding (sc-4411). Clone paid
+                    // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out.width,
+                                height: out.height,
+                                pixels: out.pixels.clone(),
+                            },
+                            Some(likeness_source_ref.as_str()),
+                        )
+                    });
+                    Ok(Some((
+                        seed,
+                        out.width,
+                        out.height,
+                        out.pixels,
+                        face_likeness,
+                    )))
+                },
+            )
         },
     );
 

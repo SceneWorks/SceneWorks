@@ -2,7 +2,14 @@
 use super::is_anima_model;
 use super::{ImageRequest, Path, PathBuf, Value, STANDARD_TIER_MODELS};
 
-const DENSE_TE_TIER_MODELS: &[&str] = &["flux2_klein_9b", "flux2_klein_9b_kv"];
+// sc-15799 (tier integrity): the hardcoded `DENSE_TE_TIER_MODELS` registry is DELETED. Keeping a dense
+// bf16 text encoder resident on a q4/q8 tier is an above-tier residency exception, and an exception the
+// shared decision cannot see is exactly what that story exists to eliminate — the ids lived in this file
+// while the catalog declared nothing, so `config/tier-integrity.jsonc` had no way to know they existed.
+// The manifest flag `mlx.denseTextEncoderTier` is now the ONLY way in, it must carry a declared exception
+// row (enforced by `scripts/check-tier-integrity.mjs`), and `tests/gpu_and_manifest.rs` pins that the
+// shipped catalog still declares it for the FLUX.2-klein pair so the deletion cannot silently re-quantize
+// a TE that sc-8711/sc-9362 deliberately kept dense.
 
 /// Whether a request's model ships the standard SceneWorks quant-matrix turnkey layout (sc-8508):
 /// true when it is registered in [`STANDARD_TIER_MODELS`] OR its manifest entry declares
@@ -20,21 +27,25 @@ pub(super) fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
             .unwrap_or(false)
 }
 
-/// Whether a standard-tier request keeps a DENSE bf16 text encoder in every tier (sc-8508): true
-/// when it is in [`DENSE_TE_TIER_MODELS`] OR its manifest declares `mlx.denseTextEncoderTier: true`.
-/// The manifest flag mirrors the hardcoded set so a new dense-TE turnkey opts in from the catalog.
+/// Whether a standard-tier request keeps a DENSE bf16 text encoder in every tier (sc-8508): true iff its
+/// manifest entry declares `mlx.denseTextEncoderTier: true`.
+///
+/// **Manifest-only since sc-15799.** This is an above-tier residency exception — on a q4 or q8 tier the
+/// text encoder is resident at a HIGHER precision than the user selected — so it may only be declared
+/// where the shared decision, the audit table, and the parity lane can all see it. The hardcoded id list
+/// this used to fall back to is gone (see the note at the top of this file); a model that needs the
+/// carve-out declares the flag and carries a measured exception row in `config/tier-integrity.jsonc`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn is_dense_te_tier(request: &ImageRequest) -> bool {
-    DENSE_TE_TIER_MODELS.contains(&request.model.as_str())
-        || request
-            .model_manifest_entry
-            .get("mlx")
-            .and_then(|mlx| mlx.get("denseTextEncoderTier"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("denseTextEncoderTier"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Quality rank of a generation quant tier: higher = more faithful (`bf16` = 3, `q8` = 2, `q4` = 1,

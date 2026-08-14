@@ -1,14 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
+import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
-import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { resultGridColumns } from "./breakpoint.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredResolution } from "./modelDefaults.js";
-import { buildSimpleImageRequest, referenceStrengthFor, resolveSimpleTier } from "./simpleJobs.js";
+import {
+  buildSimpleImageRequest,
+  referenceStrengthFor,
+  resolveSimpleTier,
+  workerAdvertises,
+} from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
@@ -53,7 +60,9 @@ export function SimpleImageStudio() {
   } = useAppContext();
   const { breakpoint, openSheet, closeSheet, openGuide, toast, referenceRequest, clearReferenceRequest } =
     useSimpleUi();
-  const unifiedMemoryGb = useUnifiedMemoryGb();
+  const hostMemory = useHostMemory();
+  const memoryBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, memoryBackend);
   const refine = useSimpleRefine("image");
 
   // Sticky across navigation (this studio unmounts when you leave it) — everything the user
@@ -79,6 +88,16 @@ export function SimpleImageStudio() {
     () => models.find((entry) => entry.id === model) ?? null,
     [models, model],
   );
+  const tier = useMemo(
+    () =>
+      resolveSimpleTier(selectedModel, TIER_SCREEN, {
+        convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
+        nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
+        unifiedMemoryGb,
+        backend: memoryBackend,
+      }),
+    [selectedModel, visibleWorkers, unifiedMemoryGb, memoryBackend],
+  );
 
   // Keep the selection valid as the tab (and therefore the eligible set) changes.
   useEffect(() => {
@@ -94,10 +113,12 @@ export function SimpleImageStudio() {
     const declared = selectedModel?.limits?.resolutions?.length
       ? selectedModel.limits.resolutions
       : DEFAULT_RESOLUTIONS;
-    const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
-    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, { backend });
+    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
+      backend: memoryBackend,
+      tier: tier.quantTier,
+    });
     return gated.length ? gated : declared;
-  }, [selectedModel, macCapabilities, unifiedMemoryGb]);
+  }, [selectedModel, unifiedMemoryGb, memoryBackend, tier.quantTier]);
 
   // Seed from the model's DECLARED default, not `limits.resolutions[0]` — for 16 shipped
   // image models those differ (z_image declares 1024², its list leads with 768²), so [0]
@@ -227,11 +248,6 @@ export function SimpleImageStudio() {
     }
     setSubmitting(true);
     try {
-      const tier = resolveSimpleTier(selectedModel, TIER_SCREEN, {
-        convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
-        nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
-        unifiedMemoryGb,
-      });
       const request = buildSimpleImageRequest({
         prompt: prompt.trim(),
         mode,
@@ -316,6 +332,9 @@ export function SimpleImageStudio() {
           placeholder="Describe the image you want…"
           value={prompt}
         />
+        {/* Edit tab only: the built-in edit recipes. Text mode has the Style strip for the
+            same job; an instruction like "deblur this image" means nothing to text-to-image. */}
+        {mode === "edit_image" ? <EditPromptTemplates onApply={setPrompt} variant="simple" /> : null}
         {refineOpen ? (
           <RefinePanel
             blurb="Rewrite this prompt with richer detail using the Anubis-8B refiner."
@@ -459,16 +478,5 @@ export function SimpleImageStudio() {
         type="image"
       />
     </div>
-  );
-}
-
-// Mirrors the advanced studios' candle-only tier gates: a tier is only offered when a
-// live worker advertises the capability, so an MLX/pre-Ada host never resolves one.
-export function workerAdvertises(workers, capability) {
-  return (workers ?? []).some(
-    (worker) =>
-      worker?.status !== "offline" &&
-      Array.isArray(worker?.capabilities) &&
-      worker.capabilities.includes(capability),
   );
 }

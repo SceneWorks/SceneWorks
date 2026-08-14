@@ -416,7 +416,7 @@ pub(crate) fn model_supports_recipe_workflow(model: &Value, workflow: &str) -> b
 
 pub(crate) fn default_recipe_preset_modes_for_workflow(workflow: &str) -> Vec<String> {
     match workflow {
-        "text_to_image" => vec!["text_to_image", "character_image", "style_variations"],
+        "text_to_image" => vec!["text_to_image", "character_image"],
         "edit_image" => vec!["edit_image"],
         "image_to_video" => vec!["image_to_video"],
         "text_to_video" => vec!["text_to_video"],

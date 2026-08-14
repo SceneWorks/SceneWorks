@@ -1,0 +1,24 @@
+SC-15839 PuLID-FLUX Candle/CUDA identity and parity raw receipt
+capturedAt=2026-08-04T02:41:17.5460869Z
+command=CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\huggingface HUGGINGFACE_HUB_CACHE=E:\huggingface\hub PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_pulid --ignored --nocapture --test-threads=1
+sceneWorks=a87a977d89b44f11dd02921404873f98a04ed192
+inference=5f973a73bf00307240afd81d2778ba9d89349e51
+reference=local operator validation fixture; visible real-person frontal portrait; original remote source URL was not preserved
+referenceDimensions=502x724
+referenceSha256=475cf7e86e0470a026efe12ae19b71286a283603c8bb0d0bea80a369b0e2645f
+referenceFaceEmbeddingDimensions=512
+identityFaceDetectionScore=0.840
+identityArcFaceCosine=0.8516
+noIdentityFaceDetectionScore=0.797
+noIdentityArcFaceCosine=-0.0992
+identityVsNoIdentityMeanPixelDifference=149.47
+preDenoiseCancel=Err(Canceled)
+midDenoiseCancel=Err(Canceled) after 3 steps
+testResult=passed
+residentOutputSha256=dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575
+stagedResidencyOutputSha256=dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575
+boundedDecodeOutputSha256=5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f
+boundedAttentionOutputSha256=5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f
+boundedTransformerResidencyOutputSha256=5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f
+optimizedVsResidentRgb8={"maximumError":3,"meanError":0.13489723205566406,"rootMeanSquareError":0.36732339711490453,"changedFraction":0.13488324483235678,"psnrDb":56.829831765744}
+stagedResidencyVsResidentRgb8={"maximumError":0,"meanError":0,"rootMeanSquareError":0}

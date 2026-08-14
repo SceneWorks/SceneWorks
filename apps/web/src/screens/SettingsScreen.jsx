@@ -20,6 +20,7 @@ import { writeClipboardText } from "../clipboard.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModeTabs } from "../components/generationStudio.jsx";
+import { WorkflowEmbedDetails } from "../components/WorkflowEmbedNotice.jsx";
 import { ACCENTS } from "../accents.js";
 import { describeDevice } from "../deviceSummary.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -65,6 +66,9 @@ export function SettingsScreen({
   simpleDefault = false,
   onSimpleDefaultChange,
   lockedToSimple = false,
+  embedWorkflow = true,
+  onEmbedWorkflowChange,
+  sharingFocusRequest = 0,
 }) {
   // theme/changeTheme and the worker registry come from the app context (the same values the
   // topbar toggle and Simple Settings read); accent + the Simple-mode default are drilled from
@@ -80,6 +84,16 @@ export function SettingsScreen({
   const [status, setStatus] = useState("");
   // Which tab is showing. Not persisted — the screen is short-lived.
   const [tab, setTab] = useState("appearance");
+  const sharingHeadingRef = useRef(null);
+  useEffect(() => {
+    if (!sharingFocusRequest) return undefined;
+    setTab("settings");
+    const timer = setTimeout(() => {
+      sharingHeadingRef.current?.scrollIntoView?.({ block: "start" });
+      sharingHeadingRef.current?.focus();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [sharingFocusRequest]);
   // LAN remote access (epic 4484 stories 4/11). `remote` is the RemoteAccessStatus
   // snapshot from the shell; only fetched/rendered on desktop.
   const [remote, setRemote] = useState(null);
@@ -488,6 +502,34 @@ export function SettingsScreen({
 
         {activeTab === "settings" ? (
           <div className="settings-tab-body">
+            {/* Sharing (sc-15953). The toggle writes `embedWorkflowInImages` into
+                ui-preferences.json, which the WORKER re-reads at its PNG write seam on every job —
+                so the change lands on the next generation with no restart. The copy under it is
+                the same block the first-run disclosure shows; see WorkflowEmbedNotice.jsx for why
+                its claims are shaped the way they are. */}
+            <div className="settings-group-title" ref={sharingHeadingRef} tabIndex={-1}>Sharing</div>
+            <div className="settings-row">
+              <div>
+                <div className="settings-row-title">Include the recipe in generated images</div>
+                <div className="settings-row-sub">
+                  New PNGs carry a small block of JSON, so dropping one back into SceneWorks
+                  reloads the recipe that made it.
+                </div>
+              </div>
+              <button
+                aria-checked={embedWorkflow}
+                aria-label="Include the recipe in generated images"
+                className={embedWorkflow ? "settings-toggle on" : "settings-toggle"}
+                onClick={() => onEmbedWorkflowChange?.(!embedWorkflow)}
+                role="switch"
+                type="button"
+              >
+                <span />
+              </button>
+            </div>
+            <WorkflowEmbedDetails />
+            <div className="work-panel-divider" />
+
             {isDesktop ? (
               <>
                 <div className="settings-group-title">Storage</div>

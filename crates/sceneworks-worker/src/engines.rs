@@ -35,9 +35,8 @@ pub(crate) struct ModelRow {
 }
 
 pub(crate) const MODEL_TABLE: &[ModelRow] = &[
-    // Mage-Flow's three published generation variants use complete flat diffusers snapshots.
-    // q4/q8/bf16 are selected by the request's load-time quantization, so the worker deliberately
-    // passes the snapshot root rather than descending into a standard-tier subdirectory.
+    // Mage-Flow's six physical tiers carry the variant-specific transformer; the shared text
+    // encoder and VAE are caller-staged from the manifest's per-tier co-requisites.
     ModelRow {
         sceneworks_id: "mage_flow_base",
         engine_id: "mage_flow_base",
@@ -233,7 +232,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_qwen",
     },
-    // FLUX.2-klein (sc-3025) — MLX-only family (no torch fallback). All three SceneWorks
+    // FLUX.2-klein (sc-3025) — native MLX on Mac and Candle/CUDA off-Mac (no Python fallback). All three SceneWorks
     // variants share the engine's single txt2img model `flux2_klein_9b` (edit + KV-cache
     // are the separate `*_edit`/`*_kv_edit` engine models, story sc-3029); the variants
     // differ only in their weights. Distilled klein runs guidance 1.0 (CFG-free) with no
@@ -547,8 +546,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // — forcing `frames:1` + `video_mode:"t2i"|"i2i"` so the engine returns a single still — so it
     // does NOT ride the generic `generate_stream`; this row supplies the `mlx_model` join the worker
     // uses for `adapter_id` / `mlx_weights_gap` / the descriptor-capability lookup. Engine defaults:
-    // 40 steps, guidance (omega_txt) 4.0 (mlx-gen-bernini `FullDefaults`). No LoRA (descriptor
-    // `supports_lora: false`). `default_repo` is the turnkey snapshot, but the dedicated path
+    // 40 steps, guidance (omega_txt) 4.0 (mlx-gen-bernini `FullDefaults`). The MLX descriptor has
+    // no adapter surface; the separate native Candle descriptor supports LoRA/LoKr. `default_repo`
+    // is the turnkey snapshot, but the dedicated path
     // resolves the dir via `resolve_bernini_model_dir` (env / app-managed / download), not this repo.
     ModelRow {
         sceneworks_id: "bernini_image",
@@ -772,10 +772,9 @@ pub(crate) const VIDEO_ENGINE_IDS: &[&str] = &[
 /// of these. Trainer descriptors DO carry `backend` (sc-4906), so the derivation gates per-backend
 /// — a candle trainer lights training up only under `backend_candle_enabled`, an mlx one only under
 /// `backend_mlx_enabled` (see the gate in `registry_capabilities`). `lens` is the mlx (sc-5148) +
-/// candle (sc-7817) Lens trainer. The mlx backend registers all of these; the candle backend includes
-/// {`sdxl`, `z_image_turbo`, `lens`, `krea_2_raw`, `ltx_2_3`, `wan2_2_t2v_14b`} (the Wan 5B /
-/// I2V A14B + Kolors have no candle trainer — `jobs_store::training_job_is_candle_eligible` keeps
-/// them off candle).
+/// candle (sc-7817) Lens trainer. At the pinned inference revision Candle also serves the sc-18479
+/// Anima Base, Kolors, Mage-Flow Base, SD3.5 Large/Medium, Wan TI2V-5B, and Wan I2V-14B cells.
+/// Per-base/network routing remains fail-closed even though this inventory is intentionally coarse.
 pub(crate) const TRAINER_IDS: &[&str] = &[
     "z_image_turbo",
     "sdxl",
@@ -783,20 +782,22 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "lens",
     // SD3.5 LoRA-training bases (epic 7841 T3 sc-7884): the engine registers the LoRA/LoKr trainer
     // under the same id as the inference generator of the training base — Large (sc-7883) and the
-    // MMDiT-X Medium (sc-7885). mlx-only (no candle SD3 trainer; epic 7982).
+    // MMDiT-X Medium (sc-7885). Both native backends register these ids.
     "sd3_5_large",
     "sd3_5_medium",
     "ltx_2_3",
     "wan2_2_ti2v_5b",
     "wan2_2_t2v_14b",
     "wan2_2_i2v_14b",
-    // Anima (Cosmos-Predict2 DiT + AnimaTextConditioner; epic 10512, sc-10522): the `mlx-gen-anima`
-    // trainer registers LoRA/LoKr under the same ids as the inference generators of the three variants
-    // (base/aesthetic/turbo). mlx-only (no candle/torch Anima trainer). The trained adapter targets the
-    // DiT AND the bundled `llm_adapter` conditioner (508 targets), applying back via `apply_anima_adapters`.
+    // Anima (Cosmos-Predict2 DiT + AnimaTextConditioner; epic 10512, sc-10522). The product trains
+    // Base; the MLX inventory also retains its pre-existing sibling trainer ids. The adapter targets
+    // the DiT and bundled `llm_adapter` conditioner and applies across the family.
     "anima_base",
     "anima_aesthetic",
     "anima_turbo",
+    // Mage-Flow Base is the sole Mage training base. One trainer id serves LoRA, LoKr, and full
+    // fine-tuning; the network type remains part of TrainingConfig rather than registry identity.
+    "mage_flow_base",
 ];
 
 /// A [`ModelRow`] paired with the linked gen_core descriptor for its engine id — the merged
@@ -867,9 +868,9 @@ impl ResolvedModel {
     pub fn supports_quant(&self) -> bool {
         !self.descriptor.capabilities.supported_quants.is_empty()
     }
-    /// Whether the engine accepts LoRA/LoKr adapters (descriptor-derived). Lens is the first candle
-    /// family to advertise either (sc-5126); the others advertise neither. Candle-lane-only for the
-    /// same reason as [`Self::supports_quant`].
+    /// Whether the engine accepts LoRA/LoKr adapters, derived from the linked provider descriptor.
+    /// Candle-lane-only for the same reason as [`Self::supports_quant`]; callers must consult the
+    /// per-engine descriptor rather than assuming adapter support from the model family.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     pub fn supports_adapters(&self) -> bool {
         self.descriptor.capabilities.supports_lora || self.descriptor.capabilities.supports_lokr
@@ -1062,6 +1063,22 @@ fn registry_capabilities_from(
 mod tests {
     use super::*;
     use sceneworks_core::contracts::WorkerCapability as Cap;
+
+    #[test]
+    fn training_inventory_names_every_sc18479_provider_id() {
+        for id in [
+            "anima_base",
+            "kolors",
+            "mage_flow_base",
+            "sd3_5_large",
+            "sd3_5_medium",
+            "wan2_2_ti2v_5b",
+            "wan2_2_t2v_14b",
+            "wan2_2_i2v_14b",
+        ] {
+            assert!(TRAINER_IDS.contains(&id), "missing trainer id {id}");
+        }
+    }
 
     // A test Settings with the two backend toggles set; everything else is from_env defaults.
     // (Tests set no backend env vars, so from_env() yields mlx=on / candle=off by default; the
@@ -1320,8 +1337,7 @@ mod tests {
     /// dispatch) and the candle map (`candle_video_engine_id`) in `video_jobs`. LTX is backend-split
     /// (`ltx_2_3` on mlx, `ltx_2_3_distilled` on candle) and `ltx_2_3_eros` shares the base engine id
     /// per backend; the resolver lists both and picks whichever the active registry actually holds.
-    /// `wan_2_2_vace_fun_14b` is mlx-only (candle has no VACE engine), so it resolves to `None` on the
-    /// candle lane and is skipped there.
+    /// VACE-Fun uses the same dedicated `wan2_2_vace_fun_14b` provider id on both native backends.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -1418,6 +1434,108 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
+    fn manifest_component_precision_floors_match_active_provider_descriptors() {
+        let manifest = parse_builtin_models();
+        for model in manifest["models"].as_array().expect("models array") {
+            let id = model["id"].as_str().expect("model id");
+            let manifest_floors = model
+                .get("precisionFloors")
+                .and_then(serde_json::Value::as_array);
+            let Some(active) = mlx_model(id) else {
+                assert!(
+                    manifest_floors.map_or(true, Vec::is_empty),
+                    "{id}: precisionFloors require an active provider descriptor"
+                );
+                continue;
+            };
+            let descriptor = active.descriptor;
+            let declared = manifest_floors
+                .into_iter()
+                .flatten()
+                .map(|floor| {
+                    (
+                        floor["component"].as_str().unwrap(),
+                        floor["selectedTier"].as_str().unwrap(),
+                        floor["residentTier"].as_str().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let advertised = descriptor
+                .capabilities
+                .component_precision_floors
+                .iter()
+                .map(|floor| {
+                    let tier = |quant| match quant {
+                        gen_core::Quant::Q4 => "q4",
+                        gen_core::Quant::Q8 => "q8",
+                        gen_core::Quant::Nvfp4 => "nvfp4",
+                    };
+                    (
+                        floor.component.as_str(),
+                        tier(floor.selected_tier),
+                        tier(floor.resident_tier),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                advertised, declared,
+                "{id}: provider/manifest precision-floor drift"
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mage_split_tiers_stage_every_provider_required_component() {
+        let manifest = parse_builtin_models();
+        for model in manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter(|model| model["family"] == "mage-flow")
+        {
+            let id = model["id"].as_str().expect("Mage model id");
+            let descriptor = mlx_model(id)
+                .unwrap_or_else(|| panic!("{id}: Mage requires an active provider descriptor"))
+                .descriptor;
+            let required = descriptor
+                .required_components
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                required,
+                std::collections::BTreeSet::from(["text_encoder", "vae"]),
+                "{id}: split layout must advertise both shared components"
+            );
+
+            for tier in ["q4", "q8", "bf16"] {
+                let staged = model["downloads"]
+                    .as_array()
+                    .expect("Mage downloads")
+                    .iter()
+                    .filter(|download| {
+                        download["coRequisite"].as_bool() == Some(true)
+                            && download["variant"].as_str() == Some(tier)
+                    })
+                    .filter_map(|download| download["componentId"].as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    staged, required,
+                    "{id}/{tier}: manifest co-requisites must cover the provider load contract"
+                );
+            }
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
     fn manifest_menu_is_subset_of_descriptor() {
         // The active backend's registry: MLX on macOS, candle on the `backend-candle` build.
         let backend = if cfg!(target_os = "macos") {
@@ -1435,8 +1553,7 @@ mod tests {
             // The advertised sampler/scheduler menu the engine honors, from whichever source applies:
             // image models via MODEL_TABLE (`mlx_model`); video models via their engine-id map
             // (`video_descriptor`); the bespoke out-of-MODEL_TABLE image models (InstantID / PuLID,
-            // sc-7432) via `bespoke_advertised`. A model with no source on the active backend is skipped
-            // (e.g. the mlx-only `wan_2_2_vace_fun_14b` on the candle lane).
+            // sc-7432) via `bespoke_advertised`. A model with no source on the active backend is skipped.
             let Some((adv_samplers, adv_schedulers, adv_guidance)) = mlx_model(id)
                 .map(|resolved| resolved.descriptor)
                 .or_else(|| video_descriptor(id))
@@ -1717,8 +1834,9 @@ mod tests {
             "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
             "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::SIZE_MULTIPLE,
             "krea_2_turbo" | "krea_2_raw" => p::krea::SIZE_MULTIPLE,
-            // Mage is macOS-only; keep the all-target MODEL_TABLE lattice tied to the same ÷16
-            // contract on candle CI even though runtime-cuda intentionally has no Mage provider.
+            // Mage now has native MLX and Candle providers. Its Candle facade does not export a
+            // stride constant through `runtime_cuda::providers`, so keep the shared ÷16 contract
+            // explicit here and checked against the all-target MODEL_TABLE lattice.
             "mage_flow_base"
             | "mage_flow"
             | "mage_flow_turbo"
@@ -1983,6 +2101,19 @@ mod tests {
         assert_eq!(pinned_image_stride("definitely_not_an_engine"), None);
     }
 
+    /// The API's Candle routing table mirrors this provider fact. Pin it at the registry boundary so
+    /// a future inference-runtime bump cannot silently reintroduce the old "LTX has no LoRA slot"
+    /// assumption while SceneWorks continues routing adapter-bearing jobs here.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_ltx_descriptor_advertises_user_adapter_inference() {
+        let descriptor = video_descriptor("ltx_2_3")
+            .expect("ltx_2_3 must resolve to the candle ltx_2_3_distilled descriptor");
+        assert_eq!(descriptor.id, "ltx_2_3_distilled");
+        assert!(descriptor.capabilities.supports_lora);
+        assert!(descriptor.capabilities.supports_lokr);
+    }
+
     /// sc-11991 (epic 1788): `mochi_1` resolves through THIS module to a real gen-core descriptor on
     /// the active backend — the story's acceptance criterion, asserted directly.
     ///
@@ -2064,6 +2195,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         }
     }
     fn stub_mlx_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
@@ -2086,6 +2218,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         }
     }
     fn stub_candle_load(
@@ -2109,6 +2242,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         }
     }
     fn stub_unknown_load(
@@ -2170,7 +2304,8 @@ mod tests {
             supports_lora: true,
             supports_lokr: true,
             supports_control: false,
-            // sc-14056: adapter-only stub — the full base fine-tune path is Mage/mlx-only.
+            // This SDXL registry-derivation stub is adapter-only. Mage owns the separate
+            // native full-base descriptor on both backends.
             supports_full_finetune: false,
         }
     }

@@ -15,7 +15,8 @@ import {
 
 export const defaultGpuOptions = ["auto"];
 export const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"];
-export const timestepTypeOptions = ["sigmoid", "linear", "weighted"];
+export const timestepTypeOptions = ["sigmoid", "linear", "uniform", "weighted"];
+const sd3TimestepTypeOptions = [...timestepTypeOptions, "default", "logit_normal"];
 export const timestepBiasOptions = ["balanced", "high_noise", "low_noise"];
 export const lossTypeOptions = ["mse", "mae"];
 // Learning-rate schedulers the worker actually honors (constant holds the LR
@@ -62,6 +63,15 @@ export function rangeOptions(limits, key) {
 
 export function optimizerLabel(value) {
   return optimizerLabels[value] ?? value;
+}
+
+// The native SD3 trainers intentionally add diffusers' default/logit-normal schedule to the shared
+// flow set. Every other target must stay on the shared set; exposing logit-normal globally created
+// plans Anima/Mage rejected only after model load. A recognized target default/current value remains
+// selected because it is already in the owning target's exact set—unsupported stale values are not
+// smuggled back into the menu.
+export function timestepTypeOptionsForTarget(target) {
+  return target?.kernel === "sd3_lora" ? sd3TimestepTypeOptions : timestepTypeOptions;
 }
 
 export function networkTypeLabel(value) {
@@ -244,7 +254,10 @@ export function mergeCustomizedConfigDraft(seeded, current = {}, customizedField
 //
 // sc-10492 dropped both as noise; sc-10501 brought the errors back and this is where
 // that distinction became the app's vocabulary rather than one screen's helper.
-export function configValidation(configDraft, { activeDataset, selectedTarget, datasetNotReady = false } = {}) {
+export function configValidation(
+  configDraft,
+  { activeDataset, selectedTarget, datasetNotReady = false, missingControlModels = [] } = {},
+) {
   const issues = [];
   if (!selectedTarget) {
     issues.push(issue.requirement("target", "Select a training target"));
@@ -286,6 +299,21 @@ export function configValidation(configDraft, { activeDataset, selectedTarget, d
   // would only repeat it. field is null: the fix is in Data Sets, not an input on this form.
   if (datasetNotReady) {
     issues.push(issue.error(null, "This dataset isn’t ready to train yet — open Data Sets to add or fix images."));
+  }
+  // A ControlNet run renders its per-image condition with a preprocessor model, and those resolvers
+  // are cache-only since epic 17625 — a missing one is a job-time failure, not a mid-run download.
+  // So it is part of "can this job run" and belongs in the one validity summary that gates Start,
+  // exactly like `datasetNotReady` above, rather than a separate `disabled` term that could drift
+  // from what the panel says. field is null: the fix is a download in the panel's notice, not an
+  // input on this form — ConfigureJobPanel renders the offer right below the ControlNet note.
+  if (missingControlModels.length > 0) {
+    const names = missingControlModels.map((model) => model?.name ?? model?.id).filter(Boolean);
+    issues.push(
+      issue.error(
+        null,
+        `Install ${names.join(" and ")} to render this run's control condition.`,
+      ),
+    );
   }
   return issues;
 }
@@ -332,6 +360,10 @@ export function promptListToLines(list) {
 export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
   const defaults = selectedTarget?.defaults ?? {};
   const networkType = asText(configDraft.networkType).trim() || "lora";
+  const isFullFinetune = isFullFinetuneNetworkType(networkType);
+  const fullFinetuneConfig = isFullFinetune ? defaults.advanced?.fullFinetuneConfig : null;
+  const defaultAdvanced = { ...(defaults.advanced ?? {}) };
+  delete defaultAdvanced.fullFinetuneConfig;
   // The user-edited prompt pool, one per line. Empty falls back to the trigger-derived
   // defaults so previews still render (and {trigger} substitution is preserved). The
   // backends cap this pool at sampleCount (one preview per prompt), so the pool can hold
@@ -339,7 +371,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
   const editedPrompts = promptLinesToList(configDraft.samplePrompts);
   const samplePrompts = editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
   const advanced = compactObject({
-    ...(defaults.advanced ?? {}),
+    ...defaultAdvanced,
     networkType,
     // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
     decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,
@@ -354,8 +386,11 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     // only fuses it when config.advanced.trainingAdapterRepo is present.
     trainingAdapterRepo: asText(configDraft.trainingAdapterRepo).trim(),
     trainingAdapterVersion: asText(configDraft.trainingAdapterVersion).trim(),
-    gradientCheckpointing: Boolean(configDraft.gradientCheckpointing),
-    mixedPrecision: asText(configDraft.precision).trim(),
+    // Platform-effective target metadata carries any backend-specific full-tune requirement. MLX
+    // has no override and keeps the submitted draft; Candle Mage advertises f32/no-checkpointing.
+    gradientCheckpointing:
+      fullFinetuneConfig?.gradientCheckpointing ?? Boolean(configDraft.gradientCheckpointing),
+    mixedPrecision: fullFinetuneConfig?.mixedPrecision ?? asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
     sampleSteps: numberFromDraft(configDraft.sampleSteps),
     sampleGuidanceScale: numberFromDraft(configDraft.sampleGuidanceScale),

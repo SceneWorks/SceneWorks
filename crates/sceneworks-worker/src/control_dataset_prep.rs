@@ -54,7 +54,7 @@ pub(crate) const PREP_CANCEL_MESSAGE: &str =
 /// pose ControlNet isn't trained on empty skeletons. Uses the worker's YOLO11 person detector
 /// (`person_jobs::detect_people_blocking`), so it is only available on a neural-inference build.
 pub(crate) struct PersonFilter {
-    /// Resolved YOLO11 detector weights (see `person_jobs::ensure_detector_weights`).
+    /// Resolved YOLO11 detector weights (see `person_jobs::require_detector_weights`).
     pub(crate) weights_path: PathBuf,
     /// Detection confidence floor.
     pub(crate) min_conf: f32,

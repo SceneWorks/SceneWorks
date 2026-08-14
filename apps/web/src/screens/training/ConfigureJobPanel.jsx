@@ -2,6 +2,7 @@ import React from "react";
 
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { Icon } from "../../components/Icons.jsx";
+import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
@@ -12,7 +13,7 @@ import {
   optionLabel,
   qualityPresetLabel,
   timestepBiasOptions,
-  timestepTypeOptions,
+  timestepTypeOptionsForTarget,
   trainingAdapterVersionLabels,
 } from "../../training/trainingConfig.js";
 
@@ -81,6 +82,17 @@ export function ConfigureJobPanel({
   // DatasetDoctorReadout below. Whether readiness blocks the run is now one of
   // `configValidity`'s issues (sc-10648), so there is no separate readiness prop.
   datasetDoctor,
+  // Preprocessor models this run needs but doesn't have (modelEligibility.missingRequiredModels).
+  // A pose control branch renders its condition with DWPose, whose resolver is cache-only since
+  // epic 17625 — so without it the run reaches the worker and dies there. The same list is folded
+  // into `configValidity` by the screen, which is what actually blocks Start training; this only
+  // renders the offer. Empty for every LoRA target.
+  missingControlModels = [],
+  controlModelDownloadJobs = [],
+  onDownloadModel,
+  onOpenModels,
+  onOpenQueue,
+  onCancelJob,
 }) {
   // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
   // per-image control condition from the selected dataset (the data source) and trains a control
@@ -88,6 +100,12 @@ export function ConfigureJobPanel({
   const isControlTarget = selectedTarget?.outputKind === "control_branch";
   const controlType =
     selectedTarget?.defaults?.advanced?.controlType ?? selectedTarget?.limits?.controlTypes?.[0] ?? "pose";
+  const fullFinetuneConfig = isFullFinetune
+    ? selectedTarget?.defaults?.advanced?.fullFinetuneConfig
+    : null;
+  const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
+  const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
+  const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   return (
     <WorkPanel
       className="training-config-panel"
@@ -264,6 +282,20 @@ export function ConfigureJobPanel({
             </p>
           ) : null}
 
+          {/* The condition above is rendered by a preprocessor, and a pose one needs DWPose. Offer
+              it here rather than letting the queued run fail at the worker with an install error
+              the Training Studio gives no way to act on. */}
+          <RequiredModelsNotice
+            detail="Preprocessing runs locally on the native worker, so the run would fail without it."
+            downloadJobs={controlModelDownloadJobs}
+            feature={`${controlType.charAt(0).toUpperCase()}${controlType.slice(1)} ControlNet training`}
+            models={missingControlModels}
+            onCancelJob={onCancelJob}
+            onDownload={onDownloadModel}
+            onOpenModels={onOpenModels}
+            onOpenQueue={onOpenQueue}
+          />
+
           <AdvancedSection
             hint="cleared values → preset default"
             onToggle={() => setShowAdvancedConfig(!showAdvancedConfig)}
@@ -323,7 +355,7 @@ export function ConfigureJobPanel({
                 />
               </label>
               {showNetworkType ? (
-                <label title="What the run trains. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only); Full base fine-tune updates every base weight and writes a fine-tuned checkpoint instead of an adapter — far more memory, offered only where the engine supports it.">
+                <label title="What the run trains. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter on targets that advertise it; Full base fine-tune updates every base weight and writes a fine-tuned checkpoint instead of an adapter — far more memory, offered only where the engine supports it.">
                   Network type
                   <select
                     onChange={(event) => updateConfigDraft("networkType", event.target.value)}
@@ -404,7 +436,7 @@ export function ConfigureJobPanel({
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
-                  {timestepTypeOptions.map((option) => (
+                  {visibleTimestepTypeOptions.map((option) => (
                     <option key={option} value={option}>
                       {optionLabel(option)}
                     </option>
@@ -463,7 +495,16 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Precision
-                <input onChange={(event) => updateConfigDraft("precision", event.target.value)} value={configDraft.precision ?? ""} />
+                <input
+                  disabled={Boolean(requiredFullPrecision)}
+                  onChange={(event) => updateConfigDraft("precision", event.target.value)}
+                  value={requiredFullPrecision ?? configDraft.precision ?? ""}
+                />
+                {requiredFullPrecision ? (
+                  <span className="training-field-hint">
+                    This backend requires {requiredFullPrecision.toUpperCase()} for full base fine-tuning.
+                  </span>
+                ) : null}
               </label>
               <label>
                 Guidance scale
@@ -490,7 +531,7 @@ export function ConfigureJobPanel({
             </label>
 
             <div className="training-advanced-toggles">
-              {isFullFinetune ? (
+              {fullCheckpointingUnsupported ? (
                 <p className="training-field-hint">
                   Gradient checkpointing is not available for a full base fine-tune yet, so it is not applied to this
                   run. Lower the training resolution if the run does not fit.

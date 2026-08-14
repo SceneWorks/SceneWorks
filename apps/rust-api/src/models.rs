@@ -574,6 +574,27 @@ pub(crate) async fn create_model_download_job(
 /// `variant`); `include_family` forwards the model's declared family for the worker's post-download
 /// family reconcile (sc-1663) — pass `false` for co-requisites, whose weights are a different artifact
 /// than the model's primary checkpoint.
+const MEMORY_CALIBRATION_PROVENANCE_REQUIRED: &str = "memoryCalibrationProvenanceRequired";
+
+fn catalog_requires_memory_calibration_provenance(model: &Value) -> bool {
+    model
+        .get("mlx")
+        .and_then(|mlx| mlx.get("calibrations"))
+        .and_then(Value::as_array)
+        .is_some_and(|calibrations| !calibrations.is_empty())
+}
+
+fn insert_memory_calibration_provenance_requirement(
+    job_payload: &mut JsonObject,
+    model: &Value,
+    primary_artifact: bool,
+) {
+    job_payload.insert(
+        MEMORY_CALIBRATION_PROVENANCE_REQUIRED.to_owned(),
+        Value::Bool(primary_artifact && catalog_requires_memory_calibration_provenance(model)),
+    );
+}
+
 fn build_model_download_job_payload(
     model: &Value,
     model_id: &str,
@@ -606,6 +627,10 @@ fn build_model_download_job_payload(
                 .to_owned(),
         ),
     );
+    // The cold install-time digest is authorized only by the server's catalog entry. The typed
+    // client request cannot supply or override this flag, and co-requisites stay inert because the
+    // calibration artifact identity is the primary checkpoint.
+    insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
     job_payload.insert(
         "provider".to_owned(),
         Value::String(required_string_field(download, "provider")?.to_owned()),
@@ -664,6 +689,232 @@ fn build_model_download_job_payload(
         ),
     );
     Ok(job_payload)
+}
+
+struct ModelConvertJobPayload<'a> {
+    model: &'a Value,
+    model_id: &'a str,
+    mlx: &'a JsonObject,
+    source_repo: &'a str,
+    output_dir: &'a FsPath,
+    quantize_only: bool,
+    request: &'a ModelConvertRequest,
+}
+
+fn build_model_convert_job_payload(input: ModelConvertJobPayload<'_>) -> JsonObject {
+    let mut job_payload = JsonObject::new();
+    job_payload.insert(
+        "modelId".to_owned(),
+        Value::String(input.model_id.to_owned()),
+    );
+    job_payload.insert(
+        "modelName".to_owned(),
+        Value::String(
+            input
+                .model
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(input.model_id)
+                .to_owned(),
+        ),
+    );
+    // This boolean is catalog-derived. Repository, source revision, output variant, and fixed tier
+    // remain resolver/job facts and are never accepted from the client.
+    insert_memory_calibration_provenance_requirement(&mut job_payload, input.model, true);
+    job_payload.insert(
+        "sourceRepo".to_owned(),
+        Value::String(input.source_repo.to_owned()),
+    );
+    job_payload.insert(
+        "outputDir".to_owned(),
+        Value::String(input.output_dir.display().to_string()),
+    );
+    job_payload.insert("dtype".to_owned(), Value::String("bfloat16".to_owned()));
+    // Optional converter discriminator + inputs (sc-2235). Default (absent) is the
+    // mlx-video Wan converter. A FLUX.2-klein community fine-tune declares
+    // `mlx.converter` + the single-file source + the base repo whose
+    // VAE/text-encoder/tokenizer are borrowed during assembly.
+    if let Some(converter) = input
+        .mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert("converter".to_owned(), Value::String(converter.to_owned()));
+    }
+    if let Some(source_file) = input
+        .mlx
+        .get("convertSourceFile")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert(
+            "sourceFile".to_owned(),
+            Value::String(source_file.to_owned()),
+        );
+    }
+    if let Some(base_repo) = input
+        .mlx
+        .get("convertBaseRepo")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert("baseRepo".to_owned(), Value::String(base_repo.to_owned()));
+    }
+    // The quant-tier subdir under `convertBaseRepo` to borrow the base components from (sc-14978):
+    // the FLUX.2-klein re-host keeps each tier in its own subdir, so the borrowed
+    // VAE/text-encoder/tokenizer live under `<tier>/`, not the snapshot root. Absent for root-layout
+    // diffusers bases.
+    if let Some(base_subdir) = input
+        .mlx
+        .get("convertBaseSubdir")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert(
+            "baseSubdir".to_owned(),
+            Value::String(base_subdir.to_owned()),
+        );
+    }
+    if input.quantize_only {
+        job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
+    }
+    if let Some(bits) = input.request.quantize_bits {
+        job_payload.insert("quantizeBits".to_owned(), Value::from(bits));
+    }
+    if let Some(group_size) = input.request.quantize_group_size {
+        job_payload.insert("quantizeGroupSize".to_owned(), Value::from(group_size));
+    }
+    job_payload
+}
+
+#[cfg(test)]
+mod memory_calibration_job_payload_tests {
+    use super::*;
+
+    fn model(calibrated: bool) -> Value {
+        let calibrations = if calibrated {
+            json!([{ "binding": "fixture" }])
+        } else {
+            json!([])
+        };
+        json!({
+            "id": "fixture-model",
+            "name": "Fixture Model",
+            "family": "fixture",
+            "mlx": {
+                "requiresConversion": true,
+                "convertSourceRepo": "owner/source",
+                "calibrations": calibrations
+            }
+        })
+    }
+
+    fn download() -> Value {
+        json!({
+            "provider": "huggingface",
+            "repo": "owner/artifact",
+            "files": ["weights.safetensors"]
+        })
+    }
+
+    #[test]
+    fn download_payload_derives_provenance_cost_only_from_the_catalog_primary_artifact() {
+        let data = tempfile::tempdir().expect("data dir");
+        let calibrated = model(true);
+        let primary = build_model_download_job_payload(
+            &calibrated,
+            "fixture-model",
+            &download(),
+            None,
+            true,
+            data.path(),
+        )
+        .expect("primary payload");
+        assert_eq!(
+            primary.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(true))
+        );
+
+        let co_requisite = build_model_download_job_payload(
+            &calibrated,
+            "fixture-model",
+            &download(),
+            None,
+            false,
+            data.path(),
+        )
+        .expect("co-requisite payload");
+        assert_eq!(
+            co_requisite.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(false)),
+            "co-requisites are not the artifact named by the calibration binding"
+        );
+
+        let client: ModelDownloadRequest = serde_json::from_value(json!({
+            "memoryCalibrationProvenanceRequired": true
+        }))
+        .expect("typed request ignores unknown spoofed fields");
+        let uncalibrated = build_model_download_job_payload(
+            &model(false),
+            "fixture-model",
+            &download(),
+            client.variant.as_deref(),
+            true,
+            data.path(),
+        )
+        .expect("uncalibrated payload");
+        assert_eq!(
+            uncalibrated.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(false)),
+            "a client-supplied lookalike cannot enable the cold provenance cost"
+        );
+    }
+
+    #[test]
+    fn convert_payload_derives_provenance_cost_only_from_the_catalog() {
+        let data = tempfile::tempdir().expect("data dir");
+        let request: ModelConvertRequest = serde_json::from_value(json!({
+            "quantizeBits": 4,
+            "memoryCalibrationProvenanceRequired": false
+        }))
+        .expect("typed request ignores unknown spoofed fields");
+        let calibrated = model(true);
+        let calibrated_payload = build_model_convert_job_payload(ModelConvertJobPayload {
+            model: &calibrated,
+            model_id: "fixture-model",
+            mlx: calibrated["mlx"].as_object().expect("mlx"),
+            source_repo: "owner/source",
+            output_dir: data.path(),
+            quantize_only: false,
+            request: &request,
+        });
+        assert_eq!(
+            calibrated_payload.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(true)),
+            "a client-supplied lookalike cannot disable catalog-authorized provenance"
+        );
+
+        let spoofed: ModelConvertRequest = serde_json::from_value(json!({
+            "memoryCalibrationProvenanceRequired": true
+        }))
+        .expect("typed request ignores unknown spoofed fields");
+        let uncalibrated = model(false);
+        let uncalibrated_payload = build_model_convert_job_payload(ModelConvertJobPayload {
+            model: &uncalibrated,
+            model_id: "fixture-model",
+            mlx: uncalibrated["mlx"].as_object().expect("mlx"),
+            source_repo: "owner/source",
+            output_dir: data.path(),
+            quantize_only: false,
+            request: &spoofed,
+        });
+        assert_eq!(
+            uncalibrated_payload.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(false)),
+            "a client-supplied lookalike cannot enable the cold provenance cost"
+        );
+    }
 }
 
 /// Convert a model's native checkpoint into the local MLX format (macOS/Apple
@@ -732,74 +983,65 @@ pub(crate) async fn create_model_convert_job(
             "Model does not require MLX conversion",
         ));
     };
-    let mut job_payload = JsonObject::new();
-    job_payload.insert("modelId".to_owned(), Value::String(model_id.clone()));
-    job_payload.insert(
-        "modelName".to_owned(),
-        Value::String(
-            model
+    // Pre-flight the source weights (sc-14708 follow-up). The worker resolves the same HF snapshot and
+    // fails the job when the checkpoint is absent, which reads as a defect to the user: the three Anima
+    // variants share `circlestone-labs/Anima`, their per-variant downloads are serialized, and the
+    // sibling cards flip to *downloaded* the moment THEIR files land — so converting the variant whose
+    // 4 GB DiT is still streaming produced a bare "Anima source DiT is missing." Refuse it here, while
+    // the request can still carry an explanation. Only `requiresConversion` reads a native checkpoint;
+    // the legacy quantize-only path has its own worker-side rejection.
+    if requires_conversion {
+        if let Some(download) = store_call(state.clone(), {
+            let model_id = model_id.clone();
+            move |store, _timeout| store.find_active_model_download_job(&model_id)
+        })
+        .await?
+        {
+            let model_name = model
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or(&model_id)
-                .to_owned(),
-        ),
-    );
-    job_payload.insert("sourceRepo".to_owned(), Value::String(source_repo));
-    job_payload.insert(
-        "outputDir".to_owned(),
-        Value::String(output_dir.display().to_string()),
-    );
-    job_payload.insert("dtype".to_owned(), Value::String("bfloat16".to_owned()));
-    // Optional converter discriminator + inputs (sc-2235). Default (absent) is the
-    // mlx-video Wan converter. A FLUX.2-klein community fine-tune declares
-    // `mlx.converter` + the single-file source + the base repo whose
-    // VAE/text-encoder/tokenizer are borrowed during assembly.
-    if let Some(converter) = mlx
-        .get("converter")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert("converter".to_owned(), Value::String(converter.to_owned()));
+                .unwrap_or(model_id.as_str());
+            return Err(ApiError::conflict(format!(
+                "{model_name} is still downloading ({percent}%). Wait for the download to finish \
+                 before converting it.",
+                percent = (download.progress.as_f64().unwrap_or(0.0) * 100.0).round() as i64,
+            )));
+        }
+        if let Some(source_file) = mlx
+            .get("convertSourceFile")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            match sceneworks_worker::convert_source_state(
+                &state.settings.data_dir,
+                &source_repo,
+                source_file,
+            ) {
+                sceneworks_worker::ConvertSourceState::Ready => {}
+                sceneworks_worker::ConvertSourceState::RepoNotCached => {
+                    return Err(ApiError::conflict(format!(
+                        "{source_repo} is not downloaded yet. Download it before converting."
+                    )));
+                }
+                sceneworks_worker::ConvertSourceState::FileMissing => {
+                    return Err(ApiError::conflict(format!(
+                        "{source_file} has not finished downloading from {source_repo}. Wait for \
+                         the download to complete, then convert."
+                    )));
+                }
+            }
+        }
     }
-    if let Some(source_file) = mlx
-        .get("convertSourceFile")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert(
-            "sourceFile".to_owned(),
-            Value::String(source_file.to_owned()),
-        );
-    }
-    if let Some(base_repo) = mlx
-        .get("convertBaseRepo")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert("baseRepo".to_owned(), Value::String(base_repo.to_owned()));
-    }
-    // The quant-tier subdir under `convertBaseRepo` to borrow the base components from (sc-14978): the
-    // FLUX.2-klein re-host keeps each tier in its own subdir, so the borrowed VAE/text-encoder/tokenizer
-    // live under `<tier>/`, not the snapshot root. Absent for root-layout diffusers bases.
-    if let Some(base_subdir) = mlx
-        .get("convertBaseSubdir")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert(
-            "baseSubdir".to_owned(),
-            Value::String(base_subdir.to_owned()),
-        );
-    }
-    if quantize_only {
-        job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
-    }
-    if let Some(bits) = payload.quantize_bits {
-        job_payload.insert("quantizeBits".to_owned(), Value::from(bits));
-    }
-    if let Some(group_size) = payload.quantize_group_size {
-        job_payload.insert("quantizeGroupSize".to_owned(), Value::from(group_size));
-    }
+
+    let job_payload = build_model_convert_job_payload(ModelConvertJobPayload {
+        model: &model,
+        model_id: &model_id,
+        mlx,
+        source_repo: &source_repo,
+        output_dir: &output_dir,
+        quantize_only,
+        request: &payload,
+    });
 
     let job = create_generation_job(
         state,
@@ -3011,6 +3253,69 @@ mod download_receipt_tests {
             }
         }
     }
+
+    /// The live SCAIL-2 manifest must give off-Mac users the dense shared package and the catalog's
+    /// install badge must enforce the exact provider-required six-file layout. This binds product
+    /// advertisement, Model Manager filtering, and worker loadability without duplicating weights.
+    #[test]
+    fn scail2_shared_bf16_package_is_installable_off_macos_and_fails_closed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let original = builtin_models_entry("scail2_14b");
+
+        for os in ["windows", "linux"] {
+            let mut model = original.clone();
+            retain_downloads_for_os(&mut model, os);
+            let downloads = model["downloads"].as_array().unwrap();
+            assert_eq!(downloads.len(), 1, "{os} must expose one installable tier");
+            assert_eq!(downloads[0]["variant"], "bf16");
+            assert_eq!(downloads[0]["files"], json!(["bf16/*"]));
+            assert_eq!(model_download(&model).unwrap()["variant"], "bf16");
+        }
+
+        let mut model = original;
+        retain_downloads_for_os(&mut model, "windows");
+        let download = model_download(&model).unwrap();
+        let repo = download["repo"].as_str().unwrap();
+        let revision = download["revision"].as_str().unwrap();
+        let tier = huggingface_repo_cache_path(data.path(), repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join("bf16");
+        std::fs::create_dir_all(&tier).unwrap();
+
+        std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+        let partial =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!partial.installed);
+        assert!(partial.cache_incomplete);
+        assert!(
+            partial
+                .missing_required_files
+                .iter()
+                .any(|file| file.contains("bf16") && file.contains("incomplete")),
+            "got {:?}",
+            partial.missing_required_files
+        );
+
+        for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
+            std::fs::write(tier.join(file), b"").unwrap();
+        }
+        let installed =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(installed.installed);
+        assert!(!installed.cache_incomplete);
+
+        std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+        let torn = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!torn.installed, "a provider-required file was removed");
+        assert!(torn.cache_incomplete);
+
+        let description = model["ui"]["description"].as_str().unwrap();
+        assert!(description.contains("Candle on NVIDIA Windows/Linux"));
+        assert!(!description.contains("macOS native MLX only"));
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A
@@ -3326,6 +3631,7 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         "anima" => Some(tc::anima_tier_complete),
         "boogu" => Some(tc::boogu_tier_complete),
         "sana" => Some(tc::sana_tier_complete),
+        "scail2" => Some(tc::scail2_tier_complete),
         // sc-14432: the SenseNova-U1 turnkeys ship a FLAT unified tier (backbone + config at the tier
         // root, no `model_index.json`), so without a predicate a torn tier read `installed` and then
         // failed at load — "complete but unloadable", with re-downloading the only (useless) repair.
@@ -3670,13 +3976,73 @@ fn mlx_convert_output_tier_states(
             } else {
                 ("missing", "missing")
             };
+            // Convert-at-install tiers have no downloads[] row of their own, so this runtime catalog
+            // state is the only truthful place to surface their per-tier size. Count the files the
+            // tier can load, including symlinked shared weights: unlike converted_tier_real_bytes
+            // (deletion accounting), this is a residency estimate, not reclaimable disk accounting.
+            let disk_size_bytes = converted_tier_loaded_bytes(&dir);
             json!({
                 "tier": tier,
                 "installState": install_state,
                 "cacheState": cache_state,
+                "diskSizeBytes": disk_size_bytes,
             })
         })
         .collect()
+}
+
+/// Sum the bytes visible to a converted tier load, including symlinked weight files.
+///
+/// This intentionally differs from [`converted_tier_real_bytes`], which excludes symlinks because it
+/// answers "what would deleting this tier reclaim?". The catalog memory floor instead needs "what
+/// bytes can this tier hold resident?", so a shared text encoder or VAE linked into the tier must count.
+/// Directory symlinks are followed because a converter may link a shared component directory rather
+/// than its individual files. Canonical-directory de-duplication prevents cycles and counts a shared
+/// component once even when more than one in-tier path aliases it.
+fn converted_tier_loaded_bytes(tier_dir: &FsPath) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut stack = vec![tier_dir.to_path_buf()];
+    let mut visited_dirs = std::collections::HashSet::new();
+    let mut visited_files = std::collections::HashSet::new();
+    while let Some(dir) = stack.pop() {
+        let canonical = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !visited_dirs.insert(canonical) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_hidden_file(&path) {
+                continue;
+            }
+            let Ok(link_meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if link_meta.file_type().is_symlink() {
+                if let Ok(target_meta) = std::fs::metadata(&path) {
+                    if target_meta.is_file() {
+                        let canonical =
+                            std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                        if visited_files.insert(canonical) {
+                            total = total.saturating_add(target_meta.len());
+                        }
+                    } else if target_meta.is_dir() {
+                        stack.push(path);
+                    }
+                }
+            } else if link_meta.is_dir() {
+                stack.push(path);
+            } else if link_meta.is_file() {
+                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if visited_files.insert(canonical) {
+                    total = total.saturating_add(link_meta.len());
+                }
+            }
+        }
+    }
+    (total > 0).then_some(total)
 }
 
 /// Whether a converted tier subdir holds loadable weights: a non-hidden `.safetensors` / `.index.json`
@@ -3703,6 +4069,89 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
         || ["diffusion_models", "transformer", "unet"]
             .into_iter()
             .any(|sub| dir_has_weight(&tier_dir.join(sub)))
+}
+
+/// Withdraw a synthesized LoRA advertisement that no lane on THIS deployment can honour (the
+/// sc-15328 class).
+///
+/// An imported / fine-tuned image model has no manifest row: `apply_model_manifest_defaults`
+/// synthesizes `loraCompatibility.families = [family]` from the family token alone. For some
+/// families that is a promise nothing keeps — currently a Mage-Flow fine-tune on either native
+/// backend. Imported Krea 2 used to be another case, but both native single-file entrypoints now
+/// accept adapters (sc-18480), so its synthesized advertisement remains intact.
+/// Left standing, the picker offers adapters, `validate_lora_specs_for_model` passes, the job is
+/// created, and NO worker claims it: it sits on "Waiting for an available GPU worker" forever, with
+/// no error and no terminal state. That is strictly worse than a rejection.
+///
+/// Applied HERE — on the catalog projection every read goes through — rather than baked into the
+/// stored manifest at import time, because the verdict is a property of the DEPLOYMENT, not of the
+/// checkpoint. Keeping this a deployment projection also makes future backend-specific capability
+/// changes safe when a data dir moves between platforms.
+///
+/// 🔴 The withdrawal is an EXPLICIT EMPTY `families` array, never `remove("loraCompatibility")`.
+/// Removing the key is a no-op: `families_from_value_chain` (lib.rs) falls back to the top-level
+/// `family` field, which an imported entry must carry for routing — so the strip sc-15328 shipped
+/// changed nothing and its lane still hangs. An empty array is non-null, so it short-circuits that
+/// fallback and `validate_lora_specs_for_model` refuses the submission LOUDLY and terminally with
+/// "has no declared LoRA families". `supported: false` is the web's signal to fail CLOSED, because
+/// `loraMatchesModel` treats an empty family set as "cannot gate" and would otherwise stay
+/// permissive and keep offering every LoRA.
+/// Binds [`apply_imported_lora_advertisement_for_lanes`] to the lanes THIS build can run: macOS
+/// ships the in-process MLX worker and no candle engine; Windows/Linux/Docker ship candle and no
+/// MLX. The verdict is derived from the same per-lane request gates the scheduler uses, so the
+/// advertisement and claim behavior stay aligned.
+///
+/// The lane split is a ONE-LINE binding here and a parameter below precisely so the behaviour is
+/// testable on both lanes from either platform.
+fn apply_imported_lora_advertisement(object: &mut JsonObject) {
+    let mlx_lane = cfg!(target_os = "macos");
+    apply_imported_lora_advertisement_for_lanes(object, mlx_lane, !mlx_lane);
+}
+
+fn apply_imported_lora_advertisement_for_lanes(
+    object: &mut JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) {
+    if object.get("type").and_then(Value::as_str) != Some("image") {
+        return;
+    }
+    let Some(id) = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let Some(family) = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let serves_loras = sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
+        &id,
+        &family,
+        mlx_lane_available,
+        candle_lane_available,
+    );
+    if serves_loras != Some(false) {
+        return;
+    }
+    let compatibility = object
+        .entry("loraCompatibility".to_owned())
+        .or_insert_with(|| json!({}));
+    let Some(compatibility) = compatibility.as_object_mut() else {
+        return;
+    };
+    // Preserve every other key (`types` drives the multi-phase surface); only the families
+    // promise is withdrawn.
+    compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
+    compatibility.insert("supported".to_owned(), Value::Bool(false));
 }
 
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
@@ -3864,7 +4313,26 @@ static TEST_CATALOG_PROBES_PEAK: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 pub(crate) fn test_reset_catalog_probe_concurrency() {
     use std::sync::atomic::Ordering;
-    TEST_CATALOG_PROBES_ACTIVE.store(0, Ordering::SeqCst);
+    // DRAIN, do not clobber. Delayed probes run via spawn_blocking on pool OS threads
+    // that cannot be cancelled mid-sleep, and the probe tests run concurrently in one
+    // binary against these process-global atomics (their sleeps are bounded: <=250ms).
+    // Storing 0 into ACTIVE while a concurrent test's probe was mid-sleep made that
+    // probe's later decrement wrap to usize::MAX, and the next probe's `+ 1` panicked
+    // with "attempt to add with overflow" — a cross-test 500 that only surfaced on the
+    // slower hosted macos-26 runners once the workspace suite moved there (sc-17723).
+    // Waiting live probes out keeps ACTIVE's +1/-1 pairing intact, so it can never go
+    // below zero; only PEAK is forced. The probe tests additionally serialize behind
+    // catalog_probe_test_lock() in tests/catalog.rs, which also keeps a neighbor's
+    // probes from clobbering a PEAK measurement — this drain is the belt-and-braces
+    // for any future probe user outside that lock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while TEST_CATALOG_PROBES_ACTIVE.load(Ordering::SeqCst) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "catalog probe stragglers did not drain within 10s — a probe thread is leaking"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
     TEST_CATALOG_PROBES_PEAK.store(0, Ordering::SeqCst);
 }
 
@@ -3888,10 +4356,18 @@ fn test_delay_catalog_probe(model: &Value) {
     else {
         return;
     };
-    let active = TEST_CATALOG_PROBES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+    // saturating_add / checked_sub: with the draining reset above, ACTIVE can no longer
+    // underflow — but these keep any future reset-style edit from reintroducing the
+    // wrap-then-panic class (a straggler now parks at 0 instead of poisoning every later
+    // sample with usize::MAX).
+    let active = TEST_CATALOG_PROBES_ACTIVE
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
     TEST_CATALOG_PROBES_PEAK.fetch_max(active, Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(delay_ms));
-    TEST_CATALOG_PROBES_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    let _ = TEST_CATALOG_PROBES_ACTIVE.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+        count.checked_sub(1)
+    });
 }
 
 fn apply_model_catalog_size_fields(
@@ -4028,6 +4504,15 @@ fn apply_model_catalog_entry(
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
     apply_mac_and_mlx_fields(object, data_dir);
+    apply_imported_lora_advertisement(object);
+    // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
+    // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
+    // THIS process may link no engines at all (docker/rust.Dockerfile builds the API without
+    // `backend-candle`, so `Registry::new()` here is empty and a serve-time derivation would report
+    // "nothing supports preview" on every server). Engine-KEYED on purpose — the flag genuinely
+    // diverges by backend and never fully collapses. Additive: a model the generated table does not
+    // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
+    sceneworks_core::preview_support::apply_to_model_entry(object);
     Ok(model)
 }
 
@@ -4083,8 +4568,34 @@ mod model_size_concurrency_tests {
         // macOS gains one over windows/linux for each mac-only entry; sc-8444 added
         // `krea_realtime_14b` (macOS-only — there is no candle Krea Realtime engine), taking it
         // from 81 to 82.
+        //
+        // sc-17627 then declared the three person-vision utilities that were previously job-time
+        // auto-downloads with no catalog entry at all: `sam3_person_segment` (both platforms),
+        // `sam2_person_segment` (macOS-only — `mod person_segment` is `#[cfg(target_os = "macos")]`)
+        // and `person_detector` (one platform-scoped row each, so exactly one survives
+        // `retain_downloads_for_os` per OS). macOS +3 → 85, windows/linux +2 → 82. `real_esrgan`
+        // swapped its repo rather than adding one, so it does not move these counts.
+        //
+        // sc-17632 then declared `seedvr2_upscaler`, the last of that same class: a job-time
+        // auto-download with no catalog entry, fetched TWICE into two `<data_dir>/cache` subtrees.
+        // One download row, no `platforms` scoping (both the image and video SeedVR2 lanes run on
+        // macOS and on the off-Mac candle lane), so every OS gains exactly one: macOS 85 → 86,
+        // windows/linux 82 → 83.
+        //
+        // sc-17634 declared `dwpose_pose_detector`, the LAST of that class and the only one that
+        // was not a Hugging Face download at all (two openmmlab `.zip` bundles, re-hosted at
+        // `SceneWorks/dwpose-onnx` so it can be installed like everything else). One download row
+        // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
+        // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
+        // 83 → 84.
+        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
+        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
+        // each gain its exact pinned download context while macOS keeps the same one.
+        // sc-18481 retired AuraSR from the installable catalog because every production backend
+        // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
+        // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
         for (os, expected_distinct_contexts) in
-            [("macos", 82_usize), ("windows", 80), ("linux", 80)]
+            [("macos", 86_usize), ("windows", 84), ("linux", 84)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -6641,6 +7152,23 @@ mod mlx_tier_probe_tests {
             "a torn DiT-only tier must read incomplete, not installed"
         );
         assert_eq!(a["bf16"], ("missing".into(), "missing".into()));
+        let disk_bytes = |states: &[Value], tier: &str| {
+            states
+                .iter()
+                .find(|state| state["tier"] == tier)
+                .and_then(|state| state["diskSizeBytes"].as_u64())
+        };
+        assert_eq!(
+            disk_bytes(&anima, "q4"),
+            Some(3),
+            "the complete tier reports its DiT, text encoder, and VAE bytes"
+        );
+        assert_eq!(
+            disk_bytes(&anima, "q8"),
+            Some(1),
+            "a torn tier reports the bytes that are actually present"
+        );
+        assert_eq!(disk_bytes(&anima, "bf16"), None);
 
         // A convert family with no bespoke predicate keeps the coarse backbone probe — a DiT-only tier
         // reads installed (byte-identical to the pre-sc-13513 behavior for any non-anima convert family).
@@ -6652,6 +7180,27 @@ mod mlx_tier_probe_tests {
         seed_anima_tier(root, "q8", true);
         let a2 = tier_state_map(&mlx_convert_output_tier_states(root, "anima", "anima_base"));
         assert_eq!(a2["q8"], ("installed".into(), "complete".into()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn convert_output_size_counts_shared_directory_symlinks_once() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tier = tmp.path().join("converted/q4");
+        write_weight(&tier, "diffusion_models", "dit.safetensors");
+        let shared = tmp.path().join("source/text_encoders");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("encoder.safetensors"), b"shared").unwrap();
+        symlink(&shared, tier.join("text_encoders")).unwrap();
+        // A second alias to the same directory must not double-count the same shared component.
+        symlink(&shared, tier.join("text_encoder_alias")).unwrap();
+
+        assert_eq!(
+            converted_tier_loaded_bytes(&tier),
+            Some(1 + b"shared".len() as u64)
+        );
     }
 
     // Full catalog path: a converted convert-at-install model (Anima) emits `mlxTiers` from
@@ -6719,6 +7268,16 @@ mod mlx_tier_probe_tests {
         assert_eq!(states["bf16"], ("installed".into(), "complete".into()));
         assert_eq!(states["q4"], ("installed".into(), "complete".into()));
         assert_eq!(states["q8"], ("missing".into(), "incomplete".into()));
+        let state_rows = object["mlxTierStates"].as_array().unwrap();
+        let disk_bytes = |tier: &str| {
+            state_rows
+                .iter()
+                .find(|state| state["tier"] == tier)
+                .and_then(|state| state["diskSizeBytes"].as_u64())
+        };
+        assert_eq!(disk_bytes("bf16"), Some(3));
+        assert_eq!(disk_bytes("q4"), Some(3));
+        assert_eq!(disk_bytes("q8"), Some(1));
         // Decoupled from the download matrix — the picker must NOT flip `hasVariantMatrix`.
         assert!(object.get("hasVariantMatrix").is_none());
     }
@@ -7132,5 +7691,109 @@ mod variant_delete_tests {
         assert!(!converted.exists());
         assert!(shared.exists());
         assert_eq!(removal.reclaimed_bytes, 300);
+    }
+}
+
+/// Lane-parameterized coverage for the imported-model LoRA advertisement withdrawal.
+///
+/// These drive `apply_imported_lora_advertisement_for_lanes` directly rather than through the
+/// platform-bound wrapper, so BOTH deployment topologies are exercised on every CI platform.
+#[cfg(test)]
+mod imported_lora_advertisement_tests {
+    use super::*;
+
+    fn entry(id: &str, family: &str) -> JsonObject {
+        json!({ "id": id, "type": "image", "family": family })
+            .as_object()
+            .expect("entry object")
+            .clone()
+    }
+
+    fn withdrawn(object: &JsonObject) -> bool {
+        object
+            .get("loraCompatibility")
+            .and_then(|value| value.get("families"))
+            .and_then(Value::as_array)
+            .is_some_and(|families| families.is_empty())
+            && object["loraCompatibility"]["supported"] == json!(false)
+    }
+
+    /// Both native imported Krea 2 single-file loaders take adapters. Neither platform projection
+    /// may withdraw the synthesized family promise now that each scheduler gate can claim it.
+    #[test]
+    fn imported_krea_2_advertisement_survives_on_both_native_lanes() {
+        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
+            let mut object = entry("user_kreamania_variant5", "krea_2");
+            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
+            assert!(
+                object.get("loraCompatibility").is_none(),
+                "{lane} serves imported Krea 2 LoRAs; withdrawing would hide a working surface: \
+                 {object:?}"
+            );
+        }
+    }
+
+    /// Generated Mage-Flow full fine-tunes render plain text-to-image on both native backends, but
+    /// both provider seams reject adapters. Each projection must therefore withdraw only the LoRA
+    /// promise while preserving the now-routable model itself.
+    #[test]
+    fn mage_flow_withdraws_adapters_on_both_native_lanes() {
+        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
+            let mut object = entry("finetune_9f3c", "mage-flow");
+            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
+            assert!(
+                withdrawn(&object),
+                "{lane} renders generated Mage t2i but cannot load adapters: {object:?}"
+            );
+        }
+    }
+
+    /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
+    /// than family. Neither may be touched — this projection only ever removes a promise nothing
+    /// can keep.
+    #[test]
+    fn honest_advertisements_and_builtins_are_never_rewritten() {
+        for (mlx, candle) in [(true, false), (false, true)] {
+            let mut sdxl = entry("community_xl", "sdxl");
+            apply_imported_lora_advertisement_for_lanes(&mut sdxl, mlx, candle);
+            assert!(
+                sdxl.get("loraCompatibility").is_none(),
+                "both fused SDXL loaders accept UNet adapters"
+            );
+
+            let mut builtin = entry("krea_2_turbo", "krea_2");
+            apply_imported_lora_advertisement_for_lanes(&mut builtin, mlx, candle);
+            assert!(
+                builtin.get("loraCompatibility").is_none(),
+                "a builtin routes by id; its shipped manifest row must not be rewritten"
+            );
+        }
+    }
+
+    /// A supported advertisement is byte-preserved, while a real withdrawal changes only the
+    /// adapter verdict and keeps sibling compatibility metadata intact.
+    #[test]
+    fn support_and_withdrawal_preserve_sibling_compatibility_keys() {
+        let compatibility =
+            json!({ "families": ["krea-2"], "supported": true, "types": ["character", "style"] });
+        let mut supported = entry("user_kreamania_variant5", "krea_2");
+        supported.insert("loraCompatibility".to_owned(), compatibility.clone());
+        apply_imported_lora_advertisement_for_lanes(&mut supported, false, true);
+        assert_eq!(
+            supported["loraCompatibility"], compatibility,
+            "Candle's supported Krea adapter family and sibling keys must remain untouched"
+        );
+
+        let mut withdrawn_entry = entry("finetune_9f3c", "mage-flow");
+        withdrawn_entry.insert(
+            "loraCompatibility".to_owned(),
+            json!({ "families": ["mage-flow"], "supported": true, "types": ["character", "style"] }),
+        );
+        apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, false, true);
+        assert!(withdrawn(&withdrawn_entry));
+        assert_eq!(
+            withdrawn_entry["loraCompatibility"]["types"],
+            json!(["character", "style"])
+        );
     }
 }

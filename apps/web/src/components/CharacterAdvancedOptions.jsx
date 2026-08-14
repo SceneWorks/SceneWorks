@@ -38,9 +38,17 @@ export function useCharacterAdvancedOptions(
   model,
   { defaultNegativePrompt = "", identityStructureMode = "single", catalog = [] } = {},
 ) {
+  // Character generation is an image lane. Its catalog axes are opt-out so
+  // legacy entries with no `image` block retain both controls.
+  const supportsGuidance = model?.image?.supportsGuidance !== false;
+  const supportsNegativePrompt = model?.image?.supportsNegativePrompt !== false;
   const ui = model?.ui ?? {};
+  const hideReferenceStrength = Boolean(ui.hideReferenceStrength);
+  const variationStrength = ui.variationStrength ?? null;
   const referenceStrengthDefault =
     typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.8;
+  const trueCfgScaleDefault =
+    typeof variationStrength?.default === "number" ? variationStrength.default : 4.0;
   const identityStructure = ui.identityStructure ?? null;
   // The Identity-structure (controlnetConditioningScale) lock defaults lower for an angle set than
   // for single-image generation (sc-8354): the softer lock sharpens the off-axis views. Track the
@@ -59,6 +67,7 @@ export function useCharacterAdvancedOptions(
 
   const [open, setOpen] = React.useState(false);
   const [ipAdapterScale, setIpAdapterScale] = React.useState(referenceStrengthDefault);
+  const [trueCfgScale, setTrueCfgScale] = React.useState(trueCfgScaleDefault);
   const [controlnetScale, setControlnetScale] = React.useState(identityStructureDefault);
   // Guidance / Steps stay "" = "use the model default"; the placeholder shows the
   // resolved default and the worker reads it off MODEL_TARGETS when unset.
@@ -68,7 +77,9 @@ export function useCharacterAdvancedOptions(
   const [scheduler, setScheduler] = React.useState(schedulerDefaultFromModel(model));
   const [schedulerShift, setSchedulerShift] = React.useState(schedulerShiftDefaultFromModel(model));
   const [seed, setSeed] = React.useState("");
-  const [negativePrompt, setNegativePrompt] = React.useState(defaultNegativePrompt);
+  const [negativePrompt, setNegativePrompt] = React.useState(
+    supportsNegativePrompt ? defaultNegativePrompt : "",
+  );
   // PiD decoder toggle (epic 7840, sc-8372): off = the model's native VAE decode; on emits
   // `advanced.usePid: true`, routing Angles/Poses decode through the optional PiD pixel-diffusion
   // decoder (2K/4K super-resolve). Mirrors the Image Studio toggle. The toggle only renders + emits
@@ -87,6 +98,7 @@ export function useCharacterAdvancedOptions(
   const modelId = model?.id;
   React.useEffect(() => {
     setIpAdapterScale(referenceStrengthDefault);
+    setTrueCfgScale(trueCfgScaleDefault);
     setControlnetScale(identityStructureDefault);
     setSampler(samplerDefaultFromModel(model));
     setScheduler(schedulerDefaultFromModel(model));
@@ -97,15 +109,23 @@ export function useCharacterAdvancedOptions(
   // Re-seed the editable negative prompt with the curated baseline when it changes
   // (e.g. switching character/panel). The user edits from that starting point.
   React.useEffect(() => {
-    setNegativePrompt(defaultNegativePrompt);
-  }, [defaultNegativePrompt]);
+    if (supportsNegativePrompt) {
+      setNegativePrompt(defaultNegativePrompt);
+    }
+  }, [defaultNegativePrompt, supportsNegativePrompt]);
 
   function buildAdvanced(base = {}) {
-    const advanced = { ...base, ipAdapterScale };
+    const advanced = { ...base };
+    if (!hideReferenceStrength) {
+      advanced.ipAdapterScale = ipAdapterScale;
+    }
+    if (variationStrength) {
+      advanced.trueCfgScale = trueCfgScale;
+    }
     if (identityStructure) {
       advanced.controlnetConditioningScale = controlnetScale;
     }
-    if (guidance !== "" && Number.isFinite(Number(guidance))) {
+    if (supportsGuidance && guidance !== "" && Number.isFinite(Number(guidance))) {
       advanced.guidanceScale = Number(guidance);
     }
     if (steps !== "" && Number.isFinite(Number(steps))) {
@@ -139,6 +159,8 @@ export function useCharacterAdvancedOptions(
     setOpen,
     ipAdapterScale,
     setIpAdapterScale,
+    trueCfgScale,
+    setTrueCfgScale,
     controlnetScale,
     setControlnetScale,
     guidance,
@@ -160,8 +182,12 @@ export function useCharacterAdvancedOptions(
     pidTarget,
     setPidTarget,
     showPidToggle,
+    supportsGuidance,
+    supportsNegativePrompt,
     model,
     identityStructure,
+    hideReferenceStrength,
+    variationStrength,
     // Optional label/range override for the primary reference-strength slider (sc-8278: klein maps
     // it to image-guidance over 1.0–2.5). Absent ⇒ the legacy "Reference strength" 0–1 slider.
     referenceStrength: ui.referenceStrength ?? null,
@@ -181,6 +207,8 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
     setOpen,
     ipAdapterScale,
     setIpAdapterScale,
+    trueCfgScale,
+    setTrueCfgScale,
     controlnetScale,
     setControlnetScale,
     guidance,
@@ -202,8 +230,12 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
     pidTarget,
     setPidTarget,
     showPidToggle,
+    supportsGuidance,
+    supportsNegativePrompt,
     model,
     identityStructure,
+    hideReferenceStrength,
+    variationStrength,
     referenceStrength: referenceStrengthCfg,
     samplerOptions,
     schedulerOptions,
@@ -230,19 +262,35 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
     <div className="character-advanced">
       <AdvancedSection hint="cleared values → model default" onToggle={() => setOpen((value) => !value)} open={open}>
         <div className="advanced-panel">
-          <label className="reference-strength">
-            {referenceStrengthCfg?.label ??
-              (identityStructure ? "Identity strength" : "Reference strength")}
-            <input
-              max={referenceStrengthCfg?.max ?? 1}
-              min={referenceStrengthCfg?.min ?? 0}
-              onChange={(event) => setIpAdapterScale(Number(event.target.value))}
-              step={referenceStrengthCfg?.step ?? 0.05}
-              type="range"
-              value={ipAdapterScale}
-            />
-            <span>{ipAdapterScale.toFixed(2)}</span>
-          </label>
+          {hideReferenceStrength ? null : (
+            <label className="reference-strength">
+              {referenceStrengthCfg?.label ??
+                (identityStructure ? "Identity strength" : "Reference strength")}
+              <input
+                max={referenceStrengthCfg?.max ?? 1}
+                min={referenceStrengthCfg?.min ?? 0}
+                onChange={(event) => setIpAdapterScale(Number(event.target.value))}
+                step={referenceStrengthCfg?.step ?? 0.05}
+                type="range"
+                value={ipAdapterScale}
+              />
+              <span>{ipAdapterScale.toFixed(2)}</span>
+            </label>
+          )}
+          {variationStrength ? (
+            <label className="variation-strength">
+              {variationStrength.label ?? "Variation"}
+              <input
+                max={variationStrength.max ?? 10}
+                min={variationStrength.min ?? 1}
+                onChange={(event) => setTrueCfgScale(Number(event.target.value))}
+                step={variationStrength.step ?? 0.5}
+                type="range"
+                value={trueCfgScale}
+              />
+              <span>{trueCfgScale.toFixed(2)}</span>
+            </label>
+          ) : null}
           {identityStructure ? (
             <label className="reference-strength">
               {identityStructure.label ?? "Identity structure"}
@@ -257,18 +305,20 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
               <span>{controlnetScale.toFixed(2)}</span>
             </label>
           ) : null}
-          <label>
-            Guidance
-            <input
-              max="30"
-              min="0"
-              onChange={(event) => setGuidance(event.target.value)}
-              placeholder={guidancePlaceholder}
-              step="0.1"
-              type="number"
-              value={guidance}
-            />
-          </label>
+          {supportsGuidance ? (
+            <label>
+              Guidance
+              <input
+                max="30"
+                min="0"
+                onChange={(event) => setGuidance(event.target.value)}
+                placeholder={guidancePlaceholder}
+                step="0.1"
+                type="number"
+                value={guidance}
+              />
+            </label>
+          ) : null}
           <label>
             Steps
             <input
@@ -326,10 +376,12 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
               value={seed}
             />
           </label>
-          <label className="prompt-field">
-            Negative prompt
-            <textarea onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePrompt} />
-          </label>
+          {supportsNegativePrompt ? (
+            <label className="prompt-field">
+              Negative prompt
+              <textarea onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePrompt} />
+            </label>
+          ) : null}
           {showPidToggle ? (
             <>
               <label

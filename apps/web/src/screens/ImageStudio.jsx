@@ -8,6 +8,7 @@ import { StudioLoraImportPanel } from "../components/StudioLoraImportPanel.jsx";
 import { MultiPhaseEditor } from "../components/MultiPhaseEditor.jsx";
 import {
   buildTurboFinishPhases,
+  deserializePhases,
   modelSupportsMultiPhase,
   multiPhaseIssues as computeMultiPhaseIssues,
   serializePhases,
@@ -17,6 +18,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
@@ -28,6 +30,7 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
+import { promptEnhancementAvailable } from "../promptEnhancement.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
   DEFAULT_SCENE_PROMPT,
@@ -45,7 +48,13 @@ import {
   validateCaption,
 } from "../ideogramCaption.js";
 import { buildImageJobRequest, composeImageJobPrompt } from "../imageJobRequest.js";
-import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
+import {
+  usePoseLibrary,
+  useUserPoseLoader,
+  workflowPoseRecords,
+  poseRecordToPayload,
+  WORKFLOW_POSE_CATEGORY,
+} from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
   "Barista pouring espresso, morning light",
@@ -151,7 +160,8 @@ import {
   tierPickerOptions,
 } from "../quantTier.js";
 import { suggestTier } from "../tierSuggestion.js";
-import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { readLastTier } from "../lastTierStore.js";
 import {
   PROMPT_REFINE_MODEL_ID,
@@ -384,6 +394,7 @@ export function ImageStudio() {
   // assets, the worker disappears").
   const latestAssets = recentImageAssets ?? latestImageAssets;
   const launchRequest = studioLaunch;
+  const nonRecipeLaunchIdRef = useRef(null);
   const trackedLocalJobs = imageLocalJobs;
   const onCancelJob = (job) => jobAction(job, "cancel");
   const onLocalJobCreated = (job) => rememberLocalGenerationJob("image", job);
@@ -496,6 +507,8 @@ export function ImageStudio() {
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
   // (one image per pose) instead of the normal variations count. Transient (not saved).
   const [selectedPoseIds, setSelectedPoseIds] = useState([]);
+  const [workflowPoses, setWorkflowPoses] = useState([]);
+  const [poseLibraryReplayOpen, setPoseLibraryReplayOpen] = useState(false);
   // Strict-control panel (epic 8236, sc-8245). The selected control type (pose / canny / depth),
   // gated to the backbone's `ui.controlModes`. Pose reuses `selectedPoseIds`; canny/depth use a
   // control-image asset + a preprocess-vs-passthrough toggle. `controlScale` (advanced.controlScale)
@@ -565,12 +578,19 @@ export function ImageStudio() {
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
   const loadUserPoses = useUserPoseLoader();
-  const { byId: poseById } = usePoseLibrary({ loadUserPoses });
+  const { byId: poseById } = usePoseLibrary({ loadUserPoses, extraPoses: workflowPoses });
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
   const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only used by the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(saved.upscaleSoftness ?? 0);
+  const [hiresFixEnabled, setHiresFixEnabled] = useState(saved.hiresFixEnabled ?? false);
+  const [hiresFixSteps, setHiresFixSteps] = useState(saved.hiresFixSteps ?? 0);
+  const [hiresFixDenoisingStrength, setHiresFixDenoisingStrength] = useState(
+    saved.hiresFixDenoisingStrength ?? 0.7,
+  );
+  const [hiresFixUpscaleBy, setHiresFixUpscaleBy] = useState(saved.hiresFixUpscaleBy ?? 2);
+  const [hiresFixCfgScale, setHiresFixCfgScale] = useState(saved.hiresFixCfgScale ?? "");
   const [submitting, setSubmitting] = useState(false);
   // Auto-expand state (sc-6501): when a structured model is in plain-text mode, Generate first
   // expands the idea into a JSON caption via magic-prompt. `expanding` drives the button label;
@@ -636,14 +656,16 @@ export function ImageStudio() {
     setUpscaleFactor,
   });
 
-  // PiD decode and Upscale both super-resolve, so they're mutually exclusive in the UI (each
-  // disables the other while active). If a saved/preset state carries both on, drop PiD (keep
-  // Upscale) so neither checkbox is left permanently disabled.
+  // PiD, post-generation Upscale, and Hires.fix are mutually exclusive super-resolution paths.
+  // If restored state carries PiD plus either option, keep the explicit upscale process and drop PiD.
   useEffect(() => {
-    if (usePid && upscaleEnabled) {
+    if (usePid && (upscaleEnabled || hiresFixEnabled)) {
       setUsePid(false);
     }
-  }, [usePid, upscaleEnabled, setUsePid]);
+    if (upscaleEnabled && hiresFixEnabled) {
+      setUpscaleEnabled(false);
+    }
+  }, [usePid, upscaleEnabled, hiresFixEnabled, setUsePid]);
 
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
@@ -658,8 +680,21 @@ export function ImageStudio() {
     if (launchRequest.recipe) {
       return;
     }
+    const freshLaunch = nonRecipeLaunchIdRef.current !== launchRequest.id;
+    nonRecipeLaunchIdRef.current = launchRequest.id;
+    if (freshLaunch) {
+      // A fresh non-recipe launch is a new intent entering this keep-alive studio. Workflow pose
+      // records belong to the recipe launch that created them; carrying them into a character/edit
+      // launch would silently submit advanced.poses (and its face-restoration opt-in) from the last
+      // workflow. The id guard prevents an equivalent context-object rerender from clearing poses
+      // the user picked while editing this same launch.
+      setSelectedPoseIds([]);
+      setWorkflowPoses([]);
+      setPoseLibraryReplayOpen(false);
+      setFaceRestore(false);
+    }
     if (launchRequest.characterId) {
-      setMode(launchRequest.mode ?? "character_image");
+      setMode(normalizeImageMode(launchRequest.mode ?? "character_image"));
       setCharacterId(launchRequest.characterId);
       setCharacterLookId(launchRequest.lookId ?? "");
       if (launchRequest.referenceAssetId) {
@@ -670,7 +705,7 @@ export function ImageStudio() {
     if (launchRequest.assetId !== selectedAsset?.id) {
       return;
     }
-    setMode(launchRequest.mode);
+    setMode(normalizeImageMode(launchRequest.mode));
     // Preselect the family-matched edit model resolved at launch time (App.jsx). It's
     // edit-capable by construction, so the availableModels snap-to-first effect leaves
     // it in place; when absent the snap falls back to the default edit model.
@@ -818,7 +853,7 @@ export function ImageStudio() {
       ? selectedPoseIds
           .map((id) => poseById[id])
           .filter(Boolean)
-          .map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
+          .map(poseRecordToPayload)
       : [];
   const controlActive = showControlPanel && Boolean(activeControlMode);
   const controlIsImageMode = controlActive && activeControlMode !== "pose";
@@ -839,7 +874,6 @@ export function ImageStudio() {
     setBatchConfirmPending(false);
   }, [batchTotal, setBatchConfirmPending]);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
-  const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
   const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
@@ -860,10 +894,26 @@ export function ImageStudio() {
   // default), so a small model (SANA-Sprint) defaults to bf16 and a heavy one on a small Mac to what
   // fits — instead of a flat q8. `null` memory (probe pending / unavailable) leans to the highest tier;
   // the worker's capability downtier (sc-10733) still clamps a non-explicit pick to what actually fits.
-  const unifiedMemoryGb = useUnifiedMemoryGb();
+  const hostMemory = useHostMemory();
+  const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  // Route-aware prompt enhancement: both native FLUX.2-dev base/edit providers implement it, while
+  // Candle's unsupported character/reference aliases, Klein, an unknown backend, and the separate
+  // strict-control provider fail closed. `posePayload` is the strict-pose route even when the control
+  // panel itself is not open (character recipe replay).
+  const promptEnhanceStrictControlActive =
+    posePayload.length > 0 ||
+    (controlActive && activeControlMode !== "pose") ||
+    Boolean(controlPassthroughId || controlOverlayId);
+  const promptEnhance = promptEnhancementAvailable({
+    model: selectedModel,
+    backend: activeBackend,
+    mode,
+    strictControlActive: promptEnhanceStrictControlActive,
+  });
+  const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
-    () => suggestTier(selectedModel, unifiedMemoryGb),
-    [selectedModel, unifiedMemoryGb],
+    () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
+    [selectedModel, unifiedMemoryGb, activeBackend],
   );
   const { quantTier, tierSwitching, handleTierChange } = useQuantTierPicker({
     screen: TIER_SCREEN,
@@ -1021,6 +1071,8 @@ export function ImageStudio() {
     setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
     setViewAngle("");
     setSelectedPoseIds([]);
+    setWorkflowPoses([]);
+    setPoseLibraryReplayOpen(false);
     // Re-gate the strict-control panel to the new backbone: snap the control type to a supported mode
     // (an unsupported pick — e.g. canny on a pose-only backbone — resets to the first supported one),
     // reset the control-scale to the model's manifest default, and clear a stale control image.
@@ -1113,7 +1165,15 @@ export function ImageStudio() {
     if (!seedsNegativeInMode(mode) || negativePrompt !== "") {
       return;
     }
-    const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
+    const entry = imageModels.find((item) => item.id === model);
+    // An engine with no negative-prompt axis (sc-15299) never gets one seeded: the box is hidden
+    // for it and the value is not sent, so seeding would only plant a ghost the user cannot see.
+    // Read off the entry rather than the `supportsNegativePrompt` const below — that binding is
+    // declared later in this component body, so touching it from a dep array would be a TDZ hit.
+    if (entry?.image?.supportsNegativePrompt === false) {
+      return;
+    }
+    const ui = entry?.ui ?? {};
     if (typeof ui.defaultNegativePrompt === "string" && ui.defaultNegativePrompt) {
       setNegativePrompt(ui.defaultNegativePrompt);
     }
@@ -1143,12 +1203,14 @@ export function ImageStudio() {
     const declared = selectedModel?.limits?.resolutions?.length
       ? selectedModel.limits.resolutions
       : DEFAULT_RESOLUTION_OPTIONS;
-    const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
-    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, { backend });
+    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
+      backend: activeBackend,
+      tier: quantTier,
+    });
     // Never collapse to an empty picker: if the gate somehow trims everything (it never trims
     // ≤1536², so this is defensive), fall back to the declared list.
     return gated.length > 0 ? gated : declared;
-  }, [selectedModel, unifiedMemoryGb, macCapabilities]);
+  }, [selectedModel, unifiedMemoryGb, activeBackend, quantTier]);
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
   // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000
@@ -1164,10 +1226,12 @@ export function ImageStudio() {
     },
     [resolutionOptions],
   );
-  // The snap key both this screen and the describe picker dedupe on — the model's DECLARED option
-  // universe, deliberately not the memory-gated `resolutionOptions` above. See
-  // resolutionUniverseKey for why the gated list is the wrong input and why a value, not an
-  // identity, is required.
+  // The reference snap's dedupe key, shared with the describe picker. It names which model's option
+  // UNIVERSE we are in — deliberately the DECLARED buckets, not the memory-gated `resolutionOptions`
+  // above. The gate also varies with the picked quant tier (sc-16020), and a tier switch re-snapping
+  // over the user's Aspect is the very clobber sc-18255 fixes. If the gate ever trims the selected
+  // bucket, the validity effect below re-picks it. A VALUE, not an identity: `selectedModel`'s
+  // identity churns on every model-catalog refetch (see useReferenceAspectSnap).
   const resolutionSnapKey = useMemo(
     () => resolutionUniverseKey(selectedModel, DEFAULT_RESOLUTION_OPTIONS),
     [selectedModel],
@@ -1192,7 +1256,6 @@ export function ImageStudio() {
   // override on the Windows/Linux candle build (e.g. Lens exposes the curated menu
   // only on candle; SDXL only on MLX). The advanced panel hides the dropdowns when
   // the menu has fewer than 2 options (epic 1753 §7.4).
-  const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
   const samplerOptions = useMemo(
     () => samplerOptionsFromModel(selectedModel, activeBackend),
     [selectedModel, activeBackend],
@@ -1208,6 +1271,68 @@ export function ImageStudio() {
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
   const showGuidanceMethodPicker = guidanceMethodOptions.length > 1;
+  // Which generation axes the selected engine actually has, declared in the manifest `image`
+  // sub-block (sc-15299) — the image-lane sibling of the `video` block sc-8445 added for Krea
+  // Realtime, and of `audio.supportsGuidance` / `audio.supportsNegativePrompt`. Neither an id check
+  // nor an engine link: the catalog says it, mirroring the engine descriptor's own
+  // `Capabilities { supports_guidance, supports_negative_prompt }` that the worker's
+  // `resolve_guidance` / `resolve_negative_prompt` already gate on (image_jobs/base.rs) — a
+  // guidance-distilled engine drops both on the floor, so offering them is a knob that does nothing.
+  //
+  // ⚠️ ABSENT MEANS TRUE, the same polarity as `video` and the OPPOSITE of `audio`. Most image
+  // engines take both a CFG scale and a negative prompt and declare nothing, so `!== false` is what
+  // keeps them byte-identical to their pre-sc-15299 behaviour; only an engine that genuinely lacks
+  // the axis declares it false.
+  //
+  // HIDDEN, not disabled: the Wan Lightning precedent in Video Studio DISABLES Steps/Guidance
+  // because that inertness is TRANSIENT (turn Lightning off and the control works again). A missing
+  // axis is permanent for the model, so a forever-dead input is just clutter — Audio Studio hides
+  // these two for the same reason (`showGuidance` / `showNegative`).
+  const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
+  const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  const hiresFixModelCapable = Boolean(
+    supportsImg2img || selectedModel?.family === "sdxl",
+  );
+  const hiresFixAccelerationBlocked =
+    model === "realvisxl_lightning" || ["lightning", "lcm", "hyper"].includes(sampler);
+  const hiresFixInputBlocked =
+    Boolean(img2imgReferenceAssetId) ||
+    posePayload.length > 0 ||
+    Boolean(controlPreprocessSourceId) ||
+    Boolean(controlPassthroughId) ||
+    (multiPhaseEnabled && modelSupportsMultiPhase(selectedModel));
+  const hiresFixAvailable =
+    mode === "text_to_image" && hiresFixModelCapable && !hiresFixAccelerationBlocked;
+  const hiresFixDisabled =
+    !hiresFixAvailable || usePid || hiresFixInputBlocked;
+  const hiresFixDisabledReason = !hiresFixModelCapable
+    ? "The selected model does not support the img2img second pass required by Hires.fix."
+    : mode !== "text_to_image"
+      ? "Hires.fix is only available for text-to-image generation."
+      : hiresFixAccelerationBlocked
+        ? "Lightning, LCM, and Hyper samplers do not accept the required img2img second pass."
+        : usePid
+          ? "Disable PiD before enabling Hires.fix."
+          : hiresFixInputBlocked
+            ? "Remove the starting image, strict control, or multi-phase denoise before enabling Hires.fix."
+            : undefined;
+  useEffect(() => {
+    // Keep restored state while the model catalog is still loading. Once the selected model is
+    // resolved, incompatible modes/samplers/inputs turn the option off instead of submitting a
+    // payload the worker must reject.
+    if (
+      hiresFixEnabled &&
+      selectedModel &&
+      (!hiresFixAvailable || hiresFixInputBlocked)
+    ) {
+      setHiresFixEnabled(false);
+    }
+  }, [
+    hiresFixEnabled,
+    selectedModel,
+    hiresFixAvailable,
+    hiresFixInputBlocked,
+  ]);
   const advancedDefaultsModel = useRef(model);
   const skipAdvancedDefaultsReset = useRef(false);
   useEffect(() => {
@@ -1274,6 +1399,14 @@ export function ImageStudio() {
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
     );
   }, [guidanceMethodOptions, guidanceMethod, selectedModel]);
+  // A sticky or replayed `true` must not survive a route change that hides the control. This keeps
+  // visible state, persisted state, and the submit-time gate aligned instead of silently carrying an
+  // old request into a backend/model that will reject it.
+  useEffect(() => {
+    if (!promptEnhance && enhancePrompt) {
+      setEnhancePrompt(false);
+    }
+  }, [enhancePrompt, promptEnhance]);
   // Keep the selected resolution valid for the current model's buckets. Switching
   // to a model whose options exclude the current value snaps to its default (or
   // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
@@ -1483,7 +1616,10 @@ export function ImageStudio() {
     const resolutionFromRecipe = recipeResolution(recipe);
     const { loraIds, loraWeights: loraWeightMap } = recipeLoraSelection(recipe);
 
-    skipReferenceTuningReset.current = true;
+    // Arm the model-change reset skip only when this recipe actually changes the model. A
+    // same-model recipe never triggers that effect; leaving `true` behind would make the NEXT
+    // manual model switch consume a stale skip and retain this recipe's transient pose records.
+    skipReferenceTuningReset.current = Boolean(recipe.model && recipe.model !== model);
     // A recipe injects its own reference tuning below (setIpAdapterScale/…), so disarm the
     // fresh-mount declared-defaults resolver (sc-12034) — it must not overwrite the recipe values
     // once the catalog resolves, even on a late-catalog mount where `skip*` was already consumed.
@@ -1557,11 +1693,69 @@ export function ImageStudio() {
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
     setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
+    // sc-15952: the reference images the user supplied in the shared-workflow panel. Guarded on
+    // presence rather than assigned unconditionally — a recorded recipe carries no
+    // `referenceAssetIds`, and clearing the multi-reference picker on every "Use this recipe"
+    // would drop a selection the user had already made.
+    if (Array.isArray(rawSettings.referenceAssetIds) && rawSettings.referenceAssetIds.length) {
+      setReferenceAssetIds(rawSettings.referenceAssetIds.filter(Boolean));
+    }
     setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
     setTrueCfgScale(rawSettings.trueCfgScale ?? settings.trueCfgScale ?? trueCfgScale);
     setViewAngle(rawSettings.viewAngle ?? settings.viewAngle ?? "");
-    setSelectedPoseIds([]);
+    // The rest of the allow-listed knobs (sc-15951). Every one of these travels in a shared
+    // image's envelope AND is recorded on a generated asset's recipe, so leaving them out made
+    // both replay paths quietly produce a different image — the recipe said "PiD decoder on,
+    // control strength 0.9" and the studio rendered with neither.
+    //
+    // ORDERING. `setControlMode` / `setControlScale` / `setTextStyleGain` are also written by the
+    // model-change reset above (and by its late-catalog twin), which `setModel` a few lines up
+    // will trigger on the NEXT commit. Both are disarmed for this path by the `skip*` /
+    // `referenceTuningDeclaredArmed` flags set at the top of this effect, which is what lets the
+    // assignments here stand — see the ordering test in `ImageStudio.recipeKnobs.test.jsx`, which
+    // replays a control recipe onto a DIFFERENT model and asserts the recipe's values survive the
+    // reset rather than the model's defaults.
+    //
+    // The booleans hydrate from `=== true` rather than falling back to their sticky values: each
+    // is emitted by `buildImageJobAdvanced` only when it is ON, so an absent key means the run had
+    // it off, and inheriting the user's current toggle would replay someone else's recipe with a
+    // decoder they never used. The numbers keep the current value when absent, matching the
+    // tuning knobs above.
+    //
+    // `replayNumber` keeps the current value for an ABSENT knob rather than for a zero one:
+    // `finiteRecipeNumber(null)` is 0 (`Number(null) === 0`), so reading these through it alone
+    // would turn "the run recorded nothing" into "the run recorded zero" — a 0.0 control strength
+    // is a real, very different setting.
+    const replayNumber = (value, fallback) =>
+      value === null || value === undefined || value === ""
+        ? fallback
+        : (finiteRecipeNumber(value) ?? fallback);
+    setEnhancePrompt(rawSettings.enhancePrompt === true);
+    setUsePid(rawSettings.usePid === true);
+    setPidTarget(rawSettings.pidTarget === "2k" ? "2k" : "4k");
+    setFaceRestore(rawSettings.faceRestore === true);
+    setImg2imgStrength(replayNumber(rawSettings.strength, img2imgStrength));
+    setTextStyleGain(replayNumber(rawSettings.textStyleGain, textStyleGain));
+    const replayPoses = workflowPoseRecords(rawSettings.poses, launchRequest.id);
+    setWorkflowPoses(replayPoses);
+    setSelectedPoseIds(replayPoses.map((pose) => pose.id));
+    setPoseLibraryReplayOpen(replayPoses.length > 0);
+    if (replayPoses.length) {
+      // A shared pose selection is strict pose conditioning even when controlMode was omitted
+      // (pose is the worker default). Never strand replayed poses behind canny or depth.
+      setControlMode("pose");
+    } else if (rawSettings.controlMode) {
+      setControlMode(rawSettings.controlMode);
+    }
+    setControlScale(replayNumber(rawSettings.controlScale, controlScale));
+    // Multi-phase denoise (epic 13879 S5). The recorded list is index-keyed against the job's own
+    // LoRA stack; the editor is id-keyed, so `deserializePhases` resolves it against the ids this
+    // launch is selecting in the very same commit. Absent → the editor is cleared AND switched
+    // off, because a stale schedule left enabled would silently re-shape the next render.
+    const restoredPhases = deserializePhases(rawSettings.phases ?? [], loraIds);
+    setMultiPhasePhases(restoredPhases);
+    setMultiPhaseEnabled(restoredPhases.length > 0);
     if (nextMode === "edit_image") {
       setSourceAssetId(launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");
       setFitMode(rawSettings.fitMode ?? settings.fitMode ?? "crop");
@@ -1577,6 +1771,12 @@ export function ImageStudio() {
     if (typeof upscale?.softness === "number") {
       setUpscaleSoftness(upscale.softness);
     }
+    const hiresFix = launchRequest.hiresFix ?? rawSettings.hiresFix ?? settings.hiresFix;
+    setHiresFixEnabled(Boolean(hiresFix?.enabled));
+    setHiresFixSteps(hiresFix?.steps ?? 0);
+    setHiresFixDenoisingStrength(hiresFix?.denoisingStrength ?? 0.7);
+    setHiresFixUpscaleBy(hiresFix?.upscaleBy ?? 2);
+    setHiresFixCfgScale(hiresFix?.cfgScale ?? "");
   // The launch id owns this one-shot hydration. Including the local values this
   // effect sets would replay a launch while applying that launch.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1599,6 +1799,13 @@ export function ImageStudio() {
   const { width, height, invalid: dimensionsInvalid } = dimensionEval;
   // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
   const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
+  const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
+  const hiresFixTargetInvalid =
+    hiresFixEnabled && (hiresFixTargetWidth > 4096 || hiresFixTargetHeight > 4096);
+  const hiresFixTargetMessage = hiresFixTargetInvalid
+    ? `Hires.fix target ${hiresFixTargetWidth}×${hiresFixTargetHeight} exceeds the 4096px image limit.`
+    : "";
 
   // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
   // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
@@ -1749,6 +1956,11 @@ export function ImageStudio() {
       ["upscaleFactor", setUpscaleFactor],
       ["upscaleEngine", setUpscaleEngine],
       ["upscaleSoftness", setUpscaleSoftness],
+      ["hiresFixEnabled", setHiresFixEnabled],
+      ["hiresFixSteps", setHiresFixSteps],
+      ["hiresFixDenoisingStrength", setHiresFixDenoisingStrength],
+      ["hiresFixUpscaleBy", setHiresFixUpscaleBy],
+      ["hiresFixCfgScale", setHiresFixCfgScale],
     ],
     // Restore the saved sub-mode ("type"). Edit presets only surface in edit mode, so
     // this only ever flips between text/character within one workflow.
@@ -1772,11 +1984,15 @@ export function ImageStudio() {
     },
     buildDefaults: () => ({
       prompt,
-      negativePrompt,
+      // Same axis gate as the job payload (sc-15299): a preset saved on an engine with no
+      // negative-prompt / guidance axis must not bank a value the studio never showed and the
+      // worker never reads — applying that preset later on a guidance-taking model would
+      // resurrect a "negative prompt" the user never typed there.
+      negativePrompt: supportsNegativePrompt ? negativePrompt : "",
       resolution,
       count,
       mode,
-      guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      guidanceScale: supportsGuidance ? finiteNumberOrUndefined(guidanceOverride) : undefined,
       steps: finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
@@ -1786,6 +2002,11 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      hiresFixEnabled,
+      hiresFixSteps,
+      hiresFixDenoisingStrength,
+      hiresFixUpscaleBy,
+      hiresFixCfgScale,
       // Reference/identity knobs only matter for the character flow; keep them
       // out of plain text/edit presets so they don't carry irrelevant state.
       ...(mode === "character_image"
@@ -1819,6 +2040,11 @@ export function ImageStudio() {
     upscaleFactor,
     upscaleEngine,
     upscaleSoftness,
+    hiresFixEnabled,
+    hiresFixSteps,
+    hiresFixDenoisingStrength,
+    hiresFixUpscaleBy,
+    hiresFixCfgScale,
     selectedLoraIds,
     loraWeights,
     // Krea 2 multi-phase denoise (sc-13885): persist the editor toggle, phase list, and disclosure
@@ -1887,8 +2113,12 @@ export function ImageStudio() {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
       return;
     }
-    if (dimensionsInvalid) {
-      setSubmitError(dimensionError ?? "Width and height must each be between 256 and 4096.");
+    if (dimensionsInvalid || hiresFixTargetInvalid) {
+      setSubmitError(
+        hiresFixTargetMessage ||
+          dimensionError ||
+          "Width and height must each be between 256 and 4096.",
+      );
       return;
     }
     setSubmitting(true);
@@ -2019,7 +2249,15 @@ export function ImageStudio() {
       // Shared studio settings (identical for both paths).
       resolution,
       mode,
-      negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
+      // An engine with no negative-prompt axis (sc-15299) gets an empty one rather than whatever a
+      // preset stack composed or a replayed recipe restored — the field is hidden for it, so
+      // sending text the user cannot see or edit (and the worker's `resolve_negative_prompt`
+      // discards anyway) would be a ghost input recorded on this job's recipe.
+      negativePrompt: supportsNegativePrompt
+        ? stackActive
+          ? composedStack.negativePrompt
+          : negativePrompt
+        : "",
       model,
       count: stackActive && composedStack.count != null ? composedStack.count : count,
       seed,
@@ -2054,11 +2292,21 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      hiresFixEnabled,
+      hiresFixSteps,
+      hiresFixDenoisingStrength,
+      hiresFixUpscaleBy,
+      hiresFixCfgScale: supportsGuidance ? hiresFixCfgScale : "",
       sampler,
       scheduler,
       schedulerShift,
       stepsOverride,
-      guidanceOverride,
+      // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
+      // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
+      // omitted entirely. The model-switch reset already clears it in the ordinary case, but a
+      // replayed recipe (and a preset launch) restores model + guidance together with that reset
+      // suppressed — which is the path that really leaks a stale scale onto a CFG-free engine.
+      guidanceOverride: supportsGuidance ? guidanceOverride : "",
       guidanceMethod,
       flashAttn,
       promptEnhance,
@@ -2151,8 +2399,12 @@ export function ImageStudio() {
       setBatchConfirmPending(false);
       return;
     }
-    if (dimensionsInvalid) {
-      setBatchError(dimensionError ?? "Width and height must each be between 256 and 4096.");
+    if (dimensionsInvalid || hiresFixTargetInvalid) {
+      setBatchError(
+        hiresFixTargetMessage ||
+          dimensionError ||
+          "Width and height must each be between 256 and 4096.",
+      );
       return;
     }
     setBatchError("");
@@ -2599,8 +2851,13 @@ export function ImageStudio() {
           ) : null}
 
           {/* Scene suggestions sit directly under the prompt (UI-refinement 4a). Free-text
-              prompts only; structured models get the builder + (later) magic-prompt. */}
-          {structuredPromptModel ? null : (
+              prompts only; structured models get the builder + (later) magic-prompt.
+              Edit mode swaps them for the built-in edit instructions: a scene description
+              ("Fox watching from the edge of a snowy forest") is not an instruction, so the
+              generation pills are actively misleading on the Edit tab. */}
+          {structuredPromptModel ? null : mode === "edit_image" ? (
+            <EditPromptTemplates onApply={setPromptFromUser} variant="studio" />
+          ) : (
             <div className="suggestion-row">
               <span className="suggestion-row-label">Try:</span>
               {suggestions.map((suggestion) => (
@@ -3025,11 +3282,16 @@ export function ImageStudio() {
                       {poseLibrary && macPoseBlock ? (
                         <p className="mac-gating-note">{macPoseBlock.text}</p>
                       ) : poseLibrary ? (
-                        <details className="pose-library-details">
+                        <details
+                          className="pose-library-details"
+                          onToggle={(event) => setPoseLibraryReplayOpen(event.currentTarget.open)}
+                          open={poseLibraryReplayOpen || undefined}
+                        >
                           <summary>
                             Pose library{selectedPoseIds.length ? ` · ${selectedPoseIds.length} selected` : ""}
                           </summary>
                           <PoseLibraryPicker
+                            extraPoses={workflowPoses}
                             loadUserPoses={loadUserPoses}
                             onClear={() => setSelectedPoseIds([])}
                             onToggle={(id) =>
@@ -3038,6 +3300,7 @@ export function ImageStudio() {
                               )
                             }
                             selectedIds={selectedPoseIds}
+                            preferredCategory={workflowPoses.length ? WORKFLOW_POSE_CATEGORY : null}
                           />
                           <label className="checkline">
                             <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
@@ -3198,10 +3461,14 @@ export function ImageStudio() {
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
+          {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-15299), the
+              same way VideoStudio does it: the submit path blanks the composed negative for a
+              CFG-free engine, so previewing "+ negative prompt" would advertise a contribution
+              this job will not make. */}
           <PresetStackPreview
             generalStack={generalStack}
             composed={composedStack}
-            stackAddsNegative={stackAddsNegative}
+            stackAddsNegative={supportsNegativePrompt && stackAddsNegative}
             stackAddsCount={stackAddsCount}
           />
 
@@ -3225,6 +3492,10 @@ export function ImageStudio() {
               }
               onClearPoses={() => setSelectedPoseIds([])}
               loadUserPoses={loadUserPoses}
+              extraPoses={workflowPoses}
+              preferredPoseCategory={workflowPoses.length ? WORKFLOW_POSE_CATEGORY : null}
+              revealPoseLibraryToken={workflowPoses.length ? launchRequest?.id : null}
+              poseReplayOpen={poseLibraryReplayOpen}
               poseBlockText={macPoseBlock ? macPoseBlock.text : null}
               controlImageAssetId={controlImageAssetId}
               onControlImageChange={setControlImageAssetId}
@@ -3335,21 +3606,23 @@ export function ImageStudio() {
                   value={stepsOverride}
                 />
               </label>
-              <label>
-                Guidance
-                <input
-                  min="0"
-                  max="30"
-                  onChange={(event) => setGuidanceOverride(event.target.value)}
-                  placeholder={(() => {
-                    const value = guidanceDefaultFromModel(selectedModel);
-                    return value == null ? "" : String(value);
-                  })()}
-                  step="0.1"
-                  type="number"
-                  value={guidanceOverride}
-                />
-              </label>
+              {supportsGuidance ? (
+                <label>
+                  Guidance
+                  <input
+                    min="0"
+                    max="30"
+                    onChange={(event) => setGuidanceOverride(event.target.value)}
+                    placeholder={(() => {
+                      const value = guidanceDefaultFromModel(selectedModel);
+                      return value == null ? "" : String(value);
+                    })()}
+                    step="0.1"
+                    type="number"
+                    value={guidanceOverride}
+                  />
+                </label>
+              ) : null}
               {supportsTextStyle ? (
                 <label className="text-style-gain">
                   {textStyleGainConfig?.label ?? "Text style"}
@@ -3399,7 +3672,7 @@ export function ImageStudio() {
               {promptEnhance ? (
                 <label
                   className="checkline prompt-enhance-toggle"
-                  title="Have FLUX.2-dev's built-in LLM rewrite (upsample) your prompt before generating — text-only for new images, and reference-aware when editing. Distinct from the Refine button; off by default."
+                  title="Have FLUX.2-dev's native prompt enhancer rewrite your prompt before generating. If enhancement safely falls back, the saved recipe records that the original prompt ran. Distinct from Refine; off by default."
                 >
                   <input
                     checked={enhancePrompt}
@@ -3430,7 +3703,7 @@ export function ImageStudio() {
                   >
                     <input
                       checked={usePid}
-                      disabled={upscaleEnabled}
+                      disabled={upscaleEnabled || hiresFixEnabled}
                       onChange={(event) => setUsePid(event.target.checked)}
                       type="checkbox"
                     />
@@ -3465,7 +3738,13 @@ export function ImageStudio() {
                 <input
                   checked={upscaleEnabled}
                   disabled={usePid}
-                  onChange={(event) => setUpscaleEnabled(event.target.checked)}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setUpscaleEnabled(enabled);
+                    if (enabled) {
+                      setHiresFixEnabled(false);
+                    }
+                  }}
                   type="checkbox"
                 />
                 Upscale
@@ -3506,10 +3785,102 @@ export function ImageStudio() {
                   <span>{upscaleSoftness.toFixed(2)}</span>
                 </label>
               ) : null}
-              <label className="prompt-field">
-                Negative prompt
-                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+              <label
+                className="checkline hires-fix-toggle"
+                title={hiresFixDisabledReason}
+              >
+                <input
+                  checked={hiresFixEnabled}
+                  disabled={hiresFixDisabled}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setHiresFixEnabled(enabled);
+                    if (enabled) {
+                      setUpscaleEnabled(false);
+                    }
+                  }}
+                  type="checkbox"
+                />
+                Hires.fix
               </label>
+              {hiresFixEnabled ? (
+                <>
+                  <label title="0 inherits the first-pass step count.">
+                    Hires Steps
+                    <input
+                      aria-label="Hires Steps"
+                      max="150"
+                      min="0"
+                      onChange={(event) => setHiresFixSteps(Number(event.target.value))}
+                      step="1"
+                      type="number"
+                      value={hiresFixSteps}
+                    />
+                  </label>
+                  <label title="How strongly the high-resolution pass may redraw the upscaled first pass.">
+                    Denoising Strength
+                    <input
+                      aria-label="Hires Denoising Strength"
+                      max="1"
+                      min="0"
+                      onChange={(event) =>
+                        setHiresFixDenoisingStrength(Number(event.target.value))
+                      }
+                      step="0.05"
+                      type="range"
+                      value={hiresFixDenoisingStrength}
+                    />
+                    <span>{hiresFixDenoisingStrength.toFixed(2)}</span>
+                  </label>
+                  <label>
+                    Upscale by
+                    <select
+                      aria-label="Hires Upscale by"
+                      onChange={(event) => setHiresFixUpscaleBy(Number(event.target.value))}
+                      value={hiresFixUpscaleBy}
+                    >
+                      {[1.25, 1.5, 1.75, 2, 2.5, 3, 4].map((factor) => (
+                        <option key={factor} value={factor}>
+                          {factor}x
+                        </option>
+                      ))}
+                    </select>
+                    <span
+                      className="field-hint"
+                      role={hiresFixTargetInvalid ? "alert" : undefined}
+                    >
+                      Output {hiresFixTargetWidth}×{hiresFixTargetHeight}
+                      {hiresFixTargetInvalid ? " · exceeds 4096px limit" : ""}
+                    </span>
+                  </label>
+                  <label
+                    title={
+                      supportsGuidance
+                        ? "Blank inherits the first-pass CFG scale."
+                        : "This model does not use CFG."
+                    }
+                  >
+                    Hires CFG Scale
+                    <input
+                      aria-label="Hires CFG Scale"
+                      disabled={!supportsGuidance}
+                      max="60"
+                      min="0"
+                      onChange={(event) => setHiresFixCfgScale(event.target.value)}
+                      placeholder="Inherit"
+                      step="0.1"
+                      type="number"
+                      value={supportsGuidance ? hiresFixCfgScale : ""}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {supportsNegativePrompt ? (
+                <label className="prompt-field">
+                  Negative prompt
+                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                </label>
+              ) : null}
             </div>
           </AdvancedSection>
 

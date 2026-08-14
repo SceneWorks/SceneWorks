@@ -34,6 +34,10 @@
         margin: 0 0 1.25rem;
         color: #9aa1ad;
         min-height: 1.4em;
+        /* Preflight failures are multi-paragraph: an actionable remedy, a blank line, then the
+           underlying driver error (sc-16247). Without pre-wrap the blank line collapses and the
+           whole thing renders as one unreadable run-on sentence. */
+        white-space: pre-wrap;
       }
       #status.error {
         color: #ff8888;

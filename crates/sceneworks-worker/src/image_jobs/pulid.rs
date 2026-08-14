@@ -20,6 +20,12 @@
 
 /// SceneWorks model id for native PuLID-FLUX (FLUX.1-dev backbone + PuLID injection).
 const PULID_MODEL: &str = "pulid_flux_dev";
+
+/// Pure production-routing seam for callers that must distinguish PuLID's identity-conditioned
+/// request/load path from the generic `MODEL_TABLE` image path.
+pub(crate) fn is_pulid_flux_model(model: &str) -> bool {
+    model == PULID_MODEL
+}
 /// The mlx-gen registry id the worker loads through `crate::inference_runtime::load`.
 const PULID_ENGINE_ID: &str = "pulid_flux";
 /// FLUX.1-dev backbone repo for the MLX path (sc-9947): the SAME ungated `SceneWorks/flux1-dev-mlx`
@@ -108,7 +114,7 @@ fn resolve_pulid_flux_base(
 /// `jobs_store::pulid_flux_mlx_eligible` so the router and worker agree (and mirrors the shape of
 /// `instantid_available`). PuLID-FLUX is text-to-image-with-a-face only — no `edit_image`.
 fn pulid_flux_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model == PULID_MODEL
+    is_pulid_flux_model(&request.model)
         && request.mode == "character_image"
         && non_empty(&request.reference_asset_id)
         && matches!(resolve_pulid_flux_base(request, settings), Ok(Some(_)))
@@ -411,7 +417,7 @@ async fn generate_pulid_flux_stream(
                 }
                 _ => None,
             };
-            drive_gen_items_scored(tx, seeds, move |_index, seed, on_progress| {
+            drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -435,6 +441,7 @@ async fn generate_pulid_flux_stream(
                         image: reference.clone(),
                         strength: Some(id_weight),
                     }],
+                    preview,
                     cancel: cancel.clone(),
                     ..Default::default()
                 };

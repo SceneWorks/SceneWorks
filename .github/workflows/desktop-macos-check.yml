@@ -1,0 +1,138 @@
+name: Desktop (macOS typecheck)
+
+# The macOS mirror of desktop-linux-check.yml, added by sc-17026.
+#
+# Until this existed, the macOS branches of apps/desktop were compiled by NO automatic
+# lane, even though macOS is a SHIPPED desktop platform. The crate names
+# `target_os = "macos"` on 73 lines (39 asserting it, 34 negating it), so both the
+# macOS-only code and the "everything except macOS" fallbacks were unverified on a Mac.
+# Three facts combined:
+#
+#   * apps/desktop is excluded from the workspace `default-members` (it needs the
+#     Tauri stack), so neither the Linux `parity` lane nor macos-mlx.yml touches it;
+#   * desktop-windows.yml compiles it on Windows and desktop-linux-check.yml on
+#     Linux, so only the macOS branches were dark;
+#   * release.yml DOES build the Mac .app on the self-hosted `nax` box, but it is
+#     `push: tags` / workflow_dispatch only — a tag build is far too late to learn
+#     that a macOS-only desktop symbol never compiled.
+#
+# That is exactly the sc-17007 failure class: a platform-conditional symbol that no
+# lane compiles in its shipping configuration surfaces on a developer's machine
+# instead of in review.
+#
+# ## Why a hosted runner, not the self-hosted `nax` box
+#
+# apps/desktop depends on sceneworks-core and Tauri — NOT on sceneworks-worker, and
+# so not on mlx-gen. It needs neither the MLX-from-source build nor the macOS 26.2
+# deployment target that macos-mlx.yml and release.yml exist to provide. Running it
+# on a hosted image keeps the sole `nax` runner free; that box serializes main-push
+# runs and a wedge there starves every queued job (sc-13603).
+#
+# Because the hosted image tops out below macOS 26.2, this lane MUST override the
+# workspace `MACOSX_DEPLOYMENT_TARGET` pin from /.cargo/config.toml. That pin exists
+# for MLX's NAX Metal kernels, which are not linked here; Cargo only applies its
+# `[env]` value when the variable is unset, so exporting 15.0 is the documented
+# escape hatch (see the comment in .cargo/config.toml). Nothing on this lane is
+# deployment-target sensitive — it typechecks and lints, it does not ship a binary.
+#
+# ## Why this is affordable per-PR
+#
+# `cargo test` / `cargo clippy` never run tauri's `beforeBuildCommand`, so this needs
+# no web bundle and no sidecar binaries. `build.rs` -> `tauri_build` does validate
+# tauri.conf.json's `externalBin` + `resources` and panics if any path is missing, so
+# the crate cannot typecheck without them; `stage-test-sidecars.mjs` (the same script
+# the Windows and Linux lanes use) writes tiny placeholders, which suffices because
+# nothing here bundles them.
+
+on:
+  # THE MERGE QUEUE'S SPECULATIVE MERGE (sc-17014). A required check MUST report here too: the queue
+  # evaluates the same required set against `gh-readonly-queue/main/**`, and a workflow with no
+  # `merge_group:` trigger never produces a run for that ref, so the check stays pending until the
+  # group times out and its entries are EVICTED. `merge_group` supports no `paths:` filter at all
+  # (community discussion 45899), which is the other reason the filtering moved into `changes`.
+  merge_group:
+  # NO `paths:` FILTER, deliberately (sc-17014). `check-macos` is a REQUIRED status check, and GitHub
+  # leaves a path-filtered workflow's check **Pending** forever rather than passing it — so a filter
+  # here would block every PR that does not touch these paths, and would strand every merge-queue
+  # entry until `check_response_timeout_minutes` evicted it. The `changes` gate job replaces the
+  # filter: a job skipped by `if:` reports Success, which a required check accepts.
+  pull_request:
+  push:
+    branches: [main]
+    paths: &desktop_macos_check_paths
+      - "apps/desktop/**"
+      # The only workspace crate apps/desktop depends on.
+      - "crates/sceneworks-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      # Carries the MACOSX_DEPLOYMENT_TARGET pin this lane overrides.
+      - ".cargo/config.toml"
+      # `desktop:check` — the lint command below — is defined here.
+      - "package.json"
+      # In-repo cargo auto-selects the pinned toolchain from this file.
+      - "rust-toolchain.toml"
+      - ".github/workflows/desktop-macos-check.yml"
+  workflow_dispatch:
+
+# Cancel superseded PR runs, but never cancel a main-push run — the reasoning
+# macos-mlx.yml and desktop-windows.yml both spell out: GitHub keeps at most ONE
+# pending run per group and evicts it when a newer one queues, so a shared main group
+# drops the middle commit of a merge burst and that commit carries no macOS desktop
+# verdict at all. Per-SHA groups cannot evict each other. (The Linux sibling still
+# uses the plain `github.ref` form; this is the pattern the repo argues for.)
+concurrency:
+  group: desktop-macos-check-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Supplies the path filter the triggers above gave up so `check-macos` could become a required check.
+  # See .github/workflows/changed-paths.yml for why a required check cannot carry a `paths:` filter.
+  changes:
+    uses: ./.github/workflows/changed-paths.yml
+    with:
+      lane: .github/workflows/desktop-macos-check.yml
+      anchor: desktop_macos_check_paths
+
+  check-macos:
+    needs: changes
+    # FAIL OPEN. `!cancelled()` and the `result != 'success'` clause are BOTH load-bearing, and
+    # neither is decoration: in GitHub Actions a job whose `needs:` FAILED is skipped, and a
+    # skipped job reports **Success**, which satisfies a required status check. So without this,
+    # a broken gate — a checkout failure, a dead runner, a syntax error in the reusable workflow —
+    # would silently skip this lane and turn its required check green without running a thing.
+    # That is the exact false-green shape this whole story exists to remove, reintroduced one
+    # level up. A gate that did not succeed must therefore RUN the lane, matching
+    # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
+    # `needs.changes.outputs.relevant == 'true'`.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
+    runs-on: macos-15
+    env:
+      CARGO_NET_OFFLINE: "true"
+      # See the header: the hosted image cannot build at the workspace's 26.2 pin, and
+      # nothing linked here needs it.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+
+      - name: Stage desktop test sidecar placeholders
+        run: node apps/desktop/scripts/stage-test-sidecars.mjs
+
+      - name: Run desktop Rust tests (macOS)
+        run: cargo test -p sceneworks-desktop
+
+      - name: Check desktop Rust lint (macOS)
+        run: npm run desktop:check

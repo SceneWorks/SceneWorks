@@ -297,11 +297,130 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
             Value::Bool(true),
             "{id} ui.img2img exposed"
         );
+        if matches!(id, "sana_1600m" | "sana_sprint_1600m") {
+            assert!(
+                m["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.contains(&Value::String("image_to_image".into()))),
+                "{id} must advertise image_to_image through /api/v1/models"
+            );
+            assert_eq!(
+                m["ui"]["img2imgStrength"]["default"],
+                serde_json::json!(0.5),
+                "{id} strength contract exposed"
+            );
+        }
     }
 }
 
 #[tokio::test]
+async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
+    // sc-16965 (epic 16948). The whole story is that a weights-free consumer must be able to tell
+    // "this route cannot live-preview" from "it can, but no frame has arrived yet". That needs the
+    // flag to survive merge → serialize on the REAL shipped manifest, through the same
+    // /api/v1/models path the app calls — and it is served from the generated
+    // `builtin.preview-support.jsonc`, NOT from a registry, because THIS process links no engines
+    // (docker/rust.Dockerfile builds the API without backend-candle, so a serve-time derivation
+    // would report "nothing supports preview" on every server).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let real_manifest = include_str!("../../../../config/manifests/builtin.models.jsonc");
+    std::fs::write(config_dir.join("builtin.models.jsonc"), real_manifest)
+        .expect("builtin models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = |id: &str| {
+        models
+            .as_array()
+            .expect("catalog is an array")
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("{id} present in the catalog"))
+            .clone()
+    };
+
+    // A wired candle route that DOES preview (sc-16952). Keyed by backend, never a bare boolean:
+    // the same model id answers differently per engine and never fully collapses (SenseNova is
+    // candle-only and MLX never wired it).
+    assert_eq!(
+        entry("qwen_image")["preview"]["byBackend"]["candle"],
+        Value::Bool(true),
+        "qwen_image must advertise live preview on candle in the /models response"
+    );
+    assert_eq!(
+        entry("sdxl")["preview"]["byBackend"]["candle"],
+        Value::Bool(true),
+        "sdxl must advertise its current candle live-preview support in the /models response"
+    );
+    assert_eq!(
+        entry("flux2_dev")["preview"]["byBackend"]["candle"],
+        Value::Bool(true),
+        "flux2_dev must advertise its current candle live-preview support in the /models response"
+    );
+    // The authoritative pin now wires SD3.5 preview too; this assertion moves with the generated
+    // capability facts instead of preserving the previous pin's `false`.
+    assert_eq!(
+        entry("sd3_5_medium")["preview"]["byBackend"]["candle"],
+        Value::Bool(true),
+        "sd3_5_medium must serve the current pin's candle preview capability"
+    );
+    // A wired candle route that does NOT preview — `false`, which is a different claim from absent.
+    assert_eq!(
+        entry("bernini_image")["preview"]["byBackend"]["candle"],
+        Value::Bool(false),
+        "bernini_image is wired on candle without preview — served as false, not omitted"
+    );
+    // A backend with no facts file is UNKNOWN. It must be ABSENT rather than false: inventing
+    // `false` would make the UI claim a route cannot preview when the catalog has no measurement
+    // for it. Probed with a name that can never be dumped rather than with `mlx` — `mlx` is the
+    // backend the macOS lane is expected to add, and pinning its absence here would make that
+    // follow-up land on a red test asserting the opposite of the intended end state.
+    assert!(
+        entry("bernini_image")["preview"]["byBackend"]
+            .get("no_such_backend")
+            .is_none(),
+        "an un-dumped backend must be absent (unknown), never served as false"
+    );
+    // sc-17593. This assertion used to read "an audio model has no engine-backed preview answer" —
+    // true at the time, and the bug: the audio registry is a SEPARATE `ProviderRegistry` that
+    // nothing dumped, so every audio route served `unknown`, which the card renders exactly like
+    // "wired and does not preview". It is dumped now, and answers.
+    assert_eq!(
+        entry("kokoro_82m")["preview"]["byBackend"]["candle"],
+        Value::Bool(false),
+        "kokoro_82m is a wired candle audio route that does not emit PreviewSink frames — served \
+         as false, not omitted"
+    );
+    // Still purely additive, on a case that stays unknown BY CONSTRUCTION rather than by omission:
+    // `supports_preview` lives on `Capabilities`, which only Generators carry. `openvoice_v2` is an
+    // `AudioTransform` and `chatterbox_ve` a `VoiceEmbedder` — descriptor types with no such field —
+    // so the registry has no opinion and the catalog must not manufacture one.
+    for non_generator in ["openvoice_v2", "chatterbox_ve"] {
+        assert!(
+            entry(non_generator).get("preview").is_none(),
+            "{non_generator} is not a Generator, so it has no supports_preview to serve and must \
+             get no `preview` key at all"
+        );
+    }
+}
+
+// The three probe-delay tests (this one and the two 250ms ones below) share the
+// process-global TEST_CATALOG_PROBES_* atomics and the probe-concurrency semaphore, and
+// cargo's default harness runs them concurrently. Serialize them: an unserialized
+// neighbor's live probes can zero PEAK mid-measurement (via the draining reset) or
+// spuriously satisfy `peak > 1` — flakes that only surface on the slow hosted macos-26
+// runners (sc-17723). Same pattern as dataset_catalogs.rs's catalog_scan_hook_test_lock.
+fn catalog_probe_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[tokio::test]
 async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
+    let _probe_guard = catalog_probe_test_lock().lock().await;
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -639,6 +758,7 @@ async fn concurrent_failed_estimate_is_shared_and_retries_after_negative_ttl_exp
 
 #[tokio::test]
 async fn models_catalog_starts_install_sweep_before_size_estimation_completes() {
+    let _probe_guard = catalog_probe_test_lock().lock().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -700,6 +820,7 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
 
 #[tokio::test]
 async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
+    let _probe_guard = catalog_probe_test_lock().lock().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -4079,10 +4200,9 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         "expose only the validated VACE mode"
     );
 
-    // Per-platform download split (sc-8613): macOS pulls the native MLX VACE-Fun checkpoint;
-    // Windows/Linux pull the DIFFERENT candle Wan2.1-VACE-14B diffusers tree the candle `wan_vace`
-    // provider reads (CANDLE_WAN_VACE_REPO). Both are diffusers-loadable conversions, never the raw
-    // VideoX-Fun upstream. Every OS must have exactly one install path.
+    // Every native backend pulls the dedicated VACE-Fun diffusers checkpoint. Windows/Linux must
+    // not substitute the incompatible Wan2.1 VACE tree now that the Candle VACE-Fun provider is
+    // registered. The raw VideoX-Fun upstream remains unsuitable for either native loader.
     let downloads = model["downloads"].as_array().expect("downloads array");
     let download_for = |os: &str| {
         downloads
@@ -4099,11 +4219,11 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     assert_eq!(macos["provider"], "huggingface");
     assert_eq!(macos["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
     let windows = download_for("windows");
-    assert_eq!(windows["repo"], "Wan-AI/Wan2.1-VACE-14B-diffusers");
+    assert_eq!(windows["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
     assert_eq!(
         download_for("linux")["repo"],
-        "Wan-AI/Wan2.1-VACE-14B-diffusers",
-        "Linux rides the same candle checkpoint as Windows"
+        "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+        "Linux rides the same dedicated VACE-Fun checkpoint as Windows"
     );
     for download in downloads {
         assert_eq!(download["provider"], "huggingface");

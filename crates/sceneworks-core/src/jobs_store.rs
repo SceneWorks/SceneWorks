@@ -35,11 +35,16 @@ pub(crate) use routing::mlx::*;
 // External re-export surface: `apps/rust-api/src/lib.rs` and the integration test
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
-    candle_routed_image_models, mac_capabilities, model_mac_support, MacCapabilities,
-    MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
+    candle_routed_image_models, imported_image_model_lora_advertisement, mac_capabilities,
+    model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
+};
+pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
+pub use routing::{
+    canonical_video_route_probe, video_backend_mode_supported,
+    video_mode_conditioning_requirements, video_ui_modes,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &[
@@ -361,6 +366,8 @@ pub struct WorkerHeartbeat {
     pub current_job_id: Option<String>,
     pub loaded_models: Vec<String>,
     pub utilization: Option<WorkerUtilizationSnapshot>,
+    /// Host-side remedy for a [`WorkerStatus::Unhealthy`] worker (sc-16260); `None` otherwise.
+    pub status_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -502,6 +509,10 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // sc-16260: why an `unhealthy` worker withdrew its capabilities — the host-side remedy,
+        // so the Queue screen can explain a stalled queue instead of leaving an operator to read
+        // container logs. Nullable and absent on every healthy worker.
+        ensure_column(&transaction, "workers", "status_reason", "text")?;
         // sc-2086: per-job peak GPU memory % and load %, written by the worker
         // along with progress so a completed row shows the peak the run reached.
         ensure_column(&transaction, "jobs", "peak_gpu_memory_pct", "real")?;
@@ -641,22 +652,39 @@ impl JobsStore {
 
     /// Remove terminal queue history older than `retention_days`.
     ///
-    /// Zero disables retention. Job-owned metrics are materialized into the
-    /// independent Generation Stats history and then deleted in the same
-    /// immediate transaction as their owning jobs. Legacy orphan metrics are
-    /// also removed.
+    /// Zero disables retention. The cutoff is resolved to a fixed timestamp
+    /// here, in Rust, rather than being left as a `datetime('now', ...)`
+    /// modifier for SQLite to evaluate: `now` is constant only within a single
+    /// `sqlite3_step`, so a modifier re-evaluated by each of the four statements
+    /// below would let the cutoff ADVANCE mid-transaction. A job whose
+    /// `completed_at` fell between two of those evaluations was then deleted
+    /// from `jobs` and `generation_metrics` without ever being materialized
+    /// into the history table — a silent, permanent loss of the run from
+    /// Generation Stats, re-rolled on every API start (sc-17597).
     pub fn purge_terminal_jobs_older_than(&self, retention_days: u32) -> JobsStoreResult<usize> {
         if retention_days == 0 {
             return Ok(0);
         }
+        let cutoff = format_unix_seconds(now_unix_seconds() - i64::from(retention_days) * 86_400);
+        self.purge_terminal_jobs_completed_before(&cutoff)
+    }
+
+    /// Remove terminal queue history completed strictly before `cutoff` (a
+    /// `YYYY-MM-DDTHH:MM:SSZ` UTC timestamp, the shape [`utc_now`] emits).
+    ///
+    /// Job-owned metrics are materialized into the independent Generation Stats
+    /// history and then deleted in the same immediate transaction as their
+    /// owning jobs. Legacy orphan metrics are also removed. Every statement
+    /// shares the one caller-supplied cutoff, so the window cannot move
+    /// underneath the sweep; a job completed exactly ON the cutoff is retained.
+    pub fn purge_terminal_jobs_completed_before(&self, cutoff: &str) -> JobsStoreResult<usize> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let modifier = format!("-{retention_days} days");
         let terminal = terminal_statuses_sql();
         let predicate = format!(
             "status in ({terminal}) and completed_at is not null \
-             and datetime(completed_at) < datetime('now', ?1)"
+             and datetime(completed_at) < datetime(?1)"
         );
         transaction.execute(
             &format!(
@@ -665,14 +693,14 @@ impl JobsStore {
                    from generation_metrics m join jobs j on j.id = m.job_id
                   where j.{predicate}"
             ),
-            params![modifier],
+            params![cutoff],
         )?;
         transaction.execute(
             &format!(
                 "delete from generation_metrics where job_id in \
                  (select id from jobs where {predicate})"
             ),
-            params![modifier],
+            params![cutoff],
         )?;
         transaction.execute(
             "delete from generation_metrics
@@ -681,7 +709,7 @@ impl JobsStore {
         )?;
         let deleted = transaction.execute(
             &format!("delete from jobs where {predicate}"),
-            params![modifier],
+            params![cutoff],
         )?;
         transaction.commit()?;
         Ok(deleted)
@@ -739,7 +767,11 @@ impl JobsStore {
             params![now],
         )?;
         transaction.execute(
-            "update workers set status = 'offline', current_job_id = null where status != 'offline'",
+            // sc-16260: `status_reason` is cleared alongside the status everywhere `offline` is
+            // written. It describes why an ALIVE worker withdrew its capabilities; on a worker we
+            // have just declared gone it is stale by construction, and `GET /api/v1/workers` would
+            // otherwise keep handing clients a host remedy for a worker that is no longer there.
+            "update workers set status = 'offline', current_job_id = null, status_reason = null              where status != 'offline'",
             [],
         )?;
         let updated_ids = interrupted_ids
@@ -869,6 +901,37 @@ impl JobsStore {
                 && payload.get("prompt").and_then(Value::as_str) == Some(prompt)
                 && payload.get("aspectRatio").and_then(Value::as_str) == Some(aspect_ratio)
         }))
+    }
+
+    /// Find an in-flight (non-terminal) `model_download` job for `model_id`, so the convert request
+    /// boundary can refuse a convert whose source weights are still streaming instead of queueing a
+    /// job that fails the moment a worker claims it. Returns the newest such job, or `None`.
+    ///
+    /// Keyed on the payload `modelId`, not the repo: a shared source repo backs several catalog cards
+    /// (the three Anima variants live in `circlestone-labs/Anima`), and converting variant A while
+    /// variant B downloads is legitimate — A's own weights are already on disk. The file-presence
+    /// half of the gate (`convert_source_state`) covers the rest.
+    ///
+    /// Read-only single-SELECT: no write mutex, relies on WAL reader isolation like `list_jobs`
+    /// (sc-8950 / F-148).
+    pub fn find_active_model_download_job(
+        &self,
+        model_id: &str,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(&format!(
+            "
+            select * from jobs
+             where type = 'model_download'
+               and status not in ({terminal})
+             order by created_at desc
+            ",
+            terminal = terminal_statuses_sql()
+        ))?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        Ok(candidates
+            .into_iter()
+            .find(|job| job.payload.get("modelId").and_then(Value::as_str) == Some(model_id)))
     }
 
     pub fn list_jobs(
@@ -1451,6 +1514,13 @@ impl JobsStore {
               gpu_id = excluded.gpu_id,
               gpu_name = excluded.gpu_name,
               status = case when workers.current_job_id is null then 'idle' else workers.status end,
+              -- A registration is the worker re-advertising what it can serve, so it also
+              -- retires any previous unhealthy reason (sc-16260): the recovery path re-registers
+              -- with the full capability set, and leaving the old remedy behind would tell an
+              -- operator to fix a host that is already fixed. An unhealthy worker re-asserts its
+              -- reason on the very next heartbeat, and its capabilities are withheld at
+              -- registration either way, so nothing routes to it during the gap.
+              status_reason = null,
               capabilities_json = excluded.capabilities_json,
               loaded_models_json = excluded.loaded_models_json,
               utilization_json = excluded.utilization_json,
@@ -1521,14 +1591,19 @@ impl JobsStore {
                    current_job_id = ?2,
                    loaded_models_json = ?3,
                    utilization_json = ?4,
-                   last_seen_at = ?5
-             where id = ?6
+                   status_reason = ?5,
+                   last_seen_at = ?6
+             where id = ?7
             ",
             params![
                 request.status.as_str(),
                 request.current_job_id,
                 dumps(&request.loaded_models)?,
                 optional_dumps(request.utilization.as_ref())?,
+                // Written unconditionally, so a worker that recovers clears its own reason on the
+                // very next heartbeat rather than carrying a stale remedy for a fixed host
+                // (sc-16260 AC 4). `None` on every non-unhealthy heartbeat.
+                request.status_reason,
                 now,
                 request.worker_id,
             ],
@@ -1619,6 +1694,7 @@ impl JobsStore {
                 update workers
                    set status = 'offline',
                        current_job_id = null,
+                       status_reason = null,
                        last_seen_at = ?1
                  where id in ({placeholders})
                 "
@@ -1697,6 +1773,7 @@ impl JobsStore {
             update workers
                set status = 'offline',
                    current_job_id = null,
+                   status_reason = null,
                    last_seen_at = ?1
              where id = ?2
             ",
@@ -2341,13 +2418,35 @@ impl JobsStore {
         }
     }
 
-    /// Return a bounded batch of terminal jobs whose API-owned side effects
-    /// still need recovery. The API drains this durable queue at startup and on
-    /// a background cadence, so recovery does not depend on a worker repeating
-    /// a terminal progress report after it already observed the committed
-    /// terminal state.
+    /// The batch that is due *now* — the shape production recovery wants.
+    /// Resolving the instant here, rather than inside the query, is what lets
+    /// [`Self::pending_terminal_progress_side_effect_job_ids_as_of`] be driven
+    /// from a fixed instant; see it for the behavior and for why.
     pub fn pending_terminal_progress_side_effect_job_ids(
         &self,
+        limit: usize,
+    ) -> JobsStoreResult<Vec<String>> {
+        self.pending_terminal_progress_side_effect_job_ids_as_of(now_unix_seconds(), limit)
+    }
+
+    /// Return a bounded batch of terminal jobs whose API-owned side effects
+    /// still need recovery, judging dueness as of `as_of` (Unix seconds)
+    /// instead of the wall clock. The API drains this durable queue at startup
+    /// and on a background cadence, so recovery does not depend on a worker
+    /// repeating a terminal progress report after it already observed the
+    /// committed terminal state. A row is due once its deadline has *arrived*,
+    /// so a row whose `progress_side_effects_retry_at` equals `as_of` is
+    /// included.
+    ///
+    /// Production always passes `now`. Tests pass a *frozen* instant so that an
+    /// assertion about which rows are due describes the durable retry schedule
+    /// rather than how long the test itself took to run: with the wall clock,
+    /// a slow pass could let the 5-second first-failure backoff expire between
+    /// deferring a row and scanning for it, and rows that were correctly
+    /// deferred would legitimately come back due (sc-17640).
+    pub fn pending_terminal_progress_side_effect_job_ids_as_of(
+        &self,
+        as_of: i64,
         limit: usize,
     ) -> JobsStoreResult<Vec<String>> {
         let connection = self.open_connection()?;
@@ -2362,7 +2461,7 @@ impl JobsStore {
         )?;
         let ids = statement
             .query_map(
-                params![now_unix_seconds(), i64::try_from(limit).unwrap_or(i64::MAX)],
+                params![as_of, i64::try_from(limit).unwrap_or(i64::MAX)],
                 |row| row.get(0),
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3087,6 +3186,7 @@ fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
                 .as_deref(),
         ),
         utilization: loads_optional(row.get::<_, Option<String>>("utilization_json")?.as_deref()),
+        status_reason: row.get("status_reason")?,
         registered_at: row.get("registered_at")?,
         last_seen_at: row.get("last_seen_at")?,
         extra: Default::default(),
@@ -3618,6 +3718,18 @@ fn is_apple_unified_gpu_id(gpu_id: &str) -> bool {
 }
 
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
+    // sc-16260: a worker that has declared itself unhealthy — its accelerator is unusable, so
+    // every job it claims is one it is certain to fail — is handed nothing at all. This is the
+    // BACKSTOP, not the primary gate: the worker also withholds the capabilities it can no
+    // longer serve (`with_candle_capabilities`), which is what keeps `image_generate` and
+    // friends queued for a host that gets fixed. Both exist because they fail differently — the
+    // capability half is what the web's queue explanation and tier pickers already read, while
+    // this half holds for any future unhealthy reason whose capability set we don't yet know to
+    // trim. Refuses EVERY job type, not just GPU ones: "I cannot run work" is the whole claim
+    // the status makes, and the CPU utility lane is a separate worker.
+    if worker.status == WorkerStatus::Unhealthy {
+        return false;
+    }
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
     }
@@ -3693,8 +3805,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
             return false;
         }
-        // Video upscale (epic 4811 / sc-4816): the mlx worker runs the native SeedVR2 engine
-        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; this is mac-only by construction.
+        // Video upscale (epic 4811 / sc-4816): the MLX worker runs the native SeedVR2 engine
+        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; Candle owns the same SeedVR2-only
+        // contract off-Mac.
         if matches!(job.job_type, JobType::VideoUpscale) && !video_upscale_job_is_mlx_eligible(job)
         {
             return false;
@@ -3722,13 +3835,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         return false;
     }
     // Candle (Windows/CUDA) lane (epic 3672 image sc-3678; epic 5095 image families sc-5096 + video
-    // sc-5097): the candle worker advertises `image_generate` (+ `video_generate` once video engines
-    // are wired) and serves gated, narrow **txt2img / txt2video-only** lanes. It must refuse every
-    // other shape — a non-candle family, or a conditioned (img2img/edit/reference/inpaint/pose/
-    // i2v/extend/bridge/replace) / LoRA request — so unsupported work remains queued unless another
-    // capable native worker registers. Identified by the `candle` marker capability (not `gpu_id`,
-    // which is a real CUDA index here). When candle is disabled the marker is absent and this is inert,
-    // so production routing is unchanged until the lane is turned on.
+    // sc-5097): the candle worker advertises broad image/video job capabilities, then the route
+    // predicates narrow them to concrete per-family base, conditioned, adapter, and control lanes.
+    // It must refuse every model/request-shape/tier/adapter combination those predicates do not own,
+    // so unsupported work remains queued unless another capable native worker registers. Identified
+    // by the `candle` marker capability (not `gpu_id`, which is a real CUDA index here). When candle
+    // is disabled the marker is absent and this is inert.
     if worker_is_candle(worker) {
         // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
         // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
@@ -3741,6 +3853,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit)
             && !(image_job_is_candle_eligible(job) || image_job_candle_pose_reject(job))
         {
+            return false;
+        }
+        if matches!(job.job_type, JobType::ImageDetail) && !image_detail_native_eligible(job) {
             return false;
         }
         // The candle worker advertises only the base `video_generate` (txt2video); refuse the

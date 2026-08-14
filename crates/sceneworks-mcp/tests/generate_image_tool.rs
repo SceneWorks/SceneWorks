@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::{convert::Infallible, iter};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -34,6 +34,7 @@ use common::{connect_mcp, error_text, fast_job_wait, spawn};
 const PNG_BYTES: &[u8] = b"fake-png-payload-0001";
 const JPG_BYTES: &[u8] = b"fake-jpeg-payload-0002";
 const PNG_PATH: &str = "assets/images/genset_1/img_0001.png";
+const WORKFLOW_PNG_PATH: &str = "assets/images/genset_1/img_workflow.png";
 const JPG_PATH: &str = "assets/images/genset_1/img_0002.jpg";
 // F-041 (sc-11236): an asset that exceeds the per-image inline cap (4 MiB), so
 // generate_image must fall back to the ticketed-link response shape instead of
@@ -53,6 +54,35 @@ struct StubState {
     snapshots: Arc<Vec<Value>>,
     /// Job ids the tool asked to cancel via `POST /jobs/:id/cancel` (sc-10276).
     cancels: Arc<Mutex<Vec<String>>>,
+    workflow_png: Arc<Vec<u8>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectFileQuery {
+    strip_workflow: Option<bool>,
+}
+
+fn workflow_png_bytes() -> Vec<u8> {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join("workflow_share")
+        .join("image-workflow-share.json");
+    let share: sceneworks_core::workflow_share::WorkflowShare =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).expect("reads workflow fixture"))
+            .expect("parses workflow fixture");
+    let temp_dir = tempfile::tempdir().expect("creates temp dir");
+    let path = temp_dir.path().join("workflow.png");
+    sceneworks_core::workflow_png::write_workflow_chunk(
+        &image::RgbImage::new(2, 2),
+        &path,
+        Some(&share),
+    )
+    .expect("writes embedded workflow PNG");
+    std::fs::read(path).expect("reads embedded workflow PNG")
 }
 
 fn snapshot(status: &str, progress: f64, stage: &str, extra: Value) -> Value {
@@ -126,7 +156,9 @@ fn stub_api_router(state: StubState) -> Router {
         .route(
             "/api/v1/projects/:project_id/files/*relative_path",
             get(
-                |Path((_project_id, relative_path)): Path<(String, String)>| async move {
+                |State(state): State<StubState>,
+                 Path((_project_id, relative_path)): Path<(String, String)>,
+                 Query(query): Query<ProjectFileQuery>| async move {
                     if relative_path == CHUNKED_LARGE_PATH {
                         // No Content-Length and no end-of-stream: the client can return only by
                         // enforcing the inline cap while consuming chunks and dropping the body.
@@ -145,6 +177,17 @@ fn stub_api_router(state: StubState) -> Router {
                     }
                     let (bytes, mime): (Vec<u8>, &str) = match relative_path.as_str() {
                         PNG_PATH => (PNG_BYTES.to_vec(), "image/png"),
+                        WORKFLOW_PNG_PATH => {
+                            let source = state.workflow_png.as_ref();
+                            let bytes = if query.strip_workflow.unwrap_or(false) {
+                                sceneworks_core::workflow_png::strip_workflow_chunk(source)
+                                    .expect("stub uses the hardened strip helper")
+                                    .unwrap_or_else(|| source.clone())
+                            } else {
+                                source.clone()
+                            };
+                            (bytes, "image/png")
+                        }
                         JPG_PATH => (JPG_BYTES.to_vec(), "image/jpeg"),
                         LARGE_PATH => (vec![0x42u8; LARGE_IMAGE_LEN], "image/png"),
                         _ => return StatusCode::NOT_FOUND.into_response(),
@@ -200,6 +243,7 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
         polls: Arc::new(Mutex::new(0)),
         snapshots: Arc::new(snapshots),
         cancels: Arc::new(Mutex::new(Vec::new())),
+        workflow_png: Arc::new(workflow_png_bytes()),
     };
     let submitted = state.submitted.clone();
     let polls = state.polls.clone();
@@ -303,6 +347,9 @@ async fn happy_path_returns_inline_image_with_progress_notifications() {
     assert_eq!(summary["jobId"], "job-1");
     assert_eq!(summary["assets"][0]["id"], "asset_1");
     assert_eq!(summary["assets"][0]["path"], PNG_PATH);
+    assert_eq!(summary["assets"][0]["workflowPolicy"], "strip-requested");
+    assert!(summary.get("workflowIncluded").is_none());
+    assert!(summary.get("workflowHandling").is_none());
 
     // The submit body carried the mapped ImageJobRequest fields. (Clone out of
     // the lock: guards must not be held across the cancel().await below.)
@@ -338,6 +385,98 @@ async fn happy_path_returns_inline_image_with_progress_notifications() {
         .any(|notification| notification.message.as_deref() == Some("generating: step 4/8")));
     assert_eq!(progress.last().unwrap().progress, 100.0);
     assert_eq!(progress.last().unwrap().total, Some(100.0));
+
+    let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
+async fn inline_png_is_stripped_of_its_workflow_by_default() {
+    let harness = harness(vec![snapshot(
+        "completed",
+        1.0,
+        "completed",
+        json!({ "result": { "assets": [image_asset(
+            "asset_workflow",
+            WORKFLOW_PNG_PATH,
+            "image/png"
+        )] } }),
+    )])
+    .await;
+
+    let result = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("generate_image").with_arguments(generate_args(json!({}))),
+        )
+        .await
+        .expect("generate_image succeeds");
+    let image = result
+        .content
+        .iter()
+        .find_map(|block| block.as_image())
+        .expect("inline image");
+    let served = BASE64.decode(&image.data).expect("valid base64 image");
+
+    assert_eq!(
+        sceneworks_core::workflow_png::read_workflow_chunk(&served),
+        Ok(None),
+        "MCP's default inline bytes must not carry the workflow envelope"
+    );
+
+    let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
+async fn inline_png_can_include_its_workflow_by_explicit_request() {
+    let harness = harness(vec![snapshot(
+        "completed",
+        1.0,
+        "completed",
+        json!({ "result": { "assets": [image_asset(
+            "asset_workflow",
+            WORKFLOW_PNG_PATH,
+            "image/png"
+        )] } }),
+    )])
+    .await;
+
+    let result = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("generate_image").with_arguments(generate_args(json!({
+                "includeWorkflow": true
+            }))),
+        )
+        .await
+        .expect("generate_image succeeds");
+    let image = result
+        .content
+        .iter()
+        .find_map(|block| block.as_image())
+        .expect("inline image");
+    let served = BASE64.decode(&image.data).expect("valid base64 image");
+
+    assert!(
+        matches!(
+            sceneworks_core::workflow_png::read_workflow_chunk(&served),
+            Ok(Some(_))
+        ),
+        "includeWorkflow=true must preserve the workflow envelope"
+    );
+    let summary: Value = serde_json::from_str(
+        &result
+            .content
+            .iter()
+            .rev()
+            .find_map(|block| block.as_text())
+            .expect("summary block")
+            .text,
+    )
+    .expect("summary JSON");
+    assert_eq!(
+        summary["assets"][0]["workflowPolicy"],
+        "preserve-if-present"
+    );
 
     let _ = harness.client.cancel().await;
 }
@@ -596,6 +735,7 @@ async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
         polls: Arc::new(Mutex::new(0)),
         snapshots: Arc::new(vec![snapshot("running", 0.5, "generating", json!({}))]),
         cancels: Arc::new(Mutex::new(Vec::new())),
+        workflow_png: Arc::new(workflow_png_bytes()),
     };
     let cancels = state.cancels.clone();
     let api_base = spawn(stub_api_router(state)).await;
@@ -737,7 +877,9 @@ async fn oversize_result_falls_back_to_ticketed_links() {
     assert_eq!(links.len(), 1, "one ticketed link: {result:?}");
     assert!(
         links[0].uri.contains("/api/v1/projects/p1/files/")
-            && links[0].uri.contains(&format!("?ticket={TICKET}")),
+            && links[0]
+                .uri
+                .contains(&format!("?stripWorkflow=true&ticket={TICKET}")),
         "link is the ticketed media URL: {}",
         links[0].uri
     );
@@ -756,9 +898,10 @@ async fn oversize_result_falls_back_to_ticketed_links() {
     assert_eq!(summary["jobId"], "job-1");
     assert_eq!(summary["status"], "completed");
     assert_eq!(summary["assets"][0]["id"], "asset_big");
+    assert_eq!(summary["assets"][0]["workflowPolicy"], "strip-requested");
     assert!(summary["assets"][0]["url"]
         .as_str()
-        .is_some_and(|url| url.contains(&format!("?ticket={TICKET}"))));
+        .is_some_and(|url| url.contains(&format!("?stripWorkflow=true&ticket={TICKET}"))));
 
     let _ = harness.client.cancel().await;
 }
@@ -799,7 +942,58 @@ async fn chunked_oversize_result_aborts_without_waiting_for_end_of_stream() {
         .filter_map(|block| block.as_resource_link())
         .collect();
     assert_eq!(links.len(), 1, "one ticketed link: {result:?}");
-    assert!(links[0].uri.contains(&format!("?ticket={TICKET}")));
+    assert!(links[0]
+        .uri
+        .contains(&format!("?stripWorkflow=true&ticket={TICKET}")));
+
+    let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
+async fn oversize_result_can_include_workflow_in_links_by_explicit_request() {
+    let harness = harness(vec![snapshot(
+        "completed",
+        1.0,
+        "completed",
+        json!({ "result": { "assets": [image_asset(
+            "asset_big",
+            LARGE_PATH,
+            "image/png"
+        )] } }),
+    )])
+    .await;
+
+    let result = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("generate_image").with_arguments(generate_args(json!({
+                "includeWorkflow": true
+            }))),
+        )
+        .await
+        .expect("generate_image succeeds");
+    let link = result
+        .content
+        .iter()
+        .find_map(|block| block.as_resource_link())
+        .expect("resource link fallback");
+    assert!(link.uri.contains(&format!("?ticket={TICKET}")));
+    assert!(!link.uri.contains("stripWorkflow"));
+
+    let summary: Value = serde_json::from_str(
+        &result
+            .content
+            .iter()
+            .rev()
+            .find_map(|block| block.as_text())
+            .expect("summary block")
+            .text,
+    )
+    .expect("summary JSON");
+    assert_eq!(
+        summary["assets"][0]["workflowPolicy"],
+        "preserve-if-present"
+    );
 
     let _ = harness.client.cancel().await;
 }

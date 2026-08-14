@@ -827,4 +827,52 @@ describe("DatasetCatalogsScreen", () => {
     await flush();
     expect(container.textContent).not.toContain("Too late");
   });
+
+  // Structured analysis resolves the person detector and DWPose before it can run, and both
+  // resolvers went cache-only in epic 17625 — so on a machine without them the run reaches the
+  // worker and dies with an install error this screen otherwise gives no way to act on.
+  async function remountWithModels(models) {
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ token: "token", models, createModelDownloadJob: vi.fn() }}>
+          <DatasetCatalogsScreen />
+          <ConfirmHost />
+        </AppContext.Provider>,
+      );
+    });
+    await flush();
+  }
+
+  it("offers the structured-analysis preprocessors when they are not installed", async () => {
+    await remountWithModels([
+      { id: "person_detector", name: "YOLO11m Person Detector", installState: "missing", downloadSizeLabel: "80 MB" },
+      { id: "dwpose_pose_detector", name: "DWPose Pose Detector", installState: "missing", downloadSizeLabel: "330 MB" },
+    ]);
+    const notice = container.querySelector(".required-models-notice");
+    expect(notice).toBeTruthy();
+    expect(notice.textContent).toContain("YOLO11m Person Detector");
+    expect(notice.textContent).toContain("DWPose Pose Detector");
+    expect(notice.textContent).toContain("Structured person, face, and pose analysis");
+  });
+
+  it("lists only the preprocessor that is actually missing", async () => {
+    await remountWithModels([
+      { id: "person_detector", name: "YOLO11m Person Detector", installState: "installed" },
+      { id: "dwpose_pose_detector", name: "DWPose Pose Detector", installState: "missing" },
+    ]);
+    const notice = container.querySelector(".required-models-notice");
+    expect(notice).toBeTruthy();
+    expect(notice.textContent).toContain("DWPose Pose Detector");
+    expect(notice.textContent).not.toContain("YOLO11m");
+  });
+
+  it("shows nothing once both are installed", async () => {
+    await remountWithModels([
+      { id: "person_detector", name: "YOLO11m Person Detector", installState: "installed" },
+      { id: "dwpose_pose_detector", name: "DWPose Pose Detector", installState: "installed" },
+    ]);
+    expect(container.querySelector(".required-models-notice")).toBeNull();
+  });
 });

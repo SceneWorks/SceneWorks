@@ -122,6 +122,8 @@ use assets::{
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
     update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
 };
+mod workflows;
+use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body_bytes};
 // Test-only crate-root imports: the `tests` module reaches these helpers via
 // `super::` (either `use super::{...}` or a fully-qualified `super::fn(...)` call).
 // Gating them keeps the non-test build warning-free — they have no non-test
@@ -331,6 +333,33 @@ const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
+// sc-15950: `POST /api/v1/workflows/inspect` deliberately does NOT get `MAX_UPLOAD_BYTES`.
+//
+// The asset upload route pays 2 GiB because the bytes BECOME the asset — the write is the point.
+// Inspect streams the body to `cache/uploads` before any PNG check, throws it away, and returns a
+// small JSON report, so a 2 GiB body buys 2 GiB of transient disk and one blocking thread for a
+// result measured in kilobytes. There is no rate limit, concurrency limit or timeout layer in this
+// app (tower-http is compression + cors only) and the desktop sets `SCENEWORKS_TRUST_LOOPBACK`, so
+// any local process can drive N of those concurrently without a token.
+//
+// 512 MiB is sized against what users actually drop, not against a round number. The largest PNG
+// SceneWorks itself can write is a 4096² generation (`image_request::MAX_DIMENSION`) through a 4×
+// upscale = 16384², 8-bit RGB (`workflow_png::write_workflow_chunk` takes an `RgbImage`) = 805 MB
+// raw, which PNG's filtered deflate puts well under 512 MiB on rendered content; an ordinary 4096²
+// share is ~50 MB, and a phone photo is single-digit MB. So the cap rejects nothing a user would
+// plausibly drop while cutting the transient-disk exposure 4×.
+const MAX_WORKFLOW_INSPECT_BYTES: usize = 512 * 1024 * 1024;
+// The route limit must sit ABOVE the per-field cap, not equal to it: a body exactly at the cap
+// plus multipart framing (boundaries, headers, the trailing CRLF) exceeds an equal router limit,
+// so axum's own limit trips first and `field.chunk()` surfaces it as a plain 400 — the typed 413
+// would then be unreachable at the only boundary that matters. Same headroom, for the same reason,
+// as `MAX_LORA_MULTIPART_BODY_BYTES`. The route reads it through
+// `workflows::max_inspect_multipart_body_bytes`, which derives it from the live per-field cap so
+// the two cannot drift back into equality and so a test can exercise the real boundary at a
+// sendable size.
+const MULTIPART_FRAMING_HEADROOM_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WORKFLOW_INSPECT_MULTIPART_BODY_BYTES: usize =
+    MAX_WORKFLOW_INSPECT_BYTES + MULTIPART_FRAMING_HEADROOM_BYTES;
 // sc-8885 (F-083): the shared max age for every `cache/*-uploads` staging area (asset,
 // lora, model, pose, keypoint) before the startup sweep reclaims it. Named for uploads
 // in general — the old `STALE_LORA_UPLOAD_SECONDS` misleadingly implied LoRA-only.
@@ -350,6 +379,10 @@ const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 thread_local! {
     static TEST_MAX_LORA_UPLOAD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // sc-15950: same override, same reasoning, for `POST /api/v1/workflows/inspect`. The real cap
+    // is `MAX_UPLOAD_BYTES` (2 GiB), which no test can send, so the oversized-body branch is only
+    // reachable through a lowered cap.
+    static TEST_MAX_WORKFLOW_INSPECT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
 static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
@@ -425,25 +458,51 @@ fn open_bind_override_enabled(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES")
 }
 
-/// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` value (sc-10212).
+/// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` and
+/// `SCENEWORKS_OWN_MANIFESTS` env values (sc-10212, sc-15504).
 ///
-/// An explicit, non-empty override marks an operator-owned config dir — a repo checkout or a Compose
-/// bind mount — which must stay authoritative, so seed `IfMissing` (fill gaps, never clobber an edited
-/// copy or dirty a checked-out `config/`). Unset or blank means `config_dir` fell back to the
-/// platform-default app-owned dir (the same one the desktop seeds `Overwrite`), so `Overwrite` there
-/// refreshes the builtin catalog on launch instead of serving a stale seed after an upgrade — the
-/// sc-10193 img2img flag was invisible on a directly-launched API because the months-old seed was
-/// never rewritten. Pure so the choice is unit-tested without touching process env or the filesystem.
+/// An explicit, non-empty `SCENEWORKS_CONFIG_DIR` marks an operator-owned config dir — a repo checkout
+/// or a Compose bind mount / RunPod persistent volume — so seed `SyncFromEmbedded`: refresh each builtin
+/// manifest when it is missing or has drifted from the binary's embedded copy, but leave a byte-identical
+/// file untouched so a matching checkout is never dirtied. The builtin manifests are app-owned (nothing
+/// edits them at runtime — customizations live in `user.*.jsonc`), so a persisted copy that no longer
+/// matches the running binary is normally stale and must be refreshed. The old always-`IfMissing`
+/// behavior — never rewriting an existing file — left an upgraded binary serving a months-old
+/// `builtin.models.jsonc` off a persisted volume: it hid the sc-10193 img2img flag once and the Krea
+/// Turbo memory-ladder curves again (the ladder was bypassed, so a 24 GB card wrongly rejected a
+/// q4/1024² render).
+///
+/// A deployment that intentionally SHIPS its own `builtin.*.jsonc` and wants it used verbatim (a
+/// customized bind mount, or the contract-snapshot test harness) opts out with a truthy
+/// `SCENEWORKS_OWN_MANIFESTS` — that forces `IfMissing`: fill only genuinely-missing manifests, never
+/// self-heal what the operator provided. The opt-out only applies with an explicit config dir; on the
+/// platform-default app-owned dir it is ignored.
+///
+/// Unset or blank `SCENEWORKS_CONFIG_DIR` means `config_dir` fell back to the platform-default app-owned
+/// dir (the same one the desktop seeds `Overwrite`), so `Overwrite` there refreshes the builtin catalog
+/// unconditionally on launch. Pure so the choice is unit-tested without touching process env or the
+/// filesystem.
 ///
 /// The trim/non-empty rule mirrors [`env_path_or`] exactly, so the seed mode and the resolved
 /// `config_dir` always agree on whether the override was actually applied.
 fn seed_mode_for_config_dir(
     config_dir_env: Option<&str>,
+    own_manifests_env: Option<&str>,
 ) -> sceneworks_core::builtin_manifests::SeedMode {
     use sceneworks_core::builtin_manifests::SeedMode;
-    match config_dir_env.map(str::trim) {
-        Some(value) if !value.is_empty() => SeedMode::IfMissing,
-        _ => SeedMode::Overwrite,
+    let explicit_config_dir = config_dir_env
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !explicit_config_dir {
+        return SeedMode::Overwrite;
+    }
+    let own_manifests = own_manifests_env
+        .map(str::trim)
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"));
+    if own_manifests {
+        SeedMode::IfMissing
+    } else {
+        SeedMode::SyncFromEmbedded
     }
 }
 
@@ -478,15 +537,42 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
 }
 
 /// Run this binary as a standalone worker process instead of the HTTP API.
-/// Apple-Silicon Metal preflight (sc-8411). Dispatched from `main` when
-/// `SCENEWORKS_GPU_CHECK=1`: a one-shot probe that the desktop spawns at startup —
-/// the macOS counterpart of the Windows `nvidia-smi` `cuda_preflight`. Reuses this
-/// binary because it already links MLX (the desktop crate does not), and runs the
-/// probe in the SAME process/spawn context the real worker uses, so it faithfully
-/// predicts whether the worker can acquire a Metal GPU. `Ok(())` when usable;
+/// One-shot GPU preflight (sc-8411 Metal, sc-16247 CUDA). Dispatched from `main` when
+/// `SCENEWORKS_GPU_CHECK=1`: a probe that the desktop spawns at startup. Reuses this
+/// binary because it already links the GPU backends (the desktop crate does not), and
+/// runs the probe in the SAME process/spawn context the real worker uses, so it
+/// faithfully predicts whether the worker can acquire a GPU. `Ok(())` when usable;
 /// `Err(message)` is the user-facing reason the desktop relays onto the setup screen.
-pub fn gpu_check() -> Result<(), String> {
-    sceneworks_worker::metal_preflight()
+///
+/// Exactly one of the two probes is ever live in a given build: `metal_preflight` is a
+/// no-op off-Mac, and `cuda_preflight` is a no-op on macOS and on any off-Mac build
+/// without `backend-candle`. Calling both keeps this dispatch platform-agnostic — the
+/// desktop decides *whether* to spawn the probe, not which one runs.
+pub fn gpu_check() -> Result<(), GpuCheckFailure> {
+    if let Err(message) = sceneworks_worker::metal_preflight() {
+        // Metal's contract is unchanged from sc-8411: any failure blocks startup.
+        return Err(GpuCheckFailure {
+            message,
+            blocking: true,
+        });
+    }
+    sceneworks_worker::cuda_preflight().map_err(|message| GpuCheckFailure {
+        blocking: sceneworks_worker::cuda_failure_is_blocking(&message),
+        message,
+    })
+}
+
+/// A failed [`gpu_check`], plus whether it should stop the app from starting.
+///
+/// `blocking` is the whole reason this isn't a bare `String`. The desktop can't make the call
+/// itself — it doesn't link the worker crate and so has no access to the CUDA error table — and
+/// getting it wrong is asymmetric: over-blocking locks the user out of the entire application
+/// over what may be a transient GPU state, while under-blocking costs one failed job that now
+/// carries an actionable message anyway. See `sceneworks_worker::cuda_failure_is_blocking`.
+/// Crosses the process boundary as an exit code (see `main.rs`), the message on stdout.
+pub struct GpuCheckFailure {
+    pub message: String,
+    pub blocking: bool,
 }
 
 /// Spawns the in-process CPU utility worker pool ([`sceneworks_worker::run_worker_loop`])
@@ -1199,6 +1285,7 @@ fn create_app_with_state_mode(
         )),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
         thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        workflow_strip_slots: Arc::new(tokio::sync::Semaphore::new(WORKFLOW_STRIP_SLOTS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -1370,9 +1457,28 @@ fn create_app_with_state_mode(
                 // small JSON cap. GET has no body, so this is harmless for listing.
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
+        // sc-15950: read a shared image's embedded workflow WITHOUT creating an asset. Registered
+        // beside the asset routes because it shares their multipart shape and staging area, but it
+        // is deliberately not project-scoped — it mutates nothing, so there is nothing to scope.
+        // Same auth posture as the upload route above; a larger-than-JSON per-route limit is
+        // re-attached for the same reason (the router default is the small JSON cap), but it is
+        // this route's OWN cap plus framing headroom rather than the 2 GiB asset ceiling — see
+        // `MAX_WORKFLOW_INSPECT_BYTES` for why both numbers are what they are.
+        .route(
+            "/api/v1/workflows/inspect",
+            post(inspect_workflow).layer(DefaultBodyLimit::max(max_inspect_multipart_body_bytes())),
+        )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id",
             get(get_asset).delete(delete_asset),
+        )
+        // sc-15952: the resolution report for the envelope an IMPORTED asset is already carrying
+        // at `extra.importedWorkflow`. The envelope needs no route — it rides on the asset — but
+        // the report is computed against catalogs that live behind this API, and it goes stale the
+        // moment a download finishes, so re-resolving after an install is a plain refetch of this.
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/workflow",
+            get(get_asset_workflow),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/poster/:poster_sha256",
@@ -1846,9 +1952,44 @@ async fn verify_access(
 const GRID_THUMBNAIL_SIZE: u32 = 384;
 const PROJECT_MEDIA_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
 
+/// How many `?stripWorkflow=true` downloads may be in flight at once (sc-15953).
+///
+/// Two, mirroring `thumbnail_generation_slots` — the other derived representation of this same
+/// route, and the precedent for gating one. A strip is not CPU-bound the way a thumbnail is; what
+/// it holds is MEMORY, for as long as the response body is being written to a client that may be
+/// on a slow link. Ungated, the ceiling was the product of the file size and the number of
+/// simultaneous callers, with nothing in the path to say no.
+const WORKFLOW_STRIP_SLOTS: usize = 2;
+
+/// Largest PNG this route will rewrite in memory to remove a workflow chunk. 128 MiB.
+///
+/// The walk needs the tail of the file, so the whole thing is read; the cost therefore follows the
+/// asset. A generated image is nowhere near this — measured through the repo's own writer on an
+/// INCOMPRESSIBLE render, the worst case for a PNG, 1024² is 3.0 MiB, 2048² is 12.0 MiB and 4096²
+/// is 48.0 MiB, and 4096² is the largest thing SceneWorks renders. An IMPORTED asset is bounded
+/// only by `MAX_UPLOAD_BYTES` = 2 GiB, which is what this exists to refuse. 128 MiB is ~2.7× the
+/// largest file the writer produces, so nothing SceneWorks made is ever turned away, and with
+/// [`WORKFLOW_STRIP_SLOTS`] it bounds the route at 256 MiB rather than at multiple gigabytes.
+///
+/// Refused rather than silently served whole: "here is your copy without the workflow" answered
+/// with the original file is the one outcome this feature must never produce, so an image too
+/// large to rewrite gets a 413 that says why.
+const MAX_WORKFLOW_STRIP_BYTES: u64 = 128 * 1024 * 1024;
+
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectFileQuery {
     thumbnail: Option<u32>,
+    /// Serve the file with any embedded `sceneworks:workflow` chunk removed (sc-15953).
+    ///
+    /// A query param on the existing route rather than a new endpoint, because the browser
+    /// "Save As without the workflow" is a bare `<a download>` and cannot transform bytes or set
+    /// headers. That constraint also decides the shape: in remote/LAN mode the anchor authenticates
+    /// with a `?ticket=` media ticket, whose allow-list (`auth::is_ticketed_media_path`) matches on
+    /// the PATH and is GET-only — so keeping the strip on this path means the download works
+    /// remotely with no change to the ticket rules at all. A separate endpoint would have needed a
+    /// new entry in that allow-list, which is the surface hardest to widen safely.
+    strip_workflow: Option<bool>,
 }
 
 async fn get_project_file(
@@ -1881,6 +2022,17 @@ async fn get_project_file(
             );
         }
     })?;
+
+    // "Download without the workflow" (sc-15953). Answered here, before the thumbnail and
+    // streaming branches, because it is the one variant whose body is not the file on disk.
+    if query.strip_workflow.unwrap_or(false) {
+        if query.thumbnail.is_some() {
+            return Err(ApiError::bad_request(
+                "stripWorkflow cannot be combined with thumbnail",
+            ));
+        }
+        return stripped_project_file_response(&state, &project_file, &headers).await;
+    }
 
     // One fixed representation prevents unbounded cache variants. Derivatives
     // are generated on first use, so assets written before this route existed
@@ -2075,6 +2227,189 @@ fn ensure_grid_thumbnail(source_path: &FsPath, cache_root: &FsPath) -> Result<Pa
     Ok(target)
 }
 
+/// Serve a project file with any embedded workflow chunk excised (sc-15953).
+///
+/// The stripping itself is `sceneworks_core::workflow_png::strip_workflow_chunk` — a byte-level
+/// walk of the PNG chunk framing that copies IHDR, every IDAT and IEND through unchanged, so the
+/// served body is the file minus one slice rather than a re-encode. Nothing here decodes a pixel.
+///
+/// Five things this branch has to get right that the streaming path does not:
+///
+/// * **Only a PNG is read into memory.** The workflow chunk only ever exists in a PNG, so anything
+///   else is served by the ordinary path — a video does not get buffered because someone appended
+///   the flag to its URL. A non-PNG asked for stripped is not an error either: it genuinely carries
+///   no workflow, and saying so by serving it is the honest answer.
+/// * **The ETag must differ from the full file's.** `project_file_etag` is derived from the source
+///   metadata, and the route sets `immutable` caching — so reusing it would let a cache answer a
+///   strip request with the unstripped body it already holds. The variant tag is folded in.
+/// * **Revalidation is ETag-ONLY.** The distinct ETag is half a fix on its own, and the missing
+///   half was a live hole: both representations are derived from the same file, so they carry the
+///   same `Last-Modified`, and a client that had done a plain GET could hand that date back on a
+///   strip request and be told `304 Not Modified` — reusing the full body, workflow intact. The
+///   date cannot distinguish the two representations, so it does not get a vote here; only the
+///   variant tag does. `project_file_is_not_modified` still owns the ordinary path, where one URL
+///   means one body and a date is a sound answer.
+/// * **No byte ranges.** The body is a rewritten buffer whose offsets do not match the file on
+///   disk, so `Accept-Ranges: none` and a `Range` header is ignored rather than answered against
+///   the wrong length. This is a download, not a `<video src>`.
+/// * **The memory is bounded, twice over.** The whole file is read at once — a walk of the chunk
+///   framing has to see the tail — so the cost scales with the asset, and an imported PNG is
+///   bounded only by `MAX_UPLOAD_BYTES` = 2 GiB. [`WORKFLOW_STRIP_SLOTS`] caps the concurrency
+///   the way `thumbnail_generation_slots` does for the sibling derived representation on this same
+///   route, and [`MAX_WORKFLOW_STRIP_BYTES`] caps the per-request size. Between them the route's
+///   ceiling is a fixed number rather than "however many clients ask at once".
+///
+/// The body is assembled without a second copy. `strip_workflow_chunk` would build a new buffer
+/// of its own — ~2N peak for a file of N bytes — so this calls the walk that underlies it
+/// (`workflow_chunk_spans`) and serves the KEPT spans as `Bytes` slices of the one buffer already
+/// read. `Bytes` slices are refcounted views, so the peak is N and the excision costs nothing.
+async fn stripped_project_file_response(
+    state: &AppState,
+    project_file: &sceneworks_core::project_store::ProjectFile,
+    request_headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let path = project_file.path.clone();
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let last_modified = metadata.modified().ok();
+
+    if project_file.content_type != "image/png" {
+        // Nothing of ours can be in it. Fall back to the ordinary streaming response so a video or
+        // a JPEG is served exactly as it always was, under its own ETag — and under the ordinary
+        // revalidation rules too, because this is not a variant: the bytes are the file's.
+        let etag = project_file_etag(&metadata);
+        let headers = project_file_response_headers(
+            &project_file.content_type,
+            metadata.len(),
+            &etag,
+            last_modified,
+        )?;
+        if project_file_is_not_modified(request_headers, &etag, last_modified) {
+            return Ok(not_modified_response(headers));
+        }
+        let file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let mut response = Body::from_stream(ReaderStream::new(file)).into_response();
+        response.headers_mut().extend(headers);
+        return Ok(response);
+    }
+
+    let etag = variant_etag(&project_file_etag(&metadata), "nw");
+    if if_none_match_matches(request_headers, &etag) {
+        let headers = project_file_response_headers(
+            &project_file.content_type,
+            metadata.len(),
+            &etag,
+            last_modified,
+        )?;
+        return Ok(not_modified_response(headers));
+    }
+
+    if metadata.len() > MAX_WORKFLOW_STRIP_BYTES {
+        return Err(ApiError::payload_too_large(format!(
+            "This image is {} MiB, over the {} MiB SceneWorks will rewrite in memory to remove a \
+             workflow. Save it normally and remove the block with another tool.",
+            metadata.len() / (1024 * 1024),
+            MAX_WORKFLOW_STRIP_BYTES / (1024 * 1024)
+        )));
+    }
+
+    let permit = state
+        .workflow_strip_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let (bytes, spans) = tokio::task::spawn_blocking(move || {
+        let original = std::fs::read(&path)?;
+        // A PNG that cannot be accounted for chunk by chunk is an ERROR, never the original bytes:
+        // "here is your copy without the workflow" must not be answered with a file that may still
+        // carry one. An empty span list is the honest "nothing of ours is in it".
+        let spans = sceneworks_core::workflow_png::workflow_chunk_spans(&original)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok::<_, std::io::Error>((original, spans))
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
+    .map_err(|error| {
+        tracing::debug!(
+            event = "project_file_strip_failed",
+            error = %error,
+            "could not serve a project file without its workflow"
+        );
+        ApiError::bad_request("This image could not be rewritten without its workflow.")
+    })?;
+
+    // One allocation for the whole response: `Bytes::from` takes the read buffer over, and every
+    // slice below is a refcounted view into it rather than a copy.
+    let bytes = axum::body::Bytes::from(bytes);
+    let kept = sceneworks_core::workflow_png::kept_spans(bytes.len(), &spans);
+    let served: Vec<axum::body::Bytes> = kept
+        .iter()
+        .map(|span| bytes.slice(span.start..span.end))
+        .collect();
+    let served_len: u64 = served.iter().map(|slice| slice.len() as u64).sum();
+
+    let mut headers = project_file_response_headers(
+        &project_file.content_type,
+        served_len,
+        &etag,
+        last_modified,
+    )?;
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+    // The permit rides with the stream rather than being dropped here: the buffer is alive until
+    // the last slice has been written, so releasing the slot at this line would let the next
+    // request in while this one's memory is still held.
+    let mut response = Body::from_stream(stream::iter(served.into_iter().map(move |slice| {
+        let _permit = &permit;
+        Ok::<_, std::convert::Infallible>(slice)
+    })))
+    .into_response();
+    response.headers_mut().extend(headers);
+    Ok(response)
+}
+
+/// Whether `If-None-Match` names `etag` (or `*`).
+///
+/// The ETag half of [`project_file_is_not_modified`], on its own, for the derived representations
+/// whose `Last-Modified` is the source file's and therefore cannot tell one representation from
+/// another.
+fn if_none_match_matches(request_headers: &HeaderMap, etag: &str) -> bool {
+    request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|candidate| candidate == "*" || candidate == etag)
+        })
+}
+
+/// A 304 carrying `headers` minus the content length, which a body-less response must not declare.
+fn not_modified_response(headers: HeaderMap) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::NOT_MODIFIED;
+    *response.headers_mut() = headers;
+    response.headers_mut().remove(header::CONTENT_LENGTH);
+    response
+}
+
+/// Distinguish a derived representation's ETag from the source file's.
+///
+/// The route caches `immutable`, so two representations of one URL sharing a tag is a correctness
+/// bug and not a missed optimization: a client holding the full file would revalidate a strip
+/// request as `304 Not Modified` and reuse the body with the workflow still in it.
+fn variant_etag(base: &str, variant: &str) -> String {
+    match base.strip_suffix('"') {
+        Some(head) => format!("{head}-{variant}\""),
+        None => format!("{base}-{variant}"),
+    }
+}
+
 fn project_file_etag(metadata: &std::fs::Metadata) -> String {
     let modified = metadata
         .modified()
@@ -2124,19 +2459,19 @@ fn project_file_response_headers(
     Ok(headers)
 }
 
+/// Ordinary revalidation for a representation whose bytes ARE the file's: the ETag when the client
+/// sent one, the modification date otherwise.
+///
+/// Deliberately not used by the strip variant. `If-Modified-Since` is an answer about the FILE, and
+/// a derived representation shares its file with the original — see
+/// [`stripped_project_file_response`], which revalidates on the tag alone.
 fn project_file_is_not_modified(
     request_headers: &HeaderMap,
     etag: &str,
     last_modified: Option<SystemTime>,
 ) -> bool {
-    if let Some(value) = request_headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-    {
-        return value
-            .split(',')
-            .map(str::trim)
-            .any(|candidate| candidate == "*" || candidate == etag);
+    if request_headers.contains_key(header::IF_NONE_MATCH) {
+        return if_none_match_matches(request_headers, etag);
     }
     let Some(modified) = last_modified else {
         return false;
@@ -2812,6 +3147,37 @@ fn model_lora_families(model: &Value) -> Vec<String> {
         &["families", "compatibleFamilies", "modelFamilies"],
         Some("loraCompatibility"),
     )
+}
+
+/// Every LoRA family this model can load: the families it DECLARES plus each one's
+/// extra-compatible families from the shared registry (`sceneworks-core`'s
+/// `accepted_lora_families`). Normalized and de-duplicated, declared entries first.
+///
+/// 🔴 The generate-time gate must use this, not [`model_lora_families`]. Keying the gate on the
+/// declared set alone made the API stricter than the registry it shares with the worker: Krea
+/// Realtime 14B declares only `krea-realtime` and additionally accepts `wan-video`, so a Wan style
+/// LoRA the engine installs happily was rejected at submit with "appears to be a wan-video LoRA,
+/// which is not compatible" (sc-15017 — caught by running it, not by a test). The same divergence
+/// applied to `chroma`←`flux` and `flux2-klein`/`flux2-dev`←`flux2`.
+///
+/// One-directional, like the registry: nothing here gives a Wan model Krea-Realtime LoRAs.
+///
+/// ⚠️ Every family that comes back is re-normalized through [`normalize_lora_family`] (the API's
+/// CANONICAL spelling — `krea_2`, underscore) because `accepted_lora_families` returns core's
+/// hyphenated `normalize_model_family` form (`krea-2`). Both sides of the membership test in
+/// `validate_lora_specs_for_model` are in the canonical form, so skipping this re-normalization
+/// silently un-does sc-8185 and falsely rejects a Krea 2 LoRA.
+fn accepted_model_lora_families(model: &Value) -> Vec<String> {
+    let mut accepted: Vec<String> = Vec::new();
+    for declared in model_lora_families(model) {
+        for family in sceneworks_core::lora_family::accepted_lora_families(&declared) {
+            let family = normalize_lora_family(&family);
+            if !accepted.contains(&family) {
+                accepted.push(family);
+            }
+        }
+    }
+    accepted
 }
 
 fn families_from_value_chain(
@@ -3597,6 +3963,195 @@ fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Resul
     Ok(())
 }
 
+const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
+const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
+const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
+
+/// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
+/// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
+/// LLM sampler and must never inherit the old truthy/coercing behavior.
+fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, ApiError> {
+    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
+        return Err(ApiError::bad_request(format!(
+            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
+        )));
+    }
+    let enabled = match advanced.get("enhancePrompt") {
+        None => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt must be a boolean",
+            ));
+        }
+    };
+    if let Some(value) = advanced.get("enhanceTemperature") {
+        let temperature = value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                ApiError::bad_request("advanced.enhanceTemperature must be a finite number")
+            })?;
+        if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&temperature) {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+            )));
+        }
+        if !enabled {
+            return Err(ApiError::bad_request(
+                "advanced.enhanceTemperature requires advanced.enhancePrompt=true",
+            ));
+        }
+    }
+    if let Some(value) = advanced.get("enhanceMaxTokens") {
+        let tokens = value
+            .as_u64()
+            .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
+        if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&tokens) {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+            )));
+        }
+        if !enabled {
+            return Err(ApiError::bad_request(
+                "advanced.enhanceMaxTokens requires advanced.enhancePrompt=true",
+            ));
+        }
+    }
+    Ok(enabled)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
+    prompt_enhancement_payload_string(payload, "referenceAssetId")
+        || payload
+            .get("referenceAssetIds")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
+            })
+}
+
+fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiError> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("text_to_image");
+
+    #[cfg(target_os = "macos")]
+    if !matches!(
+        mode,
+        "text_to_image" | "edit_image" | "character_image" | "style_variations"
+    ) {
+        return Err(ApiError::bad_request(format!(
+            "advanced.enhancePrompt on MLX does not support image mode {mode}"
+        )));
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if !matches!(mode, "text_to_image" | "edit_image") {
+        return Err(ApiError::bad_request(format!(
+            "advanced.enhancePrompt on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
+        )));
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = payload;
+        Err(ApiError::bad_request(
+            "advanced.enhancePrompt requires a native MLX or Candle image backend",
+        ))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        let has_references = prompt_enhancement_payload_references(payload);
+        let has_edit_input =
+            has_references || prompt_enhancement_payload_string(payload, "sourceAssetId");
+        if mode == "text_to_image" && has_edit_input {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt text_to_image cannot include source or reference image assets",
+            ));
+        }
+        if mode == "edit_image" && !has_edit_input {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt edit_image requires a source or reference image asset",
+            ));
+        }
+        if matches!(mode, "character_image" | "style_variations") && !has_references {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhancePrompt {mode} requires a reference image asset"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
+/// actual native backend route: MLX owns base/edit/character plus the defensive legacy style alias,
+/// while Candle owns only base and its bespoke `edit_image` lane. It is not inherited by Klein,
+/// strict control, backendless builds,
+/// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
+/// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.
+fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if !validate_prompt_enhancement_fields(advanced)? {
+        return Ok(());
+    }
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if model != "flux2_dev" {
+        return Err(ApiError::bad_request(
+            "advanced.enhancePrompt is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it",
+        ));
+    }
+    let strict_control = advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+        || advanced.contains_key("controlWeights")
+        || advanced.contains_key("controlImage")
+        || advanced.contains_key("controlMode");
+    if strict_control {
+        return Err(ApiError::bad_request(
+            "advanced.enhancePrompt cannot be combined with FLUX.2-dev strict control",
+        ));
+    }
+    validate_prompt_enhancement_route(payload)
+}
+
 /// Reject a `model` id that is not a safe single path component (F-003 / sc-11159).
 ///
 /// The id flows verbatim from the untrusted job payload into the worker's asset
@@ -3643,6 +4198,8 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    validate_prompt_enhancement_fields(&payload.advanced)?;
+    validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(
             "loras must contain at most {} entries",
@@ -3682,6 +4239,25 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         if payload.upscale.engine.trim().is_empty() {
             return Err(ApiError::bad_request("upscale.engine is required"));
         }
+    }
+    Ok(())
+}
+
+/// Bound strict-pose fan-out at the image-job creation boundary. Each `advanced.poses` entry
+/// renders one image, so this is an output-count contract rather than a JSON-size guard.
+///
+/// Existing stored jobs are immutable and remain readable. Retry/duplicate pass their merged
+/// payload through this same helper in `jobs.rs`, so a legacy over-limit job must be reduced before
+/// it can create new work instead of silently reproducing the old unbounded behavior.
+fn validate_image_pose_count(advanced: &JsonObject) -> Result<(), ApiError> {
+    let Some(poses) = advanced.get("poses").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if poses.len() > sceneworks_core::image_request::MAX_JOB_POSES {
+        return Err(ApiError::bad_request(format!(
+            "advanced.poses must contain at most {} entries; each pose renders one image",
+            sceneworks_core::image_request::MAX_JOB_POSES
+        )));
     }
     Ok(())
 }

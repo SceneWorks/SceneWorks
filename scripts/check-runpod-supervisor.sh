@@ -27,7 +27,7 @@ wait_for_event() {
 cat >"${temp_root}/fake-api" <<'EOF'
 #!/usr/bin/env bash
 set -u
-if [[ -v SCENEWORKS_ALLOW_OPEN_BIND ]]; then
+if [[ -n "${SCENEWORKS_ALLOW_OPEN_BIND+x}" ]]; then
   printf 'api:override:present\n' >>"${SCENEWORKS_TEST_EVENTS}"
   exit 91
 fi
@@ -44,10 +44,11 @@ else
   printf 'api:token:absent\n' >>"${SCENEWORKS_TEST_EVENTS}"
 fi
 if [[ "${SCENEWORKS_TEST_RECORD_PATHS:-0}" == "1" ]]; then
-  printf 'api:paths:%s|%s|%s|%s|%s|%s\n' \
+  printf 'api:paths:%s|%s|%s|%s|%s|%s|%s\n' \
     "${SCENEWORKS_VOLUME}" \
     "${SCENEWORKS_DATA_DIR}" \
     "${SCENEWORKS_CONFIG_DIR}" \
+    "${SCENEWORKS_CREDENTIALS_DIR}" \
     "${SCENEWORKS_JOBS_DB_PATH}" \
     "${HF_HOME}" \
     "${HF_HUB_CACHE:-${HUGGINGFACE_HUB_CACHE:-}}" \
@@ -65,7 +66,7 @@ EOF
 cat >"${temp_root}/fake-worker" <<'EOF'
 #!/usr/bin/env bash
 set -u
-if [[ -v SCENEWORKS_ALLOW_OPEN_BIND ]]; then
+if [[ -n "${SCENEWORKS_ALLOW_OPEN_BIND+x}" ]]; then
   printf 'worker:override:present\n' >>"${SCENEWORKS_TEST_EVENTS}"
   exit 91
 fi
@@ -123,6 +124,7 @@ assert_public_bind_rejected() {
       SCENEWORKS_WORKER_BIN="${temp_root}/fake-worker" \
       SCENEWORKS_DATA_DIR="${run_dir}/data" \
       SCENEWORKS_CONFIG_DIR="${run_dir}/config" \
+      SCENEWORKS_CREDENTIALS_DIR="${run_dir}/credentials" \
       HF_HOME="${run_dir}/hf" \
       bash "${entrypoint}" >"${run_dir}/stdout" 2>"${run_dir}/stderr"
   else
@@ -134,6 +136,7 @@ assert_public_bind_rejected() {
     SCENEWORKS_WORKER_BIN="${temp_root}/fake-worker" \
     SCENEWORKS_DATA_DIR="${run_dir}/data" \
     SCENEWORKS_CONFIG_DIR="${run_dir}/config" \
+    SCENEWORKS_CREDENTIALS_DIR="${run_dir}/credentials" \
     HF_HOME="${run_dir}/hf" \
     bash "${entrypoint}" >"${run_dir}/stdout" 2>"${run_dir}/stderr"
   fi
@@ -266,7 +269,7 @@ env -u SCENEWORKS_DATA_DIR \
   bash "${entrypoint}" >"${run_dir}/stdout" 2>"${run_dir}/stderr" &
 supervisor_pid=$!
 wait_for_event \
-  "api:paths:${run_dir}/volume|${run_dir}/volume/data|${run_dir}/volume/config|${run_dir}/ephemeral/jobs.db|${run_dir}/volume/cache/huggingface|${run_dir}/volume/cache/huggingface/hub" \
+  "api:paths:${run_dir}/volume|${run_dir}/volume/data|${run_dir}/volume/config|${run_dir}/volume/credentials|${run_dir}/ephemeral/jobs.db|${run_dir}/volume/cache/huggingface|${run_dir}/volume/cache/huggingface/hub" \
   "${events}"
 wait_for_event \
   "api:hf-env:${run_dir}/volume/cache/huggingface/hub|${run_dir}/volume/cache/huggingface/hub" \
@@ -299,6 +302,7 @@ env -u HF_HUB_CACHE \
   SCENEWORKS_VOLUME= \
   SCENEWORKS_DATA_DIR="${run_dir}/custom-data" \
   SCENEWORKS_CONFIG_DIR="${run_dir}/custom-config" \
+  SCENEWORKS_CREDENTIALS_DIR="${run_dir}/custom-credentials" \
   SCENEWORKS_JOBS_DB_PATH="${run_dir}/custom-runtime/jobs.db" \
   HF_HOME="${run_dir}/custom-hf-home" \
   HUGGINGFACE_HUB_CACHE="${run_dir}/legacy-hub-cache" \
@@ -312,7 +316,7 @@ env -u HF_HUB_CACHE \
   bash "${entrypoint}" >"${run_dir}/stdout" 2>"${run_dir}/stderr" &
 supervisor_pid=$!
 wait_for_event \
-  "api:paths:/workspace|${run_dir}/custom-data|${run_dir}/custom-config|${run_dir}/custom-runtime/jobs.db|${run_dir}/custom-hf-home|${run_dir}/legacy-hub-cache" \
+  "api:paths:/workspace|${run_dir}/custom-data|${run_dir}/custom-config|${run_dir}/custom-credentials|${run_dir}/custom-runtime/jobs.db|${run_dir}/custom-hf-home|${run_dir}/legacy-hub-cache" \
   "${events}"
 wait_for_event "api:hf-env:<unset>|${run_dir}/legacy-hub-cache" "${events}"
 wait_for_event "worker:start:http://127.0.0.1:8010:auto" "${events}"
@@ -346,7 +350,7 @@ SCENEWORKS_SHUTDOWN_GRACE_INTERVAL_SECONDS=0.05 \
 bash "${entrypoint}" >"${run_dir}/stdout" 2>"${run_dir}/stderr" &
 supervisor_pid=$!
 wait_for_event \
-  "api:paths:${run_dir}/volume|${run_dir}/data|${run_dir}/config|${run_dir}/runtime/jobs.db|${run_dir}/hf-home|${run_dir}/priority-hub-cache" \
+  "api:paths:${run_dir}/volume|${run_dir}/data|${run_dir}/config|${run_dir}/volume/credentials|${run_dir}/runtime/jobs.db|${run_dir}/hf-home|${run_dir}/priority-hub-cache" \
   "${events}"
 wait_for_event \
   "api:hf-env:${run_dir}/priority-hub-cache|${run_dir}/legacy-hub-cache" \
@@ -371,6 +375,7 @@ SCENEWORKS_WORKER_BIN="${temp_root}/fake-worker" \
 SCENEWORKS_CURL_BIN="${temp_root}/fake-curl" \
 SCENEWORKS_DATA_DIR="${run_dir}/data" \
 SCENEWORKS_CONFIG_DIR="${run_dir}/config" \
+SCENEWORKS_CREDENTIALS_DIR="${run_dir}/credentials" \
 HF_HOME="${run_dir}/hf" \
 SCENEWORKS_READINESS_MAX_ATTEMPTS=5 \
 SCENEWORKS_READINESS_INTERVAL_SECONDS=0.05 \
@@ -406,6 +411,7 @@ SCENEWORKS_WORKER_BIN="${temp_root}/fake-worker" \
 SCENEWORKS_CURL_BIN="${temp_root}/fake-curl" \
 SCENEWORKS_DATA_DIR="${run_dir}/data" \
 SCENEWORKS_CONFIG_DIR="${run_dir}/config" \
+SCENEWORKS_CREDENTIALS_DIR="${run_dir}/credentials" \
 HF_HOME="${run_dir}/hf" \
 SCENEWORKS_READINESS_MAX_ATTEMPTS=5 \
 SCENEWORKS_READINESS_INTERVAL_SECONDS=0.05 \
@@ -433,6 +439,7 @@ SCENEWORKS_WORKER_BIN="${temp_root}/fake-worker" \
 SCENEWORKS_CURL_BIN="${temp_root}/fake-curl" \
 SCENEWORKS_DATA_DIR="${run_dir}/data" \
 SCENEWORKS_CONFIG_DIR="${run_dir}/config" \
+SCENEWORKS_CREDENTIALS_DIR="${run_dir}/credentials" \
 HF_HOME="${run_dir}/hf" \
 SCENEWORKS_READINESS_MAX_ATTEMPTS=3 \
 SCENEWORKS_READINESS_INTERVAL_SECONDS=0.05 \

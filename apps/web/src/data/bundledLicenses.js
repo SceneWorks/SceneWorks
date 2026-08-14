@@ -90,14 +90,26 @@ import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?raw";
 import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?raw";
 import wan22VaceFunApache20 from "../../../desktop/licenses/wan2.2-vace-fun/Apache-2.0.txt?raw";
 import auraSrV2Apache20 from "../../../desktop/licenses/aura-sr-v2/Apache-2.0.txt?raw";
+import sam3License from "../../../desktop/licenses/sam3/SAM-License.txt?raw";
+import sam2Apache20 from "../../../desktop/licenses/sam2/Apache-2.0.txt?raw";
+import yolo11Agpl30 from "../../../desktop/licenses/yolo11/AGPL-3.0.txt?raw";
 import controlnetTileSdxlApache20 from "../../../desktop/licenses/controlnet-tile-sdxl/Apache-2.0.txt?raw";
 import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?raw";
 import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?raw";
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?raw";
+import seedvr2Apache20 from "../../../desktop/licenses/seedvr2/Apache-2.0.txt?raw";
+// DWPose (sc-17634): mmpose's OWN LICENSE file, not the stock Apache text — it carries the
+// "Copyright 2018-2020 Open-MMLab. All rights reserved." notice, which is the attribution that has
+// to travel with the two ONNX graphs SceneWorks re-hosts at SceneWorks/dwpose-onnx.
+import dwposeApache20 from "../../../desktop/licenses/dwpose/Apache-2.0.txt?raw";
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?raw";
 import cmudictBsd2Clause from "../../../desktop/licenses/cmudict/BSD-2-Clause.txt?raw";
+// Upstream CONTENT (not an algorithm port) reproduced in the native captioners: the JoyCaption
+// prompt taxonomy. This is fpgaminer/joycaption's own LICENSE file, kept verbatim because it
+// carries the upstream copyright line the generic Apache template does not (sc-15191 review).
+import joycaptionApache20 from "../../../desktop/licenses/joycaption-source/Apache-2.0.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -157,13 +169,19 @@ const DOCUMENT_TEXT = {
   "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,
   "wan2.2-vace-fun-apache": wan22VaceFunApache20,
   "aura-sr-v2-apache": auraSrV2Apache20,
+  "sam3-license": sam3License,
+  "sam2-apache": sam2Apache20,
+  "yolo11-agpl": yolo11Agpl30,
   "controlnet-tile-sdxl-apache": controlnetTileSdxlApache20,
   "pid-nvidia-license": pidNVIDIALicense,
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
+  "seedvr2-apache": seedvr2Apache20,
+  "dwpose-apache": dwposeApache20,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
+  "joycaption-source-apache": joycaptionApache20,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.

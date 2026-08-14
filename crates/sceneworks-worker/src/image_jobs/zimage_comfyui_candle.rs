@@ -1,9 +1,9 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, resolve_advanced_or_manifest_u32,
-    resolve_seed, start_gen_stream, ApiClient, GenerationOutput, GenerationRequest, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
-    WorkerResult,
+    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries, resolve_adapters,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
+    GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
+    Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -147,12 +147,25 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 .to_owned(),
         )
     })?;
+    let adapters = resolve_adapters(request, settings)?;
+    let mut admission_paths = vec![
+        paths.transformer.as_path(),
+        paths.text_encoder.as_path(),
+        paths.vae.as_path(),
+    ];
+    admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
+    admit_candle_base_floor(
+        &request.model,
+        "ComfyUI Z-Image",
+        settings,
+        &admission_paths,
+    )
+    .await?;
 
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
     let raw_settings = zimage_comfyui_raw_settings(request, steps);
-
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
@@ -175,6 +188,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 text_encoder,
                 vae,
                 tokenizer_dir,
+                adapters,
             )
             .map_err(|error| {
                 WorkerError::Engine(format!("ComfyUI Z-Image load failed: {error}"))
@@ -182,41 +196,46 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
             Ok(model)
         },
         move |model, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let request = GenerationRequest {
-                    prompt,
-                    width,
-                    height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let output = match model.generate(&request, &mut *on_progress) {
-                    Ok(output) => output,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "ComfyUI Z-Image generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                match output {
-                    GenerationOutput::Images(mut images) => {
-                        let image = images.pop().ok_or_else(|| {
-                            WorkerError::Engine("ComfyUI Z-Image produced no image".to_owned())
-                        })?;
-                        Ok(Some((seed, image.width, image.height, image.pixels)))
+                    let request = GenerationRequest {
+                        prompt,
+                        width,
+                        height,
+                        count: 1,
+                        seed: Some(seed as u64),
+                        steps: Some(steps),
+                        preview,
+                        cancel: cancel.clone(),
+                        ..Default::default()
+                    };
+                    let output = match model.generate(&request, &mut *on_progress) {
+                        Ok(output) => output,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "ComfyUI Z-Image generation failed: {error}"
+                            )));
+                        }
+                    };
+                    match output {
+                        GenerationOutput::Images(mut images) => {
+                            let image = images.pop().ok_or_else(|| {
+                                WorkerError::Engine("ComfyUI Z-Image produced no image".to_owned())
+                            })?;
+                            Ok(Some((seed, image.width, image.height, image.pixels)))
+                        }
+                        _ => Err(WorkerError::Engine(
+                            "ComfyUI Z-Image returned non-image output".to_owned(),
+                        )),
                     }
-                    _ => Err(WorkerError::Engine(
-                        "ComfyUI Z-Image returned non-image output".to_owned(),
-                    )),
-                }
-            })
+                },
+            )
         },
     );
 

@@ -1,13 +1,15 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    consume_gen_events, curated_image_menu, drive_gen_items_scored, load_reference_image,
-    non_empty, normalize_sampling_knob, pid_effective_dims, pid_output_tier,
-    read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_character_image_likeness_source, resolve_pid_weights,
-    resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream, ApiClient, Image,
-    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PulidFlux, PulidFluxPaths,
-    PulidFluxRequest, Settings, Value, WorkerError, WorkerResult,
+    admit_conditioning_paths, candle_artifact_path_matches, candle_certified_artifact_path,
+    candle_certified_hf_artifact_path, consume_gen_events, curated_image_menu,
+    drive_gen_items_scored, load_reference_image, non_empty, normalize_sampling_knob,
+    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_character_image_likeness_source, resolve_pid_weights, resolve_seed, stage_likeness,
+    standard_tier_subdir, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, PathBuf, PulidFlux, PulidFluxPaths, PulidFluxRequest, Settings, Value,
+    WorkerError, WorkerResult,
 };
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, DownloadContext};
 use serde_json::json;
 
@@ -79,6 +81,34 @@ const PULID_CANDLE_DEFAULT_ID_WEIGHT: f32 = 1.0;
 /// The adapter/engine id recorded on candle PuLID-FLUX assets + telemetry (distinct from the macOS
 /// `mlx_pulid_flux` label and the txt2img `candle_flux` lane).
 pub(super) const PULID_CANDLE_ENGINE: &str = "candle_pulid_flux";
+
+/// The shared ladder is calibrated only for the exact single-identity PuLID route. PiD adds a
+/// second decoder and LoRAs add request-specific weights that are not represented by that contract,
+/// so those requests deliberately keep the legacy resident load path until they have independent
+/// evidence rows and provider-owned safety contracts.
+fn pulid_memory_ladder_eligible(request: &ImageRequest, use_pid: bool) -> bool {
+    !use_pid && request.loras.is_empty()
+}
+
+/// Resolve the worker evidence key from the provider's inspection of the actual selected snapshot.
+/// App-managed model paths do not have to be named `q4`/`q8`, so directory basenames are never tier
+/// evidence; the packed transformer config is authoritative.
+fn pulid_memory_tier_key(paths: &PulidFluxPaths) -> WorkerResult<&'static str> {
+    let tier = runtime_cuda::providers::pulid::memory_strategy::resolved_numeric_tier(paths)
+        .map_err(|error| {
+            WorkerError::Engine(format!(
+                "PuLID-FLUX numeric tier resolution failed: {error}"
+            ))
+        })?;
+    match (tier.precision, tier.quant) {
+        (gen_core::Precision::Bf16, Some(gen_core::Quant::Q4)) => Ok("q4"),
+        (gen_core::Precision::Bf16, Some(gen_core::Quant::Q8)) => Ok("q8"),
+        (gen_core::Precision::Bf16, None) => Ok("bf16"),
+        (precision, quant) => Err(WorkerError::Engine(format!(
+            "PuLID-FLUX resolved unsupported numeric tier precision={precision:?} quant={quant:?}"
+        ))),
+    }
+}
 
 /// Resolve the FLUX.1-dev backbone snapshot for candle PuLID-FLUX: an explicit `modelPath` dir
 /// (advanced or manifest) wins (used verbatim — an app-managed override picks its own layout), else the
@@ -385,6 +415,118 @@ pub(super) async fn generate_candle_pulid_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+    let adapters = resolve_adapters(request, settings)?;
+
+    // SC-15839: build the bespoke provider's exact contract from the paths it will actually load.
+    // The contract prices the full PuLID identity stack separately from the shared FLUX trunk, so
+    // base FLUX evidence cannot authorize this route.
+    let contract_paths = PulidFluxPaths {
+        flux_base: flux_base.clone(),
+        pulid_weights: adapter.clone(),
+        eva_weights: eva.clone(),
+        face_dir: face_dir.clone(),
+        adapters: adapters.clone(),
+    };
+    let tier = pulid_memory_tier_key(&contract_paths)?;
+    let pulid_contract =
+        runtime_cuda::providers::pulid::memory_strategy::provider_contract(&contract_paths)
+            .map_err(|error| {
+                WorkerError::Engine(format!("PuLID-FLUX memory contract failed: {error}"))
+            })?;
+    let runtime_overlay_bytes = pulid_contract.asset_facts.overlay_bytes;
+    let strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux_base.clone()))
+        .with_offload_policy(gen_core::OffloadPolicy::Sequential)
+        .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        runtime_overlay_bytes,
+    );
+    let artifact_is_certified =
+        candle_certified_artifact_path("flux1_dev", settings, &flux_base, tier)
+            && candle_certified_hf_artifact_path(
+                settings,
+                PULID_CANDLE_ADAPTER_REPO,
+                PULID_CANDLE_ADAPTER_REVISION,
+                Path::new(PULID_CANDLE_ADAPTER_FILE),
+                &adapter,
+            )
+            && candle_certified_hf_artifact_path(
+                settings,
+                PULID_CANDLE_MLX_REPO,
+                PULID_CANDLE_MLX_REVISION,
+                Path::new(PULID_CANDLE_EVA_FILE),
+                &eva,
+            )
+            && candle_artifact_path_matches(
+                &face_dir,
+                &settings.data_dir.join("cache").join("pulid-flux"),
+            );
+    let memory_evaluation = if pulid_memory_ladder_eligible(request, use_pid) {
+        crate::candle_memory_strategy::evaluate_shared_bespoke_image(
+            "pulid_flux",
+            PULID_CANDLE_MODEL,
+            &strategy_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            "character_image",
+            Some("identity"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            raw_budget,
+            predicted_peak,
+            runtime_overlay_bytes,
+            gen_core::MemoryCacheState::Cold,
+            pulid_contract,
+        )?
+    } else {
+        None
+    };
+    if let Some(evaluation) = &memory_evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+        raw_settings.insert(
+            "memoryEvidenceRevision".to_owned(),
+            Value::String(evaluation.context.evidence_revision.clone()),
+        );
+    }
+    let memory_context = memory_evaluation.map(|evaluation| evaluation.context);
+    let load_memory_context = memory_context.clone();
+
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FLUX.1-dev base held co-resident
+    // with PuLID's whole identity stack: the ID adapter, the EVA-CLIP vision tower, the BiSeNet face
+    // parser, and an opted-in PiD decoder pair. This lane loads through the UNcached `start_gen_stream`
+    // with a bespoke `PulidFluxPaths`, so it reaches neither the `generate_candle_stream` `vram_gate` nor
+    // the `generator_cache` `apply_residency_policy`; before this it allocated unchecked. Gated here,
+    // before the paths are moved into the load closure.
+    {
+        let mut overlays = vec![adapter.as_path(), eva.as_path(), face_dir.as_path()];
+        overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
+        overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
+        admit_conditioning_paths(
+            settings,
+            "PuLID-FLUX",
+            "face-identity encoder stack",
+            &flux_base,
+            &overlays,
+        )
+        .await?;
+    }
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -396,9 +538,13 @@ pub(super) async fn generate_candle_pulid_stream(
                 pulid_weights: adapter,
                 eva_weights: eva,
                 face_dir,
+                adapters,
             };
-            let model = PulidFlux::load(&paths)
-                .map_err(|error| WorkerError::Engine(format!("PuLID-FLUX load failed: {error}")))?;
+            let model = match load_memory_context.as_ref() {
+                Some(context) => PulidFlux::load_with_memory_context(&paths, context.clone()),
+                None => PulidFlux::load(&paths),
+            }
+            .map_err(|error| WorkerError::Engine(format!("PuLID-FLUX load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
@@ -419,55 +565,69 @@ pub(super) async fn generate_candle_pulid_stream(
             Ok((model, reference, scorer))
         },
         move |(model, reference, scorer), tx, cancel| {
-            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = PulidFluxRequest {
-                    prompt,
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    id_weight,
-                    seed: seed as u64,
-                    sampler: sampler.clone(),
-                    scheduler: scheduler.clone(),
-                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
-                    use_pid,
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &reference, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "PuLID-FLUX generation failed: {error}"
-                        )));
+            drive_gen_items_scored(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                // Score this finished image against the cached source embedding (sc-4411). The Image
-                // build + pixel clone is paid ONLY when a scorer exists; a non-frontal / no-face result
-                // records an honest detected:false N/A, `None` scorer ⇒ field omitted.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        Some(likeness_source_ref.as_str()),
-                    )
-                });
-                Ok(Some((
-                    seed,
-                    out.width,
-                    out.height,
-                    out.pixels,
-                    face_likeness,
-                )))
-            })
+                    let req = PulidFluxRequest {
+                        prompt,
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        id_weight,
+                        seed: seed as u64,
+                        sampler: sampler.clone(),
+                        scheduler: scheduler.clone(),
+                        preview: preview.clone(),
+                        // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                        use_pid,
+                        cancel: cancel.clone(),
+                    };
+                    let generated = match memory_context.as_ref() {
+                        Some(context) => model.generate_with_memory_context(
+                            context,
+                            &req,
+                            &reference,
+                            &mut *on_progress,
+                        ),
+                        None => model.generate(&req, &reference, &mut *on_progress),
+                    };
+                    let out = match generated {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "PuLID-FLUX generation failed: {error}"
+                            )));
+                        }
+                    };
+                    // Score this finished image against the cached source embedding (sc-4411). The Image
+                    // build + pixel clone is paid ONLY when a scorer exists; a non-frontal / no-face result
+                    // records an honest detected:false N/A, `None` scorer ⇒ field omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out.width,
+                                height: out.height,
+                                pixels: out.pixels.clone(),
+                            },
+                            Some(likeness_source_ref.as_str()),
+                        )
+                    });
+                    Ok(Some((
+                        seed,
+                        out.width,
+                        out.height,
+                        out.pixels,
+                        face_likeness,
+                    )))
+                },
+            )
         },
     );
 
@@ -487,4 +647,56 @@ pub(super) async fn generate_candle_pulid_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(loras: Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            &json!({
+                "projectId": "project",
+                "model": PULID_CANDLE_MODEL,
+                "mode": "character_image",
+                "referenceAssetId": "face",
+                "loras": loras,
+            })
+            .as_object()
+            .cloned()
+            .expect("object"),
+        )
+    }
+
+    #[test]
+    fn memory_ladder_requires_exact_non_pid_non_lora_identity_route() {
+        let exact = request(json!([]));
+        assert!(pulid_memory_ladder_eligible(&exact, false));
+        assert!(!pulid_memory_ladder_eligible(&exact, true));
+
+        let with_lora = request(json!([{"path": "style.safetensors", "weight": 0.7}]));
+        assert!(!pulid_memory_ladder_eligible(&with_lora, false));
+    }
+
+    #[test]
+    fn memory_tier_comes_from_packed_config_not_directory_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_managed = temp.path().join("my-custom-flux-install");
+        std::fs::create_dir_all(app_managed.join("transformer")).expect("transformer dir");
+        std::fs::write(
+            app_managed.join("transformer/config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .expect("packed config");
+        let paths = PulidFluxPaths {
+            flux_base: app_managed,
+            pulid_weights: temp.path().join("pulid.safetensors"),
+            eva_weights: temp.path().join("eva.safetensors"),
+            face_dir: temp.path().join("face"),
+            adapters: Vec::new(),
+        };
+
+        assert_eq!(pulid_memory_tier_key(&paths).expect("q4 tier"), "q4");
+    }
 }

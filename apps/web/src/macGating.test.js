@@ -26,7 +26,7 @@ const gating = {
       supported: false,
       reason: { feature: "image_upscale (AuraSR)", detail: "dropped on Mac.", suggestedEpic: "sc-3668" },
     },
-    // SeedVR2 is the Mac-only native-MLX upscaler (epic 4811 / sc-4815) → supported on macOS.
+    // SeedVR2 uses native MLX here and native Candle/CUDA on Windows/Linux → supported on macOS.
     imageUpscaleSeedvr2: { supported: true },
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability feature entry.
   },

@@ -25,13 +25,13 @@ use runtime_cuda::media::candle_core::{Device, Tensor};
 use runtime_cuda::media::default_device;
 use runtime_cuda::media::gen_core::Quant;
 use runtime_cuda::providers::sam3::{
-    Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput, Weights,
+    Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput, Weights,
 };
 
 use crate::person_segment_sam3_common::{
-    check_segment_canceled, frame_mask_for_object, normalize_chw, paint_order, per_frame_masks,
-    select_object, BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE, CONCEPT_PROMPT,
-    INPUT_SIZE,
+    check_segment_canceled, frame_mask_for_object, mask_to_frame, normalize_chw, paint_order,
+    per_frame_masks, select_object, BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE,
+    CONCEPT_PROMPT, INPUT_SIZE,
 };
 use crate::{WorkerError, WorkerResult};
 
@@ -39,7 +39,7 @@ use crate::{WorkerError, WorkerResult};
 // the download helper + `AllPersonMasks` under this module's path so the existing off-Mac callers
 // (`media_jobs`, `video_jobs`, `scail2_masks`) keep referencing `person_segment_sam3_candle::…`
 // unchanged.
-pub(crate) use crate::person_segment_sam3_common::{ensure_segmenter_weights, AllPersonMasks};
+pub(crate) use crate::person_segment_sam3_common::{require_segmenter_weights, AllPersonMasks};
 
 /// Adapt this backend's `candle-gen-sam3` `VideoFrameOutput` to the shared association math
 /// ([`select_object`]); the two backends' `VideoFrameOutput` are the same shape but distinct types,
@@ -151,6 +151,103 @@ where
     let n = INPUT_SIZE as usize;
     Tensor::from_vec(chw, (1, 3, n, n), device)
         .map_err(|e| WorkerError::Engine(format!("sam3 input tensor: {e}")))
+}
+
+fn normalize_box_cxcywh(box_xyxy: [f32; 4], width: u32, height: u32) -> [f32; 4] {
+    let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+    let x1 = box_xyxy[0].min(box_xyxy[2]).clamp(0.0, w);
+    let y1 = box_xyxy[1].min(box_xyxy[3]).clamp(0.0, h);
+    let x2 = box_xyxy[0].max(box_xyxy[2]).clamp(0.0, w);
+    let y2 = box_xyxy[1].max(box_xyxy[3]).clamp(0.0, h);
+    [
+        (x1 + x2) * 0.5 / w,
+        (y1 + y2) * 0.5 / h,
+        (x2 - x1) / w,
+        (y2 - y1) / h,
+    ]
+}
+
+/// Single-image SAM3 box-PVS path used by the backend-neutral `image_segment` job.
+pub(crate) fn segment_box_blocking(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    image: image::RgbImage,
+    box_xyxy: [f32; 4],
+    concept: &str,
+    threshold: f32,
+    mask_threshold: f32,
+) -> WorkerResult<Vec<u8>> {
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "smart-select source image has zero dimension".to_owned(),
+        ));
+    }
+    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let weights = Weights::from_file(&model_path, &device)
+        .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+    let segmenter = Sam3ImageSegmenter::from_weights(&weights)
+        .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
+    let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+    let (input_ids, text_mask) = tokenizer
+        .encode(concept, &device)
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+    let pixels = input_tensor(&image, &device)?;
+    let cxcywh = normalize_box_cxcywh(box_xyxy, width, height);
+    let boxes = Tensor::from_vec(cxcywh.to_vec(), (1, 1, 4), &device)
+        .map_err(|e| WorkerError::Engine(format!("sam3 box tensor: {e}")))?;
+    let instances = segmenter
+        .segment_with_boxes(
+            &pixels,
+            &input_ids,
+            &text_mask,
+            &boxes,
+            &[1],
+            (width as f32, height as f32),
+            threshold,
+            mask_threshold,
+        )
+        .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))?;
+    let nx1 = (box_xyxy[0].min(box_xyxy[2]) / width as f32).clamp(0.0, 1.0);
+    let ny1 = (box_xyxy[1].min(box_xyxy[3]) / height as f32).clamp(0.0, 1.0);
+    let nx2 = (box_xyxy[0].max(box_xyxy[2]) / width as f32).clamp(0.0, 1.0);
+    let ny2 = (box_xyxy[1].max(box_xyxy[3]) / height as f32).clamp(0.0, 1.0);
+    let mut best: Option<(u64, usize, Vec<f32>)> = None;
+    for instance in instances {
+        let grid = instance
+            .mask
+            .dim(0)
+            .map_err(|e| WorkerError::Engine(e.to_string()))?;
+        let values = instance
+            .mask
+            .to_dtype(runtime_cuda::media::candle_core::DType::F32)
+            .and_then(|mask| mask.flatten_all())
+            .and_then(|mask| mask.to_vec1::<f32>())
+            .map_err(|e| WorkerError::Engine(format!("sam3 mask read: {e}")))?;
+        let mut inside = 0u64;
+        for gy in 0..grid {
+            for gx in 0..grid {
+                if values[gy * grid + gx] > 0.0 {
+                    let cx = (gx as f32 + 0.5) / grid as f32;
+                    let cy = (gy as f32 + 0.5) / grid as f32;
+                    if cx >= nx1 && cx < nx2 && cy >= ny1 && cy < ny2 {
+                        inside += 1;
+                    }
+                }
+            }
+        }
+        if best.as_ref().map_or(true, |(score, _, _)| inside > *score) {
+            best = Some((inside, grid, values));
+        }
+    }
+    let (_, grid, values) = best.filter(|(score, _, _)| *score > 0).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "SAM3 found no object in the selection box â€” try a tighter box or use the brush."
+                .to_owned(),
+        )
+    })?;
+    mask_to_frame(&values, grid, width, height)
 }
 
 /// Segment the selected person across a clip with the off-Mac candle SAM3 **text-concept (PCS) video
@@ -330,6 +427,18 @@ mod tests {
         assert_eq!(parse_quant("F32"), None);
         assert_eq!(parse_quant("none"), None);
         assert_eq!(parse_quant("garbage"), None, "unrecognized → dense");
+    }
+
+    #[test]
+    fn image_segment_box_is_normalized_clamped_and_order_independent() {
+        assert_eq!(
+            normalize_box_cxcywh([80.0, 60.0, 20.0, 10.0], 100, 100),
+            [0.5, 0.35, 0.6, 0.5]
+        );
+        assert_eq!(
+            normalize_box_cxcywh([-20.0, -10.0, 140.0, 120.0], 100, 100),
+            [0.5, 0.5, 1.0, 1.0]
+        );
     }
 
     /// sc-8807: a pre-tripped cancel flag short-circuits BEFORE frame decode / the cold multi-GB

@@ -1,14 +1,16 @@
+use super::{
+    admit_conditioning_paths, gate_tier_key, gate_with_evict_reclaim, krea_model_subdir,
+    lora_label, nvfp4_host_eligible, nvfp4_selected, pose_entries, resolve_adapters,
+    resolve_advanced_or_manifest_u32, resolve_text_style_gain, run_candle_strict_control,
+    trusted_control_weight_revision, AdapterSpec, ApiClient, CancelFlag, CandleStrictControl,
+    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings,
+    Value, WorkerError, WorkerResult,
+};
 use super::{advanced, huggingface_snapshot_dir};
 use super::{
     ensure_hf_cached_file, resolve_app_managed_model_dir, safe_weight_filename, DownloadContext,
 };
-use super::{
-    gate_tier_key, gate_with_evict_reclaim, krea_model_subdir, lora_label, nvfp4_host_eligible,
-    nvfp4_selected, pose_entries, resolve_adapters, resolve_advanced_or_manifest_u32,
-    resolve_text_style_gain, run_candle_strict_control, trusted_control_weight_revision,
-    AdapterSpec, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest,
-    JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
-};
+use crate::conditioning_fit::ConditioningAdmission;
 use serde_json::json;
 
 // Candle (Windows/CUDA) Krea 2 pose-ControlNet route (sc-8464, epic 8459) — `krea_2_turbo` +
@@ -77,7 +79,6 @@ const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
 /// checkpoint we load — mirrors `FLUX2_CONTROL_CANDLE_REVISION` / sc-9879). Registered overlays carry
 /// their own catalog-authorized immutable revision. `ensure_hf_cached_file` still verifies the file's
 /// `lfs.oid` from HF's tree API.
-#[cfg(test)]
 pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
 /// The Krea control fit-ladder tier for the base directory the resolver will actually load.
@@ -86,18 +87,120 @@ pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb4
 /// from the requested bits. Opaque dense roots deliberately fall through to the request key; NVFP4 is
 /// likewise used only when no standard tier basename resolved.
 fn krea_control_gate_tier(
+    convrot_resolved: bool,
     resolved_base: &Path,
     advanced: &JsonObject,
     manifest_entry: &JsonObject,
     nvfp4: bool,
 ) -> &'static str {
     gate_tier_key(
-        /* convrot_resolved */ false,
+        convrot_resolved,
         resolved_base,
         advanced,
         manifest_entry,
         nvfp4,
     )
+}
+
+/// Build the provider-contract spec from the same artifact identity the strict-control loader receives.
+/// The fit ladder prices adapter bytes separately, but the contract still needs the exact ConvRot +
+/// adapter composition so it cannot authorize a strategy for a different load surface.
+fn krea_control_memory_spec(
+    base: &Path,
+    tier: &str,
+    convrot_dit: Option<&Path>,
+    adapters: &[AdapterSpec],
+) -> gen_core::LoadSpec {
+    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.to_path_buf()));
+    spec = match tier {
+        "q4" => spec.with_quant(gen_core::Quant::Q4),
+        "q8" | "int8-convrot" => spec.with_quant(gen_core::Quant::Q8),
+        _ => spec,
+    };
+    if let Some(convrot_dit) = convrot_dit {
+        spec.text_encoder = Some(gen_core::WeightsSource::File(convrot_dit.to_path_buf()));
+    }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters.to_vec());
+    }
+    spec
+}
+
+/// Verify that the live request is inside sc-16013's exact rendered-device envelope: 1024² on sm_120,
+/// the pinned shipping base tier, and the pinned default control overlay. Custom/legacy artifacts and
+/// adapters may still run best-effort, but cannot inherit the calibrated hard-reject verdict.
+fn krea_control_runtime_evidence_verified(
+    request: &ImageRequest,
+    settings: &Settings,
+    tier: &str,
+    base: &Path,
+    control: &Path,
+) -> bool {
+    if request.width != 1024
+        || request.height != 1024
+        || crate::gpu::cached_compute_cap() != Some(12.0)
+    {
+        return false;
+    }
+    let Some(download) = request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads
+                .iter()
+                .find(|download| download.get("variant").and_then(Value::as_str) == Some(tier))
+        })
+    else {
+        return false;
+    };
+    let (Some(provider), Some(repository), Some(revision)) = (
+        download.get("provider").and_then(Value::as_str),
+        download.get("repo").and_then(Value::as_str),
+        download.get("revision").and_then(Value::as_str),
+    ) else {
+        return false;
+    };
+    let Some(pinned_base_root) = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        repository,
+        revision,
+    ) else {
+        return false;
+    };
+    if crate::vram_gate::KreaRuntimeEvidenceContext::inspect(
+        KREA_CONTROL_ENGINE_ID,
+        "candle",
+        &settings.gpu_id,
+        crate::gpu::cached_compute_cap(),
+        provider,
+        repository,
+        revision,
+        tier,
+        base,
+        &pinned_base_root,
+    )
+    .is_none()
+    {
+        return false;
+    }
+    let Some(pinned_control_root) = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        KREA_CONTROL_OVERLAY_REPO,
+        KREA_CONTROL_OVERLAY_REVISION,
+    ) else {
+        return false;
+    };
+    match (
+        control.canonicalize().ok(),
+        pinned_control_root
+            .join(KREA_CONTROL_OVERLAY_FILE)
+            .canonicalize()
+            .ok(),
+    ) {
+        (Some(actual), Some(expected)) => actual == expected,
+        _ => false,
+    }
 }
 
 /// Model ids the candle Krea strict-pose control route accepts (the deployed base the overlay applies on).
@@ -113,6 +216,9 @@ pub(super) fn resolve_krea_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
+    if super::wants_krea_convrot(request) {
+        return Ok(super::resolve_krea_convrot(request, settings).map(|(root, _)| root));
+    }
     if let Ok(env_dir) = std::env::var(KREA_CONTROL_BASE_ENV) {
         let p = PathBuf::from(env_dir.trim());
         if p.is_dir() {
@@ -173,7 +279,11 @@ pub(super) fn krea_control_candle_available(request: &ImageRequest, settings: &S
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
-        && matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
+        && if super::wants_krea_convrot(request) {
+            super::resolve_krea_convrot_dit(settings).is_some()
+        } else {
+            matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
+        }
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (8).
@@ -335,29 +445,33 @@ fn krea_control_candle_raw_settings(
 /// The per-lane half of the candle Krea strict-control [`CandleStrictControl`] driver: the resolved base +
 /// overlay paths + request numerics. Krea 2 Turbo is CFG-free (no guidance / negative pass) and bf16
 /// (no quant tier). Moved onto the blocking thread, loaded once, drives every pose.
-struct KreaStrictControl {
+pub(super) struct KreaStrictControl {
     base: PathBuf,
+    /// Immutable INT8-ConvRot DiT selected by the request. `None` loads `base/transformer`.
+    convrot_dit: Option<PathBuf>,
     control: PathBuf,
     /// User LoRA/LoKr adapters applied additively to the frozen base DiT (sc-11721) — a character/style
     /// adapter reshapes the subject while the control branch keeps the pose lock. Empty ⇒ stock control.
     adapters: Vec<AdapterSpec>,
-    /// Control-branch quant the VRAM fit ladder selected (sc-11754, candle-gen #483). `None` (bf16) is the
-    /// big-card default; `Some(Q8)`/`Some(Q4)` is the last-resort rung engaged only when the predicted
-    /// peak wouldn't otherwise fit the (possibly emulated) card. Folds the ~6.6 GB dense branch onto the
-    /// GPU packed (dequant-on-forward) so it never lands dense in VRAM.
-    branch_quant: Option<gen_core::Quant>,
+    /// The tier the control branch is packed to — **tier integrity, not a rung** (sc-15799). Derived
+    /// from the resolved BASE tier by `krea_control_fit::control_branch_tier_for_key`, so it is the same
+    /// on a 16 GB card and a 96 GB one: a q8 base carries a q8 branch, a q4 base floors at q8 (the
+    /// declared, measured exception), and only a dense base carries a dense branch. Folds the ~6.6 GB
+    /// published bf16 branch onto the GPU packed (dequant-on-forward) so a packed render never holds
+    /// precision it did not ask for.
+    branch_tier: Option<gen_core::Quant>,
     /// Force the seam-free tiled VAE decode (sc-11744) — the fit ladder's first speed-cost rung after
     /// sequential residency, engaged only when the predicted decode-phase peak exceeds free VRAM.
     /// `false` (the big-card default) is the monolithic full-speed decode. A *speed* cost, no quality cost.
     tile_vae_decode: bool,
     /// Engage sc-6217-style query-row attention chunking on the composable base stack + control branch
-    /// (sc-11745, candle-gen #496) — the fit ladder's rung between VAE-decode tiling and branch quant,
-    /// engaged only when the predicted denoise-phase activation peak exceeds free VRAM. `false` (the
-    /// big-card default) is the unchunked full-speed forward. A *speed* cost (~+6%), byte-identical output.
+    /// (sc-11745, candle-gen #496) — the fit ladder's DEEPEST rung, engaged only when the predicted
+    /// denoise-phase activation peak exceeds free VRAM. `false` (the big-card default) is the unchunked
+    /// full-speed forward. A *speed* cost (~+6%), byte-identical output.
     chunk_attention: bool,
-    /// Direct residency selection for this bespoke provider. It is not a registered generator, so the
-    /// control fit gate owns this decision instead of consulting `supports_sequential_offload`.
-    offload_policy: gen_core::OffloadPolicy,
+    /// Request-scoped residency selection for this bespoke provider. It is not a registered generator,
+    /// so the control fit gate owns this decision instead of consulting `supports_sequential_offload`.
+    stage_residency: bool,
     prompt: String,
     width: u32,
     height: u32,
@@ -367,6 +481,79 @@ struct KreaStrictControl {
     /// `None`/g≈1 is a byte-exact no-op. Applied to the pose-control lane's CFG-free context by the
     /// engine (inference sc-12009, `Krea2ControlRequest.text_style_gain`).
     text_style_gain: Option<f32>,
+}
+
+/// Routing/wiring fixture for the Krea strict-control provider — dummy paths, no load. Mirrors
+/// [`super::qwen_control::qwen_strict_control_test_fixture`].
+#[cfg(test)]
+pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictControl {
+    KreaStrictControl {
+        base: path.clone(),
+        convrot_dit: None,
+        control: path,
+        adapters: Vec::new(),
+        branch_tier: None,
+        tile_vae_decode: false,
+        chunk_attention: false,
+        stage_residency: false,
+        prompt: "p".to_owned(),
+        width: 1024,
+        height: 1024,
+        steps: 8,
+        control_scale: 0.7,
+        text_style_gain: None,
+    }
+}
+
+impl KreaStrictControl {
+    /// Exact artifact set handed to the pinned inference provider. Factoring this out keeps the
+    /// ConvRot identity and its additive adapter stack inseparable at the final load boundary.
+    fn provider_paths(&self) -> runtime_cuda::providers::krea::Krea2ControlPaths {
+        runtime_cuda::providers::krea::Krea2ControlPaths {
+            root: self.base.clone(),
+            convrot_dit: self.convrot_dit.clone(),
+            native_dit: None,
+            control: self.control.clone(),
+            adapters: self.adapters.clone(),
+            // Tier integrity (sc-15799): the branch's tier is a function of the base tier, decided
+            // before the fit ladder runs and identical on every card.
+            branch_tier: self.branch_tier,
+            // Unchunked (full speed) by default; the fit ladder (sc-11745) forces query-row attention
+            // chunking only to bound the denoise activation peak on a constrained card — byte-identical.
+            chunk_attention: self.chunk_attention,
+            // Compatibility-only load field; request-scoped residency is authoritative.
+            offload_policy: gen_core::OffloadPolicy::Resident,
+        }
+    }
+
+    /// Build this lane's bespoke request. Split out of [`CandleStrictControl::generate_one`] so the
+    /// preview wiring is reachable without a loaded 20 GB provider — see
+    /// `candle_strict_control_requests_carry_the_live_preview_sink` in `image_jobs::tests`, which
+    /// calls this and asserts an emitted frame reaches the sink the driver supplied.
+    ///
+    /// `preview` is the job's live sink and is **cloned onto the request**, never defaulted (epic 16948,
+    /// sc-16962). Krea 2 emits per-step latent previews from every render route as of inference
+    /// `f94c0b1c` (sc-16950); before this the lane passed `Default::default()` and the user saw nothing.
+    pub(super) fn control_request(
+        &self,
+        seed: u64,
+        cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
+    ) -> runtime_cuda::providers::krea::Krea2ControlRequest {
+        runtime_cuda::providers::krea::Krea2ControlRequest {
+            prompt: self.prompt.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            control_scale: self.control_scale,
+            text_style_gain: self.text_style_gain,
+            seed,
+            tile_vae_decode: self.tile_vae_decode,
+            stage_residency: self.stage_residency,
+            cancel: cancel.clone(),
+            preview: preview.clone(),
+        }
+    }
 }
 
 impl CandleStrictControl for KreaStrictControl {
@@ -392,18 +579,30 @@ impl CandleStrictControl for KreaStrictControl {
         self.height
     }
 
+    /// This lane is admitted in its OWN preamble — `generate_candle_krea_control_stream` runs both the
+    /// shared weights floor ([`admit_conditioning_paths`]) and the measured [`crate::krea_control_fit`]
+    /// ladder there — so the shared driver's gate stands down (sc-16069).
+    ///
+    /// **It is an ORDERING requirement, not an exemption.** The preamble records the peak it admitted at
+    /// with [`crate::vram_gate::note_loaded_peak`]. A rejection arriving after that call would leave a
+    /// reclaimable high-water standing for a load that never allocated — over-crediting the pool, which
+    /// lets the NEXT gate over-admit an OOM. So the floor has to run BEFORE the ladder, which is before
+    /// control ever reaches the driver. Re-gating in the driver would add a second `nvidia-smi` probe and
+    /// risk a second generator eviction for no new information.
+    ///
+    /// The floor and the ladder answer different questions and both are needed here. Current measured
+    /// tiers use the ladder for transient-aware rejection; at a tier with no priced row it cannot judge
+    /// the render at all
+    /// (`KreaControlFit::Unverified`). In both cases the floor is the only check that can still refuse a
+    /// host which cannot hold the weights. Its footprint prices the files each route actually loads.
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        ConditioningAdmission::GatedInPreamble {
+            gate: "krea_control_fit",
+        }
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
-        let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
-            root: self.base.clone(),
-            control: self.control.clone(),
-            adapters: self.adapters.clone(),
-            // bf16 by default; the fit ladder (sc-11754) sets q8/q4 only to fit a constrained card.
-            branch_quant: self.branch_quant,
-            // Unchunked (full speed) by default; the fit ladder (sc-11745) forces query-row attention
-            // chunking only to bound the denoise activation peak on a constrained card — byte-identical.
-            chunk_attention: self.chunk_attention,
-            offload_policy: self.offload_policy,
-        };
+        let paths = self.provider_paths();
         runtime_cuda::providers::krea::Krea2Control::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
         })
@@ -415,19 +614,10 @@ impl CandleStrictControl for KreaStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
-        let req = runtime_cuda::providers::krea::Krea2ControlRequest {
-            prompt: self.prompt.clone(),
-            width: self.width,
-            height: self.height,
-            steps: self.steps as usize,
-            control_scale: self.control_scale,
-            text_style_gain: self.text_style_gain,
-            seed,
-            tile_vae_decode: self.tile_vae_decode,
-            cancel: cancel.clone(),
-        };
+        let req = self.control_request(seed, cancel, preview);
         model.generate(&req, control, on_progress).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
         })
@@ -450,16 +640,35 @@ pub(super) async fn generate_candle_krea_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let base = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
+    if super::wants_krea_convrot(request) {
+        super::ensure_krea_convrot_base_present(api, settings, job, request).await?;
+    }
+    let (base, convrot_dit) = if super::wants_krea_convrot(request) {
+        super::resolve_krea_convrot(request, settings).map(|(root, dit)| (root, Some(dit)))
+    } else {
+        resolve_krea_control_base(request, settings)?.map(|root| (root, None))
+    }
+    .ok_or_else(|| {
         WorkerError::InvalidPayload(
-            "Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned(),
+            "Krea 2 Turbo control base weights not found for the selected tier".to_owned(),
         )
     })?;
     let control = ensure_krea_control_weights(api, settings, job, request).await?;
     // User LoRA/LoKr adapters ride additively on the frozen base DiT (sc-11721 / candle-gen sc-11720):
     // resolved + path-confined by the shared helper (enforces MAX_JOB_LORAS + `normalize_app_managed_
     // lora_path`), then installed on the base at load — the pose control branch is never adapted.
+    // Pinned inference applies low-rank LoRA/LoKr residuals directly over the immutable ConvRot base
+    // projections as well as the dense/packed base. Keep the resolved stack intact for residency
+    // pricing and for `Krea2ControlPaths`; diff-patch compatibility remains provider-validated.
     let adapters = resolve_adapters(request, settings)?;
+    let adapter_bytes =
+        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Krea 2 cannot determine the resident size of the requested adapter stack."
+                        .to_owned(),
+                )
+            })?;
 
     let steps = krea_control_candle_steps(request);
     let control_scale = advanced::f32_clamped(
@@ -485,12 +694,11 @@ pub(super) async fn generate_candle_krea_control_stream(
 
     // VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane is diverted around the base.rs
     // `generate_candle_stream` fit-gate, so it gets its own here: predict the control-lane peak (base tier
-    // + the ~6.6 GB bf16 control branch + activations + the end-of-render VAE-decode spike) and compare it
-    // against the live/capped free VRAM. On a big card the bf16 branch fits — nothing engages, zero speed/
-    // quality penalty. On a constrained card (or one emulated via `SCENEWORKS_CUDA_VRAM_CAP_GB`) the ladder
-    // first stages the text and heavy phases sequentially (sc-12176), then engages VAE-decode tiling
-    // (sc-11744), activation chunking / res-cap (sc-11745), and finally the last-resort branch-quant rung
-    // (q8 near-lossless, then q4 pose-locked) until it fits, else rejects-before-OOM.
+    // + the shipping per-tier control branch + activations + the end-of-render VAE-decode spike) and
+    // compare it against live/capped free VRAM. On a big card nothing engages. On a constrained card (or
+    // one emulated via `SCENEWORKS_CUDA_VRAM_CAP_GB`) the ladder first stages the text and heavy phases
+    // sequentially (sc-12176), then engages VAE-decode tiling (sc-11744) and attention chunking
+    // (sc-11745) until it fits, else rejects-before-OOM. Branch precision is fixed before this ladder.
     //
     // sc-13588 / sc-13960: this lane loads through the UNcached `start_gen_stream` (it never evicts the
     // single-slot generator cache), so a resident txt2img generator stays co-resident and its cudarc pool
@@ -506,26 +714,83 @@ pub(super) async fn generate_candle_krea_control_stream(
     // that loads (for example, requested q4 with only q8 installed). Dense/opaque roots have no tier
     // basename and deliberately retain the request/NVFP4 fallback.
     let tier = krea_control_gate_tier(
+        convrot_dit.is_some(),
         &base,
         &request.advanced,
         &request.model_manifest_entry,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
     );
-    // Fit-ladder inputs are budget-independent; resolve them once, then run the two-pass gate below.
-    let peak =
-        crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier);
-    let sequential_peak = crate::krea_control_fit::predicted_control_sequential_peak_gb(
-        &request.model_manifest_entry,
-        tier,
-    );
-    let decode_tile_save =
-        crate::krea_control_fit::decode_tile_save_gb(&request.model_manifest_entry, tier);
-    let chunk_attn_save =
-        crate::krea_control_fit::chunk_attn_save_gb(&request.model_manifest_entry);
-    let q8_save =
-        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q8");
-    let q4_save =
-        crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q4");
+    // Tier integrity (sc-15799): the control branch's tier is derived from the resolved BASE tier, NOT
+    // from the fit ladder, so it is decided here — before any budget is read — and holds on every path
+    // below, `Unknown` included. A branch that only packs when VRAM is tight is precisely the defect this
+    // removes: it left ~3.3 GB of precision a q8 render never requested resident on every roomy card
+    // (the branch is 3.30 B params ≈ 6.6 GB bf16, ~3.3 GB at q8).
+    let branch_tier = crate::krea_control_fit::control_branch_tier_for_key(tier);
+
+    // Conditioning-overlay weights FLOOR (sc-16069) — run HERE, before the ladder, and therefore before
+    // the `note_loaded_peak` below. Ordering is the whole reason this lane gates itself instead of through
+    // `run_candle_strict_control` (`ConditioningAdmission::GatedInPreamble`): a rejection after
+    // `note_loaded_peak` would leave a reclaimable high-water standing for a load that never allocated,
+    // over-crediting the pool for the next gate.
+    //
+    // It is NOT redundant with the ladder. Current measured tiers receive transient-aware admission,
+    // while a future or malformed tier it cannot price (`Unverified`) makes no memory claim at
+    // all. Without this floor those paths reach allocation with no hard check, which is exactly the
+    // sc-16069 defect the rest of this story removes everywhere else.
+    //
+    // The footprint counts the BASE ONLY when the branch is packed. The branch is folded onto the GPU at
+    // `branch_tier` (sc-15799) — ~3.3 GB at q8, ~1.7 GB at q4 against a ~6.6 GB published bf16 checkpoint
+    // — so pricing the file would over-count a packed base by several GB and could refuse a render that
+    // fits, the one direction this gate must never take. A DENSE branch (`branch_tier == None`, i.e. a
+    // bf16 base) loads at exactly the published bytes, so there it is counted and the floor is tighter.
+    if let Some(convrot_dit) = convrot_dit.as_deref() {
+        // The bf16 surface supplies only tokenizer/Qwen3-VL/VAE on this route; its dense transformer is
+        // not loaded. Price the actual ConvRot DiT plus the two weight-bearing shared component dirs so
+        // the floor neither hides the int8 trunk nor charges the unused bf16 trunk.
+        let shared_components = [base.join("text_encoder"), base.join("vae")];
+        let shared_component_paths: Vec<&Path> =
+            shared_components.iter().map(PathBuf::as_path).collect();
+        admit_conditioning_paths(
+            settings,
+            "Krea 2 INT8-ConvRot",
+            "pose-ControlNet shared components",
+            convrot_dit,
+            &shared_component_paths,
+        )
+        .await?;
+    } else {
+        let control_overlay: Vec<&Path> = if branch_tier.is_some() {
+            Vec::new()
+        } else {
+            vec![control.as_path()]
+        };
+        admit_conditioning_paths(
+            settings,
+            "Krea 2",
+            "pose-ControlNet branch",
+            &base,
+            &control_overlay,
+        )
+        .await?;
+    }
+
+    let memory_spec = krea_control_memory_spec(&base, tier, convrot_dit.as_deref(), &adapters);
+    let provider_memory_contract = crate::inference_runtime::media()
+        .memory_strategy_contract(KREA_CONTROL_ENGINE_ID, &memory_spec)
+        .ok()
+        .flatten();
+    let memory_geometry = gen_core::MemoryGeometry {
+        width: request.width,
+        height: request.height,
+        batch: 1,
+        frames: 1,
+        // The separately supplied pose image is one reference in the provider's own authoritative
+        // evidence probe. A zero here makes a current measured cell structurally ineligible.
+        reference_count: crate::krea_control_fit::KREA_CONTROL_REFERENCE_COUNT,
+    };
+    let runtime_evidence_verified = adapter_bytes == 0
+        && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);
+
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -536,26 +801,42 @@ pub(super) async fn generate_candle_krea_control_stream(
     let (fit, _budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
+        // sc-16069: ONE seam (`fit_ladder_for_entry`) reads every manifest row for the resolved tier,
+        // instead of the lane hand-threading six of them in. That is what makes the "block present but no
+        // row for THIS tier" case expressible at all: as six separate `Option`s a missing row arrived as
+        // an indistinguishable `None` and the ladder took the zero-adaptation big-card path in silence.
+        // It also removes the standing risk of pairing one tier's peak with another tier's savings.
         |budget| {
-            crate::krea_control_fit::fit_ladder(
-                peak,
-                sequential_peak,
+            crate::krea_control_fit::fit_ladder_for_entry_with_runtime(
+                &request.model_manifest_entry,
+                tier,
                 budget,
-                decode_tile_save,
-                chunk_attn_save,
-                q8_save,
-                q4_save,
+                adapter_bytes,
+                memory_geometry,
+                provider_memory_contract.as_ref(),
+                runtime_evidence_verified,
             )
         },
-        // Two rejects differing only in their reported free number are the same non-outcome — a reclaim
-        // that still won't fit must NOT trigger a pointless evict. Any other change is a strict
-        // improvement, worth evicting the warm txt2img cache for.
+        // Two non-fits differing only in their reported free number are the same non-outcome — a reclaim
+        // that still won't fit must NOT trigger a pointless evict. `BestEffort` is the superseded-evidence
+        // form of the same non-outcome (it always carries every measured rung, so only its numbers can
+        // move), so it is paired here too. Any other change is a strict improvement, worth evicting the
+        // warm txt2img cache for.
         |raw, reclaimed| {
             !matches!(
                 (raw, reclaimed),
                 (
                     crate::krea_control_fit::KreaControlFit::TooBig { .. },
                     crate::krea_control_fit::KreaControlFit::TooBig { .. }
+                ) | (
+                    crate::krea_control_fit::KreaControlFit::BestEffort { .. },
+                    crate::krea_control_fit::KreaControlFit::BestEffort { .. }
+                ) | (
+                    // sc-16069: `Unverified` is budget-INDEPENDENT (the tier has no row to price at any
+                    // budget), so reclaiming can never change it. Evicting the warm txt2img cache for it
+                    // would be pure loss.
+                    crate::krea_control_fit::KreaControlFit::Unverified { .. },
+                    crate::krea_control_fit::KreaControlFit::Unverified { .. }
                 )
             ) && raw != reclaimed
         },
@@ -563,25 +844,31 @@ pub(super) async fn generate_candle_krea_control_stream(
     .await?;
     // The peak this admitted load actually leaves in the cudarc pool (sc-13960) — recorded below as the
     // reclaimable high-water. Computed before the by-value match consumes `fit`; `None` on a reject.
-    let incurred_peak =
-        crate::krea_control_fit::incurred_peak_gb(&fit, &request.model_manifest_entry, tier);
-    let (offload_policy, tile_vae_decode, chunk_attention, branch_quant) = match fit {
-        // Big-card fast path (or no signal): monolithic full-speed decode, unchunked attention, bf16 branch.
+    let incurred_peak = crate::krea_control_fit::incurred_peak_gb_with_adapter_bytes(
+        &fit,
+        &request.model_manifest_entry,
+        tier,
+        adapter_bytes,
+    );
+    let (offload_policy, tile_vae_decode, chunk_attention) = match fit {
+        // Big-card fast path (or no signal): monolithic full-speed decode, unchunked attention.
         crate::krea_control_fit::KreaControlFit::Unknown
         | crate::krea_control_fit::KreaControlFit::Fits {
             offload_policy: gen_core::OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
-            branch_quant: None,
-        } => (gen_core::OffloadPolicy::Resident, false, false, None),
+            // Measured or estimate-scoped (sc-18097) — the knobs are identical; only
+            // `incurred_peak_gb_with_adapter_bytes` (computed above) distinguishes them.
+            estimate_scoped: _,
+        } => (gen_core::OffloadPolicy::Resident, false, false),
         // Constrained card: the fit ladder engaged the cheapest sufficient set of rungs to fit —
-        // sequential residency (sc-12176), the seam-free tiled VAE decode (sc-11744), query-row attention
-        // chunking (sc-11745), and/or the last-resort branch quant (sc-11743, a quality cost).
+        // sequential residency (sc-12176), the seam-free tiled VAE decode (sc-11744), and query-row
+        // attention chunking (sc-11745). All three are speed-only; the branch tier is not among them.
         crate::krea_control_fit::KreaControlFit::Fits {
             offload_policy,
             tile_vae_decode: tile,
             chunk_attention: chunk,
-            branch_quant: quant,
+            estimate_scoped: _,
         } => {
             tracing::info!(
                 model = %request.model,
@@ -589,21 +876,73 @@ pub(super) async fn generate_candle_krea_control_stream(
                 offload_policy = ?offload_policy,
                 tile_vae_decode = tile,
                 chunk_attention = chunk,
-                branch_quant = ?quant,
+                branch_tier = ?branch_tier,
                 "Krea control VRAM fit ladder: predicted peak exceeds free VRAM — engaging rungs \
-                 (sequential residency, VAE-decode tiling, attention chunking, and/or control-branch quant) to fit"
+                 (sequential residency, VAE-decode tiling, attention chunking) to fit"
             );
-            (offload_policy, tile, chunk, quant)
+            (offload_policy, tile, chunk)
         }
-        // Won't fit even at the last rung ⇒ reject before the reactive CUDA OOM.
+        // The `candle.control` block exists but carries NO peak row for the resolved base tier
+        // (sc-16069) — so the render cannot be priced. Previously this collapsed into `Unknown` and took
+        // the big-card fast path with no log: no staging, no tiling, no chunking, no reject, no trace.
+        // Now it is an explicit, named, logged decision that stages residency (the cheapest adaptation,
+        // no quality cost) and still never rejects — there is no evidence to reject on. The hard check for
+        // this tier is the `conditioning_fit` weights floor already run in this function's preamble above
+        // (it must precede `note_loaded_peak`, hence not in `run_candle_strict_control`). Records no
+        // reclaimable peak (`incurred_peak_gb` → None).
+        crate::krea_control_fit::KreaControlFit::Unverified {
+            offload_policy,
+            tile_vae_decode: tile,
+            chunk_attention: chunk,
+            tier_key,
+        } => {
+            tracing::warn!(
+                model = %request.model,
+                tier = %tier_key,
+                offload_policy = ?offload_policy,
+                branch_tier = ?branch_tier,
+                "Krea control VRAM fit ladder: the candle.control block has NO peak row for this base \
+                 tier, so this render cannot be priced. Staging component residency (the cheapest, \
+                 quality-free adaptation) and declining to reject on absent evidence. The on-disk \
+                 weights floor already applied in this lane's preamble is the only hard check for this \
+                 tier until it is measured, so a render whose TRANSIENTS overflow can still reach a \
+                 reactive CUDA OOM. Add direct peakGbByTier and sequentialPeakGbByTier measurements \
+                 for it."
+            );
+            (offload_policy, tile, chunk)
+        }
+        // Generic stale-evidence fallback: engage every speed-only rung and let the reactive CUDA-OOM
+        // backstop decide rather than reject from a superseded upper bound.
+        crate::krea_control_fit::KreaControlFit::BestEffort {
+            offload_policy,
+            tile_vae_decode: tile,
+            chunk_attention: chunk,
+            needed_gb,
+            available_gb,
+        } => {
+            tracing::warn!(
+                model = %request.model,
+                tier,
+                offload_policy = ?offload_policy,
+                tile_vae_decode = tile,
+                chunk_attention = chunk,
+                branch_tier = ?branch_tier,
+                needed_gb,
+                available_gb,
+                "Krea control VRAM fit ladder: predicted peak exceeds free VRAM at every rung, but the \
+                 control-lane evidence is not current. Admitting best-effort with every speed-only rung \
+                 engaged rather than rejecting from stale evidence."
+            );
+            (offload_policy, tile, chunk)
+        }
+        // Won't fit even at the deepest rung, on CURRENT evidence ⇒ reject before the reactive CUDA OOM.
         crate::krea_control_fit::KreaControlFit::TooBig {
             needed_gb,
             available_gb,
         } => {
             return Err(WorkerError::InvalidPayload(format!(
                 "Krea 2 pose-ControlNet at the {tier} base tier needs ~{needed} GB of VRAM (with \
-                 headroom, sequential residency + tiled VAE decode + attention chunking + control \
-                 branch quantized to q4) but \
+                 headroom, sequential residency + tiled VAE decode + attention chunking) but \
                  GPU {gpu} has ~{available} GB available. Lower the output resolution or run on a card \
                  with more VRAM.",
                 needed = needed_gb.round() as i64,
@@ -622,12 +961,13 @@ pub(super) async fn generate_candle_krea_control_stream(
 
     let provider = KreaStrictControl {
         base,
+        convrot_dit,
         control,
         adapters,
-        branch_quant,
+        branch_tier,
         tile_vae_decode,
         chunk_attention,
-        offload_policy,
+        stage_residency: matches!(offload_policy, gen_core::OffloadPolicy::Sequential),
         prompt: request.prompt.clone(),
         width: request.width,
         height: request.height,
@@ -669,12 +1009,68 @@ mod krea_control_tier_reconcile_tests {
     }
 
     #[test]
+    fn convrot_adapter_stack_reaches_memory_contract_and_provider_paths() {
+        let base = PathBuf::from("/nonexistent/krea-bf16-surface");
+        let convrot = PathBuf::from("/nonexistent/krea-int8-convrot.safetensors");
+        let control = PathBuf::from("/nonexistent/krea-control.safetensors");
+        let adapter = AdapterSpec::new(
+            PathBuf::from("/nonexistent/character-lora.safetensors"),
+            0.75,
+            gen_core::AdapterKind::Lora,
+        );
+
+        let memory_spec = krea_control_memory_spec(
+            &base,
+            super::super::tier_resolver::INT8_CONVROT_TIER,
+            Some(&convrot),
+            std::slice::from_ref(&adapter),
+        );
+        assert!(matches!(memory_spec.quantize, Some(gen_core::Quant::Q8)));
+        assert!(matches!(
+            memory_spec.text_encoder.as_ref(),
+            Some(gen_core::WeightsSource::File(path)) if path == &convrot
+        ));
+        assert_eq!(memory_spec.adapters.len(), 1);
+        assert_eq!(memory_spec.adapters[0].path, adapter.path);
+
+        let provider = KreaStrictControl {
+            base: base.clone(),
+            convrot_dit: Some(convrot.clone()),
+            control: control.clone(),
+            adapters: vec![adapter.clone()],
+            branch_tier: Some(gen_core::Quant::Q8),
+            tile_vae_decode: false,
+            chunk_attention: true,
+            stage_residency: false,
+            prompt: "portrait".to_owned(),
+            width: 1024,
+            height: 1024,
+            steps: 8,
+            control_scale: 0.7,
+            text_style_gain: None,
+        };
+        let paths = provider.provider_paths();
+        assert_eq!(paths.root, base);
+        assert_eq!(paths.convrot_dit, Some(convrot));
+        assert_eq!(paths.control, control);
+        assert_eq!(paths.adapters.len(), 1);
+        assert_eq!(paths.adapters[0].path, adapter.path);
+        assert_eq!(paths.adapters[0].scale, 0.75);
+        assert!(matches!(
+            paths.adapters[0].kind,
+            gen_core::AdapterKind::Lora
+        ));
+        assert!(paths.chunk_attention);
+    }
+
+    #[test]
     fn fit_ladder_sizes_the_resolved_base_tier_before_request_fallback() {
         let req = request(4);
 
         // Installed-tier fallback: a q4 request that resolved q8 must budget q8.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q8"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -691,6 +1087,7 @@ mod krea_control_tier_reconcile_tests {
         // Every recognized resolved tier is authoritative, independent of the requested q4.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q4"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -700,6 +1097,7 @@ mod krea_control_tier_reconcile_tests {
         );
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/bf16"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -712,6 +1110,7 @@ mod krea_control_tier_reconcile_tests {
         // a standard installed fallback remains authoritative.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/nvfp4"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -721,6 +1120,7 @@ mod krea_control_tier_reconcile_tests {
         );
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q8"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -732,6 +1132,7 @@ mod krea_control_tier_reconcile_tests {
         // Bring-your-own dense snapshots have opaque basenames, preserving the request-derived fallback.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/models/krea-dense-snapshot"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -741,12 +1142,26 @@ mod krea_control_tier_reconcile_tests {
         );
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/models/krea-dense-snapshot"),
                 &req.advanced,
                 &req.model_manifest_entry,
                 true,
             ),
             NVFP4_TIER
+        );
+
+        // SC-16453: the immutable ConvRot DiT identity wins even though its shared tokenizer/TE/VAE
+        // surface is the `bf16/` directory. Dropping this identity aliases the load back to bf16.
+        assert_eq!(
+            krea_control_gate_tier(
+                true,
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/bf16"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            super::super::tier_resolver::INT8_CONVROT_TIER
         );
     }
 }

@@ -19,7 +19,8 @@ use super::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const PREFERENCES_FILENAME: &str = "ui-preferences.json";
+// The filename lives in `sceneworks_core::app_paths::ui_preferences_file` — see
+// `preferences_path`. A second literal here is what made the cross-crate name drift possible.
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +107,30 @@ pub(crate) struct UiPreferences {
     /// `MAX_STUDIO_ENTRY_BYTES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     advanced_studio: Option<BTreeMap<String, serde_json::Value>>,
+    /// Whether a generated PNG carries the sanitized workflow envelope so a shared image reloads
+    /// its recipe on drop (epic 15945, sc-15948). Absent until first set, which every reader takes
+    /// as ON — the feature is pointless off by default, and a user who does not want it should
+    /// have to find the switch once rather than opt in forever.
+    ///
+    /// This is the ONE preference read outside the web app: the WORKER reads it straight off this
+    /// file at its PNG write seam, through `sceneworks_core::app_paths::embed_workflow_in_images`,
+    /// because the desktop hands every process it spawns the same `SCENEWORKS_CONFIG_DIR`. Renaming
+    /// the field or moving the file therefore breaks a consumer the route cannot see.
+    /// sc-15953 owns the Settings toggle and the first-run disclosure that write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embed_workflow_in_images: Option<bool>,
+    /// Whether the one-time embedded-workflow disclosure has been shown and dismissed (sc-15953).
+    ///
+    /// Durable rather than a browser flag because the desktop shell serves the UI from a
+    /// `127.0.0.1:<port>` origin that changes each launch, taking origin-keyed storage with it — a
+    /// `localStorage`-only "already told them" flag would re-show the notice on every launch.
+    ///
+    /// Absent means NOT shown, and that is the state an install upgrading into this build is in:
+    /// embedding defaults ON, so someone who has been generating for months has never been told,
+    /// and the notice fires once for them rather than only for fresh installs. Nothing ever writes
+    /// `false` back — this only goes from absent to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow_embed_notice_seen: Option<bool>,
 }
 
 /// Retained workspaces in a studio-settings map. The map grows by one entry per workspace the
@@ -167,8 +192,15 @@ const AUTO_GENERATION_QUALITY: &str = "auto";
 /// with the web `AUTO_GENERATION_QUALITY` default in `normalizeGenerationQuality`.
 const DEFAULT_GENERATION_QUALITY: &str = AUTO_GENERATION_QUALITY;
 
+/// The stored preference file.
+///
+/// Goes through `sceneworks_core::app_paths` rather than joining a local literal, because this file
+/// has a reader in ANOTHER crate: the worker reads `embedWorkflowInImages` off it at its PNG write
+/// seam (sc-15948). Two literals for one cross-crate file is a silent-failure shape — a drift in
+/// either would leave the worker reading a path that does not exist, which its reader resolves to
+/// "embedding ON" with no error and no log, forever.
 fn preferences_path(state: &AppState) -> PathBuf {
-    state.settings.config_dir.join(PREFERENCES_FILENAME)
+    sceneworks_core::app_paths::ui_preferences_file(&state.settings.config_dir)
 }
 
 fn load_preferences(path: &std::path::Path) -> UiPreferences {
@@ -323,6 +355,19 @@ pub(crate) async fn set_ui_preferences(
         if let Some(advanced_studio) = payload.advanced_studio {
             prefs.advanced_studio = Some(normalize_studio_settings(advanced_studio));
         }
+        // Same partial-merge rule as `simple_ui`: only touch it when the payload carries it, so an
+        // unrelated PUT can neither turn embedding off nor turn it back on. A plain bool needs no
+        // normalization — an out-of-vocabulary value cannot parse.
+        if let Some(embed_workflow_in_images) = payload.embed_workflow_in_images {
+            prefs.embed_workflow_in_images = Some(embed_workflow_in_images);
+        }
+        // One-way (sc-15953): once the disclosure has been shown it stays shown. A payload
+        // carrying `false` is ignored rather than obeyed, so no unrelated client — or a stale
+        // cached copy of an older preferences object PUT back wholesale — can make a user who has
+        // already been told see the notice again.
+        if payload.workflow_embed_notice_seen == Some(true) {
+            prefs.workflow_embed_notice_seen = Some(true);
+        }
         if let Some(active_view) = normalize_preference_id(payload.active_view.as_deref(), 48) {
             prefs.active_view = Some(active_view);
         }
@@ -457,6 +502,46 @@ mod tests {
         assert_eq!(
             parsed.advanced_studio.unwrap()["project-1"],
             snapshot("advanced side")
+        );
+    }
+
+    /// The workflow-embedding toggle has a reader outside this crate: the worker reads it off the
+    /// stored file by name at its PNG write seam (sc-15948). So the wire name and the
+    /// omitted-when-absent behaviour are contract, not detail — an absent field is what the worker
+    /// resolves to ON, and a stored `false` is the only thing that turns embedding off.
+    #[test]
+    fn embed_workflow_in_images_round_trips_under_the_name_the_worker_reads() {
+        let body = serde_json::to_string(&UiPreferences::default()).expect("serialize");
+        assert!(
+            !body.contains("embedWorkflowInImages"),
+            "an untouched install must store nothing, so every reader falls back to ON: {body}"
+        );
+
+        let prefs = UiPreferences {
+            embed_workflow_in_images: Some(false),
+            ..Default::default()
+        };
+        let body = serde_json::to_string(&prefs).expect("serialize");
+        assert!(body.contains("\"embedWorkflowInImages\":false"), "{body}");
+        // The exact shape `sceneworks_core::app_paths::embed_workflow_in_images` parses.
+        assert!(
+            !sceneworks_core::app_paths::embed_workflow_in_images_from_json(&body),
+            "the worker's reader must see the stored opt-out"
+        );
+
+        let parsed: UiPreferences = serde_json::from_str(&body).expect("deserialize");
+        assert_eq!(parsed.embed_workflow_in_images, Some(false));
+
+        // The FILE, not only the field. This test used to pin the wire name while the two crates
+        // named the file with two separate literals, so a drift in either would have left the
+        // worker opening a path that does not exist — which its reader resolves to "embedding ON",
+        // with no error and no log. `preferences_path` now builds the path from this same helper,
+        // and this pins the name the two crates share.
+        let config = std::path::Path::new("config-dir");
+        assert_eq!(
+            sceneworks_core::app_paths::ui_preferences_file(config),
+            config.join("ui-preferences.json"),
+            "the worker finds this preference by opening this exact filename"
         );
     }
 

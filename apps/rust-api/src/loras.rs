@@ -708,6 +708,89 @@ pub(crate) async fn lora_catalog(
     Ok(loras)
 }
 
+/// Return a worker-cached exact digest only while the marker still describes the selected file.
+/// Missing markers (including external/shared model roots) simply leave the catalog hashless.
+fn cached_lora_sha256(entry: &Value, installed_path: &FsPath, data_dir: &FsPath) -> Option<String> {
+    let declared = entry
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .or_else(|| entry.get("source").and_then(|source| source.get("file")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let file = if installed_path.is_dir() {
+        sceneworks_core::lora_family::resolve_adapter_in_dir(installed_path, declared)?
+    } else {
+        installed_path.to_path_buf()
+    };
+    let source = entry.get("source").and_then(Value::as_object);
+    let hf_repo = source
+        .and_then(|source| source.get("provider"))
+        .or_else(|| entry.get("provider"))
+        .and_then(Value::as_str)
+        .filter(|provider| *provider == "huggingface")
+        .and_then(|_| {
+            source
+                .and_then(|source| source.get("repo"))
+                .or_else(|| entry.get("repo"))
+                .and_then(Value::as_str)
+        });
+    let receipt_marker = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .zip(hf_repo)
+        .map(|(id, repo)| {
+            (
+                data_dir
+                    .join("loras")
+                    .join(safe_download_dir(id))
+                    .join(".sceneworks-download-complete.json"),
+                repo,
+            )
+        })
+        .filter(|(candidate, repo)| {
+            std::fs::read(candidate)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|marker| {
+                    marker
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some(*repo)
+        })
+        .map(|(candidate, _)| candidate);
+    let marker_path = receipt_marker.or_else(|| {
+        file.ancestors()
+            .take(8)
+            .map(|directory| directory.join(".sceneworks-download-complete.json"))
+            .find(|candidate| candidate.is_file())
+    })?;
+    let marker: Value = serde_json::from_slice(&std::fs::read(marker_path).ok()?).ok()?;
+    let metadata = std::fs::metadata(&file).ok()?;
+    let name = file.file_name()?.to_string_lossy();
+    let modified_nanos = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .to_string();
+    if marker.get("loraFileName").and_then(Value::as_str) != Some(name.as_ref())
+        || marker.get("loraFileBytes").and_then(Value::as_u64) != Some(metadata.len())
+        || marker.get("loraFileModifiedNanos").and_then(Value::as_str)
+            != Some(modified_nanos.as_str())
+    {
+        return None;
+    }
+    let hash = marker.get("loraFileSha256").and_then(Value::as_str)?.trim();
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| hash.to_ascii_lowercase())
+}
+
 pub(crate) fn normalize_lora_entry(
     mut lora: Value,
     scope: &str,
@@ -747,6 +830,9 @@ pub(crate) fn normalize_lora_entry(
         Some(path) if lora_is_installed(path) => "installed",
         _ => "missing",
     };
+    let installed_hash = installed_path
+        .as_deref()
+        .and_then(|path| cached_lora_sha256(&lora_snapshot, path, data_dir));
     object.insert(
         "manifestPath".to_owned(),
         Value::String(manifest_path.display().to_string()),
@@ -754,6 +840,7 @@ pub(crate) fn normalize_lora_entry(
     object.insert(
         "installedPath".to_owned(),
         installed_path
+            .as_ref()
             .map(|path| Value::String(path.display().to_string()))
             .unwrap_or(Value::Null),
     );
@@ -761,6 +848,11 @@ pub(crate) fn normalize_lora_entry(
         "installState".to_owned(),
         Value::String(install_state.to_owned()),
     );
+    if let Some(hash) = installed_hash {
+        object.insert("sha256".to_owned(), Value::String(hash));
+    } else {
+        object.remove("sha256");
+    }
     let requested_file_present =
         lora_huggingface_requested_file(&lora_snapshot, data_dir).is_some();
     object.insert(
@@ -1273,12 +1365,22 @@ pub(crate) fn validate_lora_specs_for_model(
             "Model {model_id} not found; cannot verify LoRA compatibility"
         )));
     };
-    let model_families = model_lora_families(model);
+    // The families this model can LOAD — declared plus extra-compatible (sc-15017). Using the
+    // declared set here made the gate stricter than the registry the worker and engine honor.
+    let model_families = crate::accepted_model_lora_families(model);
     if model_families.is_empty() {
         return Err(ApiError::bad_request(format!(
             "Model {model_id} has no declared LoRA families"
         )));
     }
+    // The model's OWN declared family drives the base-model gate below (an extra-compatible family
+    // is not the model's identity), so keep it separate from the accepted set.
+    let model_own_family = model
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| model_lora_families(model).into_iter().next())
+        .unwrap_or_default();
     let mut normalized_loras = Vec::new();
     for attached_lora in attached_loras {
         let Some((lora_id, lora, normalized_lora, catalog_backed)) =
@@ -1363,7 +1465,15 @@ pub(crate) fn validate_lora_specs_for_model(
         // never tightens behavior for existing LoRAs.
         if families.iter().any(|family| family == "wan-video") {
             if let Some(base_model) = lora_base_model(lora) {
-                if base_model != model_id {
+                // Shared with the worker's own gate (sc-15017): exact-id equality, plus the
+                // extra-compatible arm that keeps the 5B-vs-14B split while letting a Wan-14B
+                // LoRA onto a 14B-class model that accepts `wan-video` through the registry —
+                // its recorded base can never equal that model's id.
+                if !sceneworks_core::lora_family::base_model_satisfies_gate(
+                    &model_own_family,
+                    model_id,
+                    &base_model,
+                ) {
                     return Err(ApiError::bad_request(format!(
                         "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; \
                          Wan 5B and 14B LoRAs are not interchangeable"
@@ -1846,6 +1956,123 @@ pub(crate) fn lora_base_model(lora: &Value) -> Option<String> {
 #[cfg(test)]
 mod huggingface_receipt_tests {
     use super::*;
+    use crate::tests::support::isolate_hf_cache;
+
+    #[test]
+    fn normalized_catalog_exposes_only_a_file_identity_validated_lora_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let install = data_dir.join("loras").join("author-style");
+        std::fs::create_dir_all(&install).unwrap();
+        let file = install.join("author-style.safetensors");
+        std::fs::write(&file, b"exact adapter bytes").unwrap();
+        let metadata = std::fs::metadata(&file).unwrap();
+        let modified_nanos = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let hash = "1111111111111111111111111111111111111111111111111111111111111111";
+        std::fs::write(
+            install.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "loraFileName": "author-style.safetensors",
+                "loraFileBytes": metadata.len(),
+                "loraFileModifiedNanos": modified_nanos,
+                "loraFileSha256": hash
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let entry = json!({
+            "id": "author-style",
+            "name": "Author Style",
+            "source": { "provider": "local", "path": install },
+            "files": ["author-style.safetensors"]
+        });
+        let normalized = normalize_lora_entry(
+            entry.clone(),
+            "global",
+            FsPath::new("user.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert_eq!(normalized["sha256"], hash);
+
+        std::fs::write(&file, b"changed adapter bytes with another size").unwrap();
+        let changed = normalize_lora_entry(
+            entry,
+            "global",
+            FsPath::new("user.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert!(changed.get("sha256").is_none());
+    }
+
+    #[test]
+    fn hf_catalog_reads_the_app_owned_receipt_for_a_hub_cache_adapter() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "author/style";
+        let repo_root = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let snapshot = repo_root.join("snapshots").join("revision");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(repo_root.join("refs")).unwrap();
+        std::fs::write(repo_root.join("refs").join("main"), "revision").unwrap();
+        let file = snapshot.join("style.safetensors");
+        std::fs::write(&file, b"hub adapter bytes").unwrap();
+        let metadata = std::fs::metadata(&file).unwrap();
+        let modified_nanos = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let receipt_dir = data_dir
+            .join("loras")
+            .join(safe_download_dir("author-style"));
+        std::fs::create_dir_all(&receipt_dir).unwrap();
+        let hash = "2222222222222222222222222222222222222222222222222222222222222222";
+        std::fs::write(
+            receipt_dir.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "repo": repo,
+                "loraFileName": "style.safetensors",
+                "loraFileBytes": metadata.len(),
+                "loraFileModifiedNanos": modified_nanos,
+                "loraFileSha256": hash
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let entry = json!({
+            "id": "author-style",
+            "name": "Author Style",
+            "source": {
+                "provider": "huggingface",
+                "repo": repo,
+                "file": "style.safetensors"
+            }
+        });
+
+        let normalized = normalize_lora_entry(
+            entry,
+            "builtin",
+            FsPath::new("builtin.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert_eq!(normalized["installedPath"], file.display().to_string());
+        assert_eq!(normalized["sha256"], hash);
+    }
 
     #[test]
     fn old_receipted_adapter_is_usable_stale_but_arbitrary_safetensors_is_not() {
@@ -1979,6 +2206,167 @@ mod base_model_gating_tests {
         let lora = json!({ "id": "legacy", "families": ["wan-video"] });
         validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
             .expect("family-only LoRA must still pass");
+    }
+
+    /// Minimal valid safetensors whose tensor keys make `detect_lora_family` report `wan-video`
+    /// — the header check is the gate that actually fired in the app, so a fixture without a real
+    /// file would not reproduce the bug.
+    fn write_wan_lora(dir: &std::path::Path) {
+        use std::io::Write;
+        let mut header = serde_json::Map::new();
+        for block in 0..30 {
+            for module in ["self_attn.q", "self_attn.k", "cross_attn.q", "ffn.0"] {
+                for side in ["lora_A", "lora_B"] {
+                    header.insert(
+                        format!("transformer.blocks.{block}.{module}.{side}.weight"),
+                        json!({"dtype": "F16", "shape": [16, 1024], "data_offsets": [0, 0]}),
+                    );
+                }
+            }
+        }
+        let bytes_header = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut bytes = (bytes_header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&bytes_header);
+        std::fs::File::create(dir.join("wan_style.safetensors"))
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    fn krea_realtime_models() -> Vec<Value> {
+        vec![
+            json!({
+                "id": "krea_realtime_14b",
+                "family": "krea-realtime",
+                "loraCompatibility": { "families": ["krea-realtime"] }
+            }),
+            json!({
+                "id": "wan_2_2_t2v_14b",
+                "family": "wan-video",
+                "loraCompatibility": { "families": ["wan-video"] }
+            }),
+        ]
+    }
+
+    /// 🔴 sc-15017, caught by running the real app rather than by a test: this generate-time gate
+    /// keyed on the model's DECLARED families, so it was stricter than the
+    /// `extra_compatible_lora_families` registry the worker and engine honor. A Wan style LoRA the
+    /// engine installs happily was refused at submit with "appears to be a wan-video LoRA, which
+    /// is not compatible with model krea_realtime_14b (krea-realtime)".
+    ///
+    /// Both rejection points are exercised: the DETECTED family (from the file header — the one
+    /// the app actually hit) and the DECLARED family.
+    #[test]
+    fn accepts_a_wan_lora_on_krea_realtime_and_stays_one_directional() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wan_lora(tmp.path());
+        let models = krea_realtime_models();
+        let wan_lora = json!({
+            "id": "origami_wan_style",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["wan-video"],
+        });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "krea_realtime_14b",
+            std::slice::from_ref(&wan_lora),
+            true,
+            "LoRA",
+        )
+        .expect("a Wan-family LoRA must pass the generate gate on Krea Realtime 14B");
+
+        // Control 1 — one-directional. A krea-realtime LoRA is NOT thereby accepted on a Wan
+        // model. (No header here: the declared-family check is the one under test.)
+        let krea_lora = json!({
+            "id": "krea_native", "installState": "installed", "families": ["krea-realtime"],
+        });
+        validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[krea_lora], true, "LoRA")
+            .expect_err("the extra-compatible relation must not run backwards");
+
+        // Control 2 — the accepted set is an ADDITION, not a replacement: an unrelated family is
+        // still refused on Krea, so the pass above is not "everything now passes".
+        let ltx_lora = json!({
+            "id": "ltx_style", "installState": "installed", "families": ["ltx-video"],
+        });
+        validate_lora_specs_for_model(&models, &[], "krea_realtime_14b", &[ltx_lora], true, "LoRA")
+            .expect_err("an LTX LoRA must still be refused on Krea Realtime");
+    }
+
+    /// The base-model half, on the same route: SceneWorks' own importer stamps `baseModel`, and a
+    /// Wan LoRA's stamp can never equal `krea_realtime_14b`. The 5B/14B split it exists for stays.
+    #[test]
+    fn krea_realtime_admits_a_base_model_stamped_wan_14b_lora_but_not_a_5b_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wan_lora(tmp.path());
+        let models = krea_realtime_models();
+        let stamped = |base: &str| {
+            json!({
+                "id": "stamped",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": ["wan-video"],
+                "baseModel": base,
+            })
+        };
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "krea_realtime_14b",
+            &[stamped("wan_2_2_t2v_14b")],
+            true,
+            "LoRA",
+        )
+        .expect("a 14B-stamped Wan LoRA must run on Krea Realtime");
+        let err = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "krea_realtime_14b",
+            &[stamped("wan_2_2")],
+            true,
+            "LoRA",
+        )
+        .expect_err("the 5B TI2V base must still be refused");
+        assert!(
+            format!("{err:?}").contains("not interchangeable"),
+            "got: {err:?}"
+        );
+
+        // 🔴 An I2V-stamped base is the same 14B SIZE class but the wrong CONDITIONING class:
+        // Krea Realtime is text-to-video, and an I2V LoRA targets `cross_attn.k_img`/`v_img`, which
+        // it does not have. Refusing it here is a 400 at submit; admitting it would mean a hard
+        // engine error after the tier fetch. The sibling T2V model already refuses this stamp.
+        let i2v_err = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "krea_realtime_14b",
+            &[stamped("wan_2_2_i2v_14b")],
+            true,
+            "LoRA",
+        )
+        .expect_err("an I2V-stamped base must be refused on a T2V backbone");
+        assert!(
+            format!("{i2v_err:?}").contains("not interchangeable"),
+            "got: {i2v_err:?}"
+        );
+        // Control: the same I2V-stamped LoRA is fine on the I2V model itself, so the refusal above
+        // is the T2V/I2V mismatch and not the stamp merely being present.
+        let mut i2v_models = krea_realtime_models();
+        i2v_models.push(json!({
+            "id": "wan_2_2_i2v_14b",
+            "family": "wan-video",
+            "loraCompatibility": { "families": ["wan-video"] }
+        }));
+        validate_lora_specs_for_model(
+            &i2v_models,
+            &[],
+            "wan_2_2_i2v_14b",
+            &[stamped("wan_2_2_i2v_14b")],
+            true,
+            "LoRA",
+        )
+        .expect("an I2V LoRA still runs on the I2V model");
     }
 
     /// Minimal valid safetensors with one krea-identifying tensor key (`text_fusion`), so

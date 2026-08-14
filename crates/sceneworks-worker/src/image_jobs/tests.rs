@@ -4,7 +4,7 @@ use super::{
     flux1_control_candle::*, flux2_comfyui_candle::*, flux2_control_candle::*,
     flux2_edit_candle::*, flux_ipadapter::*, kolors_control::*, kolors_ipadapter::*,
     krea_control_candle::*, pulid_candle::*, qwen_control::*, qwen_edit_candle::*,
-    sdxl_ipadapter::*, zimage_control::*, zimage_identity_candle::*,
+    sdxl_ipadapter::*, zimage_control::*,
 };
 use serde_json::json;
 
@@ -16,6 +16,786 @@ use crate::test_env::EnvVars;
 
 fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
+}
+
+/// sc-18480: the worker half of the raw Batch Detail contract. The API starts from the web's
+/// no-manifest/no-quant payload and persists authoritative metadata plus `mlxQuantize: 0`; prove
+/// those persisted fields make the worker select the installed dense tier and resolve every SDXL
+/// descriptor component before dispatching to the provider.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_components() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir creates");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin models manifest present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin models manifest parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == json!("realvisxl"))
+        .cloned()
+        .expect("realvisxl manifest entry");
+
+    let stage = |repo: &str, revision: &str, file: &str| {
+        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), repo)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(revision);
+        let path = snapshot.join(file);
+        std::fs::create_dir_all(path.parent().expect("staged file parent"))
+            .expect("staged parent creates");
+        std::fs::write(&path, b"weights").expect("staged file writes");
+        path
+    };
+    let base_revision = "e40202d63baef826c7df95a639a811698c1178d2";
+    stage(
+        "SceneWorks/realvisxl-mlx",
+        base_revision,
+        "q4/unet/diffusion_pytorch_model.safetensors",
+    );
+    stage(
+        "SceneWorks/realvisxl-mlx",
+        base_revision,
+        "bf16/unet/diffusion_pytorch_model.safetensors",
+    );
+    for (repo, revision, file) in [
+        (
+            "openai/clip-vit-large-patch14",
+            "32bd64288804d66eefd0ccbe215aa642df71cc41",
+            "tokenizer.json",
+        ),
+        (
+            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+            "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+            "tokenizer.json",
+        ),
+        (
+            "madebyollin/sdxl-vae-fp16-fix",
+            "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+            "diffusion_pytorch_model.safetensors",
+        ),
+    ] {
+        stage(repo, revision, file);
+    }
+
+    let request = request(json!({
+        "projectId": "project-1",
+        "sourceAssetId": "asset-1",
+        "model": "realvisxl",
+        "displayName": "portrait.png",
+        "advanced": { "strength": 0.55, "cnScale": 0.7, "mlxQuantize": 0 },
+        "modelManifestEntry": entry
+    }));
+    let weights_dir = resolve_weights_dir(&request, &settings)
+        .expect("detail tier resolves")
+        .expect("detail base is installed");
+    assert_eq!(
+        tier_key_from_resolved_dir(&weights_dir),
+        Some("bf16"),
+        "the route-owned dense selector must beat the shipped q4 default"
+    );
+
+    let (clip_l, clip_bigg, vae) =
+        resolve_candle_detail_components(&request, &settings, &weights_dir, false)
+            .expect("dense base and all authoritative co-requisites resolve");
+    assert!(matches!(clip_l, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(matches!(clip_bigg, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(
+        matches!(vae, WeightsSource::File(path) if path.ends_with("diffusion_pytorch_model.safetensors"))
+    );
+
+    std::fs::remove_dir_all(&weights_dir).expect("remove staged bf16 tier");
+    let packed_fallback = resolve_weights_dir(&request, &settings)
+        .expect("fallback tier resolves")
+        .expect("q4 sibling remains installed");
+    assert_eq!(tier_key_from_resolved_dir(&packed_fallback), Some("q4"));
+    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback, false)
+        .expect_err("a packed sibling must not masquerade as the requested dense detail base");
+    assert!(
+        error
+            .to_string()
+            .contains("installed dense bf16 model tier"),
+        "the fallback refusal must tell the user which tier detail requires: {error}"
+    );
+}
+
+#[test]
+fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
+    let valid = request(json!({
+        "projectId": "p",
+        "model": "krea_2_turbo",
+        "width": 1024,
+        "height": 1024,
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "ui": { "img2img": true }
+        },
+        "hiresFix": {
+            "enabled": true,
+            "steps": 12,
+            "denoisingStrength": 0.7,
+            "upscaleBy": 2.0
+        }
+    }));
+    validate_hires_fix_request(&valid).expect("img2img model supports hires fix");
+
+    let with_upscale = request(json!({
+        "projectId": "p",
+        "model": "sdxl",
+        "modelManifestEntry": { "family": "sdxl" },
+        "upscale": { "enabled": true },
+        "hiresFix": { "enabled": true }
+    }));
+    assert!(validate_hires_fix_request(&with_upscale)
+        .unwrap_err()
+        .to_string()
+        .contains("mutually exclusive"));
+
+    let too_large = request(json!({
+        "projectId": "p",
+        "model": "sdxl",
+        "width": 3072,
+        "height": 2048,
+        "modelManifestEntry": { "family": "sdxl" },
+        "hiresFix": { "enabled": true, "upscaleBy": 2.0 }
+    }));
+    assert!(validate_hires_fix_request(&too_large)
+        .unwrap_err()
+        .to_string()
+        .contains("6144x4096"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct HiresProbeGenerator {
+    descriptor: gen_core::ModelDescriptor,
+    requests: std::sync::Mutex<Vec<GenerationRequest>>,
+    /// The memory-run context each pass opened, in pass order. Recorded so a test can grade the
+    /// DECLARED geometry of every pass against the request that pass actually sent — the exact
+    /// agreement the backend request scopes enforce.
+    contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl HiresProbeGenerator {
+    fn new() -> Self {
+        Self {
+            descriptor: gen_core::ModelDescriptor {
+                id: "hires_probe",
+                family: "test",
+                backend: "test",
+                modality: gen_core::Modality::Image,
+                capabilities: Default::default(),
+                control_kinds: None,
+                required_components: &[],
+            },
+            requests: Default::default(),
+            contexts: Default::default(),
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Generator for HiresProbeGenerator {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        &self.descriptor
+    }
+
+    fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        self.contexts.lock().unwrap().push(context.clone());
+        Ok(None)
+    }
+
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        let pass = self.requests.lock().unwrap().len() as u8 + 1;
+        self.requests.lock().unwrap().push(req.clone());
+        for current in 1..=req.steps.unwrap_or(1) {
+            on_progress(Progress::Step {
+                current,
+                total: req.steps.unwrap_or(1),
+            });
+        }
+        if req.prompt_enhancement.is_active() {
+            req.prompt_enhancement
+                .emit(gen_core::PromptEnhancementReport::enhanced(
+                    req.prompt.clone(),
+                    format!("{} enhanced", req.prompt),
+                ));
+        }
+        on_progress(Progress::Decoding);
+        Ok(GenerationOutput::Images(vec![Image {
+            width: req.width,
+            height: req.height,
+            pixels: vec![pass; (req.width * req.height * 3) as usize],
+        }]))
+    }
+}
+
+/// A provider-facing Krea fixture that rejects any attempt to open an optimized request scope.
+/// Hires must stay on the established fallback because candle-gen-krea does not support the
+/// img2img refinement request under its memory-strategy scope.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct StrictKreaHiresFallbackGenerator {
+    probe: HiresProbeGenerator,
+    memory_scope_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl StrictKreaHiresFallbackGenerator {
+    fn new() -> Self {
+        let mut probe = HiresProbeGenerator::new();
+        probe.descriptor.id = "krea_2_turbo";
+        probe.descriptor.family = "krea_2";
+        probe.descriptor.backend = "candle";
+        Self {
+            probe,
+            memory_scope_attempts: Default::default(),
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Generator for StrictKreaHiresFallbackGenerator {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.probe.descriptor()
+    }
+
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::MemorySafetyDecision::Accept
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        self.memory_scope_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(gen_core::Error::Unsupported(
+            "Krea hires fallback must not open a memory-strategy request scope".to_owned(),
+        ))
+    }
+
+    fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        if req.memory.is_some() {
+            return Err(gen_core::Error::Unsupported(
+                "Krea hires fallback must not carry optimized request memory".to_owned(),
+            ));
+        }
+        self.probe.generate(req, on_progress)
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::MemoryRunContext {
+    gen_core::MemoryRunContext {
+        selection,
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: "test".to_owned(),
+        load_shape: gen_core::LoadShape::EagerMaterialization,
+        mode: gen_core::MemoryMode::TextToImage,
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width: 8,
+            height: 8,
+            batch: 1,
+            frames: 1,
+            reference_count: hires_fix_reference_count(),
+        },
+        overlay: None,
+        budget: gen_core::MemoryBudget {
+            total_bytes: 1 << 40,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1 << 20,
+        cache_state: gen_core::MemoryCacheState::Cold,
+        evidence_revision: "test".to_owned(),
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_progress() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    let mut progress = Vec::new();
+    let output = generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        Some(7.0),
+        Some("bad".to_owned()),
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        &PromptEnhance::default(),
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: Some(5.5),
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
+        &cancel,
+        &mut |event| progress.push(event),
+    )
+    .expect("two-pass generation");
+
+    assert_eq!((output.0, output.1), (8, 8));
+    assert!(output.2.iter().all(|pixel| *pixel == 2));
+    let requests = generator.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!((requests[0].width, requests[0].height), (4, 4));
+    assert_eq!(requests[0].steps, Some(2));
+    assert_eq!((requests[1].width, requests[1].height), (8, 8));
+    assert_eq!(requests[1].steps, Some(3));
+    assert_eq!(requests[1].guidance, Some(5.5));
+    match requests[1].conditioning.as_slice() {
+        [Conditioning::Reference { image, strength }] => {
+            assert_eq!((image.width, image.height), (8, 8));
+            assert!(image.pixels.iter().all(|pixel| *pixel == 1));
+            assert_eq!(*strength, Some(0.3));
+        }
+        other => panic!("expected one high-resolution reference, got {other:?}"),
+    }
+    let steps: Vec<(u32, u32)> = progress
+        .iter()
+        .filter_map(|event| match event {
+            Progress::Step { current, total } => Some((*current, *total)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps, vec![(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
+    assert_eq!(
+        progress
+            .iter()
+            .filter(|event| matches!(event, Progress::Decoding))
+            .count(),
+        1
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reports.clone();
+    let sink = gen_core::PromptEnhancementSink::new(move |report| {
+        captured.lock().unwrap().push(report);
+    });
+    generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        &PromptEnhance {
+            enabled: true,
+            temperature: Some(0.2),
+            max_tokens: Some(64),
+        },
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        sink,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("two-pass enhanced generation");
+
+    let requests = generator.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].enhance_prompt);
+    assert!(!requests[0].prompt_enhancement.is_active());
+    assert!(requests[1].enhance_prompt);
+    assert!(requests[1].prompt_enhancement.is_active());
+    assert_eq!(reports.lock().unwrap().len(), 1);
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scope() {
+    let generator = StrictKreaHiresFallbackGenerator::new();
+    let cancel = CancelFlag::new();
+    let hires_fix = HiresFixPlan {
+        width: 8,
+        height: 8,
+        steps: 3,
+        guidance: None,
+        true_cfg: None,
+        provider_reference_strength: 0.3,
+    };
+    let optimized_context = hires_memory_context(gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+        parameters: gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            transformer_window_component: Some(gen_core::TransformerComponent::Dit),
+            ..Default::default()
+        },
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Q8),
+            component_precision_floors: &[],
+        },
+    });
+    let optimized_route = krea_turbo_memory_route(
+        "krea_2_turbo",
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+    );
+    let production_route = include_str!("base.rs")
+        .split_once("let krea_turbo_ladder = krea_turbo_memory_route(")
+        .expect("production Krea ladder route call")
+        .1
+        .split_once(");")
+        .expect("end of production Krea ladder route call")
+        .0;
+    assert!(
+        production_route.contains("hires_fix.is_some()"),
+        "the production route must pass the live hires decision into the exclusion predicate"
+    );
+    let context = optimized_route.then_some(&optimized_context);
+
+    let output = generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        context,
+        &PromptEnhance::default(),
+        Some(hires_fix),
+        gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("Krea hires fallback completes without an optimized request scope");
+
+    assert!(
+        !optimized_route,
+        "hires must not mint a Krea ladder context"
+    );
+    assert_eq!((output.0, output.1), (8, 8));
+    assert!(output.2.iter().all(|pixel| *pixel == 2));
+    assert_eq!(generator.probe.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        generator
+            .memory_scope_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "neither fallback pass may call begin_memory_strategy_request"
+    );
+}
+
+/// An admitted memory geometry that a pass's own request does not match is not a bookkeeping slip:
+/// the backend request scopes (`mlx-gen`'s `MlxRequestScopeCore::configure_request` and its candle
+/// twin) re-derive width/height/`image_reference_count` from the LIVE request and refuse anything
+/// that differs from the admitted geometry, and gen-core's shared safety check rejects a
+/// `has_reference` disagreeing with `reference_count > 0`.
+///
+/// Hires fix runs TWO passes under ONE admission: the base-size first pass, then the upscaled
+/// refinement. Admission describes the upscaled pass (it sets the memory ceiling), so running the
+/// first pass under that same context declared the WRONG width/height (and, with no request
+/// reference, the wrong count) and refused the first pass of every hires render on a scope-adopting
+/// provider. This grades what each pass DECLARED against what that same pass SENT, so neither side
+/// can be restated wrongly without the test failing.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    // The admission the lane makes for a hires job: the FINAL pass's geometry.
+    let admitted = hires_memory_context(gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        },
+    });
+
+    generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        // A plain text-to-image job: the FIRST pass carries no conditioning at all, while the
+        // admitted (final) geometry carries one reference. This is the case the old single-context
+        // wiring got wrong on both axes.
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        Some(&admitted),
+        &PromptEnhance::default(),
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("two-pass generation");
+
+    let requests = generator.requests.lock().unwrap();
+    let contexts = generator.contexts.lock().unwrap();
+    assert_eq!(requests.len(), 2, "hires fix runs exactly two passes");
+    assert_eq!(
+        contexts.len(),
+        requests.len(),
+        "every pass must open its own request scope"
+    );
+    for (pass, (request, context)) in requests.iter().zip(contexts.iter()).enumerate() {
+        assert_eq!(
+            (context.geometry.width, context.geometry.height),
+            (request.width, request.height),
+            "pass {} declared {}x{} but rendered {}x{}",
+            pass + 1,
+            context.geometry.width,
+            context.geometry.height,
+            request.width,
+            request.height
+        );
+        assert_eq!(
+            context.geometry.reference_count,
+            request.image_reference_count(),
+            "pass {} declared references={} but sent references={}",
+            pass + 1,
+            context.geometry.reference_count,
+            request.image_reference_count()
+        );
+        assert_eq!(
+            context.has_reference,
+            context.geometry.reference_count > 0,
+            "pass {}: gen-core rejects a has_reference/reference_count disagreement",
+            pass + 1
+        );
+        assert_eq!(
+            context.selection.strategy,
+            admitted.selection.strategy,
+            "pass {}: only the geometry identity may differ from the admitted selection",
+            pass + 1
+        );
+    }
+    // The final pass is the one admission was made for, and it is unchanged.
+    assert_eq!(contexts[1].geometry, admitted.geometry);
+}
+
+/// The generic lane's declared reference count must equal the count gen-core derives from the
+/// conditioning that lane really builds, for every shape it can build.
+///
+/// The old formula (`edit_refs.len().max(reference || mask || hires)`) treated a mask as an
+/// ALTERNATIVE to the source reference rather than an addition, so an Ideogram 4 inpaint/outpaint
+/// edit declared one reference and sent two. That is inert only for as long as its provider has not
+/// adopted the shared request scope; the moment it does, the render is refused.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn lane_reference_count_matches_the_conditioning_the_lane_builds() {
+    // Built inline rather than with the macOS-gated `control_fixture`: this gate must hold on the
+    // candle lane too, which compiles without it.
+    let image = Image {
+        width: 4,
+        height: 4,
+        pixels: vec![7; 4 * 4 * 3],
+    };
+    let reference = (image.clone(), 0.5);
+    /// `(single reference, multi-references, edit mask)` — one shape the lane can build.
+    type LaneCase<'a> = (Option<&'a (Image, f32)>, &'a [Image], Option<&'a Image>);
+    let cases: [LaneCase; 6] = [
+        // Plain text-to-image.
+        (None, &[], None),
+        // img2img / IP-Adapter init.
+        (Some(&reference), &[], None),
+        // Ideogram 4 edit: the source reference AND the inpaint / outpaint mask.
+        (Some(&reference), &[], Some(&image)),
+        // Boogu instruction edit, one and many.
+        (None, std::slice::from_ref(&image), None),
+        (None, &[image.clone(), image.clone(), image.clone()], None),
+        // A masked multi-reference edit — no family builds this today, but the count must hold.
+        (
+            None,
+            &[image.clone(), image.clone(), image.clone()],
+            Some(&image),
+        ),
+    ];
+
+    for (reference, multi_references, edit_mask) in cases {
+        let conditioning = build_lane_conditioning(reference, multi_references, edit_mask);
+        let request = GenerationRequest {
+            conditioning,
+            ..Default::default()
+        };
+        assert_eq!(
+            lane_reference_count(
+                reference.is_some(),
+                multi_references.len(),
+                edit_mask.is_some()
+            ),
+            request.image_reference_count(),
+            "declared count drifted from the conditioning (reference={}, multi={}, mask={})",
+            reference.is_some(),
+            multi_references.len(),
+            edit_mask.is_some()
+        );
+    }
+
+    // The hires refinement pass sends exactly one reference — the upscaled first-pass render.
+    assert_eq!(
+        lane_reference_count(true, 0, false),
+        GenerationRequest {
+            conditioning: build_lane_conditioning(Some(&reference), &[], None),
+            ..Default::default()
+        }
+        .image_reference_count()
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -239,6 +1019,1008 @@ fn write_image_asset_confines_malicious_model_id() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Embedded workflow (epic 15945, sc-15948)
+// ---------------------------------------------------------------------------
+
+/// Worker settings pointed at a scratch config dir, so the embed toggle can be written and read
+/// without touching the real install's `ui-preferences.json`.
+fn settings_with_config_dir(config_dir: &Path) -> Settings {
+    let mut settings = Settings::from_env();
+    settings.config_dir = config_dir.to_path_buf();
+    settings
+}
+
+fn write_embed_preference(config_dir: &Path, enabled: bool) {
+    std::fs::create_dir_all(config_dir).unwrap();
+    std::fs::write(
+        sceneworks_core::app_paths::ui_preferences_file(config_dir),
+        format!(r#"{{"theme":"dark","embedWorkflowInImages":{enabled}}}"#),
+    )
+    .unwrap();
+}
+
+#[test]
+fn imported_checkpoint_attribution_requires_the_worker_route_and_one_exact_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&dir.path().join("config"));
+    settings.data_dir = dir.path().join("data");
+    let install = settings.data_dir.join("models").join("kreamania-v4");
+    std::fs::create_dir_all(&install).unwrap();
+    let checkpoint = install.join("renamed.safetensors");
+    std::fs::write(&checkpoint, b"exact checkpoint bytes").unwrap();
+    let req = request(json!({
+        "projectId": "p",
+        "model": "kreamania-v4",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "paths": { "model": install }
+        }
+    }));
+
+    assert_eq!(
+        imported_checkpoint_file_for_share("stub", &req, &settings),
+        None,
+        "a client manifest path is not trusted without the worker's imported-model route"
+    );
+    assert_eq!(
+        imported_checkpoint_file_for_share("candle_krea_imported", &req, &settings),
+        Some(std::fs::canonicalize(&checkpoint).unwrap()),
+        "the worker-selected imported route identifies the exact lone checkpoint"
+    );
+
+    std::fs::write(install.join("another.safetensors"), b"different model").unwrap();
+    assert_eq!(
+        imported_checkpoint_file_for_share("candle_krea_imported", &req, &settings),
+        None,
+        "an ambiguous directory must not attribute an arbitrary checkpoint"
+    );
+}
+
+#[test]
+fn cached_checkpoint_hash_is_bound_to_the_file_that_will_execute() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = dir.path().join("selected.safetensors");
+    std::fs::write(&checkpoint, b"checkpoint A").unwrap();
+    let identity = model_file_identity(&checkpoint).unwrap();
+    let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let marker = json!({
+        "modelFileName": identity.name,
+        "modelFileBytes": identity.bytes,
+        "modelFileModifiedNanos": identity.modified_nanos,
+        "modelFileSha256": hash
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    assert_eq!(
+        cached_model_hash_for_file(&checkpoint, &marker).as_deref(),
+        Some(hash)
+    );
+
+    let mut sibling_marker = marker.clone();
+    sibling_marker.insert(
+        "modelFileName".to_owned(),
+        Value::String("different.safetensors".to_owned()),
+    );
+    assert_eq!(
+        cached_model_hash_for_file(&checkpoint, &sibling_marker),
+        None,
+        "a sibling checkpoint must never inherit the marker's cached digest"
+    );
+
+    std::fs::write(
+        &checkpoint,
+        b"replacement checkpoint B with different bytes",
+    )
+    .unwrap();
+    assert_eq!(
+        cached_model_hash_for_file(&checkpoint, &marker),
+        None,
+        "replacing the selected file must invalidate its old attribution digest"
+    );
+}
+
+#[test]
+fn cached_lora_hash_is_invalidated_by_rename_or_changed_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("author_style.safetensors");
+    let bytes = b"exact adapter bytes";
+    std::fs::write(&original, bytes).unwrap();
+    let identity = model_file_identity(&original).unwrap();
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    let marker = json!({
+        "loraFileName": identity.name,
+        "loraFileBytes": identity.bytes,
+        "loraFileModifiedNanos": identity.modified_nanos,
+        "loraFileSha256": hash
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let marker_path = dir.path().join(INSTALL_MARKER);
+    std::fs::write(&marker_path, b"{}").unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    assert_eq!(
+        existing_lora_install_marker(&json!({}), &settings, &original),
+        Some(marker_path)
+    );
+    assert_eq!(
+        cached_lora_hash_for_file(&original, &marker).as_deref(),
+        Some(hash.as_str())
+    );
+
+    let renamed = dir.path().join("renamed-identical.safetensors");
+    std::fs::rename(&original, &renamed).unwrap();
+    assert_eq!(cached_lora_hash_for_file(&renamed, &marker), None);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(std::fs::read(&renamed).unwrap())),
+        hash,
+        "a renamed identical file rehashes to the same Civitai identity"
+    );
+
+    std::fs::write(&renamed, b"changed adapter bytes with a different size").unwrap();
+    assert_eq!(
+        cached_lora_hash_for_file(&renamed, &marker),
+        None,
+        "changed bytes cannot inherit the previous attribution"
+    );
+    assert_ne!(
+        format!("{:x}", Sha256::digest(std::fs::read(&renamed).unwrap())),
+        hash
+    );
+}
+
+#[test]
+fn lora_resource_keys_come_from_exact_filenames_and_stay_unique() {
+    let mut used = std::collections::HashSet::new();
+    assert_eq!(
+        civitai_lora_key(
+            Path::new("C:/private/user/Author Style v2.safetensors"),
+            &mut used
+        ),
+        "Author_Style_v2"
+    );
+    assert_eq!(
+        civitai_lora_key(
+            Path::new("D:/elsewhere/Author Style v2.safetensors"),
+            &mut used
+        ),
+        "Author_Style_v2_2",
+        "two resources with the same readable stem must not overwrite each other's hash entry"
+    );
+}
+
+#[test]
+fn lora_attribution_resolves_the_manifest_declared_inference_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&dir.path().join("config"));
+    settings.data_dir = dir.path().join("data");
+    let install = settings.data_dir.join("loras").join("author-style");
+    std::fs::create_dir_all(&install).unwrap();
+    let final_file = install.join("author-style.safetensors");
+    let checkpoint = install.join("author-style-step0009.safetensors");
+    std::fs::write(&final_file, b"final adapter").unwrap();
+    std::fs::write(&checkpoint, b"training checkpoint").unwrap();
+    let raw = json!({
+        "installedPath": install,
+        "files": ["author-style.safetensors"],
+        "weight": 0.7
+    });
+    assert_eq!(lora_weight(&raw), 0.7);
+    assert_eq!(
+        resolve_adapter_file(&raw, &settings).unwrap(),
+        std::fs::canonicalize(final_file).unwrap(),
+        "attribution and inference must choose the same manifest-declared adapter"
+    );
+}
+
+#[test]
+fn hf_lora_attribution_uses_the_catalog_receipt_beside_data_loras() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&dir.path().join("config"));
+    settings.data_dir = dir.path().join("data");
+    let hub_file = settings
+        .data_dir
+        .join("huggingface")
+        .join("hub")
+        .join("models--author--style")
+        .join("snapshots")
+        .join("revision")
+        .join("style.safetensors");
+    std::fs::create_dir_all(hub_file.parent().unwrap()).unwrap();
+    std::fs::write(&hub_file, b"adapter").unwrap();
+    let receipt = settings
+        .data_dir
+        .join("loras")
+        .join(safe_download_dir("author-style"))
+        .join(INSTALL_MARKER);
+    std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+    std::fs::write(
+        &receipt,
+        serde_json::to_vec(&json!({ "repo": "author/style" })).unwrap(),
+    )
+    .unwrap();
+    let raw = json!({
+        "id": "author-style",
+        "installedPath": hub_file,
+        "source": { "provider": "huggingface", "repo": "author/style" }
+    });
+
+    assert_eq!(
+        existing_lora_install_marker(
+            &raw,
+            &settings,
+            Path::new(raw["installedPath"].as_str().unwrap())
+        ),
+        Some(receipt)
+    );
+}
+
+#[test]
+fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    let payload = json!({
+        "projectId": "p",
+        "model": "kreamania-v4",
+        "modelHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "prompt": "resource attribution regression",
+        "width": 64,
+        "height": 64,
+        "loras": [{
+            "name": "forged-client-name",
+            "weight": 0.2,
+            "hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "installedPath": "C:/private/user/path/forged.safetensors"
+        }]
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let req = ImageRequest::from_payload(&payload);
+    let mut plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
+    assert_eq!(
+        plan.model_hash, None,
+        "the payload cannot populate trusted identity"
+    );
+    plan.model_hash =
+        Some("312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07".to_owned());
+    plan.loras = vec![WorkflowLora {
+        name: Some("exact_adapter_file".to_owned()),
+        weight: Some(0.65),
+        repo: None,
+        hash: Some("d34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33f".to_owned()),
+    }];
+
+    let fact = write_image_asset(
+        &plan,
+        0,
+        7,
+        64,
+        64,
+        stub_rgb8(64, 64, 7),
+        "candle_krea_imported",
+        JsonObject::new(),
+        &project_path,
+    )
+    .unwrap();
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .unwrap()
+        .expect("generated PNG carries the workflow");
+    assert_eq!(share.model_hash, plan.model_hash);
+    assert_eq!(share.loras, plan.loras);
+    let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (64, 64));
+    assert!(parameters
+        .contains("Model hash: 312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07"));
+    assert!(!parameters.contains("ffffffffffffffff"));
+    assert!(parameters.contains("<lora:exact_adapter_file:0.65>"));
+    assert!(parameters.contains("Lora hashes: \"exact_adapter_file: d34db33f"));
+    assert!(!parameters.contains("forged-client-name"));
+    assert!(!parameters.contains(project_path.to_string_lossy().as_ref()));
+    let bytes = std::fs::read(media).unwrap();
+    assert!(bytes
+        .windows(b"Model hash: 312f5ab8".len())
+        .any(|window| { window == b"Model hash: 312f5ab8" }));
+}
+
+/// A representative Image Studio payload: an edit with a reference and a mask, LoRAs, a style, an
+/// upscale pass, and `advanced` carrying both allow-listed knobs and denied ones.
+fn embed_payload() -> JsonObject {
+    json!({
+        "projectId": "p",
+        "mode": "edit_image",
+        "model": "krea_2_turbo",
+        "prompt": "Mist over hills",
+        "negativePrompt": "text, watermark",
+        "count": 2,
+        "width": 320,
+        "height": 256,
+        "seed": 100,
+        "seeds": [100, 101],
+        "stylePreset": "cinematic",
+        "styleId": "style_noir",
+        "fitMode": "pad",
+        "sourceAssetId": "asset_source_1",
+        "referenceAssetIds": ["asset_ref_1", "asset_ref_2"],
+        "maskAssetId": "asset_mask_1",
+        "upscale": { "enabled": true, "engine": "real-esrgan", "factor": 2 },
+        "loras": [{
+            "name": "Film Grain",
+            "weight": 0.6,
+            "source": { "provider": "huggingface", "repo": "acme/film-grain", "file": "grain.safetensors" }
+        }],
+        "modelManifestEntry": { "family": "krea" },
+        "advanced": {
+            "steps": 8,
+            "sampler": "euler",
+            "guidanceScale": 3.5,
+            "mlxQuantize": 4,
+            "flashAttn": true,
+            "controlImage": "asset_control_1"
+        }
+    })
+    .as_object()
+    .cloned()
+    .unwrap()
+}
+
+fn write_one(plan: &ImagePlan, req: &ImageRequest, seed: i64, project_path: &Path) -> JsonObject {
+    let pixels = stub_rgb8(req.width, req.height, seed);
+    write_image_asset(
+        plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(req),
+        project_path,
+    )
+    .unwrap()
+}
+
+/// The main funnel embeds the sanitized envelope, and the envelope describes THIS image.
+///
+/// `write_image_asset` is the one place every generated image is written, which is why sc-15948
+/// embeds here rather than at the four egress paths (`std::fs::copy`, the API's `ReaderStream`, the
+/// browser's `<a download>`, the MCP base64) — all of which are byte-exact and therefore carry
+/// whatever this wrote, including a PNG dragged straight out of Explorer.
+#[test]
+fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let payload = embed_payload();
+    let req = ImageRequest::from_payload(&payload);
+    // No preference file at all — embedding is ON by default, which is the shape a fresh install has.
+    let mut plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    // The default-platform test uses the procedural writer rather than an inference backend, so
+    // supply the worker-resolved adapter fact that production obtains before this seam.
+    plan.loras = vec![WorkflowLora {
+        name: Some("grain".to_owned()),
+        weight: Some(0.6),
+        repo: Some("acme/film-grain".to_owned()),
+        hash: Some("1111111111111111111111111111111111111111111111111111111111111111".to_owned()),
+    }];
+    // Image index 0 of a two-image batch whose base seed is 100 — so the seed that lands in the
+    // envelope has to be this image's, not the batch's `seeds` list.
+    let fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);
+
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .expect("the written PNG is readable")
+        .expect("it carries a workflow");
+
+    assert_eq!(share.mode, "edit_image");
+    assert_eq!(share.model, "krea_2_turbo");
+    assert_eq!(share.prompt, "Mist over hills");
+    assert_eq!(share.negative_prompt, "text, watermark");
+    assert_eq!(share.seed, Some(100));
+    assert_eq!((share.width, share.height), (Some(320), Some(256)));
+    assert_eq!(share.style_preset.as_deref(), Some("cinematic"));
+    assert_eq!(share.fit_mode.as_deref(), Some("pad"));
+    // The payload asked for an inline upscale, but THIS file is the base render — see
+    // `the_base_image_of_an_inline_upscale_describes_no_upscale_pass`.
+    assert_eq!(share.upscale, None);
+    assert_eq!(
+        share.loras.first().and_then(|lora| lora.repo.as_deref()),
+        Some("acme/film-grain")
+    );
+
+    // Input images by SHAPE, never by id: source + two references + mask + the control map.
+    let mut kinds: Vec<(&str, u32)> = share
+        .inputs
+        .iter()
+        .map(|input| (input.kind.as_str(), input.count))
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        vec![("control", 1), ("mask", 1), ("reference", 2), ("source", 1)]
+    );
+
+    // The allow-list ran on the way out, in the file that actually leaves the machine.
+    let advanced = &share.advanced;
+    assert_eq!(advanced.get("steps"), Some(&json!(8)));
+    assert_eq!(advanced.get("sampler"), Some(&json!("euler")));
+    for denied in ["mlxQuantize", "flashAttn", "controlImage"] {
+        assert!(
+            !advanced.contains_key(denied),
+            "`{denied}` must not travel inside a shared image"
+        );
+    }
+    let text = serde_json::to_string(&share).unwrap();
+    for local_id in [
+        "asset_source_1",
+        "asset_ref_1",
+        "asset_mask_1",
+        "asset_control_1",
+        "\"projectId\"",
+    ] {
+        assert!(!text.contains(local_id), "{local_id} leaked: {text}");
+    }
+
+    // And it is still an ordinary PNG: the chunk is ancillary, so every decoder must ignore it.
+    let decoded = image::open(&media).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (320, 256));
+}
+
+#[test]
+fn a_kreamania_generation_records_the_worker_resolved_settings_civitai_requires() {
+    // Regression for Civitai post 30111231. The uploaded PNG's request envelope carried only
+    // `advanced.resolution`, while the imported-Krea worker actually ran its resolved 8-step default
+    // and recorded that fact in `raw_settings.numInferenceSteps`. Its runtime also resolved Euler,
+    // but neither fact existed in the request. Civitai requires a numeric `Steps:` value; a
+    // non-numeric placeholder passes its first gate but fails its schema and drops everything.
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    let payload = json!({
+        "projectId": "p",
+        "mode": "text_to_image",
+        "model": "kreamania_v5",
+        "prompt": "An expressive impasto oil painting of deep crimson roses",
+        "software": "Forged Generator",
+        "producer": { "name": "Forged Producer" },
+        "count": 2,
+        "width": 1024,
+        "height": 1024,
+        "seed": 3_502_903_515_i64,
+        "advanced": { "resolution": "1024x1024" }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    assert!(
+        payload["advanced"].get("steps").is_none(),
+        "the regression must begin with the same missing request field as the uploaded image"
+    );
+    let req = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let raw_settings = json!({
+        "realModelInference": true,
+        "numInferenceSteps": 8,
+        "resolvedSampler": "euler",
+        "engine": "candle_krea_imported"
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let fact = write_image_asset(
+        &plan,
+        0,
+        3_502_903_515,
+        1024,
+        1024,
+        stub_rgb8(1024, 1024, 3_502_903_515),
+        "candle_krea_imported",
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .unwrap()
+        .expect("the generated PNG carries its workflow");
+    assert_eq!(share.advanced.get("steps"), Some(&json!(8)));
+    assert_eq!(share.advanced.get("sampler"), Some(&json!("euler")));
+
+    let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (1024, 1024));
+    assert!(parameters.contains("Steps: 8"), "{parameters:?}");
+    assert!(parameters.contains("Sampler: euler"), "{parameters:?}");
+    assert!(
+        parameters.contains("software: SceneWorks"),
+        "{parameters:?}"
+    );
+    assert!(!parameters.contains("Forged"), "{parameters:?}");
+    assert!(!parameters.contains("Steps: Unknown"), "{parameters:?}");
+    assert_eq!(
+        parameters
+            .lines()
+            .last()
+            .and_then(|line| line.strip_prefix("Steps: "))
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|steps| steps.parse::<u32>().ok()),
+        Some(8),
+        "Civitai validates the mapped steps value as a number"
+    );
+    let bytes = std::fs::read(media).unwrap();
+    assert!(
+        bytes
+            .windows(b"Steps: 8".len())
+            .any(|window| window == b"Steps: 8"),
+        "the numeric value must reach the actual PNG parameters chunk"
+    );
+    assert!(
+        bytes
+            .windows(b"Sampler: euler".len())
+            .any(|window| window == b"Sampler: euler"),
+        "the actual sampler must reach the physical PNG parameters chunk"
+    );
+    assert!(
+        bytes
+            .windows(b"software: SceneWorks".len())
+            .any(|window| window == b"software: SceneWorks"),
+        "the trusted producer name must reach the physical PNG parameters chunk"
+    );
+}
+
+#[test]
+fn only_worker_resolved_settings_can_enrich_the_share_envelope() {
+    let forged = json!({
+        "projectId": "p",
+        "advanced": { "numInferenceSteps": 999 }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let resolved = json!({ "numInferenceSteps": 8 })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        resolved_steps_for_share(&forged, &resolved, false),
+        None,
+        "a client-supplied telemetry key must never be promoted into the trusted envelope"
+    );
+
+    let phased = json!({
+        "projectId": "p",
+        "advanced": { "phases": [{ "steps": 4 }, { "steps": 4 }] }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    assert_eq!(
+        resolved_steps_for_share(&phased, &resolved, true),
+        None,
+        "a multi-phase schedule must not be collapsed into one top-level step count"
+    );
+
+    let resolved_sampler = json!({ "resolvedSampler": "euler" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        resolved_sampler_for_share("stub", &resolved_sampler),
+        None,
+        "an internal-looking field cannot promote a sampler outside the trusted execution route"
+    );
+    assert_eq!(
+        resolved_sampler_for_share("candle_krea_imported", &resolved_sampler),
+        Some("euler"),
+        "the worker-resolved sampler should enrich the imported-Krea route"
+    );
+}
+
+#[test]
+fn client_sampler_fields_cannot_suppress_the_imported_krea_execution_fact() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    let payload = json!({
+        "projectId": "p",
+        "mode": "text_to_image",
+        "model": "kreamania_v4_int8",
+        "prompt": "conflicting sampler regression",
+        "width": 64,
+        "height": 64,
+        "advanced": {
+            "sampler": "dpmpp_2m",
+            "resolvedSampler": "client-supplied"
+        }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let req = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
+    let raw_settings = json!({
+        "resolvedSampler": "euler",
+        "engine": "candle_krea_imported"
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let fact = write_image_asset(
+        &plan,
+        0,
+        7,
+        64,
+        64,
+        stub_rgb8(64, 64, 7),
+        "candle_krea_imported",
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .unwrap()
+        .expect("the generated PNG carries its workflow");
+    assert_eq!(share.advanced.get("sampler"), Some(&json!("euler")));
+    let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (64, 64));
+    assert!(parameters.contains("Sampler: euler"), "{parameters:?}");
+    assert!(!parameters.contains("dpmpp_2m"), "{parameters:?}");
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn imported_krea_records_the_sampler_it_explicitly_executes() {
+    let req = request(json!({
+        "projectId": "p",
+        "model": "kreamania_v4_int8",
+        "advanced": { "sampler": "not-the-runtime-sampler" }
+    }));
+    let raw = krea_imported_raw_settings(&req, 8, false, 0);
+    assert_eq!(raw.get("resolvedSampler"), Some(&json!("euler")));
+}
+
+/// Turning the setting off writes the file SceneWorks writes today, to the byte.
+///
+/// Proven by comparison against a real `save_with_format` write of the same pixel buffer rather
+/// than by reading the implementation — the `None` arm of `write_workflow_chunk` guarantees this
+/// (`the_none_path_is_byte_identical_to_save_with_format`, sc-15947) and this is the seam actually
+/// taking it.
+#[test]
+fn embedding_off_writes_the_bytes_sceneworks_writes_today() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    write_embed_preference(&config_dir, false);
+    let settings = settings_with_config_dir(&config_dir);
+
+    let payload = embed_payload();
+    let req = ImageRequest::from_payload(&payload);
+    let source = workflow_source(&settings, &payload);
+    assert!(
+        source.is_none(),
+        "a stored `embedWorkflowInImages: false` must leave nothing to embed"
+    );
+
+    let seed = resolve_seed(&req, 0);
+    let plan = ImagePlan::with_count(&req, req.count, source);
+    let fact = write_one(&plan, &req, seed, &project_path);
+    let written = std::fs::read(project_path.join(fact["mediaPath"].as_str().unwrap())).unwrap();
+
+    // The same pixels through the encoder this seam used before sc-15948.
+    let reference_path = dir.path().join("reference.png");
+    image::RgbImage::from_raw(
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, seed),
+    )
+    .unwrap()
+    .save_with_format(&reference_path, image::ImageFormat::Png)
+    .unwrap();
+    let reference = std::fs::read(&reference_path).unwrap();
+
+    assert_eq!(
+        written.len(),
+        reference.len(),
+        "opting out changed the encoded size by {} bytes",
+        written.len().abs_diff(reference.len())
+    );
+    assert!(
+        written == reference,
+        "opting out did not produce the bytes `save_with_format` produces"
+    );
+
+    // Stated the other way round too, so this cannot pass because the reader is broken.
+    let embedded_plan = ImagePlan::with_count(&req, req.count, Some(Arc::new(payload)));
+    let embedded = write_one(&embedded_plan, &req, seed, &project_path);
+    let embedded_bytes =
+        std::fs::read(project_path.join(embedded["mediaPath"].as_str().unwrap())).unwrap();
+    assert!(embedded_bytes.len() > reference.len());
+}
+
+/// A write with no job payload behind it must produce a plain PNG, not an error and not an envelope
+/// of bare fallbacks. The stub and dry-run paths go through this funnel too.
+#[test]
+fn a_write_with_no_payload_embeds_nothing_and_still_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    assert!(
+        workflow_source(&settings, &JsonObject::new()).is_none(),
+        "an empty payload has nothing to describe, so it must embed nothing"
+    );
+
+    let req =
+        request(json!({ "projectId": "p", "model": "z_image_turbo", "width": 256, "height": 256 }));
+    let plan = ImagePlan::new(&req);
+    let fact = write_one(&plan, &req, 1, &project_path);
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    assert_eq!(
+        sceneworks_core::workflow_png::read_workflow_chunk_file(&media).unwrap(),
+        None,
+        "an absent payload is an absence, never an error"
+    );
+    assert!(image::open(&media).is_ok());
+}
+
+/// The toggle is read live off the config dir, so a user who flips it does not have to restart the
+/// worker — the same live-handoff shape as the GPU-memory-limit file (epic 7819).
+#[test]
+fn the_embed_toggle_is_read_from_the_config_dir_each_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().to_path_buf();
+    let settings = settings_with_config_dir(&config_dir);
+    let payload = embed_payload();
+
+    assert!(
+        workflow_source(&settings, &payload).is_some(),
+        "no preference file means ON"
+    );
+    write_embed_preference(&config_dir, false);
+    assert!(workflow_source(&settings, &payload).is_none());
+    write_embed_preference(&config_dir, true);
+    assert!(workflow_source(&settings, &payload).is_some());
+}
+
+/// The inline-upscaled variant carries the pass that produced IT, and specifically the pass that
+/// RAN rather than the one that was requested (sc-15948).
+///
+/// The request here asks for `aura-sr` at 3x — an engine that no longer exists and a factor the
+/// worker does not offer. `apply_inline_upscale` normalizes both before upscaling, so a shared
+/// upscaled image that echoed the request would describe a pass nobody can reproduce.
+#[test]
+fn the_upscaled_variant_describes_the_pass_that_actually_ran() {
+    let mut payload = embed_payload();
+    payload.insert(
+        "upscale".to_owned(),
+        json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
+    );
+    let req = ImageRequest::from_payload(&payload);
+    let base_fact = json!({
+        "assetId": "asset_base", "seed": 101, "width": 320, "height": 256, "index": 0
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let applied = json!({ "enabled": true, "engine": "seedvr2", "factor": 2, "softness": 0.25 });
+
+    let share = upscaled_workflow_share(&req, &base_fact, &payload, &applied)
+        .expect("a fixture envelope is far under the recording ceiling");
+    let upscale = share.upscale.as_ref().expect("the pass is recorded");
+    assert!(upscale.enabled);
+    assert_eq!(upscale.engine.as_deref(), Some("seedvr2"));
+    assert_eq!(upscale.factor, Some(2));
+    assert_eq!(upscale.softness, Some(0.25));
+
+    // The base generation still travels — the upscaled file is base + pass, not pass alone — and the
+    // seed is the BASE image's, because that is the render this variant came out of.
+    assert_eq!(share.prompt, "Mist over hills");
+    assert_eq!(share.model, "krea_2_turbo");
+    assert_eq!(share.seed, Some(101));
+    // Generation geometry, not the upscaled file's: the envelope is a recipe, and "render 320x256
+    // then upscale 2x" is what reproduces this image.
+    assert_eq!((share.width, share.height), (Some(320), Some(256)));
+
+    // A payload that omitted geometry falls back to the BASE fact's, never to the upscaled file's.
+    let mut geometry_less = payload.clone();
+    geometry_less.remove("width");
+    geometry_less.remove("height");
+    let share = upscaled_workflow_share(&req, &base_fact, &geometry_less, &applied)
+        .expect("a fixture envelope is far under the recording ceiling");
+    assert_eq!((share.width, share.height), (Some(320), Some(256)));
+}
+
+/// The BASE image of an inline-upscale generation must not describe a pass it never received
+/// (sc-15948).
+///
+/// `apply_inline_upscale` keeps the base render as its own retained asset and appends the upscaled
+/// variant beside it, so an inline-upscale generation ships TWO files. `write_image_asset` embeds the
+/// raw request payload, which means the base file used to claim `upscale.enabled: true` — and claim
+/// it in the REQUESTED terms, which the pass then clamps (`factor` to 2 or 4) and normalizes (the
+/// dropped `aura-sr` to `real-esrgan`). The hostile request below asks for `aura-sr` at 3x: neither
+/// exists, and the base image was never upscaled at all, so a base envelope echoing them named a
+/// dropped engine at an unoffered factor on a file that received no pass. sc-15952 prefills the
+/// studio from this.
+///
+/// The two halves are asserted together on one generation, because "drop it from the base" is only
+/// right if the variant still carries it — otherwise the pass would go unrecorded everywhere.
+#[test]
+fn the_base_image_of_an_inline_upscale_describes_no_upscale_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let mut payload = embed_payload();
+    payload.insert(
+        "upscale".to_owned(),
+        json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
+    );
+    let req = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let base_fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);
+
+    let media = project_path.join(base_fact["mediaPath"].as_str().unwrap());
+    let base = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .expect("the written PNG is readable")
+        .expect("the base image still carries its own workflow");
+    assert_eq!(
+        base.upscale, None,
+        "the base render received no upscale pass, so its envelope must not describe one"
+    );
+    // Not merely absent from the typed field — absent from the FILE. A serialized `"upscale"` key
+    // would still reach sc-15952's prefill.
+    let text = serde_json::to_string(&base).unwrap();
+    for fragment in ["upscale", "aura-sr"] {
+        assert!(
+            !text.contains(fragment),
+            "{fragment:?} must not appear in the base image's envelope: {text}"
+        );
+    }
+    // Everything else about the base render is untouched.
+    assert_eq!(base.prompt, "Mist over hills");
+    assert_eq!(base.seed, Some(100));
+    assert_eq!((base.width, base.height), (Some(320), Some(256)));
+
+    // The derived variant is where the pass lives, in APPLIED terms: `apply_inline_upscale` clamps
+    // 3 to 2 and normalizes `aura-sr` to `real-esrgan` before upscaling.
+    let applied = json!({ "enabled": true, "engine": "real-esrgan", "factor": 2 });
+    let variant = upscaled_workflow_share(&req, &base_fact, &payload, &applied)
+        .expect("a fixture envelope is far under the recording ceiling");
+    let upscale = variant
+        .upscale
+        .as_ref()
+        .expect("the variant records the pass");
+    assert!(upscale.enabled);
+    assert_eq!(upscale.engine.as_deref(), Some("real-esrgan"));
+    assert_eq!(upscale.factor, Some(2));
+}
+
+/// The detail pass has its OWN job payload, so its envelope describes the refine — not the
+/// generation that produced the image it refined (sc-15948).
+#[test]
+fn the_detail_pass_describes_itself_and_not_the_source_generation() {
+    // The payload `buildDetailJobBody` sends: a source asset, a backbone, and two knobs.
+    let payload = json!({
+        "projectId": "p",
+        "sourceAssetId": "asset_source_1",
+        "model": "realvisxl",
+        "displayName": "Mist over hills",
+        "advanced": { "strength": 0.55, "cnScale": 0.7 }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+
+    let share = detail_workflow_share(
+        &payload,
+        "realvisxl",
+        "ultra detailed, sharp focus, fine texture, high quality",
+        "blurry, soft, lowres, smooth, plastic",
+        7,
+        1536,
+        1024,
+    )
+    .expect("a fixture envelope is far under the recording ceiling");
+
+    assert_eq!(share.mode, "image_detail");
+    assert_eq!(share.model, "realvisxl");
+    assert_eq!(
+        share.prompt, "ultra detailed, sharp focus, fine texture, high quality",
+        "the prompt the model saw lives in `advanced`, not at the payload's top level"
+    );
+    assert_eq!(
+        share.negative_prompt,
+        "blurry, soft, lowres, smooth, plastic"
+    );
+    assert_eq!(share.seed, Some(7));
+    assert_eq!((share.width, share.height), (Some(1536), Some(1024)));
+
+    // Both knobs the Detail UI exposes travel. `cnScale` was unclassified — and therefore silently
+    // dropped — until sc-15948 added it to `ADVANCED_KEY_RULES`.
+    assert_eq!(share.advanced.get("strength"), Some(&json!(0.55)));
+    assert_eq!(share.advanced.get("cnScale"), Some(&json!(0.7)));
+
+    // The source image is a SHAPE, never the local id.
+    assert_eq!(share.inputs.len(), 1);
+    assert_eq!(share.inputs[0].kind, "source");
+    let text = serde_json::to_string(&share).unwrap();
+    assert!(!text.contains("asset_source_1"), "{text}");
+}
+
+/// The measured per-image cost, recorded on sc-15948.
+///
+/// A batch at the sizes the Image Studio actually renders, so "the chunk and nothing else" is a
+/// number rather than a claim. The bound is deliberately loose in one direction only: what would be
+/// a regression is the *encoder* drifting (a compression-level or row-filter change would move the
+/// delta by kilobytes on the pixels, not by tens of bytes on the text), which is what the sc-15947
+/// invariant test pins and what this would notice second.
+#[test]
+fn the_embedded_chunk_costs_only_the_chunk_on_a_representative_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let mut deltas = Vec::new();
+    for (width, height) in [(512, 512), (768, 512), (1024, 1024), (1280, 720)] {
+        let mut payload = embed_payload();
+        payload.insert("width".to_owned(), json!(width));
+        payload.insert("height".to_owned(), json!(height));
+        let req = ImageRequest::from_payload(&payload);
+        let seed = resolve_seed(&req, 0);
+
+        let embedded = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
+        let plain = ImagePlan::with_count(&req, 1, None);
+        let with = write_one(&embedded, &req, seed, &project_path);
+        let without = write_one(&plain, &req, seed, &project_path);
+
+        let with_bytes = std::fs::metadata(project_path.join(with["mediaPath"].as_str().unwrap()))
+            .unwrap()
+            .len();
+        let without_bytes =
+            std::fs::metadata(project_path.join(without["mediaPath"].as_str().unwrap()))
+                .unwrap()
+                .len();
+        let delta = with_bytes as i64 - without_bytes as i64;
+        println!("{width}x{height}: {without_bytes} -> {with_bytes} (+{delta} bytes)");
+        deltas.push(delta);
+    }
+
+    // Effectively one number regardless of the pixels: the only thing that moves is the deflated
+    // length of the envelope's own `width`/`height` digits, which is single-digit bytes. Measured on
+    // this batch: 446 / 449 / 448 / 446 bytes.
+    let (low, high) = (
+        *deltas.iter().min().expect("a batch"),
+        *deltas.iter().max().expect("a batch"),
+    );
+    assert!(
+        high - low <= 32,
+        "the per-image cost must be flat across image sizes, measured {deltas:?}"
+    );
+    assert!(
+        (200..2048).contains(&low) && (200..2048).contains(&high),
+        "a representative envelope should cost a few hundred bytes, measured {deltas:?}"
+    );
+}
+
 #[test]
 fn resolve_seed_matches_python_precedence() {
     // base seed wins (seed + index), even over an explicit seeds list.
@@ -439,6 +2221,25 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
             .contains("route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request))"),
         "the resolved candle route must supply the adapter label"
     );
+    let pose_reject = between(
+        run_job,
+        "CandleImageRoute::PoseReject => {",
+        "CandleImageRoute::PoseControlBaseMissing => {",
+    );
+    assert!(
+        pose_reject.contains("return Err(WorkerError::InvalidPayload"),
+        "PoseReject must terminate dispatch with a typed payload error"
+    );
+    let pose_reject_dispatch = run_job
+        .find("CandleImageRoute::PoseReject => {")
+        .expect("PoseReject dispatch arm");
+    let stub_fallback = run_job
+        .find("if !handled {\n        if request.hires_fix.enabled")
+        .expect("procedural-stub fallback");
+    assert!(
+        pose_reject_dispatch < stub_fallback,
+        "PoseReject dispatch must execute before the procedural-stub fallback"
+    );
 
     let base = include_str!("base.rs");
     let mlx_stream = between(
@@ -477,6 +2278,25 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let too_big_reject = candle_stream
         .find("FitDecision::TooBig")
         .expect("resident reject");
+    let shared_krea_selection = candle_stream
+        .find("let shared_krea_fit =")
+        .expect("shared Krea selection");
+    let shared_krea_resident = shared_krea_selection
+        + candle_stream[shared_krea_selection..]
+            .find("KreaTurboFit::Resident {")
+            .expect("shared Krea resident result");
+    let legacy_gate = candle_stream
+        .find("let gate_decision =")
+        .expect("legacy defense gate");
+    assert!(
+        shared_krea_selection < shared_krea_resident && shared_krea_resident < legacy_gate,
+        "the shared selector must make Krea's resident decision before the legacy defense gate"
+    );
+    assert!(
+        candle_stream.contains("memory_strategy_context.as_ref()")
+            && base.contains("crate::memory_strategy::generate_with_scope("),
+        "the selected Krea contract must reach provider safety and lifecycle hooks"
+    );
     let probes: Vec<usize> = candle_stream
         .match_indices("installed_tier_keys(")
         .map(|(offset, _)| offset)
@@ -934,7 +2754,10 @@ fn mlx_model_table_maps_known_families() {
     assert_eq!(qwen.adapter_label(), "mlx_qwen");
     assert_eq!(qwen.default_steps(), 20);
     assert!(qwen.supports_guidance() && qwen.supports_negative_prompt());
-    // All three FLUX.2-klein variants share the engine's single txt2img model.
+    // All three FLUX.2-klein variants share the engine's single txt2img model. sc-15440 aligned the
+    // descriptor with what the engine renders: klein is not the embedded-guidance variant, so that
+    // path consumes a real user negative prompt. That is standard guidance, NOT the
+    // `supports_true_cfg` capability. FLUX.2-dev below remains embedded-only.
     for id in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -943,7 +2766,7 @@ fn mlx_model_table_maps_known_families() {
         let m = mlx_model(id).unwrap();
         assert_eq!(m.engine_id(), "flux2_klein_9b");
         assert_eq!(m.adapter_label(), "mlx_flux2");
-        assert!(m.supports_guidance() && !m.supports_negative_prompt());
+        assert!(m.supports_guidance() && m.supports_negative_prompt());
     }
     // Distilled variants are 4-step; the undistilled true_v2 is 24-step.
     assert_eq!(mlx_model("flux2_klein_9b").unwrap().default_steps(), 4);
@@ -964,9 +2787,9 @@ fn mlx_model_table_maps_known_families() {
         mlx_model("flux2_klein_9b_kv").unwrap().default_repo(),
         "SceneWorks/flux2-klein-9b-kv-mlx"
     );
-    // FLUX.2-dev (epic 5914): its OWN engine model (not a klein weight variant), embedded
-    // distilled guidance (guidance scalar, no negative prompt — like klein but ~28 steps /
-    // guidance 4.0). Shares the `mlx_flux2` adapter.
+    // FLUX.2-dev (epic 5914): its OWN engine model (not a Klein weight variant), embedded
+    // distilled guidance (guidance scalar, no negative prompt — unlike the current Klein path;
+    // ~28 steps / guidance 4.0). Shares the `mlx_flux2` adapter.
     let dev = mlx_model("flux2_dev").unwrap();
     assert_eq!(dev.engine_id(), "flux2_dev");
     assert_eq!(dev.adapter_label(), "mlx_flux2");
@@ -1035,6 +2858,13 @@ fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
             json!({ "projectId": "p", "mode": "character_image" })
         )),
         1.5
+    );
+    assert_eq!(
+        resolve_sensenova_img_cfg(&request(json!({
+            "projectId": "p", "mode": "character_image",
+            "advanced": { "trueCfgScale": 3.0, "imageGuidanceScale": 2.5 }
+        }))),
+        3.0
     );
     assert_eq!(
         resolve_sensenova_img_cfg(&request(json!({
@@ -1142,6 +2972,7 @@ fn sensenova_it2i_real_weights_generates_one_image() {
         1.0,       // image CFG (edit default)
         3.0,       // timestep shift
         build_edit_conditioning(std::slice::from_ref(&reference)),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1210,6 +3041,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
             1.0,       // image CFG
             3.0,       // timestep shift
             conditioning.clone(),
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
         )
@@ -1394,26 +3226,28 @@ fn candle_bernini_tier_subdir_selection() {
     assert!(candle_bernini_tier_quant("bf16").is_none());
 
     // Sentinels on a temp root: a tier subfolder with a `transformer/` tree, plus a bare root.
-    let root = std::env::temp_dir().join(format!("candle-bernini-tier-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
+    let root_guard = tempfile::Builder::new()
+        .prefix("candle-bernini-tier-")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let make_tier = |tier: &str| {
         std::fs::create_dir_all(root.join(tier).join("transformer")).unwrap();
     };
     make_tier("q8");
     make_tier("q4");
     // A tier root (has subfolders) is a usable snapshot; a bare/empty dir is not.
-    assert!(candle_bernini_snapshot_ok(&root));
+    assert!(candle_bernini_snapshot_ok(root));
     let empty = root.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
     assert!(!candle_bernini_snapshot_ok(&empty));
     // `transformer/` sentinel resolves the tier tree, not a bare dir.
     assert!(candle_bernini_tree_present(&root.join("q4")));
-    assert!(!candle_bernini_tree_present(&root));
+    assert!(!candle_bernini_tree_present(root));
     // A legacy flat tree (`transformer/` AT root) is accepted as a snapshot too.
     let flat = root.join("flat");
     std::fs::create_dir_all(flat.join("transformer")).unwrap();
     assert!(candle_bernini_snapshot_ok(&flat));
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// Resolve the Bernini MLX snapshot dir for the real-weight smokes: env override → the local
@@ -1477,6 +3311,7 @@ fn bernini_image_t2i_real_weights_generates_one_image() {
         Some(4.0),
         "t2i",
         Vec::new(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1530,6 +3365,7 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
         Some(4.0),
         "i2i",
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1627,6 +3463,7 @@ fn bernini_image_t2i_candle_real_weights_generates_one_image() {
         guidance,
         "t2i",
         Vec::new(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -2246,7 +4083,10 @@ fn smoke_generate_one(
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -2429,7 +4269,10 @@ fn lens_turbo_real_weights_bucket_resolution() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_p| {},
     )
@@ -2717,7 +4560,10 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -2788,7 +4634,10 @@ fn boogu_q4_real_weights_loads_and_generates() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -2855,7 +4704,10 @@ fn klein_tier_real_weights_loads_and_generates() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -2914,7 +4766,10 @@ fn ideogram_4_bf16_real_weights_loads_and_generates() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -3071,7 +4926,10 @@ fn kolors_real_weights_img2img_generates_one_image() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3127,7 +4985,10 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3499,7 +5360,10 @@ fn smoke_generate_one_true_cfg(
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3857,7 +5721,10 @@ fn sc3031_ab_dump_txt2img() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -3933,6 +5800,7 @@ fn sc3031_ab_dump_pose() {
         seed,
         steps,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -4158,6 +6026,7 @@ fn zimage_control_real_weights_generates_one_pose() {
         42,
         8,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -4220,6 +6089,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
             50,
             4.0,
             conditioning,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -4308,6 +6178,7 @@ fn qwen_control_real_weights_generates_one_pose() {
         4.0,
         conditioning,
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -4341,58 +6212,100 @@ fn flux2_edit_engine_id_maps_variants() {
     );
     // FLUX.2-dev edit (sc-5922): the dev model routes to the `flux2_dev_edit` variant.
     assert_eq!(flux2_edit_engine_id("flux2_dev"), Some("flux2_dev_edit"));
+    assert!(flux2_edit_uses_provider_memory_safety("flux2_dev_edit"));
+    assert!(!flux2_edit_uses_provider_memory_safety(
+        "flux2_klein_9b_edit"
+    ));
+    assert!(!flux2_edit_uses_provider_memory_safety(
+        "flux2_klein_9b_kv_edit"
+    ));
     assert_eq!(flux2_edit_engine_id("z_image_turbo"), None);
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
 }
 
-// ---- sc-6124 / sc-6211: FLUX.2-dev multi-reference edit memory guard --------------------------
+// ---- sc-6124 / sc-6211: FLUX.2-dev provider memory admission context --------------------------
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_dev_edit_peak_gb_tracks_chunked_measurements() {
-    // sc-6211 worker-layer peaks with the sc-6266 chunking ON (Q4, 1024², /usr/bin/time -l):
-    // 2-ref ~81 GB, 4-ref ~93 GB. (Pre-chunking sc-5923 had 2-ref ~104 — the re-anchored fit is
-    // ~3.8× gentler per token, which is why the 2-ref edit now fits 96.)
-    let two = flux2_dev_edit_peak_gb(2, 1024, 1024);
-    let four = flux2_dev_edit_peak_gb(4, 1024, 1024);
-    assert!(
-        (two - 81.0).abs() < 2.0,
-        "two-reference estimate {two} GB ≉ measured ~81"
-    );
-    assert!(
-        (four - 93.0).abs() < 2.0,
-        "four-reference estimate {four} GB ≉ measured ~93"
-    );
-    // Monotonic in both reference count and resolution.
-    assert!(four > two);
-    assert!(flux2_dev_edit_peak_gb(2, 768, 768) < two);
+fn flux2_dev_edit_memory_context_preserves_multiref_boundaries_for_provider_safety() {
+    let registry = crate::inference_runtime::media();
+    let registration = registry
+        .memory_strategy_registrations()
+        .find(|registration| registration.provider_id == "flux2_dev_edit")
+        .expect("FLUX.2-dev edit provider memory registration");
+    let base_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default()));
+    let contract = registry
+        .memory_strategy_contract("flux2_dev_edit", &base_spec)
+        .unwrap()
+        .expect("FLUX.2-dev edit provider memory contract");
+
+    // Single-reference and a failed RAM probe remain outside the provider safety context.
+    assert!(flux2_dev_edit_memory_context(
+        &contract,
+        Some(gen_core::Quant::Q4),
+        1,
+        1024,
+        1024,
+        Some(64.0),
+    )
+    .unwrap()
+    .is_none());
+    assert!(flux2_dev_edit_memory_context(
+        &contract,
+        Some(gen_core::Quant::Q4),
+        4,
+        1024,
+        1024,
+        None,
+    )
+    .unwrap()
+    .is_none());
+    for quant in [Some(gen_core::Quant::Q4), Some(gen_core::Quant::Q8), None] {
+        let mut spec = base_spec.clone();
+        spec.quantize = quant;
+        let contract = registry
+            .memory_strategy_contract("flux2_dev_edit", &spec)
+            .unwrap()
+            .expect("tier-specific FLUX.2-dev edit provider memory contract");
+        let context = flux2_dev_edit_memory_context(&contract, quant, 2, 1024, 1024, Some(128.0))
+            .unwrap()
+            .expect("multi-reference context");
+        assert_eq!(context.selection.tier.quant, quant);
+        assert_eq!(context.predicted_peak_bytes, 0);
+        assert_eq!(context.geometry.reference_count, 2);
+        assert_eq!(
+            (registration.safety_check)(&spec, &contract, &context),
+            gen_core::MemorySafetyDecision::Accept,
+            "the worker context must pass the pinned provider's real safety check for {quant:?}"
+        );
+        assert_eq!(context.overlay, None);
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_dev_edit_memory_guard_gates_multiref_on_small_machines() {
-    // Single reference / txt2img always pass — covered by the declared minMemoryGb — even on a
-    // small machine, and regardless of the RAM probe.
-    assert!(flux2_dev_edit_memory_guard(1, 1024, 1024, Some(64.0)).is_ok());
-    assert!(flux2_dev_edit_memory_guard(0, 1024, 1024, Some(64.0)).is_ok());
-    // sc-6211: the chunked two-reference 1024² edit (~81 GB) now PASSES on a 96 GB Mac (the whole
-    // point of this story) and of course on a 128 GB one.
-    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(96.0)).is_ok());
-    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(128.0)).is_ok());
-    // Four references at 1024² (~93 GB peak) is too tight for a 96 GB machine but fits a 128 GB one.
-    let err = flux2_dev_edit_memory_guard(4, 1024, 1024, Some(96.0)).unwrap_err();
-    assert!(
-        matches!(&err, WorkerError::InvalidPayload(msg) if msg.contains("multi-reference")),
-        "expected an actionable multi-reference rejection, got {err:?}"
+fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
+    let requested_q4 = request(json!({
+        "model": "flux2_dev",
+        "advanced": { "mlxQuantize": 4 }
+    }));
+    let (quant, bits) = flux2_edit_resolved_quant(
+        &requested_q4,
+        Path::new("/models/flux2-dev/q8"),
+        "flux2_dev",
+        "job-tier-fallback",
+        "mlx",
     );
-    assert!(flux2_dev_edit_memory_guard(4, 1024, 1024, Some(128.0)).is_ok());
-    // A failed RAM probe is lenient (don't block a possibly-fine job).
-    assert!(flux2_dev_edit_memory_guard(4, 1024, 1024, None).is_ok());
+    assert_eq!(quant, Some(gen_core::Quant::Q8));
+    assert_eq!(bits, Some(8));
 }
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
@@ -4401,7 +6314,8 @@ fn prompt_enhance_reads_advanced_settings() {
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
         .advanced,
-    );
+    )
+    .expect("absent enhancement settings validate");
     assert!(!off.enabled);
     assert_eq!(off.temperature, None);
     assert_eq!(off.max_tokens, None);
@@ -4412,10 +6326,389 @@ fn prompt_enhance_reads_advanced_settings() {
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
-    .advanced);
+    .advanced)
+    .expect("bounded enhancement settings validate");
     assert!(on.enabled);
     assert_eq!(on.temperature, Some(0.2));
     assert_eq!(on.max_tokens, Some(256));
+}
+
+#[test]
+fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
+    #[allow(unused_mut)]
+    let mut settings = Settings::from_env();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        settings.backend_candle_enabled = true;
+    }
+    for (advanced, expected) in [
+        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": true, "enhanceTemperature": 2.1 }),
+            "must be between 0 and 2",
+        ),
+        (
+            json!({ "enhancePrompt": true, "enhanceMaxTokens": 2049 }),
+            "must be between 1 and 2048",
+        ),
+        (
+            json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
+            "tuning requires",
+        ),
+        (
+            json!({ "promptEnhancement": { "outcome": "enhanced" } }),
+            "worker-owned",
+        ),
+    ] {
+        let error =
+            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
+                .expect_err("invalid settings reject")
+                .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let klein = request(json!({
+        "model": "flux2_klein_9b",
+        "advanced": { "enhancePrompt": true }
+    }));
+    assert!(validate_prompt_enhancement_request(&klein, &settings)
+        .unwrap_err()
+        .to_string()
+        .contains("FLUX.2-Klein"));
+    for strict_control in [
+        json!({ "poses": [{ "id": "pose-1" }] }),
+        json!({ "controlWeights": { "overlayId": "flux2-depth" } }),
+        json!({ "controlImage": "asset-1" }),
+        json!({ "controlMode": "depth" }),
+    ] {
+        let mut advanced = strict_control.as_object().unwrap().clone();
+        advanced.insert("enhancePrompt".to_owned(), json!(true));
+        let strict = request(json!({
+            "model": "flux2_dev",
+            "advanced": advanced,
+        }));
+        assert!(validate_prompt_enhancement_request(&strict, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("strict control"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "character_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "style_variations", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("MLX supports its native base/edit/character/style routes");
+        }
+        for mode in ["reference", "image_to_image"] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            assert!(validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support"));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "edit_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "edit_image", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("Candle supports only its native base and edit routes");
+        }
+
+        for mode in [
+            "character_image",
+            "style_variations",
+            "reference",
+            "image_to_image",
+        ] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            let error = validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Candle supports only"),
+                "mode={mode}: {error}"
+            );
+        }
+
+        for carrier in [
+            json!({ "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = carrier.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("mode".to_owned(), json!("text_to_image"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            let error =
+                validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains("cannot include source or reference"),
+                "{error}"
+            );
+        }
+
+        let missing_edit_input = request(json!({
+            "model": "flux2_dev",
+            "mode": "edit_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(
+            validate_prompt_enhancement_request(&missing_edit_input, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a source or reference")
+        );
+
+        settings.backend_candle_enabled = false;
+        let disabled = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&disabled, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let backendless = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&backendless, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly() {
+    let enhanced = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "a fox".to_owned(),
+            "a red fox in winter light".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("matching enhanced report validates");
+    assert_eq!(enhanced["outcome"], "enhanced");
+    assert_eq!(enhanced["originalPrompt"], "a fox");
+    assert_eq!(enhanced["effectivePrompt"], "a red fox in winter light");
+    assert!(enhanced["fallbackReason"].is_null());
+
+    let fallback = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "enhancer unavailable".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("safe fallback validates");
+    assert_eq!(fallback["outcome"], "fallback");
+    assert_eq!(fallback["effectivePrompt"], "a fox");
+    assert_eq!(fallback["fallbackReason"], "enhancer unavailable");
+
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "another prompt".to_owned(),
+            "a fox".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not match"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not rewrite"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "   ".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("must contain"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "unsafe\nreason".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("safe bounded reason"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::absent("a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("absent outcome"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
+    fn enhanced(original: &str, effective: &str) -> gen_core::PromptEnhancementReport {
+        gen_core::PromptEnhancementReport::enhanced(original.to_owned(), effective.to_owned())
+    }
+
+    let mut reports = PromptEnhancementReports::new();
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        false,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("disabled request"));
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        1,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("unknown image"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .expect("first report is accepted");
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "another red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("duplicate"));
+    let fact = take_prompt_enhancement_fact(&mut reports, 0)
+        .expect("the report remains available for its image");
+    assert_eq!(fact["effectivePrompt"], "a red fox");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("no prompt-enhancement report"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("another prompt", "a red fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not match"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not rewrite"));
+
+    // Reports may arrive out of order for a batch, but each image must consume only the report
+    // bound to its own index and requested prompt.
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        1,
+        "an owl".to_owned(),
+        enhanced("an owl", "a moonlit owl"),
+    )
+    .expect("second image report is accepted first");
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox in snowfall"),
+    )
+    .expect("first image report is accepted second");
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 0).unwrap()["effectivePrompt"],
+        "a fox in snowfall"
+    );
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 1).unwrap()["effectivePrompt"],
+        "a moonlit owl"
+    );
 }
 
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
@@ -4844,6 +7137,7 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
         8,
         Some(4.0), // dev embedded guidance
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -4921,6 +7215,7 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
             28,
             Some(3.5), // dev embedded guidance
             conditioning,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
         )
@@ -5036,6 +7331,32 @@ fn flux2_edit_image_guidance_lever() {
             "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 0.8 }
         }))),
         None
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
+    let model = mlx_model("flux2_dev").unwrap();
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "character_image",
+                "advanced": { "trueCfgScale": 7.0, "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(7.0)
+    );
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "edit_image",
+                "advanced": { "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(2.0)
     );
 }
 
@@ -5198,6 +7519,9 @@ fn flux2_edit_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        false,
+        None,
+        None,
         "make it a watercolor painting",
         512,
         512,
@@ -5207,6 +7531,8 @@ fn flux2_edit_real_weights_generates_one_image() {
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -5713,6 +8039,29 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&zimage_base_t2i, &settings).unwrap();
     assert_eq!(route, ImageRoute::Mlx);
     assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() {
+    let req = request(json!({
+        "projectId": "p", "model": "sensenova_u1_8b", "mode": "character_image",
+        "prompt": "portrait", "referenceAssetIds": ["first", "second"], "count": 1,
+        "seed": 123, "advanced": { "angleSet": true, "trueCfgScale": 1.5 }
+    }));
+    let work = candle_conditioned_edit_work(&req);
+    assert_eq!(work.len(), 11);
+    assert!(work.iter().all(|(seed, _)| *seed == work[0].0));
+    assert_eq!(work[0].0, 123);
+    assert_eq!(
+        CandleImageRoute::SenseNovaEdit.image_count(&req, &Settings::from_env()),
+        11
+    );
+    assert_eq!(
+        sensenova_edit_candle_reference_ids(&req),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+    assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
@@ -6789,6 +9138,57 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
+/// sc-16453: strict-pose routing must preserve the selected ConvRot DiT identity even before the
+/// shared bf16 tokenizer / text-encoder / VAE surface has been fetched. The immutable ConvRot file
+/// alone is enough to claim the bespoke control route; generation fetches the shared surface and the
+/// provider replaces its transformer with this file. Requiring a standard q8/bf16 base here silently
+/// dropped `convRot` by either refusing the route or substituting the ordinary transformer.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn krea_convrot_pose_route_is_claimed_by_the_immutable_dit_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    let snapshot = hub
+        .join("models--SceneWorks--krea-2-turbo-int8-convrot")
+        .join("snapshots")
+        .join("installed");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(
+        snapshot.join("krea2_turbo_int8_convrot.safetensors"),
+        b"convrot-identity",
+    )
+    .unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let req = request(json!({
+        "projectId": "p",
+        "model": "krea_2_turbo",
+        "advanced": {
+            "convRot": true,
+            "poses": [{ "id": "pose-1" }]
+        }
+    }));
+
+    assert!(
+        krea_control_candle_available(&req, &settings),
+        "the immutable ConvRot file must claim strict pose before the shared bf16 surface is fetched"
+    );
+    assert_eq!(
+        resolve_candle_image_route(&req, &settings),
+        Some(CandleImageRoute::KreaControl),
+        "ConvRot strict pose must not fall through to ordinary Krea txt2img"
+    );
+    assert!(
+        resolve_krea_control_base(&req, &settings)
+            .expect("controlled resolver")
+            .is_none(),
+        "route availability must not substitute a standard q8/bf16 transformer for ConvRot"
+    );
+}
+
 /// sc-14249: the SenseNova q8 floor keeps the CAPABILITY DOWNTIER off q4, without taking q4 away
 /// from a user who asks for it.
 ///
@@ -7033,6 +9433,230 @@ fn flux2_edit_candle_base_is_absent_without_the_turnkey() {
     assert!(!flux2_edit_candle_available(&edit, &settings));
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_closed() {
+    let cases = [
+        ("edit_image", "sourceAssetId"),
+        ("reference", "referenceAssetId"),
+        ("image_to_image", "referenceAssetId"),
+        ("character_image", "referenceAssetId"),
+        ("style_variations", "referenceAssetId"),
+    ];
+    for model in [
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        assert!(is_flux2_edit_candle_model(model));
+        for (mode, reference_field) in cases {
+            let mut payload = json!({
+                "projectId": "p", "model": model, "prompt": "keep the subject",
+                "mode": mode, "count": 1
+            });
+            payload
+                .as_object_mut()
+                .expect("request object")
+                .insert(reference_field.to_owned(), json!("asset_1"));
+            let with_reference = request(payload);
+            assert!(
+                flux2_edit_candle_mode(&with_reference),
+                "model={model} mode={mode}"
+            );
+            assert_eq!(
+                flux2_edit_candle_reference_ids(&with_reference),
+                vec!["asset_1".to_owned()],
+                "model={model} mode={mode}"
+            );
+
+            let missing = request(json!({
+                "projectId": "p", "model": model, "prompt": "keep the subject",
+                "mode": mode, "count": 1
+            }));
+            assert!(
+                !flux2_edit_candle_mode(&missing),
+                "model={model} mode={mode}"
+            );
+            assert!(flux2_klein_reference_bearing_mode(mode));
+        }
+    }
+
+    let dev_edit = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
+        "mode": "edit_image", "sourceAssetId": "asset_1", "count": 1
+    }));
+    assert!(flux2_edit_candle_mode(&dev_edit));
+    for mode in [
+        "reference",
+        "image_to_image",
+        "character_image",
+        "style_variations",
+    ] {
+        let dev_conditioned = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
+            "mode": mode, "referenceAssetId": "asset_1", "count": 1
+        }));
+        assert!(
+            flux2_edit_candle_mode(&dev_conditioned),
+            "flux2_dev conditioned mode must reach the edit provider; mode={mode}"
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_edit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let model_path = root.path().to_string_lossy().to_string();
+
+    let flux_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+        "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert!(flux2_control_candle_available(&flux_pose, &settings));
+    assert!(!flux2_edit_candle_available(&flux_pose, &settings));
+    assert_eq!(
+        resolve_candle_image_route(&flux_pose, &settings),
+        Some(CandleImageRoute::Flux2Control),
+        "the real Character Studio pose payload must keep its skeleton control"
+    );
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        let supported_control = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "pose the subject",
+            "mode": mode, "referenceAssetId": "identity", "count": 1,
+            "advanced": {
+                "modelPath": model_path.clone(),
+                "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+            }
+        }));
+        assert_eq!(
+            resolve_candle_image_route(&supported_control, &settings),
+            Some(CandleImageRoute::Flux2Control),
+            "FLUX.2 non-edit pose mode {mode} remains a control request"
+        );
+    }
+
+    let flux_edit_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "edit with pose",
+        "mode": "edit_image", "sourceAssetId": "source", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&flux_edit_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "valid pose + edit_image must reject explicitly, never return None to the stub"
+    );
+
+    for poses in [Value::Null, json!([])] {
+        let plain_character = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": poses }
+        }));
+        assert!(flux2_edit_candle_available(&plain_character, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&plain_character, &settings),
+            Some(CandleImageRoute::Flux2Edit)
+        );
+    }
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        let malformed_pose = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": malformed }
+        }));
+        assert!(!flux2_edit_candle_available(&malformed_pose, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&malformed_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "direct worker routing must reject a malformed carrier after typed parsing"
+        );
+    }
+
+    let qwen_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "prompt": "keep the person", "mode": "character_image",
+        "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path,
+            "poses": [
+                { "keypoints": [[0.5, 0.2, 1.0]] },
+                { "keypoints": [[0.2, 0.5, 1.0]] }
+            ]
+        }
+    }));
+    assert!(qwen_edit_candle_available(&qwen_pose, &settings));
+    let route = resolve_candle_image_route(&qwen_pose, &settings);
+    assert_eq!(route, Some(CandleImageRoute::QwenEdit));
+    assert_eq!(
+        route
+            .expect("Qwen pose route")
+            .image_count(&qwen_pose, &settings),
+        2,
+        "Qwen pose plans must reserve one streamed result per pose"
+    );
+
+    let malformed_qwen = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetId": "identity",
+        "advanced": { "poses": false }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&malformed_qwen, &settings),
+        Some(CandleImageRoute::PoseReject)
+    );
+
+    for (mode, references) in [
+        ("edit_image", json!({ "sourceAssetId": "source" })),
+        ("text_to_image", json!({})),
+        ("reference", json!({ "referenceAssetId": "identity" })),
+        (
+            "style_variations",
+            json!({ "referenceAssetId": "identity" }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": "qwen_image_edit_2511_lightning", "mode": mode,
+            "advanced": { "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }] }
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(references.as_object().expect("reference object").clone());
+        let unsupported_pose = request(payload);
+        assert_eq!(
+            resolve_candle_image_route(&unsupported_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "Qwen pose mode {mode} must reject explicitly, never return None to the stub"
+        );
+    }
+    let ambiguous_identity_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetIds": ["one", "two"],
+        "advanced": { "poses": [{}] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&ambiguous_identity_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "the exact Qwen pose recipe accepts one identity, not a silently truncated array"
+    );
+}
+
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
 // base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
 // to the plain candle txt2img lane (which would silently render an unconditioned image and drop the
@@ -7116,6 +9740,7 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
         CandleImageRoute::Flux2Control,
         CandleImageRoute::Flux1Control,
         CandleImageRoute::KreaControl,
+        CandleImageRoute::KreaImportedControl,
     ] {
         assert_eq!(route.image_count(&zimage_pose, &settings), 3);
     }
@@ -7124,6 +9749,39 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
         CandleImageRoute::CandleTxt2Img.image_count(&zimage_pose, &settings),
         zimage_pose.count,
     );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn sc18477_every_named_bespoke_lane_declares_real_adapter_application() {
+    let request = request(json!({ "projectId": "p", "model": "z_image_turbo", "count": 1 }));
+    for route in [
+        CandleImageRoute::SdxlEdit,
+        CandleImageRoute::SdxlIpAdapter,
+        CandleImageRoute::Flux2Edit,
+        CandleImageRoute::FluxIpAdapter,
+        CandleImageRoute::Pulid,
+        CandleImageRoute::QwenEdit,
+        CandleImageRoute::QwenImageComfyui,
+        CandleImageRoute::QwenControl,
+        CandleImageRoute::KolorsIpAdapter,
+        CandleImageRoute::KolorsControl,
+        CandleImageRoute::ZimageEdit,
+        CandleImageRoute::ZimageComfyui,
+        CandleImageRoute::ZimageControl,
+        CandleImageRoute::Flux1Control,
+        CandleImageRoute::Flux2Control,
+        CandleImageRoute::Flux2Comfyui,
+        CandleImageRoute::Bernini,
+        CandleImageRoute::KreaImported,
+        CandleImageRoute::KreaImportedControl,
+        CandleImageRoute::SdxlImported,
+    ] {
+        assert!(
+            route.applies_request_loras(&request),
+            "{route:?} must never claim adapter provenance without applying the selected stack"
+        );
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -7149,7 +9807,7 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
         (
             CandleImageRoute::ZimageEdit,
             "z_image_turbo",
-            "candle_zimage_edit",
+            "candle_z_image",
         ),
         (CandleImageRoute::KreaEdit, "krea_2_raw", "candle_krea_edit"),
         (CandleImageRoute::KreaTurboOnRaw, "krea_2_raw", "mlx_krea"),
@@ -7160,14 +9818,19 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
             "candle_krea_imported",
         ),
         (
+            CandleImageRoute::KreaImportedControl,
+            "external_krea",
+            "candle_krea_imported",
+        ),
+        (
+            CandleImageRoute::MageFinetuned,
+            "finetune_mage",
+            "candle_mage_finetuned",
+        ),
+        (
             CandleImageRoute::SdxlImported,
             "external_sdxl",
             "candle_sdxl_imported",
-        ),
-        (
-            CandleImageRoute::ZimageIdentity,
-            "z_image_turbo",
-            "candle_zimage_identity",
         ),
         (
             CandleImageRoute::SdxlIpAdapter,
@@ -7624,11 +10287,18 @@ fn qwen_edit_engine_id_maps_variants() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn qwen_edit_reference_ids_prefers_reference_then_source() {
-    // referenceAssetId (character flow) wins over a source.
+fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
+    // Ordered plural references are the character/reference-array contract.
     assert_eq!(
         qwen_edit_reference_ids(&request(json!({
-            "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
+            "projectId": "p", "mode": "character_image",
+            "referenceAssetIds": ["ref_1", "ref_2"]
+        }))),
+        vec!["ref_1".to_owned(), "ref_2".to_owned()]
+    );
+    assert_eq!(
+        qwen_edit_reference_ids(&request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref_1"
         }))),
         vec!["ref_1".to_owned()]
     );
@@ -7681,6 +10351,17 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             &model
         ),
         6.0
+    );
+    assert_eq!(
+        resolve_qwen_edit_guidance(
+            &request(json!({
+                "projectId": "p", "mode": "character_image",
+                "advanced": { "imageGuidanceScale": 2.5 }
+            })),
+            &model
+        ),
+        2.5,
+        "legacy imageGuidanceScale remains a deliberate fallback"
     );
     // The character reference path clamps to [1, 10].
     assert_eq!(
@@ -7754,6 +10435,7 @@ fn qwen_edit_real_weights_generates_one_image() {
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -7820,6 +10502,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
         Some("lightning"),
         build_edit_conditioning(std::slice::from_ref(&reference)),
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -7901,6 +10584,9 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        false,
+        None,
+        None,
         &augment_prompt_for_pose("a knight standing in a courtyard"),
         512,
         512,
@@ -7910,6 +10596,8 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         None,
         conditioning,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -8032,6 +10720,9 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
             eprintln!("[sc-6702] generating {pose}/{arm} (seed {seed}) ...");
             let (w, h, pixels) = flux2_edit_generate_one(
                 generator.as_ref(),
+                false,
+                None,
+                None,
                 &prompt,
                 SIDE,
                 SIDE,
@@ -8041,6 +10732,8 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
                 None,
                 conditioning,
                 &PromptEnhance::default(),
+                gen_core::PromptEnhancementSink::default(),
+                gen_core::PreviewSink::default(),
                 &cancel,
                 &mut |p| {
                     if let gen_core::Progress::Step { current, .. } = p {
@@ -8110,7 +10803,10 @@ fn sdxl_sub_mode_classifies_advanced_shapes() {
     assert!(sdxl_sub_mode(&request(json!({ "model": "sdxl", "mode": "edit_image" }))).is_none());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(1024), 1024); // already valid
@@ -8120,7 +10816,10 @@ fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(3000), 2048); // clamps to the engine maximum
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn detail_feather_ramps_over_overlap() {
     // No overlap → a flat field of ones (every pixel contributes fully).
@@ -8139,7 +10838,10 @@ fn detail_feather_ramps_over_overlap() {
     assert!((at(8, 0) - at(8, 15)).abs() < 1e-6);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn compose_feathered_no_boundary_vignette() {
     // sc-8229: a single edge tile covers the whole frame; its raised-cosine feather ramps
@@ -8175,6 +10877,85 @@ fn compose_feathered_no_boundary_vignette() {
             "pixel ({x},{y}) = {px:?} darkened toward the border (expected ~{SRC})"
         );
     }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
+    use std::sync::Mutex;
+
+    struct RecordingRefiner {
+        calls: Mutex<Vec<(u32, u32, i64)>>,
+    }
+
+    impl DetailTileRefiner for RecordingRefiner {
+        fn refine_tile(
+            &self,
+            tile: Image,
+            eng_w: u32,
+            eng_h: u32,
+            _params: &DetailParams,
+            seed: i64,
+            _preview: &gen_core::PreviewSink,
+            _cancel: &CancelFlag,
+        ) -> WorkerResult<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("recording lock")
+                .push((eng_w, eng_h, seed));
+            Ok(tile.pixels)
+        }
+    }
+
+    let source = image::RgbImage::from_pixel(700, 540, image::Rgb([73, 101, 149]));
+    let params = DetailParams {
+        strength: 0.55,
+        cn_scale: 0.7,
+        steps: 24,
+        guidance: 5.0,
+        tile: 512,
+        overlap: 64,
+        prompt: "detail".to_owned(),
+        negative: "blur".to_owned(),
+        seed: 11,
+    };
+    let refiner = RecordingRefiner {
+        calls: Mutex::new(Vec::new()),
+    };
+    let mut progress = Vec::new();
+    let preview = gen_core::PreviewSink::default();
+    let (output, total) = refine_tiled_detail(
+        &refiner,
+        &source,
+        &params,
+        &preview,
+        &CancelFlag::new(),
+        &mut |done, total| progress.push((done, total)),
+    )
+    .expect("provider-neutral detail refinement");
+
+    assert_eq!(total, 4);
+    assert_eq!(progress, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+    assert_eq!(
+        *refiner.calls.lock().expect("recording lock"),
+        vec![
+            (512, 512, 11),
+            (512, 512, 12),
+            (512, 512, 13),
+            (512, 512, 14)
+        ]
+    );
+    assert_eq!(output.dimensions(), source.dimensions());
+    assert!(output.pixels().all(|pixel| {
+        pixel
+            .0
+            .into_iter()
+            .zip([73, 101, 149])
+            .all(|(actual, expected)| actual.abs_diff(expected) <= 1)
+    }));
 }
 
 /// sc-3625 real-Mac E2E (epic 3621): drive the WORKER's FLUX.1 XLabs IP-Adapter reference path
@@ -8708,7 +11489,10 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             false,
             None,
             None,
+            None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -8900,7 +11684,10 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             false,
             None,
             None,
+            None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
         )
@@ -9024,7 +11811,10 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             false,
             None,
             None,
+            None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -9224,7 +12014,10 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             false,
             None,
             None,
+            None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -9570,6 +12363,83 @@ fn build_control_conditioning_matches_legacy_shape() {
     assert!(
         matches!(cond[0], Conditioning::Depth { .. }),
         "depth uses Conditioning::Depth"
+    );
+}
+
+/// The MLX Krea pose-control lane's DECLARED request geometry must equal the geometry gen-core
+/// derives from the request that lane actually sends.
+///
+/// The declaration is not advisory: gen-core's shared memory-strategy safety check rejects
+/// `has_reference != (reference_count > 0)`, and the MLX request scope re-derives
+/// `GenerationRequest::image_reference_count()` at `configure_request` and refuses anything that
+/// differs from the admitted geometry. Declaring `references=0` while sending the pose
+/// `Conditioning::Control` (which gen-core charges as one image reference) failed EVERY pose render
+/// with `krea_2_turbo_control: request geometry 1024x1024x1 references=1 does not fit admitted
+/// 1024x1024x1 references=0`. Grading the declaration against `image_reference_count()` — rather than
+/// against a second hand-written constant — is what keeps the two from drifting apart again.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request() {
+    let inputs = krea_control_memory_inputs(1024, 1024, "character_image", 0);
+
+    // The conditioning the lane builds for one pose: the pose `Control`, no identity init.
+    let conditioning = build_control_conditioning(
+        control_fixture(8, 8, [1, 2, 3]),
+        ControlKind::Pose,
+        KREA_CONTROL_DEFAULT_SCALE,
+        None,
+    );
+    let request = gen_core::GenerationRequest {
+        width: 1024,
+        height: 1024,
+        count: 1,
+        conditioning,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        inputs.reference_count,
+        request.image_reference_count(),
+        "the admitted reference count must equal what the MLX request scope re-derives from the \
+         pose request"
+    );
+    assert_eq!(
+        inputs.has_reference,
+        inputs.reference_count > 0,
+        "gen-core's shared safety check rejects a has_reference/reference_count disagreement"
+    );
+    assert_eq!(
+        (inputs.width, inputs.height, inputs.count),
+        (request.width, request.height, request.count),
+        "the admitted frame geometry must be the geometry the lane renders at"
+    );
+    assert_eq!(
+        (inputs.mode.as_str(), inputs.overlay.as_deref()),
+        ("text_to_image", Some("control:1")),
+        "Character Studio's `character_image` source label must normalize to the exact measured \
+         Krea pose-control calibration identity"
+    );
+
+    let image_studio_inputs = krea_control_memory_inputs(1024, 1024, "image_generation", 0);
+    assert_eq!(
+        image_studio_inputs.mode, inputs.mode,
+        "both product entry points execute the same noise-to-image pose-control provider"
+    );
+
+    // PR #2218 added the imported-checkpoint pose route after this builtin guard was written. Pin
+    // that second call site to the same constructor: otherwise it can compile with a duplicate
+    // hand-built declaration and reintroduce the live references=0/references=1 refusal depending
+    // on merge order.
+    let imported_source = include_str!("krea_imported.rs");
+    assert!(
+        imported_source
+            .contains("krea_control_memory_inputs(width, height, &request.mode, adapter_count)"),
+        "the imported-checkpoint pose route must use the shared Krea control geometry constructor"
+    );
+    assert!(
+        !imported_source.contains("has_reference: false")
+            && !imported_source.contains("reference_count: 0"),
+        "the imported-checkpoint pose route must not redeclare the known-bad zero-reference geometry"
     );
 }
 
@@ -9996,6 +12866,7 @@ fn matrix_flux1_render(
         28,
         Some(3.5),
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -10142,6 +13013,7 @@ fn matrix_flux2_render(
         8,
         Some(4.0),
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -10281,6 +13153,7 @@ fn matrix_zimage_turbo_render(
         42,
         8,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -10421,6 +13294,7 @@ fn matrix_zimage_base_render(
         50,
         4.0,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -10562,6 +13436,7 @@ fn matrix_qwen_render(
         4.0,
         conditioning,
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -11056,6 +13931,213 @@ fn candle_strict_control_trait_routes_each_provider() {
     assert_eq!(kolors.engine_id(), KOLORS_CONTROL_ENGINE_ID);
     assert_eq!(kolors.engine_label(), KOLORS_CONTROL_ENGINE);
     assert_eq!(kolors.stream_tag(), "kolors_control");
+}
+
+/// sc-18477 review regression: every adapter-capable bespoke Candle route must price the exact
+/// resolved adapter stack before handing it to the provider. Exercise both admission mechanisms:
+/// shared-selector routes receive nonzero resident bytes, and floor routes include the adapter path
+/// in the footprint whose decision can flip at the resulting boundary.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
+    let root = tempfile::tempdir().expect("adapter admission fixture");
+    let adapter_path = root.path().join("style.safetensors");
+    std::fs::write(&adapter_path, vec![0_u8; 4096]).expect("adapter bytes");
+    let adapters = vec![AdapterSpec::new(
+        adapter_path.clone(),
+        0.75,
+        AdapterKind::Lora,
+    )];
+
+    for (route, bytes) in [
+        (
+            "FLUX.2 edit",
+            flux2_edit_adapter_source_bytes(&adapters).expect("sized FLUX.2 edit adapter"),
+        ),
+        (
+            "FLUX.1 control",
+            flux1_control_adapter_source_bytes(&adapters).expect("sized FLUX.1 control adapter"),
+        ),
+        (
+            "FLUX.2 control",
+            flux2_control_adapter_source_bytes(&adapters).expect("sized FLUX.2 control adapter"),
+        ),
+    ] {
+        assert_eq!(bytes, 4096, "{route} must pass real, nonzero adapter bytes");
+        let manifest = json!({ "candle": { "vramGbByTier": { "q4": 10.0 } } })
+            .as_object()
+            .unwrap()
+            .clone();
+        let plain = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(&manifest, "q4", 0)
+            .expect("plain peak");
+        let adapted =
+            crate::vram_gate::predicted_peak_gb_with_adapter_bytes(&manifest, "q4", bytes)
+                .expect("adapted peak");
+        assert!(
+            adapted > plain,
+            "{route} adapter bytes must raise admission"
+        );
+    }
+    assert_eq!(
+        bernini_adapter_resident_bytes(&adapters, None).expect("dense Bernini folds adapters"),
+        0
+    );
+    assert_eq!(
+        bernini_adapter_resident_bytes(&adapters, Some(Quant::Q4))
+            .expect("packed Bernini sizes both resident experts"),
+        8192,
+        "an untargeted packed Bernini adapter is resident on both co-resident experts"
+    );
+    let missing = vec![AdapterSpec::new(
+        root.path().join("missing.safetensors"),
+        1.0,
+        AdapterKind::Lora,
+    )];
+    for (route, result) in [
+        ("FLUX.2 edit", flux2_edit_adapter_source_bytes(&missing)),
+        (
+            "FLUX.1 control",
+            flux1_control_adapter_source_bytes(&missing),
+        ),
+        (
+            "FLUX.2 control",
+            flux2_control_adapter_source_bytes(&missing),
+        ),
+        (
+            "packed Bernini still",
+            bernini_adapter_resident_bytes(&missing, Some(Quant::Q4)),
+        ),
+    ] {
+        assert!(
+            result.is_err(),
+            "{route} must fail closed when adapter bytes cannot be sized"
+        );
+    }
+
+    let base = root.path().join("base");
+    std::fs::create_dir_all(&base).expect("base dir");
+    std::fs::write(base.join("model.safetensors"), vec![0_u8; 8192]).expect("base bytes");
+    let control = root.path().join("control.safetensors");
+    std::fs::write(&control, vec![0_u8; 2048]).expect("control bytes");
+    let plain = crate::conditioning_fit::ConditioningFootprint::from_paths(
+        "test",
+        "control",
+        &base,
+        &[control.as_path()],
+    );
+    let adapted = crate::conditioning_fit::ConditioningFootprint::from_paths(
+        "test",
+        "control + adapter",
+        &base,
+        &[control.as_path(), adapter_path.as_path()],
+    );
+    assert_eq!(adapted.overlay_bytes - plain.overlay_bytes, 4096);
+    let plain_floor = crate::conditioning_fit::conditioning_floor_gb(&plain).unwrap();
+    let adapted_floor = crate::conditioning_fit::conditioning_floor_gb(&adapted).unwrap();
+    let budget = crate::vram_gate::VramBudget {
+        free_gb: (plain_floor + adapted_floor) / 2.0,
+        total_gb: adapted_floor,
+    };
+    assert!(matches!(
+        crate::conditioning_fit::decide(&plain, Some(budget)),
+        crate::conditioning_fit::ConditioningFit::Fits { .. }
+    ));
+    assert!(matches!(
+        crate::conditioning_fit::decide(&adapted, Some(budget)),
+        crate::conditioning_fit::ConditioningFit::TooBig { .. }
+    ));
+
+    for (route, source, marker) in [
+        ("FLUX.2 edit selector", include_str!("flux2_edit_candle.rs"), "predicted_peak_gb_with_adapter_bytes(\n        &request.model_manifest_entry,\n        tier,\n        adapter_source_bytes,"),
+        ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("Bernini admission", include_str!("bernini.rs"), "admit_candle_base_floor_with_resident_overlay(\n        &request.model,\n        \"Bernini still image\",\n        settings,\n        &[weights_dir.as_path()],\n        adapter_resident_bytes,"),
+        ("Qwen control", include_str!("qwen_control.rs"), "self.adapters.iter()"),
+        ("Kolors control", include_str!("kolors_control.rs"), "self.adapters.iter()"),
+        ("Z-Image control", include_str!("zimage_control.rs"), "self.adapters.iter()"),
+        ("Kolors IP-Adapter", include_str!("kolors_ipadapter.rs"), "admission_overlays.extend(adapters.iter()"),
+        ("PuLID fallback", include_str!("pulid_candle.rs"), "overlays.extend(adapters.iter()"),
+        ("Z-Image ComfyUI", include_str!("zimage_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
+        ("FLUX.2 ComfyUI", include_str!("flux2_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
+        ("Krea imported", include_str!("krea_imported.rs"), "admission_paths.extend(adapters.iter()"),
+        ("SDXL detail", include_str!("detail.rs"), "admission_paths.extend(adapters.iter()"),
+    ] {
+        assert!(
+            source.contains(marker),
+            "{route} must add the same resolved adapter paths to preflight admission"
+        );
+    }
+}
+
+/// epic 16948 / sc-16962: the two preview-wired bespoke strict-control lanes put the job's **live**
+/// sink on their request, not the inert default.
+///
+/// This is the compiled half of the guard (the source-level half is
+/// [`crate::candle_preview_wiring_tests`], which runs on every platform because both candle CI lanes
+/// are dispatch-only). It builds each provider's request through the same `control_request` the
+/// driver calls, hands it a recording sink, and proves a frame emitted on that request reaches the
+/// closure — the property `preview: Default::default()` silently destroys.
+///
+/// Deliberately asserts on DELIVERY rather than `is_active()` alone: an active-but-wrong sink (say,
+/// a second sink built locally) would still pass an `is_active()` check.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_control_requests_carry_the_live_preview_sink() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn counting_sink() -> (gen_core::PreviewSink, Arc<AtomicUsize>) {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        (
+            gen_core::PreviewSink::new(move |_frame| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }),
+            seen,
+        )
+    }
+
+    fn frame() -> gen_core::PreviewFrame {
+        gen_core::PreviewFrame {
+            current: 1,
+            total: 8,
+            image: Image {
+                width: 2,
+                height: 2,
+                pixels: vec![0u8; 12],
+            },
+        }
+    }
+
+    let dummy = std::path::PathBuf::from("/nonexistent");
+    let cancel = CancelFlag::new();
+
+    // Krea 2 pose control (inference f94c0b1c, sc-16950). Before sc-16962 this lane passed
+    // `Default::default()`, so a Krea control render emitted nothing at all.
+    let (sink, seen) = counting_sink();
+    let krea = krea_strict_control_test_fixture(dummy.clone());
+    let req = krea.control_request(7, &cancel, &sink);
+    assert!(
+        req.preview.is_active(),
+        "Krea2ControlRequest.preview must carry the live sink, not the inert default"
+    );
+    req.preview.emit(frame());
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the frame must reach the sink the driver supplied"
+    );
+
+    // Qwen-Image 2512-Fun control (inference 5b6d6aa; preview field introduced by sc-16952).
+    let (sink, seen) = counting_sink();
+    let qwen = qwen_strict_control_test_fixture(dummy);
+    let req = qwen.control_request(7, &cancel, &sink);
+    assert!(
+        req.preview.is_active(),
+        "QwenFunControlRequest.preview must carry the live sink, not the inert default"
+    );
+    req.preview.emit(frame());
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
 }
 
 /// sc-8823: the candle Kolors strict-control lane is POSE-ONLY. Its `kolors_control` catalog row accepts
@@ -11702,8 +14784,10 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
             steps,
             conditioning,
             None,
+            gen_core::PreviewSink::default(),
             &CancelFlag::new(),
             &mut |_| {},
+            None,
         )
         .expect("krea control render");
         Image {
@@ -11833,6 +14917,46 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
     assert!(
         base.join("tokenizer").join("tokenizer.json").is_file(),
         "resolved base must carry the tokenizer whose absence produced the sc-11853 load failure"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_control_calibration_provenance_accepts_only_exact_base_and_verified_default_overlay() {
+    let data = tempfile::tempdir().unwrap();
+    let base = data
+        .path()
+        .join("models--SceneWorks--krea-2-turbo-mlx")
+        .join("snapshots")
+        .join(KREA_CONTROL_BASE_REVISION)
+        .join("q4");
+    std::fs::create_dir_all(&base).unwrap();
+    let cached_overlay = data
+        .path()
+        .join("controlnet-krea")
+        .join(KREA_CONTROL_OVERLAY_FILE);
+    std::fs::create_dir_all(cached_overlay.parent().unwrap()).unwrap();
+    std::fs::write(&cached_overlay, b"verified by ensure_hf_cached_file").unwrap();
+
+    let exact =
+        krea_control_calibration_provenance(&base, &cached_overlay, true).expect("exact identity");
+    assert_eq!(exact.identity.repository, KREA_CONTROL_MLX_REPO);
+    assert_eq!(exact.identity.revision, KREA_CONTROL_BASE_REVISION);
+    assert_eq!(exact.identity.variant, "q4");
+    assert!(exact
+        .identity
+        .fingerprint
+        .contains(KREA_CONTROL_OVERLAY_PIN));
+
+    assert!(
+        krea_control_calibration_provenance(&base, &cached_overlay, false).is_none(),
+        "an arbitrary local overlay path must not inherit the verified default identity"
+    );
+    let wrong_base = data.path().join("q4");
+    std::fs::create_dir_all(&wrong_base).unwrap();
+    assert!(
+        krea_control_calibration_provenance(&wrong_base, &cached_overlay, true).is_none(),
+        "a verified overlay cannot make an unpinned base current"
     );
 }
 
@@ -12242,16 +15366,44 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     );
     assert!(krea_imported_available(&imported, &settings));
     assert_eq!(KREA_IMPORTED_ENGINE, "candle_krea_imported");
+
+    let with_lora = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "loras": [{ "id": "style", "path": file.to_str().unwrap() }],
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&with_lora, &settings),
+        Some(CandleImageRoute::KreaImported),
+        "an imported Krea adapter request must reach the adapter-capable native-file lane"
+    );
+
+    let strict_pose = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "advanced": { "poses": [{ "id": "pose-1" }] },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&strict_pose, &settings),
+        Some(CandleImageRoute::KreaImportedControl),
+        "strict pose must dispatch to the imported Krea control provider"
+    );
 }
 
 /// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
 /// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
-/// t2i + img2img are accepted on EVERY backend; LoRAs (sc-14111) and the Kontext edit surface
-/// (sc-14119) are accepted only on an adapter-capable backend ([`KREA_IMPORTED_SUPPORTS_ADAPTERS`]:
-/// MLX yes / candle not yet, sc-14135); the bare-transformer guards (pose, mask, character, multi-phase,
-/// a non-edit two-reference SET, a bare non-edit `sourceAssetId`) stay rejected on every backend. Runs on
-/// the cross-platform path so both the MLX and candle imported lanes are covered, asserting the
-/// per-backend split via the compile-time capability const.
+/// t2i + img2img are accepted on EVERY backend; LoRAs, Kontext edit, and strict pose follow the
+/// backend's explicit provider capabilities. The current MLX and Candle pins advertise all three.
+/// Base-tier-only shapes (mask, character, multi-phase, a non-edit reference set, bare source) stay
+/// rejected on every backend.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -12283,8 +15435,22 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         krea_imported_available(&img2img, &settings),
         "an img2img referenceAssetId (mode t2i) is accepted"
     );
+    assert!(
+        krea_imported_img2img_requested(&img2img),
+        "the admitted reference shape must engage img2img even without optional ui.img2img metadata"
+    );
 
-    // A LoRA stack (sc-14111) and the edit surface (sc-14119) are backend-gated: MLX yes, candle no.
+    let plain_hires = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "hiresFix": { "enabled": true },
+        "modelManifestEntry": base.clone()
+    }));
+    assert!(
+        krea_imported_available(&plain_hires, &settings),
+        "plain imported Krea t2i keeps its supported hires pass"
+    );
+
+    // A LoRA stack and the edit surface are admitted wherever the native loader accepts adapters.
     let t2i_lora = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "loras": [{ "id": "adapter" }],
@@ -12337,11 +15503,90 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "an edit with no conditioning image is rejected"
     );
 
-    // Bare-transformer guards stay rejected on EVERY backend: pose, mask, character, multi-phase, a
+    // A strict-pose set follows the backend's pose-control capability, the same shape the LoRA/edit
+    // surfaces follow above: each capable provider assembles the trained pose branch around the
+    // file-loaded imported DiT (`load_control_from_native_dit_file`).
+    let pose = request(json!({
+        "projectId": "p", "model": "kreamania_variant4",
+        "advanced": { "poses": [{ "id": "a" }] },
+        "modelManifestEntry": base.clone()
+    }));
+    if KREA_IMPORTED_SUPPORTS_POSE_CONTROL {
+        assert!(
+            krea_imported_available(&pose, &settings),
+            "a pose set is served on the pose-control-capable backend"
+        );
+        assert!(
+            krea_imported_control_available(&pose, &settings),
+            "...and it is claimed by the pose-control route, not the plain per-image one"
+        );
+    } else {
+        assert!(
+            !krea_imported_available(&pose, &settings),
+            "a pose set is rejected on a backend without pose-control support"
+        );
+    }
+
+    for (label, extra) in [
+        (
+            "img2img + hires",
+            json!({ "referenceAssetId": "r", "hiresFix": { "enabled": true } }),
+        ),
+        (
+            "edit + hires",
+            json!({
+                "mode": "edit_image", "sourceAssetId": "s",
+                "hiresFix": { "enabled": true }
+            }),
+        ),
+        (
+            "pose + hires",
+            json!({
+                "advanced": { "poses": [{ "id": "a" }] },
+                "hiresFix": { "enabled": true }
+            }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": "kreamania_variant5",
+            "modelManifestEntry": base.clone()
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(
+            !krea_imported_available(&request(payload), &settings),
+            "{label} must fail closed instead of dropping conditioning"
+        );
+    }
+
+    // Bare-transformer guards stay rejected on EVERY backend: mask, character, multi-phase, a
     // NON-edit two-reference SET (the edit surface, only valid in edit mode), and a bare non-edit
     // `sourceAssetId` (the img2img resolve reads only `referenceAssetId`, so it would silently drop it).
+    // A pose set combined with any of them is likewise rejected — the pose render loop reads none of
+    // these fields, so admitting the combination would silently drop the extra conditioning.
     for (label, extra) in [
-        ("pose", json!({ "advanced": { "poses": [{ "id": "a" }] } })),
+        (
+            "pose + non-edit two-ref set",
+            json!({ "referenceAssetIds": ["a", "b"], "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
+        (
+            "pose + bare source",
+            json!({ "sourceAssetId": "s", "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
+        (
+            "pose + edit mode",
+            json!({
+                "mode": "edit_image",
+                "sourceAssetId": "s",
+                "advanced": { "poses": [{ "id": "a" }] },
+            }),
+        ),
+        (
+            "pose + mask",
+            json!({ "maskAssetId": "m", "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
         (
@@ -12370,13 +15615,16 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     }
 }
 
-/// On the MLX imported lane, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
+/// On both native imported lanes, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
 /// (sc-14111) and, for an `edit_image` job, enforces the R5 identity-edit-LoRA requirement (sc-14119,
 /// epic 10871) BEFORE any reference I/O — the bare transformer cannot edit without the
 /// `krea2_identity_edit` LoRA (the source conditioning is inert without it), mirroring the builtin
 /// `generate_krea_edit_stream`. A plain t2i job (no loras) resolves to an empty adapter stack + no edit
-/// conditioning. macOS-only (the adapter/edit path is MLX-only, sc-14135).
-#[cfg(target_os = "macos")]
+/// conditioning.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn imported_edit_requires_the_identity_edit_lora() {
     let dir = tempfile::tempdir().unwrap();
@@ -12409,9 +15657,9 @@ fn imported_edit_requires_the_identity_edit_lora() {
 
 /// The imported Krea lane threads a resolved img2img reference into a single `Conditioning::Reference`
 /// (strength carried) on the Turbo t2i descriptor, and a plain txt2img job into the empty conditioning
-/// (sc-14071). Also pins the manifest→worker seam: the `ui.img2img` flag the core stamps on an imported
-/// krea_2 entry (sc-14071 Part B) is exactly what `model_supports_img2img` reads to engage the img2img
-/// resolve. Pure — no reference-asset I/O or generator load. Runs on the cross-platform path so the
+/// (sc-14071). Also pins the API→worker seam: the admitted `referenceAssetId` shape engages img2img
+/// without relying on optional UI presentation metadata. Pure — no reference-asset I/O or generator
+/// load. Runs on the cross-platform path so the
 /// candle imported lane's img2img threading is covered too.
 #[cfg(any(
     target_os = "macos",
@@ -12437,23 +15685,23 @@ fn krea_imported_conditioning_threads_the_img2img_reference() {
         "plain txt2img carries no conditioning"
     );
 
-    // Manifest→worker seam: the `ui.img2img` flag `apply_family_studio_surface_defaults` stamps on an
-    // imported krea_2 entry (Part B) is what `model_supports_img2img` reads to engage the img2img arm.
-    let img2img_entry = request(json!({
+    // API→worker seam: a LAN client need not echo the UI hint for the shape the route advertises.
+    let img2img_entry_without_ui_hint = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
-        "modelManifestEntry": { "family": "krea_2", "ui": { "img2img": true } }
+        "referenceAssetId": "asset-1",
+        "modelManifestEntry": { "family": "krea_2" }
     }));
     assert!(
-        model_supports_img2img(&img2img_entry),
-        "the stamped ui.img2img flag engages the img2img resolve"
+        krea_imported_img2img_requested(&img2img_entry_without_ui_hint),
+        "referenceAssetId engages imported Krea img2img without ui.img2img"
     );
-    let no_flag = request(json!({
+    let plain = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "modelManifestEntry": { "family": "krea_2" }
     }));
     assert!(
-        !model_supports_img2img(&no_flag),
-        "without ui.img2img the lane stays plain txt2img"
+        !krea_imported_img2img_requested(&plain),
+        "without a reference the lane stays plain txt2img"
     );
 }
 
@@ -12694,10 +15942,375 @@ fn krea_imported_mlx_gpu_smoke() {
     );
 }
 
+/// Real-weight MLX GPU smoke for the imported-checkpoint **pose ControlNet** lane — the control
+/// sibling of [`krea_imported_mlx_gpu_smoke`], and the end-to-end proof that the trained pose branch
+/// composes with a FILE-LOADED community DiT rather than only the builtin base.
+///
+/// It exercises the same four stages the `KreaImportedControl` arm runs, in order:
+///   1. `resolve_image_route` → [`ImageRoute::KreaImportedControl`] for an imported `krea_2` job
+///      carrying `advanced.poses` — the deterministic ROUTE EVIDENCE that a pose set takes the
+///      pose-control lane (one image per pose) and not the plain per-image imported t2i arm.
+///   2. `resolve_imported_krea_dit` + `resolve_krea_imported_base_tier` → the in-place single-file
+///      DiT (symlinked, no copy) + the resident dense `bf16/` tier supplying TE/VAE/tokenizer/config.
+///   3. `resolve_krea_imported_control_overlay` → the installed pose overlay, CACHE-ONLY.
+///   4. `load_control_from_native_dit_file` → the branch folded onto the imported DiT, then a real
+///      Metal pose-conditioned render driven by a `Conditioning::Control` skeleton.
+///
+/// Two NEGATIVE CONTROLS make the assertion discriminating, because a coherent image alone would
+/// also be produced by a lane that silently dropped the pose:
+///   * **control_scale = 0** renders the same prompt+seed+skeleton with the branch scaled to zero —
+///     the engine-proven bit-exact base passthrough. A pose-locked render must differ from it; a
+///     near-zero delta means the branch contributed nothing (an inert or unloaded overlay).
+///   * **a DIFFERENT skeleton** at the same prompt+seed must also differ, which is the property a
+///     scale-0-only check cannot establish: it proves the output tracks the POSE INPUT, not merely
+///     that some residual perturbed the render.
+///
+/// Loads run sequentially with `clear_cache()` between them to stay under the MLX wired ceiling.
+/// ```text
+/// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
+/// # optional: KREA_STEPS=8 KREA_W=1024 KREA_H=1024 KREA_SEED=42 KREA_CONTROL_SCALE=0.6
+/// cargo test -p sceneworks-worker --release krea_imported_control_mlx_gpu_smoke -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight MLX smoke; needs the imported Krea 2 DiT + the krea-2-turbo-mlx bf16 base + the pose overlay cached + an Apple-Silicon Mac"]
+fn krea_imported_control_mlx_gpu_smoke() {
+    use crate::smoke_support::{
+        env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
+    };
+
+    let home = std::env::var("HOME").expect("HOME");
+    let dit_src = PathBuf::from(env_or(
+        "KREA_IMPORTED_DIT",
+        &format!("{home}/models/kreamania_variant5.safetensors"),
+    ));
+    assert!(
+        dit_src.is_file(),
+        "imported DiT not found at {} — download it or set KREA_IMPORTED_DIT",
+        dit_src.display()
+    );
+
+    // Register the checkpoint the S0c way: an app-managed install dir holding ONLY the checkpoint.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let install_dir = data_dir
+        .path()
+        .join("models")
+        .join("imports")
+        .join("kreamania_v5");
+    std::fs::create_dir_all(&install_dir).expect("install dir");
+    let dit_link = install_dir.join("kreamania_variant5.safetensors");
+    std::os::unix::fs::symlink(&dit_src, &dit_link).expect("symlink DiT into app-managed dir");
+
+    let real_hub = PathBuf::from(format!("{home}/.cache/huggingface/hub"));
+    let _hf = isolate_hf_hub_cache_to(&real_hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+
+    let steps: u32 = env_or("KREA_STEPS", "8").parse().expect("KREA_STEPS");
+    let w: u32 = env_or("KREA_W", "1024").parse().expect("KREA_W");
+    let h: u32 = env_or("KREA_H", "1024").parse().expect("KREA_H");
+    let seed: u64 = env_or("KREA_SEED", "42").parse().expect("KREA_SEED");
+    let control_scale: f32 = env_or("KREA_CONTROL_SCALE", "0.6")
+        .parse()
+        .expect("KREA_CONTROL_SCALE");
+    let prompt = env_or(
+        "KREA_PROMPT",
+        "a photorealistic full-body portrait of a woman in a red jacket, studio lighting, \
+         sharp focus",
+    );
+    let out_dir = PathBuf::from(env_or("KREA_OUT_DIR", "/tmp/krea_imported_control_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    // Two GENUINELY different 18-point OpenPose skeletons (the `advanced.poses` entries the pose
+    // library sends). `parse_poses` reads the `keypoints` array — an entry carrying only an `id`
+    // would normalize to `vec![None; 18]`, i.e. a BLANK control image, which would make the two
+    // "different pose" renders identical and turn the pose-tracking assertion below into a
+    // guaranteed failure. So both skeletons are spelled out: `arms_down` is a neutral standing
+    // pose, `arms_up` raises both forearms and widens the stance — a large, unmistakable change in
+    // the wrists/elbows/ankles the branch conditions on.
+    let arms_down = json!([
+        [0.50, 0.20],
+        [0.50, 0.35],
+        [0.42, 0.35],
+        [0.40, 0.50],
+        [0.40, 0.65],
+        [0.58, 0.35],
+        [0.60, 0.50],
+        [0.60, 0.65],
+        [0.45, 0.60],
+        [0.45, 0.80],
+        [0.45, 0.95],
+        [0.55, 0.60],
+        [0.55, 0.80],
+        [0.55, 0.95],
+        [0.48, 0.18],
+        [0.52, 0.18],
+        [0.46, 0.20],
+        [0.54, 0.20]
+    ]);
+    let arms_up = json!([
+        [0.50, 0.20],
+        [0.50, 0.35],
+        [0.42, 0.35],
+        [0.34, 0.26],
+        [0.30, 0.12],
+        [0.58, 0.35],
+        [0.66, 0.26],
+        [0.70, 0.12],
+        [0.45, 0.60],
+        [0.40, 0.80],
+        [0.36, 0.95],
+        [0.55, 0.60],
+        [0.60, 0.80],
+        [0.64, 0.95],
+        [0.48, 0.18],
+        [0.52, 0.18],
+        [0.46, 0.20],
+        [0.54, 0.20]
+    ]);
+
+    // ---- 1. ROUTE EVIDENCE: a pose set on an imported krea_2 takes the pose-control lane ----
+    let pose_payload = |poses: Value| {
+        json!({
+            "projectId": "p",
+            "model": "imported_kreamania_v5",
+            "prompt": prompt,
+            "width": w, "height": h,
+            "advanced": { "poses": poses, "controlScale": control_scale, "steps": steps },
+            "modelManifestEntry": {
+                "catalogScope": "user",
+                "family": "krea_2",
+                "paths": { "model": install_dir.to_str().unwrap() }
+            }
+        })
+    };
+    let req = request(pose_payload(
+        json!([{ "id": "arms_down", "keypoints": arms_down }]),
+    ));
+    let route = resolve_image_route(&req, &settings);
+    assert_eq!(
+        route,
+        Some(ImageRoute::KreaImportedControl),
+        "ROUTE EVIDENCE: an imported krea_2 job with a pose set must take the pose-control lane"
+    );
+    assert_eq!(
+        ImageRoute::KreaImportedControl.image_count(&req, &settings),
+        1,
+        "the pose-control lane renders one image PER POSE"
+    );
+    eprintln!("[route] resolve_image_route(imported + poses) = {route:?}");
+
+    // ---- 2 + 3. The three resolves the arm makes before any compute ----
+    let dit = resolve_imported_krea_dit(&req, &settings)
+        .expect("resolve ok")
+        .expect("imported single-file Krea 2 DiT resolves");
+    let base =
+        resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base tier");
+    let overlay = resolve_krea_imported_control_overlay(&settings, &req)
+        .expect("installed Krea 2 pose control overlay (cache-only)");
+    eprintln!(
+        "[route] load_control_from_native_dit_file(dit={}, base={}, control={})",
+        dit.display(),
+        base.display(),
+        overlay.display()
+    );
+
+    // ---- 4. Load the branch onto the IMPORTED DiT, then render three variants ----
+    let t0 = std::time::Instant::now();
+    let model = runtime_macos::providers::krea::load_control_from_native_dit_file(
+        &dit,
+        &base,
+        &overlay,
+        &[],
+    )
+    .expect("load the pose control branch onto the imported Krea 2 DiT");
+    eprintln!("[load] assembled in {:.1}s", t0.elapsed().as_secs_f64());
+    assert_eq!(
+        model.descriptor().id,
+        "krea_2_turbo_control",
+        "the imported control assembly keeps the builtin provider identity"
+    );
+
+    // The MEMORY GATE the lane really runs, on the real generator — not a unit fixture.
+    //
+    // This is the composition the shipped defect lived in. Every piece was individually plausible:
+    // the lane declared its `MlxRequestInputs`, the engine rendered when driven directly, and the
+    // route/claim predicates were unit-tested. What nothing exercised was generator + gate +
+    // render TOGETHER, so a declaration that disagreed with the live request — `references=0`
+    // against the one reference gen-core charges for `Conditioning::Control` — passed every test
+    // and refused every real render with `request geometry ... references=1 does not fit admitted
+    // ... references=0`. `krea_control_declares_the_reference_count_gen_core_derives_from_its_request`
+    // now grades the declaration statically; this grades it against a LOADED provider, which is the
+    // only place `MlxRequestScopeCore::configure_request` actually runs.
+    //
+    // Built exactly as `generate_krea_imported_control_stream` builds them, so a drift in the lane's
+    // spec or inputs surfaces here rather than in a user's refused pose set.
+    let mut estimation_spec = LoadSpec::new(WeightsSource::Dir(base.clone()))
+        .with_control(WeightsSource::File(overlay.clone()));
+    estimation_spec = estimation_spec.with_adapters(Vec::new());
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        "krea_2_turbo_control",
+        &req.model,
+        &estimation_spec,
+        Some(&req.model_manifest_entry),
+        None,
+    );
+    let memory_inputs = krea_control_memory_inputs(w, h, &req.mode, 0);
+    assert_eq!(
+        memory_inputs.reference_count, 1,
+        "a pose Control is one image reference; declaring zero is the shipped defect this smoke \
+         exists to catch"
+    );
+
+    // Two DIFFERENT skeletons rendered at the same size as the output. `draw_wholebody` is the same
+    // renderer the lane (and training) uses, so these are real conditioning inputs, not noise.
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(w, h);
+    let skeleton = |pose_id: &str, keypoints: &Value| {
+        let pose = parse_poses(&request(pose_payload(
+            json!([{ "id": pose_id, "keypoints": keypoints }]),
+        )))
+        .into_iter()
+        .next()
+        .expect("one pose entry");
+        assert!(
+            pose.keypoints.iter().filter(|kp| kp.is_some()).count() >= 14,
+            "{pose_id} must carry real keypoints — a blank skeleton would make the pose-tracking \
+             assertion below vacuous"
+        );
+        preprocess_control_entry(
+            &ControlKind::Pose,
+            None,
+            Some(&pose),
+            None,
+            w,
+            h,
+            stickwidth,
+            None,
+        )
+        .expect("render the DWPose skeleton for the pose entry")
+    };
+    let mut cache_state = gen_core::MemoryCacheState::Cold;
+    let mut render = |label: &str, control: Image, scale: f32| {
+        let mut request = GenerationRequest {
+            prompt: prompt.clone(),
+            width: w,
+            height: h,
+            count: 1,
+            seed: Some(seed),
+            steps: Some(steps),
+            guidance: None,
+            conditioning: vec![Conditioning::Control {
+                image: control,
+                kind: ControlKind::Pose,
+                scale: Some(scale),
+            }],
+            ..Default::default()
+        };
+        // The live re-derivation the declaration is graded against. Asserted per render, before the
+        // gate runs, so a conditioning change that alters the reference count is caught here rather
+        // than as an opaque geometry refusal below.
+        assert_eq!(
+            request.image_reference_count(),
+            memory_inputs.reference_count,
+            "[{label}] the live request's reference count must equal the admitted declaration"
+        );
+        let started = std::time::Instant::now();
+        let mut last = String::new();
+        // Admit through the REAL fit gate against the loaded provider, then render through the same
+        // `generate_with_scope` seam `krea_control_generate_one` uses. With the pre-fix
+        // `references=0` declaration this call chain is what returned the geometry refusal.
+        let evaluation = crate::mlx_fit_gate::evaluate_request(
+            model.as_ref(),
+            &memory_plan,
+            &memory_inputs,
+            cache_state,
+            gen_core::OffloadPolicy::Resident,
+            0,
+        )
+        .unwrap_or_else(|error| panic!("[{label}] fit gate refused the pose request: {error}"));
+        cache_state = gen_core::MemoryCacheState::Warm;
+        let out = crate::memory_strategy::generate_with_scope(
+            model.as_ref(),
+            &mut request,
+            Some(&evaluation.context),
+            &mut |p| {
+                let s = format!("{p:?}");
+                if s != last {
+                    eprintln!("[{label}] {s}");
+                    last = s;
+                }
+            },
+        )
+        .unwrap_or_else(|error| panic!("{label} generate: {error}"));
+        let image = match out {
+            GenerationOutput::Images(mut images) => images.pop().expect("one image"),
+            other => panic!("expected Images, got {other:?}"),
+        };
+        let std = image_std(&image);
+        let png = out_dir.join(format!("{label}.png"));
+        save_png(&image, &png);
+        eprintln!(
+            "[{label}] {}x{} std {std:.2} scale {scale} in {:.1}s -> {}",
+            image.width,
+            image.height,
+            started.elapsed().as_secs_f64(),
+            png.display()
+        );
+        assert_eq!((image.width, image.height), (w, h), "{label} wrong size");
+        assert!(
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
+            "{label} render looks degenerate (std {std:.2}) — NaN / all-black / flat decode"
+        );
+        image
+    };
+
+    // The two skeletons must genuinely differ as IMAGES before either render runs — otherwise the
+    // pose-tracking assertion below could pass or fail for reasons that have nothing to do with the
+    // branch. This is the cheap, weights-free precondition for that assertion.
+    let arms_down_map = skeleton("arms_down", &arms_down);
+    let arms_up_map = skeleton("arms_up", &arms_up);
+    let skeleton_delta = mean_abs_frame_delta(&arms_down_map, &arms_up_map);
+    eprintln!("[input] mean_abs_pixel_delta(arms_down_map, arms_up_map) = {skeleton_delta:.3}");
+    assert!(
+        skeleton_delta > 0.5,
+        "the two control maps must differ ({skeleton_delta:.3}) or the pose-tracking assertion is \
+         vacuous"
+    );
+
+    let posed = render("arms_down_locked", arms_down_map.clone(), control_scale);
+    let passthrough = render("arms_down_scale0", arms_down_map, 0.0);
+    let other_pose = render("arms_up_locked", arms_up_map, control_scale);
+
+    drop(model);
+    mlx_rs::memory::clear_cache();
+
+    // ---- DIFFER 1: the branch actually contributes (vs the bit-exact scale-0 base passthrough) ----
+    let branch_delta = mean_abs_frame_delta(&posed, &passthrough);
+    eprintln!("[differ] mean_abs_pixel_delta(pose_locked, scale0_passthrough) = {branch_delta:.3}");
+    assert!(
+        branch_delta > 2.0,
+        "the pose branch must change the render against its own scale-0 passthrough — a near-zero \
+         delta ({branch_delta:.3}) means the overlay contributed nothing on the imported DiT"
+    );
+
+    // ---- DIFFER 2: the render tracks the POSE INPUT, not merely 'some residual fired' ----
+    let pose_delta = mean_abs_frame_delta(&posed, &other_pose);
+    eprintln!("[differ] mean_abs_pixel_delta(arms_down, arms_up) = {pose_delta:.3}");
+    assert!(
+        pose_delta > 2.0,
+        "two different skeletons at the same prompt+seed must produce different images — a \
+         near-zero delta ({pose_delta:.3}) means the pose input is not reaching the branch"
+    );
+    eprintln!("[DONE] KreaImportedControl lane validated on real weights.");
+}
+
 /// Settings + a complete fine-tuned Mage transformer component dir under the app data root
 /// (sc-15036): the `config.json` + `diffusion_pytorch_model.safetensors` pair the trainer's
 /// `save_full_checkpoint` writes into `<data>/models/finetunes/<id>`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::PathBuf) {
     let checkpoint = dir
         .join("models")
@@ -12725,7 +16338,10 @@ fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::
 /// Discriminating on each of the four conditions independently: a builtin Mage id must keep its
 /// tiered-snapshot path, a wrong family is not this lane's job, and a TORN checkpoint (either
 /// component file missing) is refused here rather than failing deep inside the load.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
@@ -12746,7 +16362,7 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
     // A BUILTIN Mage id keeps loading from its own per-tier snapshot through the generic lane.
     assert!(
         mlx_model("mage_flow_base").is_some(),
-        "precondition: mage_flow_base is a builtin engine on macOS"
+        "precondition: mage_flow_base is a builtin native engine"
     );
     let builtin = request(json!({
         "projectId": "p", "model": "mage_flow_base",
@@ -12794,11 +16410,20 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
 /// else claims it).
 ///
 /// Discriminating: one entry, one flip of one field per case.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
     let dir = tempfile::tempdir().unwrap();
     let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let mut settings = settings;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        settings.backend_candle_enabled = true;
+    }
     let path_str = checkpoint.to_str().unwrap().to_owned();
     let job = |extra: serde_json::Value| {
         let mut value = json!({
@@ -12817,11 +16442,17 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
         mage_finetuned_available(&t2i, &settings),
         "plain txt2img is the shape this lane serves"
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(
         resolve_image_route(&t2i, &settings),
         Some(ImageRoute::MageFinetuned),
-        "the router must reach the fine-tuned lane — the id is in no MODEL_TABLE, so otherwise the \
-         job stubs"
+        "the MLX router must reach the fine-tuned lane"
+    );
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert_eq!(
+        resolve_candle_image_route(&t2i, &settings),
+        Some(CandleImageRoute::MageFinetuned),
+        "the Candle router must reach the fine-tuned lane"
     );
 
     for (label, extra) in [
@@ -12849,12 +16480,48 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             !mage_finetuned_available(&shaped, &settings),
             "{label} must not be claimed by the fine-tuned lane — it would be silently dropped"
         );
+        #[cfg(target_os = "macos")]
         assert_ne!(
             resolve_image_route(&shaped, &settings),
             Some(ImageRoute::MageFinetuned),
             "{label} must not route to the fine-tuned lane"
         );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert_ne!(
+            resolve_candle_image_route(&shaped, &settings),
+            Some(CandleImageRoute::MageFinetuned),
+            "{label} must not route to the Candle fine-tuned lane"
+        );
     }
+}
+
+/// The generated Mage base inherits the undistilled Base descriptor's true-CFG negative-prompt
+/// surface. Pin the actual per-image request builder so accepted LAN/API input cannot be recorded in
+/// asset provenance while disappearing before provider dispatch.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn mage_finetuned_generation_request_threads_negative_prompt() {
+    let cancel = CancelFlag::new();
+    let request = mage_finetuned_generation_request(
+        "portrait".to_owned(),
+        Some("blurry, watermark".to_owned()),
+        1024,
+        1024,
+        42,
+        28,
+        4.5,
+        gen_core::PreviewSink::default(),
+        &cancel,
+    );
+    assert_eq!(
+        request.negative_prompt.as_deref(),
+        Some("blurry, watermark")
+    );
+    assert_eq!(request.guidance, Some(4.5));
+    assert_eq!(request.seed, Some(42));
 }
 
 /// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint
@@ -13087,6 +16754,9 @@ fn sc_8253_8278_identity_angle_ab() {
                 let cancel = gen_core::CancelFlag::new();
                 let (w, h, pixels) = flux2_edit_generate_one(
                     generator.as_ref(),
+                    false,
+                    None,
+                    None,
                     &prompt,
                     SIDE,
                     SIDE,
@@ -13099,6 +16769,8 @@ fn sc_8253_8278_identity_angle_ab() {
                         strength: None,
                     }],
                     &PromptEnhance::default(),
+                    gen_core::PromptEnhancementSink::default(),
+                    gen_core::PreviewSink::default(),
                     &cancel,
                     &mut |_| {},
                 )
@@ -13123,5 +16795,779 @@ fn sc_8253_8278_identity_angle_ab() {
          REF_DIR={0}/ref GEN_DIR={0}/<arm> PROMPTS_JSON={0}/prompts.json EVAL_LABEL=<arm> \\\n    \
          cargo test -p sceneworks-worker --lib -- --ignored --nocapture eval_lora_outputs",
         out.display()
+    );
+}
+
+/// The candle control lanes the worker wires must be the same set the evidence matrix believes ships
+/// (sc-16069).
+///
+/// ## The blind spot this closes
+///
+/// `scripts/generate-memory-matrix.mjs::overlaysFor()` used to emit the `control` overlay only when
+/// `model[backend].control` existed — but that key is a MEASUREMENT block, and `"control"` appears exactly
+/// once in the whole catalog (inside `krea_2_turbo`'s **candle** block). So a control lane that had never
+/// been measured produced **zero** matrix cells: the shipping MLX Krea control lane
+/// (`mlx-gen-krea::KREA_2_TURBO_CONTROL_ID`, routed by `image_jobs/krea_control.rs`) was invisible to the
+/// very matrix that exists to show what is unmeasured. Absent evidence read as absent feature.
+///
+/// The generator now keys the overlay off a DECLARED lane list (`CONTROL_LANE_MODELS`). A declaration in a
+/// different language from the router is only as good as the guard that ties them together, so this is that
+/// guard: add an `else if …_control_available` arm to `resolve_candle_image_route` and a
+/// `WIRED_CANDLE_POSE_FAMILIES` id without declaring it to the matrix, and this test goes red naming the
+/// missing id. The generator carries the reverse check itself (`assertDeclaredControlLanes` throws when a
+/// measurement block exists for an undeclared lane, i.e. orphaned evidence).
+///
+/// `WIRED_CANDLE_POSE_FAMILIES` is the right Rust anchor because `base.rs` already documents
+/// `WIRED_MLX_POSE_FAMILIES` as "the MLX twin … and the SAME id set", so one list covers both backends.
+/// The second assertion closes the one-level-up blind spot from sc-16095: declaration alone is not
+/// enough if the generated model omits the Candle backend entirely, because then the per-backend loop
+/// still emits no Candle control cells.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() {
+    let generator = include_str!("../../../../scripts/generate-memory-matrix.mjs");
+    let declared_block = generator
+        .split_once("export const CONTROL_LANE_MODELS = [")
+        .expect(
+            "generate-memory-matrix.mjs must declare CONTROL_LANE_MODELS (sc-16069) — if it was \
+             renamed, update this guard rather than deleting it",
+        )
+        .1
+        .split_once("];")
+        .expect("CONTROL_LANE_MODELS must be a closed array literal")
+        .0;
+    let declared: std::collections::BTreeSet<&str> = declared_block
+        .split('"')
+        // A `"a", "b"` list alternates between separators and values, so the values are the odd indices.
+        .skip(1)
+        .step_by(2)
+        .collect();
+    let wired: std::collections::BTreeSet<&str> =
+        WIRED_CANDLE_POSE_FAMILIES.iter().copied().collect();
+    assert_eq!(
+        declared, wired,
+        "the candle control lanes the worker wires and the model ids the memory matrix declares a control \
+         lane for must be the same set. Undeclared to the matrix: {:?}; declared but not wired: {:?}. A \
+         shipping control lane missing from CONTROL_LANE_MODELS generates NO cells, so it reads as a \
+         feature that does not exist rather than one that is unmeasured (sc-16069).",
+        wired.difference(&declared).collect::<Vec<_>>(),
+        declared.difference(&wired).collect::<Vec<_>>(),
+    );
+
+    let matrix: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../docs/generated/memory-matrix.json"
+    ))
+    .expect("generated memory matrix must be valid JSON");
+    let candle_backends: std::collections::BTreeSet<&str> = matrix["models"]
+        .as_array()
+        .expect("memory matrix models must be an array")
+        .iter()
+        .filter(|model| {
+            model["backends"]
+                .as_array()
+                .is_some_and(|backends| backends.iter().any(|backend| backend == "candle"))
+        })
+        .filter_map(|model| model["id"].as_str())
+        .collect();
+    let omitted: Vec<_> = wired.difference(&candle_backends).copied().collect();
+    assert!(
+        omitted.is_empty(),
+        "wired Candle pose families omitted from the generated matrix's Candle backends: {omitted:?}. \
+         A shipping lane whose manifest entry has no `candle` block produces no Candle cells at all, \
+         including no control cells, so absent evidence is again misreported as an absent feature \
+         (sc-16095). Add measured Candle manifest evidence and a backend-scoped owner; never fabricate \
+         an empty backend block."
+    );
+}
+
+/// Every `CandleImageRoute` arm of `resolve_candle_image_route` that overlays a SECOND network on the
+/// base model must be admitted through a memory gate before it allocates — and a NEW conditioning arm
+/// cannot be added ungated (sc-16069, epic 15448).
+///
+/// ## The defect this pins
+///
+/// `resolve_candle_image_route`'s `else if` ladder claims every conditioning route BEFORE the generic
+/// `CandleTxt2Img` arm, deliberately: those lanes share candle txt2img model ids, so without the divert
+/// a pose job would be silently rendered as plain txt2img with the poses dropped. The unintended
+/// consequence was that the divert also routed them around BOTH admission checks — the
+/// `generate_candle_stream` `vram_gate` and the `generator_cache` `apply_residency_policy` — so eleven
+/// conditioning routes allocated with no pre-flight check at all and died on a reactive CUDA OOM.
+/// Nothing in the type system, the resolver, or CI required a handler to gate; the route was admitted
+/// the moment its `else if` compiled.
+///
+/// ## Why a SOURCE scan, and why it is mutation-proof
+///
+/// The gate keys on the ROUTE, but the property that makes one necessary — a second resident network —
+/// is a property of the PROVIDER, and nothing in the code connects the two. So this guard is the
+/// connection: the two lists below are the single source for that classification, and their union is
+/// checked against the routes the resolver can actually produce. Adding an arm to the ladder without
+/// classifying it fails here with a message naming the route; classifying it as conditioning without
+/// gating its handler fails here too; and deleting a gate call from any gated handler — or the ONE call
+/// site in the shared strict-control driver — fails here as well. A test that still passed with the
+/// gates deleted would be a false green, which is the failure mode this whole guard exists to prevent.
+///
+/// This is the same shape as `WIRED_CANDLE_POSE_FAMILIES` (sc-11171, F-008), which exists because this
+/// exact ladder had already drifted once. Deliberately NOT cfg-gated to the candle build: it is a pure
+/// text scan, so it runs in the Linux parity and macOS suites too, not only `windows-candle`.
+#[test]
+fn every_candle_conditioning_route_is_admitted_through_a_gate() {
+    // A candle route that overlays a second network on the base model, the handler module that owns it,
+    // and the marker proving that handler participates in admission.
+    //
+    // Two marker shapes, because there are two gate seams:
+    //  * `admit_conditioning_paths(` — the lane calls the shared gate itself (the ip-adapter / identity
+    //    lanes, and Krea pose-control, which must gate in its own preamble ahead of its
+    //    `note_loaded_peak`).
+    //  * `fn conditioning_admission(` — the lane declares how it is admitted through the REQUIRED
+    //    `CandleStrictControl` trait method, and the ONE `run_candle_strict_control` call site acts on it
+    //    (the five in-house strict-control lanes). That call site is asserted separately below, so a
+    //    per-handler marker alone cannot carry the test.
+    //
+    // `conditioning_admission` has two arms, and the second (`GatedInPreamble`) tells the shared driver to
+    // stand down — legitimate only for a lane that gates itself earlier, and the obvious place a future
+    // lane could hide. It is therefore bounded below: only explicitly audited handlers may use it, and
+    // each must name and actually call the gate that owns its preamble admission.
+    const CONDITIONING: &[(&str, &str, &str, &str)] = &[
+        (
+            "InstantId",
+            "instantid.rs",
+            include_str!("instantid.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "SdxlIpAdapter",
+            "sdxl_ipadapter.rs",
+            include_str!("sdxl_ipadapter.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "KolorsIpAdapter",
+            "kolors_ipadapter.rs",
+            include_str!("kolors_ipadapter.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "FluxIpAdapter",
+            "flux_ipadapter.rs",
+            include_str!("flux_ipadapter.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "Pulid",
+            "pulid_candle.rs",
+            include_str!("pulid_candle.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "QwenControl",
+            "qwen_control.rs",
+            include_str!("qwen_control.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "KolorsControl",
+            "kolors_control.rs",
+            include_str!("kolors_control.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "ZimageControl",
+            "zimage_control.rs",
+            include_str!("zimage_control.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "Flux2Control",
+            "flux2_control_candle.rs",
+            include_str!("flux2_control_candle.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "Flux1Control",
+            "flux1_control_candle.rs",
+            include_str!("flux1_control_candle.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            // Gates in its OWN preamble (it must precede its `note_loaded_peak`), so the marker is the
+            // direct call, not the trait declaration — see `ConditioningAdmission::GatedInPreamble`.
+            "KreaControl",
+            "krea_control_candle.rs",
+            include_str!("krea_control_candle.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "KreaImportedControl",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+            "admit_conditioning_paths(",
+        ),
+    ];
+
+    // Routes that overlay NO second network, so the conditioning gate does not apply to them. Each is
+    // listed to make the classification explicit rather than implied by absence.
+    //
+    // This list remains only the overlay classification. The edit / imported / ComfyUI / Bernini routes
+    // that load a single base are ALSO enumerated in BASE_ADMITTED below: built-in tiered models use the
+    // catalog per-tier gate when evidenced (or a pinned, reasoned exception), while user-owned
+    // checkpoints use the explicitly weaker weights floor. Z-Image Edit is the exception: its catalog
+    // alias enters the generic provider path, whose shared selector owns base admission.
+    // Keeping the classifications separate prevents an overlay floor from being substituted for catalog
+    // base evidence while ensuring "not conditioning" can no longer disguise an ungated base lane.
+    const NOT_CONDITIONING: &[&str] = &[
+        // Edit lanes: one base model, reference/source conditioning, no second network.
+        "SdxlEdit",
+        "Flux2Edit",
+        "QwenEdit",
+        "ZimageEdit",
+        "MageEdit",
+        "KreaEdit",
+        // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
+        // separately loaded conditioning network is overlaid. The route then uses the generic
+        // `generate_candle_stream` base-model admission gate.
+        "SenseNovaEdit",
+        // Kolors source edit lazily VAE-encodes the img2img init inside the registered base pipeline;
+        // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
+        // and reaches the generic `generate_candle_stream` base-model admission gate.
+        "KolorsEdit",
+        // Krea sampling-regime lanes: the same base, a different schedule / phase list.
+        "KreaTurboOnRaw",
+        "KreaMultiPhase",
+        // Imported / in-place external bases: a single user-supplied checkpoint.
+        "KreaImported",
+        "MageFinetuned",
+        "SdxlImported",
+        "ZimageComfyui",
+        "QwenImageComfyui",
+        "Flux2Comfyui",
+        // Bernini still-image companion: a plain base load.
+        "Bernini",
+        // The two reject arms error before any generation, so they never allocate.
+        "PoseReject",
+        "PoseControlBaseMissing",
+        // Generic provider arms — both reach the shared `generate_candle_stream` gate.
+        "CandleTxt2Img",
+    ];
+
+    // Every bespoke single-base route named by sc-16093, plus the already-correct Qwen Edit reference.
+    // The marker is route-local live code: deleting/commenting any call turns this guard red. External
+    // checkpoints deliberately use the floor marker because no stable manifest tier exists for them.
+    const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
+        (
+            "SdxlEdit",
+            "sdxl_edit_candle.rs",
+            include_str!("sdxl_edit_candle.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "Flux2Edit",
+            "flux2_edit_candle.rs",
+            include_str!("flux2_edit_candle.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "QwenEdit",
+            "qwen_edit_candle.rs",
+            include_str!("qwen_edit_candle.rs"),
+            "crate::vram_gate::load_plan(",
+        ),
+        (
+            "KreaEdit",
+            "krea_edit_candle.rs",
+            include_str!("krea_edit_candle.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "KreaTurboOnRaw",
+            "krea_turbo_raw.rs",
+            include_str!("krea_turbo_raw.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "KreaMultiPhase",
+            "krea_multiphase.rs",
+            include_str!("krea_multiphase.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "KreaImported",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "SdxlImported",
+            "sdxl_imported.rs",
+            include_str!("sdxl_imported.rs"),
+            "admit_candle_load_spec_floor(",
+        ),
+        (
+            "MageFinetuned",
+            "mage_finetuned.rs",
+            include_str!("mage_finetuned.rs"),
+            "admit_candle_load_spec_floor(",
+        ),
+        (
+            "ZimageComfyui",
+            "zimage_comfyui_candle.rs",
+            include_str!("zimage_comfyui_candle.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "QwenImageComfyui",
+            "qwen_comfyui_candle.rs",
+            include_str!("qwen_comfyui_candle.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "Flux2Comfyui",
+            "flux2_comfyui_candle.rs",
+            include_str!("flux2_comfyui_candle.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "Bernini",
+            "bernini.rs",
+            include_str!("bernini.rs"),
+            "admit_candle_base_floor_with_resident_overlay(",
+        ),
+    ];
+    for (route, file, source, marker) in BASE_ADMITTED {
+        let gate = source
+            .lines()
+            .position(|line| line.contains(marker) && !line.trim_start().starts_with("//"))
+            .unwrap_or_else(|| {
+                panic!("{route} ({file}) has no live base-admission call `{marker}`")
+            });
+        let handoff = ["start_gen_stream(", "start_cached_gen_stream("]
+            .iter()
+            .filter_map(|needle| {
+                source
+                    .lines()
+                    .enumerate()
+                    .skip(gate + 1)
+                    .find(|(_, line)| line.contains(needle) && !line.trim_start().starts_with("//"))
+                    .map(|(line, _)| line)
+            })
+            .min()
+            .unwrap_or_else(|| {
+                panic!("{route} ({file}) has no generation-stream handoff after its gate")
+            });
+        assert!(
+            gate < handoff,
+            "{route} ({file}) gates after allocation begins; base admission must be pre-load (sc-16093)"
+        );
+    }
+
+    // Every route the resolver can actually produce, read out of its source. `Some(CandleImageRoute::`
+    // is the production form, so prose mentioning a variant cannot inflate this set.
+    let base = include_str!("base.rs");
+    let resolver = base
+        .split_once("fn resolve_candle_image_route(")
+        .expect("resolve_candle_image_route must exist")
+        .1
+        .split_once("\n}\n")
+        .expect("resolve_candle_image_route must end at a top-level brace")
+        .0;
+    let produced: std::collections::BTreeSet<&str> = resolver
+        .split("Some(CandleImageRoute::")
+        .skip(1)
+        .map(|tail| {
+            let end = tail
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .expect("a variant name is always followed by a delimiter");
+            &tail[..end]
+        })
+        .collect();
+    assert!(
+        produced.len() > 20,
+        "the resolver scan found only {} routes — the source markers have drifted and this guard is no \
+         longer reading the ladder: {produced:?}",
+        produced.len()
+    );
+
+    // 1. The classification is COMPLETE. A new `else if` arm lands in neither list and fails here.
+    let classified: std::collections::BTreeSet<&str> = CONDITIONING
+        .iter()
+        .map(|(route, ..)| *route)
+        .chain(NOT_CONDITIONING.iter().copied())
+        .collect();
+    let unclassified: Vec<&&str> = produced.difference(&classified).collect();
+    assert!(
+        unclassified.is_empty(),
+        "resolve_candle_image_route produces {unclassified:?}, which sc-16069's guard has not \
+         classified. Decide whether the route overlays a SECOND network on the base model: if it does, \
+         add it to CONDITIONING and gate its handler through `admit_conditioning_paths` (or, for a \
+         strict-control lane, `CandleStrictControl::conditioning_admission`); if it does not, add it to \
+         NOT_CONDITIONING. A conditioning route that reaches allocation ungated dies on a reactive \
+         CUDA OOM."
+    );
+
+    // 2. No STALE rows: a classified route the resolver can no longer produce means the guard is
+    //    quietly watching a lane that no longer exists.
+    let stale: Vec<&&str> = classified.difference(&produced).collect();
+    assert!(
+        stale.is_empty(),
+        "{stale:?} are classified by sc-16069's guard but no longer produced by \
+         resolve_candle_image_route — drop the stale rows"
+    );
+
+    // 3. Every conditioning handler participates in admission — on a line of real CODE.
+    //
+    //    The marker must appear on a line whose trimmed start is NOT `//`, or commenting the gate out
+    //    would keep the marker text present and pass. That is not hypothetical: a reviewer mutation
+    //    prefixed `//` to the `admit_conditioning_paths(` call in `sdxl_ipadapter.rs` and the earlier
+    //    version of this test stayed green, because it was a bare `source.contains`. Deleting the call was
+    //    caught; disabling it was not. Doc comments are the common case here — every handler's
+    //    `conditioning_admission` carries a `///` block that names the method.
+    for (route, file, source, marker) in CONDITIONING {
+        let on_code_line = source
+            .lines()
+            .any(|line| line.contains(marker) && !line.trim_start().starts_with("//"));
+        assert!(
+            on_code_line,
+            "candle conditioning route {route} ({file}) has no `{marker}` on a line of live code — it \
+             would allocate with no pre-flight memory check and die on a reactive CUDA OOM (sc-16069). A \
+             commented-out gate is an ungated route."
+        );
+    }
+
+    // 4. The ONE shared strict-control call site still gates. Without this, deleting the single
+    //    `admit_conditioning_overlay` call in `run_candle_strict_control` would leave all six
+    //    `fn conditioning_admission` markers intact and every assertion above would still pass — the
+    //    exact false green this guard exists to prevent.
+    let driver = include_str!("candle_strict_control.rs");
+    assert_eq!(
+        driver.matches("admit_conditioning_overlay(").count(),
+        1,
+        "run_candle_strict_control must gate every strict-control lane exactly once through \
+         `admit_conditioning_overlay` — the `conditioning_admission` declarations are inert \
+         without it (sc-16069)"
+    );
+    let preamble = driver
+        // No trailing `(` — the driver is generic (`<P: CandleStrictControl>`), so the paren does not
+        // follow the name.
+        .split_once("pub(super) async fn run_candle_strict_control")
+        .expect("the shared strict-control driver")
+        .1;
+    assert!(
+        preamble
+            .find("admit_conditioning_overlay(")
+            .expect("the gate call is inside the driver")
+            < preamble
+                .find("start_gen_stream(")
+                .expect("the driver starts a generation stream"),
+        "the conditioning gate must run BEFORE the load stream starts, or it is not a PRE-flight check \
+         (sc-16069)"
+    );
+    // The trait method carries no default, so a new strict-control lane cannot compile without
+    // declaring how it is admitted. Pin that: a `{` after the signature would be a default body, which is
+    // exactly how a new lane would inherit the defect silently.
+    let trait_decl = driver
+        .split_once("fn conditioning_admission(&self) -> ConditioningAdmission")
+        .expect("the trait declares conditioning_admission")
+        .1;
+    assert!(
+        trait_decl.trim_start().starts_with(';'),
+        "CandleStrictControl::conditioning_admission must stay REQUIRED (no default body), so a new \
+         strict-control lane cannot be added ungated (sc-16069)"
+    );
+
+    // 4b. The `GatedInPreamble` arm tells the shared driver to stand down, so it is the obvious place a
+    //     future lane could hide an ungated route. Bind it to the two audited conditioning handlers:
+    //     Krea pose-control gates before its own `note_loaded_peak`, while FLUX.1 control evaluates the
+    //     shared image-memory ladder before constructing the strict-control provider. Any other lane is
+    //     a new exemption and must fail review here.
+    let opting_out: Vec<&str> = CONDITIONING
+        .iter()
+        .filter(|(_, _, source, _)| source.contains("ConditioningAdmission::GatedInPreamble"))
+        .map(|(route, ..)| *route)
+        .collect();
+    assert_eq!(
+        opting_out,
+        vec!["Flux1Control", "KreaControl"],
+        "only the audited FLUX.1 shared-ladder and Krea pose-control preambles may declare \
+         GatedInPreamble. Anything else tells the shared driver to stand down without review (sc-16069)"
+    );
+    let flux1_source = CONDITIONING
+        .iter()
+        .find(|(route, ..)| *route == "Flux1Control")
+        .expect("Flux1Control row")
+        .2;
+    assert!(
+        flux1_source.contains("gate: \"shared FLUX.1 memory ladder\""),
+        "the FLUX.1 opting-out lane must name the shared image-memory ladder that owns admission"
+    );
+    assert!(
+        flux1_source.contains("candle_memory_strategy::evaluate_shared_image("),
+        "flux1_control_candle.rs must evaluate the shared image-memory ladder before its provider load"
+    );
+    let krea_source = CONDITIONING
+        .iter()
+        .find(|(route, ..)| *route == "KreaControl")
+        .expect("KreaControl row")
+        .2;
+    assert!(
+        krea_source.contains("gate: \"krea_control_fit\""),
+        "the opting-out lane must NAME its gate, and it must be the module that really decides — \
+         `krea_control_fit` (sc-16069)"
+    );
+    // And that named gate must actually run in that lane, not merely be cited.
+    assert!(
+        krea_source.contains("krea_control_fit::fit_ladder_for_entry_with_runtime("),
+        "krea_control_candle.rs must actually call `krea_control_fit`'s runtime-aware shared-selector \
+         seam — naming a gate it does not call would be an admission claim with nothing behind it \
+         (sc-16069)"
+    );
+    // 5. Each direct-gate lane gates BEFORE it hands off to the load — a gate placed after the allocation
+    //    begins is not a pre-flight check. Most lanes hand off via `start_gen_stream`; Krea pose-control
+    //    hands off via `run_candle_strict_control`, so accept whichever the lane uses and require at least
+    //    one of them (a lane with neither is not driving a load at all and the row is stale).
+    for (route, file, source, marker) in CONDITIONING {
+        if *marker != "admit_conditioning_paths(" {
+            continue;
+        }
+        let gate = source
+            .lines()
+            .position(|line| line.contains(marker) && !line.trim_start().starts_with("//"))
+            .expect("a live gate call, asserted in step 3");
+        let handoff = ["start_gen_stream(", "run_candle_strict_control("]
+            .iter()
+            .filter_map(|needle| {
+                source
+                    .lines()
+                    .position(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
+            })
+            .min()
+            .unwrap_or_else(|| {
+                panic!("{file} must hand off to start_gen_stream or run_candle_strict_control")
+            });
+        assert!(
+            gate < handoff,
+            "candle conditioning route {route} ({file}) gates AFTER it hands off to the load — the check \
+             must be PRE-flight (sc-16069)"
+        );
+    }
+}
+
+/// Live denoise preview plumbing (epic 16624, sc-16904). Gated like `stream.rs`/`base.rs`, which
+/// define the seam under test.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod preview_stream_tests {
+    use super::*;
+
+    fn frame(current: u32, total: u32) -> gen_core::PreviewFrame {
+        gen_core::PreviewFrame {
+            current,
+            total,
+            image: gen_core::Image {
+                width: 2,
+                height: 2,
+                pixels: vec![128_u8; 2 * 2 * 3],
+            },
+        }
+    }
+
+    /// The sink runs synchronously on the denoise thread, so a momentarily full channel must DROP
+    /// the frame (latest-wins downstream), never block. A `blocking_send` regression here would
+    /// deadlock this single-threaded test instead of failing an assertion.
+    #[test]
+    fn preview_sink_drops_frames_on_a_full_channel_without_blocking() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(1);
+        let sink = preview_sink_for(&tx, 0);
+        assert!(sink.is_active(), "an attached sink must advertise itself");
+        sink.emit(frame(1, 4));
+        sink.emit(frame(2, 4));
+        match rx.try_recv().expect("first frame queued") {
+            GenEvent::Preview { index, frame } => {
+                assert_eq!(index, 0);
+                assert_eq!(frame.current, 1);
+            }
+            other => panic!("expected a preview event, got {}", gen_event_name(&other)),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the second frame must be dropped when the channel is full, not queued or blocked on"
+        );
+    }
+
+    #[test]
+    fn scored_reported_driver_keeps_prompt_and_likeness_facts_isolated_per_image() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
+        let items = [
+            ("a fox", "a red fox in snow", 11_i64, 0.91_f64),
+            ("an owl", "a moonlit owl in flight", 12_i64, 0.73_f64),
+        ];
+        drive_gen_items_scored_reported(
+            tx,
+            items,
+            |_index, (original, effective, seed, likeness), _preview, reports, _progress| {
+                reports
+                    .for_prompt(original)
+                    .emit(gen_core::PromptEnhancementReport::enhanced(
+                        original.to_owned(),
+                        effective.to_owned(),
+                    ));
+                let face_likeness = json!({ "score": likeness })
+                    .as_object()
+                    .expect("likeness fact object")
+                    .clone();
+                Ok(Some((seed, 1, 1, vec![0_u8; 3], Some(face_likeness))))
+            },
+        )
+        .expect("weights-free scored edit carrier completes");
+
+        for (expected_index, (original, effective, seed, likeness)) in items.into_iter().enumerate()
+        {
+            match rx.try_recv().expect("prompt report precedes its image") {
+                GenEvent::PromptEnhancement {
+                    index,
+                    expected_prompt,
+                    report,
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(expected_prompt, original);
+                    assert_eq!(
+                        prompt_enhancement_fact(report, &expected_prompt).unwrap()
+                            ["effectivePrompt"],
+                        effective
+                    );
+                }
+                other => panic!(
+                    "expected a prompt-enhancement event, got {}",
+                    gen_event_name(&other)
+                ),
+            }
+            match rx
+                .try_recv()
+                .expect("scored image follows its prompt report")
+            {
+                GenEvent::Image {
+                    index,
+                    seed: actual_seed,
+                    face_likeness,
+                    ..
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(actual_seed, seed);
+                    assert_eq!(face_likeness.unwrap()["score"], likeness);
+                }
+                other => panic!("expected a scored image, got {}", gen_event_name(&other)),
+            }
+        }
+        assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
+    }
+
+    fn gen_event_name(event: &GenEvent) -> &'static str {
+        match event {
+            GenEvent::Step { .. } => "Step",
+            GenEvent::Decoding { .. } => "Decoding",
+            GenEvent::Loading { .. } => "Loading",
+            GenEvent::Preview { .. } => "Preview",
+            GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
+            GenEvent::Image { .. } => "Image",
+        }
+    }
+
+    #[test]
+    fn preview_frame_encodes_as_a_decodable_jpeg_data_url() {
+        let data_url = encode_preview_data_url(&frame(3, 8)).expect("frame encodes");
+        let payload = data_url
+            .strip_prefix("data:image/jpeg;base64,")
+            .expect("data URL carries the jpeg media type");
+        use base64::Engine as _;
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .expect("payload is valid base64");
+        let decoded = image::load_from_memory(&jpeg).expect("payload is a decodable JPEG");
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+    }
+
+    /// The frame rides `result.previewFrame` as a single slot on the EXISTING streaming result —
+    /// `result` is replaced wholesale per accepted POST, so a result built without the slot (the
+    /// final/terminal posts) is what clears it. Both halves are pinned here.
+    #[test]
+    fn streaming_result_carries_the_preview_slot_and_omits_it_when_cleared() {
+        let plan = ImagePlan::new(&request(
+            json!({ "projectId": "p", "prompt": "x", "count": 1 }),
+        ));
+        let slot = PreviewSlot {
+            index: 0,
+            current: 5,
+            total: 20,
+            data_url: "data:image/jpeg;base64,QQ==".to_owned(),
+        };
+        let with = streaming_result_with_preview(&plan, &[], Some(&slot));
+        let frame = with
+            .get("previewFrame")
+            .and_then(Value::as_object)
+            .expect("previewFrame block present");
+        assert_eq!(frame.get("imageIndex").and_then(Value::as_u64), Some(0));
+        assert_eq!(frame.get("current").and_then(Value::as_u64), Some(5));
+        assert_eq!(frame.get("total").and_then(Value::as_u64), Some(20));
+        assert_eq!(
+            frame.get("dataUrl").and_then(Value::as_str),
+            Some("data:image/jpeg;base64,QQ==")
+        );
+
+        let without = streaming_result_with_preview(&plan, &[], None);
+        assert!(
+            !without.contains_key("previewFrame"),
+            "a result built with no live slot must omit the key entirely"
+        );
+        // Every other key matches the plain streaming result — the preview is strictly additive.
+        assert_eq!(without, streaming_result(&plan, &[]));
+    }
+}
+
+/// The event ORDER the UI's placeholder bound depends on (sc-16965, epic 16948).
+///
+/// `GenEvent::Preview` deliberately does not POST — the frame rides the *next* `Step`/`Decoding`
+/// update, so previews add zero requests to the existing per-step cadence. Combined with the
+/// sampler's own ordering (`candle-gen/src/sampler.rs` `run_curated_sampler` calls
+/// `on_progress(Progress::Step { … })` and only THEN `hook.emit(…)`, both delivered down the single
+/// `GenEvent` channel), that means **the first `generating` POST is always frame-less**: frame 1
+/// lands on the step-2 update.
+///
+/// `apps/web/src/previewSupport.js` holds its "Preview starting…" placeholder across the first
+/// denoise step because of exactly this — without it the card blinks pending → supported → live. If
+/// someone makes the Preview arm post its own update, the frame arrives a step earlier, that bound
+/// becomes a one-step over-hold, and the comment there becomes a lie. Pin the property next to the
+/// code that owns it.
+///
+/// Deliberately OUTSIDE `preview_stream_tests`: this reads source text and needs none of the
+/// engine-gated types, so it runs on every lane rather than only on macOS / `backend-candle`.
+#[test]
+fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
+    let base = include_str!("base.rs");
+    let arm_start = base
+        .find("GenEvent::Preview { index, frame } => {")
+        .expect("the Preview arm of consume_gen_events");
+    let arm_end = arm_start
+        + base[arm_start..]
+            .find("\n            GenEvent::Image {")
+            .expect("the Preview arm is followed by the Image arm");
+    let arm = &base[arm_start..arm_end];
+    assert!(
+        !arm.contains("update_job("),
+        "GenEvent::Preview must NOT post — the frame rides the next Step/Decoding update, which is \
+         why the first `generating` POST carries no previewFrame and why previewSupport.js holds \
+         its placeholder across denoise step 1. Arm:\n{arm}"
+    );
+    assert!(
+        arm.contains("latest_preview = Some(slot)"),
+        "the Preview arm must park the frame in the single latest-wins slot for the next POST"
+    );
+    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked.
+    let step_start = base
+        .find("GenEvent::Step {")
+        .expect("the Step arm of consume_gen_events");
+    let step_arm = &base[step_start..(step_start + 2000).min(base.len())];
+    assert!(
+        step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
+        "the Step arm is the POST that carries the parked frame"
     );
 }

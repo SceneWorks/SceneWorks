@@ -180,7 +180,7 @@ async fn host_capabilities_requires_token_and_reports_host_memory() {
     assert_eq!(status, StatusCode::OK);
 
     let (status, caps) = request_with_headers(
-        app,
+        app.clone(),
         "GET",
         "/api/v1/host-capabilities",
         Value::Null,
@@ -189,8 +189,48 @@ async fn host_capabilities_requires_token_and_reports_host_memory() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(caps["unifiedMemoryGb"], 128.0);
+    if std::env::consts::OS == "macos" {
+        assert_eq!(caps["memoryKind"], "unified");
+        assert_eq!(caps["memoryGb"], 128.0);
+    } else {
+        assert!(caps.get("memoryKind").is_none());
+        assert!(caps.get("memoryGb").is_none());
+    }
     // No host paths or secrets leak through this endpoint.
     assert!(caps.get("directories").is_none());
+
+    let (status, _) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "cuda-test",
+            "gpuId": "cuda:0",
+            "capabilities": [],
+            "loadedModels": [],
+            "utilization": { "memoryTotalMb": 24576 }
+        }),
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, caps) = request_with_headers(
+        app,
+        "GET",
+        "/api/v1/host-capabilities",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(caps["gpuMemoryGb"], 24.0);
+    if std::env::consts::OS == "macos" {
+        assert_eq!(caps["memoryKind"], "unified");
+        assert_eq!(caps["memoryGb"], 128.0);
+    } else {
+        assert_eq!(caps["memoryKind"], "dedicated");
+        assert_eq!(caps["memoryGb"], 24.0);
+    }
 }
 
 #[tokio::test]
@@ -1125,6 +1165,18 @@ async fn credentials_routes_store_redact_and_delete() {
     assert!(
         !body.to_string().contains("secret-key"),
         "token leaked in the response"
+    );
+    // sc-16540: the token lands in the credentials dir, NOT the config dir. The config
+    // dir is the repo checkout in dev, so a store written there puts a plaintext token
+    // in a git working tree — the regression this asserts against.
+    let filename = sceneworks_core::credentials::CREDENTIALS_FILENAME;
+    assert!(
+        settings.credentials_dir.join(filename).is_file(),
+        "credential store must be written to the credentials dir",
+    );
+    assert!(
+        !settings.config_dir.join(filename).exists(),
+        "no credential store may be created in the config dir",
     );
 
     // A separate GET is likewise redacted.

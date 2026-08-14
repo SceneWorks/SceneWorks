@@ -139,21 +139,50 @@ fn validate_model_id_rejects_traversal_and_separators() {
 #[test]
 fn seed_mode_refreshes_the_app_owned_default_but_not_an_explicit_config_dir() {
     use sceneworks_core::builtin_manifests::SeedMode;
-    // sc-10212: an explicit, non-empty SCENEWORKS_CONFIG_DIR marks an operator-owned dir (repo
-    // checkout / Compose bind mount) → stay authoritative (IfMissing), never dirty a checkout.
+    // sc-10212 / sc-15504: an explicit, non-empty SCENEWORKS_CONFIG_DIR marks an operator-owned dir
+    // (repo checkout / Compose bind mount / RunPod volume) → SyncFromEmbedded: refresh a drifted or
+    // missing builtin manifest so an upgraded binary is never served a stale seed, but leave a
+    // byte-identical file untouched so a matching checkout is not dirtied.
     assert_eq!(
-        seed_mode_for_config_dir(Some("/srv/sceneworks/config")),
+        seed_mode_for_config_dir(Some("/srv/sceneworks/config"), None),
+        SeedMode::SyncFromEmbedded
+    );
+    assert_eq!(
+        seed_mode_for_config_dir(Some("./config"), None),
+        SeedMode::SyncFromEmbedded
+    );
+    // A truthy SCENEWORKS_OWN_MANIFESTS opts a fully operator-provisioned config dir out of
+    // self-healing → IfMissing: fill gaps only, never overwrite a provided builtin.*.jsonc.
+    assert_eq!(
+        seed_mode_for_config_dir(Some("/srv/sceneworks/config"), Some("1")),
         SeedMode::IfMissing
     );
     assert_eq!(
-        seed_mode_for_config_dir(Some("./config")),
+        seed_mode_for_config_dir(Some("/srv/sceneworks/config"), Some("true")),
         SeedMode::IfMissing
+    );
+    // A non-truthy / blank opt-out value does not divert the default self-heal.
+    assert_eq!(
+        seed_mode_for_config_dir(Some("/srv/sceneworks/config"), Some("0")),
+        SeedMode::SyncFromEmbedded
+    );
+    // The opt-out only applies with an explicit config dir; on the platform-default app-owned dir it
+    // is ignored and Overwrite still refreshes the builtin catalog unconditionally on launch.
+    assert_eq!(
+        seed_mode_for_config_dir(None, Some("1")),
+        SeedMode::Overwrite
     );
     // Unset, or blank/whitespace (env_path_or treats those as unset) → the platform-default
-    // app-owned dir → Overwrite so a directly-launched API refreshes its builtin catalog on launch.
-    assert_eq!(seed_mode_for_config_dir(None), SeedMode::Overwrite);
-    assert_eq!(seed_mode_for_config_dir(Some("")), SeedMode::Overwrite);
-    assert_eq!(seed_mode_for_config_dir(Some("   ")), SeedMode::Overwrite);
+    // app-owned dir → Overwrite.
+    assert_eq!(seed_mode_for_config_dir(None, None), SeedMode::Overwrite);
+    assert_eq!(
+        seed_mode_for_config_dir(Some(""), None),
+        SeedMode::Overwrite
+    );
+    assert_eq!(
+        seed_mode_for_config_dir(Some("   "), None),
+        SeedMode::Overwrite
+    );
 }
 
 #[tokio::test]
