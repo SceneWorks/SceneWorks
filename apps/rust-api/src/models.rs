@@ -2630,6 +2630,20 @@ mod download_receipt_tests {
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
     }
 
+    fn seed_manifest_download(data_dir: &FsPath, download: &Value) {
+        let repo = download.get("repo").and_then(Value::as_str).unwrap();
+        let revision = download.get("revision").and_then(Value::as_str).unwrap();
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        for file in string_array_field(download, "files") {
+            let path = snapshot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"legacy Eros weights").unwrap();
+        }
+    }
+
     fn seed_manifest_downloads(data_dir: &FsPath, model: &Value, include_co_requisites: bool) {
         for download in model
             .get("downloads")
@@ -2638,17 +2652,7 @@ mod download_receipt_tests {
             .flatten()
             .filter(|download| include_co_requisites || !is_co_requisite_download(download))
         {
-            let repo = download.get("repo").and_then(Value::as_str).unwrap();
-            let revision = download.get("revision").and_then(Value::as_str).unwrap();
-            let snapshot = huggingface_repo_cache_path(data_dir, repo)
-                .unwrap()
-                .join("snapshots")
-                .join(revision);
-            for file in string_array_field(download, "files") {
-                let path = snapshot.join(file);
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(path, b"legacy Eros weights").unwrap();
-            }
+            seed_manifest_download(data_dir, download);
         }
     }
 
@@ -2895,6 +2899,141 @@ mod download_receipt_tests {
         assert!(
             !partial_primary_cache.exists(),
             "partial primary Eros cache is reclaimed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_corequisite_only_partial_is_cleanup_only_and_reclaimable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        let adapter = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|download| {
+                download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true)
+            })
+            .unwrap();
+        seed_manifest_download(data_dir, adapter);
+
+        let adapter_repo = adapter.get("repo").and_then(Value::as_str).unwrap();
+        let adapter_cache = huggingface_repo_cache_path(data_dir, adapter_repo).unwrap();
+        let mut projection = vec![entry];
+        retain_models_for_os(&mut projection, "windows", data_dir).unwrap();
+        assert_eq!(
+            projection.len(),
+            1,
+            "a co-requisite-only partial is retained"
+        );
+        let context = model_download_context(&projection[0]).unwrap();
+        let projected = apply_model_catalog_entry(
+            projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            projected.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            projected.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            projected.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&projected, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("co-requisite-only partial delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!adapter_cache.exists(), "orphan adapter cache is reclaimed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_mixed_trash_failure_retains_a_retryable_cleanup_tombstone() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        seed_manifest_downloads(data_dir, &entry, true);
+
+        let primary_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3-10Eros").unwrap();
+        let adapter_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments")
+                .unwrap();
+        let mut projection = vec![entry.clone()];
+        retain_models_for_os(&mut projection, "linux", data_dir).unwrap();
+        let cleanup_model = projection.pop().unwrap();
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let _trash = crate::test_trash_outcomes([
+            (primary_cache.clone(), true),
+            (adapter_cache.clone(), false),
+        ]);
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&cleanup_model, data_dir),
+            &allowed_roots,
+            false,
+        )
+        .await
+        .expect("mixed OS-trash outcome is recoverable");
+        assert!(removal
+            .removed_paths
+            .iter()
+            .any(|path| path == &primary_cache.display().to_string()));
+        assert!(removal
+            .trash_failed_paths
+            .iter()
+            .any(|path| path == &adapter_cache.display().to_string()));
+        assert!(!primary_cache.exists());
+        assert!(adapter_cache.exists());
+
+        let mut retry_projection = vec![entry.clone()];
+        retain_models_for_os(&mut retry_projection, "linux", data_dir).unwrap();
+        assert_eq!(
+            retry_projection.len(),
+            1,
+            "adapter residue must keep the permanent-delete retry resolvable"
+        );
+        let context = model_download_context(&retry_projection[0]).unwrap();
+        let retry_model = apply_model_catalog_entry(
+            retry_projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            retry_model.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        let retry = crate::remove_owned_artifacts(
+            model_artifact_paths(&retry_model, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("permanent retry reclaims the retained adapter");
+        assert!(!retry.removed_paths.is_empty());
+        assert!(!adapter_cache.exists());
+
+        let mut after_retry = vec![entry];
+        retain_models_for_os(&mut after_retry, "linux", data_dir).unwrap();
+        assert!(
+            after_retry.is_empty(),
+            "tombstone disappears after retry succeeds"
         );
     }
 
@@ -4786,6 +4925,13 @@ fn apply_model_catalog_entry(
     #[cfg(test)]
     test_delay_catalog_probe(&model);
     let state = install_state_for(download_context, &model, data_dir);
+    let platform_cleanup_only =
+        model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true);
+    let cleanup_residue_only = platform_cleanup_only
+        && !state.installed
+        && cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
@@ -4795,8 +4941,6 @@ fn apply_model_catalog_entry(
         "catalogScope".to_owned(),
         Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
     );
-    let platform_cleanup_only =
-        object.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true);
     object.insert(
         "downloadable".to_owned(),
         Value::Bool(state.downloadable && !platform_cleanup_only),
@@ -4815,7 +4959,7 @@ fn apply_model_catalog_entry(
     object.insert(
         "cacheState".to_owned(),
         Value::String(
-            if state.cache_incomplete {
+            if state.cache_incomplete || cleanup_residue_only {
                 "incomplete"
             } else if state.installed {
                 "complete"
@@ -5374,7 +5518,10 @@ fn retain_models_for_os(
         // the tombstone solely to resolve install state and owned cleanup paths.
         let context = model_download_context(&model)?;
         let state = install_state_for(context, &model, data_dir);
-        if state.installed || state.cache_incomplete {
+        let cleanup_residue = cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
+        if state.installed || state.cache_incomplete || cleanup_residue {
             let object = model
                 .as_object_mut()
                 .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
@@ -6240,19 +6387,9 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
     if let Some(path) = model_manifest_installed_path(model, data_dir) {
         paths.push(path);
     }
-    let mut cleanup_downloads = model_download(model).into_iter().collect::<Vec<_>>();
+    let cleanup_downloads = model_download(model).into_iter().collect::<Vec<_>>();
     if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
-        cleanup_downloads.extend(
-            model
-                .get("downloads")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|download| {
-                    download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true)
-                })
-                .cloned(),
-        );
+        paths.extend(cleanup_with_model_artifact_paths(model, data_dir));
     }
     for repo in cleanup_downloads.into_iter().filter_map(|download| {
         download
@@ -6279,6 +6416,24 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
         } else {
             data_dir.join(path)
         });
+    }
+    unique_paths(paths)
+}
+
+fn cleanup_with_model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for repo in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true))
+        .filter_map(|download| download.get("repo").and_then(Value::as_str))
+    {
+        paths.push(data_dir.join("models").join(safe_download_dir(repo)));
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            paths.push(cache_path);
+        }
     }
     unique_paths(paths)
 }

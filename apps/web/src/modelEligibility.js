@@ -81,7 +81,7 @@ export function videoModelUsable(model, caps) {
   return (
     model?.type === "video" &&
     !macModelBlock(model, caps) &&
-    !(model?.macOnly === true && platform && platform !== "macos") &&
+    !(model?.macOnly === true && platform !== "macos") &&
     VIDEO_MODES.some((mode) => videoModelServesMode(model, mode, caps))
   );
 }

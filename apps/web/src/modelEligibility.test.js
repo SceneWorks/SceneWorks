@@ -57,6 +57,7 @@ describe("modelEligibility predicates", () => {
     expect(videoModelUsable(eros, { ...caps, platform: "macos" })).toBe(true);
     expect(videoModelUsable(eros, { ...caps, platform: "windows" })).toBe(false);
     expect(videoModelUsable(eros, { ...caps, platform: "linux" })).toBe(false);
+    expect(videoModelUsable(eros, { ...caps, platform: "" })).toBe(false);
   });
 
   it("SC-18902 withdraws Eros from off-Mac pickers and offers without hiding base LTX", () => {
@@ -81,6 +82,12 @@ describe("modelEligibility predicates", () => {
     expect(generationModelsForType([base, eros], "video").map((model) => model.id)).toEqual(["ltx_2_3"]);
     expect(downloadOffersFor([eros], videoModelUsable, windows)).toEqual([]);
     expect(videoModelUsable(base, windows)).toBe(true);
+
+    const unknownFallback = fallbackModels.filter((model) =>
+      videoModelUsable(model, { ...caps, platform: "" }),
+    );
+    expect(unknownFallback.some((model) => model.id === "ltx_2_3_eros")).toBe(false);
+    expect(unknownFallback.some((model) => model.id === "ltx_2_3")).toBe(true);
 
     const macEros = { ...eros, installState: "missing", downloadable: true, usable: true };
     expect(downloadOffersFor([macEros], videoModelUsable, { ...caps, platform: "macos" }).map((model) => model.id)).toEqual([
