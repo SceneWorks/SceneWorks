@@ -10560,6 +10560,236 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     assert!(!media_path.with_extension("audio.wav").exists());
 }
 
+/// **The AV mux policy at the container (sc-19425).** The mux step bounds the file at the PICTURE's
+/// length and never lets the soundtrack decide it.
+///
+/// `-shortest` is the thing this must not be. When the soundtrack is even marginally shorter it wins
+/// and pays for winning in discarded video frames — measured at 5 of MiniMax-H3's 14 legal frame
+/// counts, up to 3 frames lost for a 10 µs deficit, with the container still advertising the audio's
+/// duration. See [`audio_mux_args`] for the full table.
+///
+/// Pure arg-shape, so it runs on every host including those with no ffmpeg; the behaviour it stands
+/// for is measured by `the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration` below.
+#[test]
+fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
+    let args = audio_mux_args(
+        Path::new("/tmp/e.mp4"),
+        Path::new("/tmp/a.wav"),
+        Path::new("/tmp/m.mp4"),
+        124,
+        24,
+    );
+    assert!(
+        !args.iter().any(|a| a == "-shortest"),
+        "`-shortest` lets the soundtrack shorten the picture: {args:?}"
+    );
+    let t = args
+        .iter()
+        .position(|a| a == "-t")
+        .expect("the mux must bound the output explicitly");
+    // 124 / 24 = 5.1666666…, rounded to the microsecond. Asserted as the literal string because the
+    // value ffmpeg is handed is what decides whether the last frame survives; restating it as
+    // `format!("{:.6}", 124.0 / 24.0)` would only repeat the implementation.
+    assert_eq!(args[t + 1], "5.166667");
+    assert!(args.iter().any(|a| a == "-map_metadata"), "sc-15956 tag");
+
+    // Every legal MiniMax-H3 duration bounds at its own frame count. The NINE inexact rungs are
+    // where that has content: at those the soundtrack's own grid length
+    // (`round(frames / 24 · 40) · 800 / 32000`) is ±8.33 ms away, so a bound taken off the audio
+    // would land measurably elsewhere. Counted, so this loop cannot quietly become the five
+    // exactly-aligned rungs where every candidate policy agrees.
+    let mut inexact = 0;
+    for &frames in &sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS {
+        let args = audio_mux_args(
+            Path::new("e"),
+            Path::new("a"),
+            Path::new("m"),
+            frames as usize,
+            sceneworks_core::video_request::MINIMAX_H3_FPS,
+        );
+        let bound: f64 = args[args.iter().position(|a| a == "-t").unwrap() + 1]
+            .parse()
+            .expect("a decimal seconds bound");
+        let picture = f64::from(frames) / f64::from(sceneworks_core::video_request::MINIMAX_H3_FPS);
+        assert!(
+            (bound - picture).abs() < 1e-6,
+            "{frames}: bounded at {bound} s, picture is {picture} s"
+        );
+        // ...and the bound cannot cut the final frame, whose pts is a whole interval earlier.
+        assert!(
+            bound > f64::from(frames - 1) / 24.0,
+            "{frames}: the bound must sit past the last frame's presentation time"
+        );
+        // What a soundtrack-derived bound would have been: the audio latent grid's own length.
+        let soundtrack = (f64::from(frames) / 24.0 * 40.0).round() * 800.0 / 32_000.0;
+        if (soundtrack - picture).abs() > 1e-9 {
+            inexact += 1;
+            assert!(
+                (bound - soundtrack).abs() > 8.0e-3,
+                "{frames}: the bound {bound} s is the soundtrack's {soundtrack} s, not the \
+                 picture's {picture} s"
+            );
+        }
+    }
+    assert_eq!(
+        inexact, 9,
+        "nine of the fourteen rungs must actually distinguish the two candidate bounds"
+    );
+
+    // Degenerate fps mirrors `encode_inner`'s own `.max(1)` clamp rather than dividing by zero.
+    let zero = audio_mux_args(Path::new("e"), Path::new("a"), Path::new("m"), 9, 0);
+    assert_eq!(
+        zero[zero.iter().position(|a| a == "-t").unwrap() + 1],
+        "9.000000"
+    );
+}
+
+/// The measured half of the guard above: run the real two-step encode at **all fourteen** MiniMax-H3
+/// legal frame counts with a soundtrack fitted to the picture, and decode the resulting mp4 back.
+/// Every frame must survive.
+///
+/// Under `-shortest` this fails at 124, 175, 226, 277 and 328 — the five counts whose fitted track
+/// rounds a third of a sample SHORT. Sampling only 141/192/243/294/345 (the exactly-aligned five)
+/// would pass for either policy, which is why the loop is the whole lattice.
+///
+/// 64x64 keeps fourteen encodes cheap; the policy is about timestamps, not pixels. Skips when no
+/// ffmpeg is reachable, like the sibling encode tests.
+#[tokio::test]
+async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration: no ffmpeg"
+        );
+        return;
+    }
+    let fps = sceneworks_core::video_request::MINIMAX_H3_FPS;
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_mux_av_")
+        .tempdir()
+        .expect("temp dir");
+    let mut checked = 0;
+    for &frames in &sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS {
+        let count = frames as usize;
+        // MiniMax-H3's delivered soundtrack: 32 kHz stereo, `round(frames / fps · 32000)` samples
+        // per channel — the engine's `fit_audio_to_video` target, NOT the audio grid's
+        // `round(frames / fps · 40) · 800`.
+        let per_channel = (f64::from(frames) / f64::from(fps) * 32_000.0).round() as usize;
+        let decoded = DecodedVideo {
+            frames: (0..count)
+                .map(|i| RgbFrame {
+                    width: 64,
+                    height: 64,
+                    pixels: vec![(i % 251) as u8; 64 * 64 * 3],
+                })
+                .collect(),
+            fps,
+            audio: Some(AudioTrack {
+                samples: vec![0.05; per_channel * 2],
+                sample_rate: 32_000,
+                channels: 2,
+            }),
+            adapter_apply_reports: Vec::new(),
+        };
+        let media_path = dir_guard.path().join(format!("clip_{frames}.mp4"));
+        encode_media(&media_path, decoded, None, None)
+            .await
+            .expect("encode + mux");
+        assert_eq!(
+            probe_frame_count(&media_path),
+            Some(count),
+            "{frames} frames: the muxed mp4 must hold every frame the engine produced"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 14, "all fourteen lattice rungs must be exercised");
+
+    // The other direction, which is what `-shortest` was there for and why "just delete the flag"
+    // is not the fix: a soundtrack twice the picture's length must not extend the container.
+    // Unbounded, this same command produces a 10.33 s file around 5.17 s of picture.
+    let frames = 124usize;
+    let decoded = DecodedVideo {
+        frames: (0..frames)
+            .map(|i| RgbFrame {
+                width: 64,
+                height: 64,
+                pixels: vec![(i % 251) as u8; 64 * 64 * 3],
+            })
+            .collect(),
+        fps,
+        audio: Some(AudioTrack {
+            samples: vec![
+                0.05;
+                2 * (frames as f64 / f64::from(fps) * 32_000.0).round() as usize * 2
+            ],
+            sample_rate: 32_000,
+            channels: 2,
+        }),
+        adapter_apply_reports: Vec::new(),
+    };
+    let media_path = dir_guard.path().join("long_audio.mp4");
+    encode_media(&media_path, decoded, None, None)
+        .await
+        .expect("encode + mux");
+    let advertised = probe_duration_seconds(&media_path).expect("a container duration");
+    assert!(
+        advertised < 6.0,
+        "an oversized soundtrack must not stretch the container: {advertised} s around \
+         {} s of picture",
+        frames as f64 / f64::from(fps)
+    );
+    assert_eq!(probe_frame_count(&media_path), Some(frames));
+}
+
+/// The container's own advertised `Duration:` — the number a player shows, read off the same
+/// ffmpeg probe.
+fn probe_duration_seconds(path: &Path) -> Option<f64> {
+    let stderr = probe_stderr(path)?;
+    let rest = stderr.split("Duration: ").nth(1)?;
+    let hms = rest.split(',').next()?;
+    let mut parts = hms.split(':');
+    let h: f64 = parts.next()?.trim().parse().ok()?;
+    let m: f64 = parts.next()?.parse().ok()?;
+    let s: f64 = parts.next()?.parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + s)
+}
+
+/// Decode `path` and return the frame count ffmpeg counts, the same `-f null -` probe
+/// `media_jobs::probe_source_frame_count` uses (no `ffprobe`: the desktop bundle ships none).
+fn probe_frame_count(path: &Path) -> Option<usize> {
+    let stderr = probe_stderr(path)?;
+    stderr
+        .rsplit("frame=")
+        .next()
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+}
+
+/// One `-c copy -f null -` pass over `path`, returning ffmpeg's stderr. Shared by the two probes
+/// above so they read the same run's report rather than two.
+fn probe_stderr(path: &Path) -> Option<String> {
+    let program = std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| "ffmpeg".to_owned());
+    let out = std::process::Command::new(program)
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-i",
+            &path.display().to_string(),
+            "-map",
+            "0:v:0",
+            "-c",
+            "copy",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
 #[tokio::test]
 async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
     let dir_guard = tempfile::Builder::new()

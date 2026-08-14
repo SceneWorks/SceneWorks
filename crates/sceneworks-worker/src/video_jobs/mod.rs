@@ -6,9 +6,10 @@
 //! `video_adapters.py`). The shared encode pipeline takes the engine's video output
 //! shape — RGB8 `frames` + `fps` + an optional synchronized `audio` track — writes
 //! the frames to an mp4 (libx264), muxes a 16-bit-PCM WAV as AAC when audio is present
-//! (`-shortest`), remuxes `+faststart` (WKWebView range-seek), and extracts a poster
-//! frame. It reuses [`crate::media_jobs::run_ffmpeg`] (binary resolution + the
-//! periodic-heartbeat / cooperative-cancel loop).
+//! (bounded at the PICTURE's length — see [`audio_mux_args`]), remuxes `+faststart`
+//! (WKWebView range-seek), and extracts a poster frame. It reuses
+//! [`crate::media_jobs::run_ffmpeg`] (binary resolution + the periodic-heartbeat /
+//! cooperative-cancel loop).
 //!
 //! sc-3033 ships only the **procedural stub** generator (a moving gradient + a quiet
 //! synchronized tone for the LTX family, mirroring the engine: LTX emits audio, Wan
@@ -1282,7 +1283,7 @@ fn lerp(a: u8, t: f32) -> u8 {
 }
 
 /// A quiet 220 Hz mono tone matching the clip length (`frame_count / fps` seconds) at
-/// 48 kHz — enough to exercise the WAV-write + AAC-mux + `-shortest` path end to end.
+/// 48 kHz — enough to exercise the WAV-write + AAC-mux path (see [`audio_mux_args`]) end to end.
 fn stub_audio_track(frame_count: u32, fps: u32) -> AudioTrack {
     let sample_rate = 48_000u32;
     let duration = frame_count as f32 / fps.max(1) as f32;
@@ -1305,7 +1306,8 @@ fn stub_audio_track(frame_count: u32, fps: u32) -> AudioTrack {
 // ---------------------------------------------------------------------------
 
 /// Write `decoded` to `media_path` as an mp4: raw RGB frames streamed to libx264, an optional 16-bit
-/// PCM WAV muxed as AAC (`-shortest`), then a best-effort `+faststart` remux and
+/// PCM WAV muxed as AAC and bounded at the picture's length ([`audio_mux_args`]), then a
+/// best-effort `+faststart` remux and
 /// `.poster.jpg`. `media_path` is created (atomically renamed from a temp) only on
 /// success; all intermediates are removed regardless of outcome.
 async fn encode_media(
@@ -1376,6 +1378,10 @@ async fn encode_inner(
         }
     }
 
+    // Captured before `frames` is consumed below: step 2 bounds the file at the PICTURE's length,
+    // and that length is this count — never anything read back off the soundtrack (sc-19425).
+    let frame_count = frames.len();
+
     // 1. Stream the engine-owned RGB buffers directly into FFmpeg. This moves one existing frame
     // buffer at a time through the pipe: no per-frame PNG encode, no multi-GB scratch tree, and no
     // second whole-video concatenation.
@@ -1423,32 +1429,11 @@ async fn encode_inner(
     args.push(enc_tmp.to_string_lossy().into_owned());
     run_ffmpeg_with_stdin_chunks(args, chunks, ctx).await?;
 
-    // 2. Mux the audio track (LTX) as AAC, else the video-only mp4 is the result.
+    // 2. Mux the audio track (LTX, MiniMax-H3) as AAC, else the video-only mp4 is the result.
     let finished_tmp = if let Some(audio) = audio {
         write_wav_pcm16(&audio, wav_tmp)?;
         run_ffmpeg(
-            vec![
-                "ffmpeg".to_owned(),
-                "-nostdin".to_owned(),
-                "-y".to_owned(),
-                "-i".to_owned(),
-                enc_tmp.to_string_lossy().into_owned(),
-                "-i".to_owned(),
-                wav_tmp.to_string_lossy().into_owned(),
-                "-c:v".to_owned(),
-                "copy".to_owned(),
-                "-c:a".to_owned(),
-                "aac".to_owned(),
-                "-shortest".to_owned(),
-                // Explicit, though it is also ffmpeg's default for a multi-input command: the
-                // container metadata — including the sc-15956 workflow tag written in step 1 —
-                // comes from the VIDEO, never from the WAV. Stated because "the default happens to
-                // be right" is not a property anyone maintains, and the step below it depends on
-                // this one having carried the tag through.
-                "-map_metadata".to_owned(),
-                "0".to_owned(),
-                mux_tmp.to_string_lossy().into_owned(),
-            ],
+            audio_mux_args(enc_tmp, wav_tmp, mux_tmp, frame_count, fps),
             ctx,
         )
         .await?;
@@ -1462,6 +1447,85 @@ async fn encode_inner(
     faststart_mp4(media_path).await;
     write_poster_frame(media_path).await;
     Ok(())
+}
+
+/// The step-2 mux command: copy the encoded picture, encode the WAV as AAC, and **bound the file at
+/// the picture's own length** — `-t frame_count / fps`.
+///
+/// # Why `-t` and not `-shortest` (sc-19425)
+///
+/// `-shortest` makes the SOUNDTRACK a candidate for deciding the clip's length, and when it wins it
+/// does so by **discarding video frames** — silently, and out of proportion to the mismatch.
+/// Measured with the bundled ffmpeg 7.1 on this exact two-step command, at 24 fps, MiniMax-H3's 14
+/// legal frame counts, with a soundtrack already fitted to the picture to within a third of one
+/// sample (`round(frames / 24 · 32000)` samples per channel — the engine's own mux policy):
+///
+/// | frames | `-shortest` | no flag | `-t frames/fps` |
+/// |---|---|---|---|
+/// | 124 | **121** | 124 | 124 |
+/// | 175 | **173** | 175 | 175 |
+/// | 226 | **225** | 226 | 226 |
+/// | 277 | **275** | 277 | 277 |
+/// | 328 | **327** | 328 | 328 |
+/// | the other 9 | exact | exact | exact |
+///
+/// Five of the fourteen lost picture — up to three frames for a 10 µs audio deficit — while the
+/// container went on advertising the AUDIO's duration (5.17 s for a file holding 121 frames = 5.04 s
+/// of picture). That is precisely "the container claims a duration the file does not have", the
+/// defect sc-12371 measured `EncodedClip` for, reappearing one layer down where measuring the
+/// `DecodedVideo` cannot see it.
+///
+/// Dropping the flag outright fixes the frame loss but gives up what it was for: an audio track
+/// LONGER than the picture then extends the file (measured: a 2× track produced a 16.0 s container
+/// around 8.0 s of picture). `-t` is the only one of the three that is right in both directions, and
+/// it is the container-level spelling of the same rule the MiniMax-H3 engine applies to the
+/// waveform: **the picture is the exact quantity, so the picture is what everything else is fitted
+/// to.** It is a strict improvement for LTX too, whose vocoder output is not length-matched to the
+/// frame count at all and which today loses picture whenever that output lands short.
+///
+/// # Why `-t` cannot do to the picture what `-shortest` does
+///
+/// MEASURED: under `-c:v copy` the bound carries a consistent **two frames of slack at the tail** —
+/// `-t 4.0` on a 24 fps clip keeps 98 frames, not the 96 the arithmetic suggests, and `-t 2.5` keeps
+/// 62, not 60. (Consistent with the bound being applied to decode timestamps, which lag presentation
+/// by libx264's default B-frame reorder delay; the two-frame figure is measured, that attribution is
+/// not.) So the bound is inclusive at its own end and errs toward keeping picture, which is the
+/// direction that matters here: at
+/// `frame_count / fps` there is nothing past it to keep, and a bound short by a microsecond of
+/// `{:.6}` rounding is nowhere near a frame interval (41 667 µs at 24 fps) of the last frame's
+/// presentation time at `(frame_count - 1) / fps`. Trimming a long soundtrack is unaffected — the
+/// audio is re-encoded, not copied (measured: a 2× track lands at 5.17 s, not 10.33 s).
+fn audio_mux_args(
+    video: &Path,
+    wav: &Path,
+    out: &Path,
+    frame_count: usize,
+    fps: u32,
+) -> Vec<String> {
+    let seconds = frame_count as f64 / f64::from(fps.max(1));
+    vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-y".to_owned(),
+        "-i".to_owned(),
+        video.to_string_lossy().into_owned(),
+        "-i".to_owned(),
+        wav.to_string_lossy().into_owned(),
+        "-c:v".to_owned(),
+        "copy".to_owned(),
+        "-c:a".to_owned(),
+        "aac".to_owned(),
+        "-t".to_owned(),
+        format!("{seconds:.6}"),
+        // Explicit, though it is also ffmpeg's default for a multi-input command: the
+        // container metadata — including the sc-15956 workflow tag written in step 1 —
+        // comes from the VIDEO, never from the WAV. Stated because "the default happens to
+        // be right" is not a property anyone maintains, and the step below it depends on
+        // this one having carried the tag through.
+        "-map_metadata".to_owned(),
+        "0".to_owned(),
+        out.to_string_lossy().into_owned(),
+    ]
 }
 
 /// Write f32 PCM to a canonical 16-bit WAV. Signals already within `[-1, 1]` retain their original
