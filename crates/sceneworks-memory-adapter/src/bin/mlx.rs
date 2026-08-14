@@ -108,14 +108,14 @@ const LTX_RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
 /// validating against LTX's OWN declared envelope instead of accepting any frame count at all.
 const LTX_PROVIDER: &str = "ltx_2_3";
 const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video path";
-/// Historical adapter-owned SC-18810 capture identity. The pinned provider now publishes its own
-/// distinct memory-strategy contract; this arm intentionally remains gated on the historical plan
-/// until SC-18946 atomically promotes a new pin, provider identity, and replacement evidence. Never
-/// relabel the old records with the provider fingerprint.
-const LTX_CALIBRATION_FINGERPRINT: &str = "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1";
+/// Expected provider-owned identity at the permanent inference pin. The adapter always reads the
+/// loaded registry contract and refuses any mismatch; this local expectation merely prevents a
+/// provider re-fingerprint from silently reusing SC-18946's plan and fixtures.
+const LTX_CALIBRATION_FINGERPRINT: &str = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
 /// One fixed seed for every `mlx:ltx_2_3` fixture
-/// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18808`).
-const LTX_SEED: u64 = 18808;
+/// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18946`). Historical SC-18810
+/// evidence remains bound to seed 18808 and is never relabelled.
+const LTX_SEED: u64 = 18946;
 /// LTX's video VAE is x32 spatial and **x8 causal temporal**, so `out_f = 1 + (t_lat - 1) * 8` and
 /// the engine's `validate_request` hard-rejects any `num_frames` that is not `1 + 8k`. Latent
 /// temporal depth — not raw frame count — is the physically motivated regressor for a frames-aware
@@ -1302,7 +1302,7 @@ fn scoped_generate(
     let mut scope = generator
         .begin_memory_strategy_request(context)
         .map_err(|error| format!("begin calibrated request: {error}"))?
-        .ok_or_else(|| "optimized Krea request did not open a memory scope".to_owned())?;
+        .ok_or_else(|| "optimized request did not open a provider memory scope".to_owned())?;
     scope
         .configure_request(&mut request)
         .map_err(|error| format!("configure calibrated request: {error}"))?;
@@ -5308,6 +5308,7 @@ fn ltx_load_spec(
 /// that claims `staged_residency` through a tiled decode is a false attestation. This calls the
 /// production entry point rather than re-deriving either bound, so the arm cannot drift from the
 /// engine it is measuring.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct LtxDecodePlan {
     tiling: Option<TilingConfig>,
@@ -5419,6 +5420,7 @@ impl Drop for LtxInjectedBudget {
     }
 }
 
+#[cfg(test)]
 impl LtxDecodePlan {
     fn resolve(geometry: LtxGeometry) -> Result<Self, String> {
         Self::resolve_against_live_budget(geometry)
@@ -5513,56 +5515,19 @@ impl LtxDecodePlan {
     }
 }
 
-/// The rung this arm can honestly attest, verified against the plan rather than copied from it.
-///
-/// MLX LTX has no selectable residency seam: `supports_sequential_offload: false` is honest about the
-/// SHARED seam and hides the behaviour. sc-10976 makes `Ltx` hold `root`/`gemma_dir` and build the
-/// ~26 GB Gemma text encoder and the AvDiT INSIDE `generate` — TE built, used, dropped and
-/// `clear_cache()`d before the DiT materializes, DiT dropped and cleared before the VAE decode. That
-/// is staged residency, unconditionally and undeclared. `resident` is therefore not a reachable state
-/// for this provider.
-///
-/// `bounded_decode` IS reachable, but it is not selectable — `decode_to_frames` auto-selects it from
-/// the geometry (sc-18810). The plan therefore declares which rung it expects and this fails closed
-/// when the engine disagrees, rather than stamping whichever rung the plan asked for.
-fn ltx_attested_strategy(request: &Value, decode: LtxDecodePlan) -> Result<Value, String> {
-    let rung = protocol::planned_rung(request)?;
-    let measured = decode.rung();
-    if rung != measured {
-        return Err(format!(
-            "the pinned MLX LTX-2.3 provider exposes no residency seam and auto-selects its decode \
-             tiling from the geometry, so its rung is a FUNCTION of the request: this geometry \
-             engages {measured:?} (writable frame cap {}, tiling {}), and the plan declared \
-             {rung:?}",
-            decode.writable_frame_cap,
-            if decode.tiling.is_some() {
-                "selected"
-            } else {
-                "single-pass"
-            }
-        ));
-    }
-    let parameters = protocol::strategy_parameters(request)?;
-    if !parameters.is_empty() {
-        return Err(format!(
-            "the MLX LTX-2.3 decode tiling is auto-selected from the geometry, so no rung on this \
-             arm takes strategy parameters; got {parameters:?}"
-        ));
-    }
-    let strategy = json!({
-        "rung": measured,
-        "engagedRungs": decode.engaged_rungs(),
-        "parameters": parameters,
-    });
-    let planned_strategy = protocol::planned(request)?
-        .get("strategy")
-        .ok_or_else(|| "planned.strategy must be present".to_owned())?;
-    if planned_strategy != &strategy {
-        return Err(format!(
-            "plan/provider strategy mismatch: plan={planned_strategy}, MLX adapter measured={strategy}"
-        ));
-    }
-    Ok(strategy)
+/// Bind the plan to the provider contract's actual engaged composition. SC-19109 made bounded
+/// decode an explicit request-scoped control; the adapter must no longer infer the rung from the
+/// host-dependent automatic selector used by historical SC-18810 captures.
+fn ltx_attested_strategy(
+    request: &Value,
+    selection: &MemorySelection,
+    contract: &mlx_gen::gen_core::MemoryProviderContract,
+) -> Result<Value, String> {
+    attested_strategy(
+        request,
+        selection,
+        &contract.engaged_composition(selection.strategy),
+    )
 }
 
 fn ltx_complete_sweep(request: &Value) -> Result<Value, String> {
@@ -5757,6 +5722,7 @@ fn ltx_staging_is_proven(
 /// `resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells` pins the decision
 /// against all 69 committed MLX image records and production's scaled foreign-reserve currency:
 /// 62 record predictions change and 54 host-grid decisions flip from refusal to admission.
+#[cfg(test)]
 fn ltx_predicted_peak_bytes(
     conditioning: PhaseMemory,
     denoise: PhaseMemory,
@@ -5765,58 +5731,236 @@ fn ltx_predicted_peak_bytes(
     video_predicted_peak_bytes(conditioning, denoise, decode).json()
 }
 
-fn ltx_scenarios(blocker: &str) -> Value {
-    Value::Array(
-        [
-            "exact_fit",
-            "unknown_budget",
-            "stale_evidence",
-            "warm_repeat",
-            "cancel",
-            "error",
-        ]
-        .into_iter()
-        .map(|name| json!({ "name": name, "result": "not_run", "reason": blocker }))
-        .chain([
-            json!({ "name": "loadability", "result": "passed" }),
-            json!({ "name": "overlay", "result": "not_run", "reason": blocker }),
-        ])
-        .collect(),
-    )
+fn ltx_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    geometry: LtxGeometry,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("text_to_video".to_owned()),
+        has_reference: false,
+        use_pid: false,
+        has_phases: true,
+        geometry: MemoryGeometry {
+            width: geometry.width,
+            height: geometry.height,
+            batch: 1,
+            frames: geometry.frames,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18946@{}", protocol::INFERENCE_PIN),
+    }
 }
 
-/// The `mlx:ltx_2_3` arm (sc-18808) — the first arm in this adapter that drives a VIDEO job.
-///
-/// It is deliberately `gated`, not `runtime_complete`. `runtime_complete` requires `exact_fit`,
-/// `unknown_budget` and `stale_evidence` to PASS, and each of those is an assertion about a
-/// registered admission check. `mlx-gen-ltx` registers no `MemoryStrategyContract` at the pin, so
-/// there is no admission check to interrogate and no provider calibration identity to compare
-/// against — emitting a runtime-complete receipt would be claiming three scenarios that no code
-/// executed. What the arm DOES prove, on real weights: the render runs at a multi-frame geometry,
-/// the measured peak is bounded by the staged-residency claim rather than by the sum of the two
-/// giants, the output is deterministic across a warm repeat, and that determinism envelope is
-/// breachable.
-///
-/// sc-18864: the missing contract is now the ONLY thing gating this receipt. `predictedPeakBytes`
-/// was also hardcoded `null`, an independent block on the record ever seeding an estimate; it is
-/// derived from the arm's own measured phases by [`ltx_predicted_peak_bytes`] and needs no
-/// contract. When `mlx-gen-ltx` registers a `MemoryStrategyContract` the six `not_run` scenarios
-/// become runnable and this arm can claim `runtime_complete` with no further change here.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LtxLifecycleMetrics {
+    clean_warm_peak: u64,
+    clean_post_cleanup: AllocatorState,
+    maximum_error: f64,
+    mean_error: f64,
+    rms_error: f64,
+    max_fault_post_cleanup: AllocatorState,
+    max_recovery_peak: u64,
+    max_recovery_post_cleanup: AllocatorState,
+}
+
+/// Execute the provider-owned warm/cancel/error request scope on the exact selected rung. One
+/// cancellation and one injected error target the rung's binding phase, and each is followed by a
+/// deterministic recovery render plus allocator bounds against a clean warm control.
+fn verify_ltx_lifecycle(
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    selected: &[Image],
+    geometry: LtxGeometry,
+    fps: u32,
+    seed: u64,
+) -> Result<LtxLifecycleMetrics, String> {
+    clear_cache();
+    reset_peak_memory();
+    let (clean_warm, _, _) = video_frames(scoped_generate(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let bounds = LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(selected, &clean_warm)?;
+    if !ltx_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "LTX-2.3 clean warm control exceeded the determinism envelope: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    let mut metrics = LtxLifecycleMetrics {
+        clean_warm_peak,
+        clean_post_cleanup,
+        maximum_error,
+        mean_error,
+        rms_error,
+        ..Default::default()
+    };
+    let fault_phase = if context.selection.strategy == MemoryStrategy::BoundedDecode {
+        MemoryPhase::Decode
+    } else {
+        MemoryPhase::Denoise
+    };
+
+    let cancelled = ltx_request(geometry, fps, seed);
+    let cancel_signal = cancelled.cancel.clone();
+    let mut cancel_triggered = false;
+    let cancel_error = scoped_generate(generator, cancelled, context, None, &mut |progress| {
+        let at_boundary = match fault_phase {
+            MemoryPhase::Denoise => matches!(progress, Progress::Step { current: 1, .. }),
+            MemoryPhase::Decode => matches!(progress, Progress::Decoding),
+            _ => false,
+        };
+        if at_boundary && !cancel_triggered {
+            cancel_triggered = true;
+            cancel_signal.cancel();
+        }
+    })
+    .expect_err("in-flight LTX cancellation must fail");
+    if !cancel_triggered || !cancel_error.to_ascii_lowercase().contains("cancel") {
+        return Err(format!(
+            "LTX-2.3 cancellation did not return the typed path at {fault_phase:?}: triggered={cancel_triggered}, error={cancel_error}"
+        ));
+    }
+    clear_cache();
+    let cancel_cleanup = AllocatorState::capture_current();
+    metrics.max_fault_post_cleanup = cancel_cleanup;
+    if !bounds.allows_retained(cancel_cleanup) {
+        return Err(format!(
+            "LTX-2.3 cancellation retained {cancel_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    reset_peak_memory();
+    let (cancel_recovery, _, _) = video_frames(scoped_generate(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let cancel_recovery_peak = get_peak_memory() as u64;
+    metrics.max_recovery_peak = cancel_recovery_peak;
+    if !bounds.allows_warm_peak(cancel_recovery_peak) {
+        return Err(format!(
+            "LTX-2.3 post-cancel recovery peaked at {cancel_recovery_peak}, above clean warm {clean_warm_peak} plus 2%"
+        ));
+    }
+    clear_cache();
+    let cancel_recovery_cleanup = AllocatorState::capture_current();
+    metrics.max_recovery_post_cleanup = cancel_recovery_cleanup;
+    if !bounds.allows_retained(cancel_recovery_cleanup) {
+        return Err(format!(
+            "LTX-2.3 post-cancel recovery retained {cancel_recovery_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    let cancel_quality = video_max_mean_rms_abs(selected, &cancel_recovery)?;
+    if !ltx_quality_passes(cancel_quality.0, cancel_quality.1, cancel_quality.2) {
+        return Err("LTX-2.3 cancellation cleanup changed the warm recovery clip".to_owned());
+    }
+
+    let injected = scoped_generate(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        Some(fault_phase),
+        &mut |_| {},
+    )
+    .expect_err("injected LTX error must fail");
+    if !injected.contains("injected memory-strategy calibration error") {
+        return Err(format!(
+            "LTX-2.3 error injection returned the wrong error at {fault_phase:?}: {injected}"
+        ));
+    }
+    clear_cache();
+    let error_cleanup = AllocatorState::capture_current();
+    metrics.max_fault_post_cleanup.active = metrics
+        .max_fault_post_cleanup
+        .active
+        .max(error_cleanup.active);
+    metrics.max_fault_post_cleanup.cache = metrics
+        .max_fault_post_cleanup
+        .cache
+        .max(error_cleanup.cache);
+    if !bounds.allows_retained(error_cleanup) {
+        return Err(format!(
+            "LTX-2.3 injected error retained {error_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    reset_peak_memory();
+    let (error_recovery, _, _) = video_frames(scoped_generate(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let error_recovery_peak = get_peak_memory() as u64;
+    metrics.max_recovery_peak = metrics.max_recovery_peak.max(error_recovery_peak);
+    if !bounds.allows_warm_peak(error_recovery_peak) {
+        return Err(format!(
+            "LTX-2.3 post-error recovery peaked at {error_recovery_peak}, above clean warm {clean_warm_peak} plus 2%"
+        ));
+    }
+    clear_cache();
+    let error_recovery_cleanup = AllocatorState::capture_current();
+    metrics.max_recovery_post_cleanup.active = metrics
+        .max_recovery_post_cleanup
+        .active
+        .max(error_recovery_cleanup.active);
+    metrics.max_recovery_post_cleanup.cache = metrics
+        .max_recovery_post_cleanup
+        .cache
+        .max(error_recovery_cleanup.cache);
+    if !bounds.allows_retained(error_recovery_cleanup) {
+        return Err(format!(
+            "LTX-2.3 post-error recovery retained {error_recovery_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    let error_quality = video_max_mean_rms_abs(selected, &error_recovery)?;
+    if !ltx_quality_passes(error_quality.0, error_quality.1, error_quality.2) {
+        return Err("LTX-2.3 error cleanup changed the warm recovery clip".to_owned());
+    }
+    Ok(metrics)
+}
+
+/// The `mlx:ltx_2_3` SC-18946 arm. SC-19109 moved strategy ownership into the provider: this path
+/// reads the exact registry contract, proves the loaded generator exposes the same contract, drives
+/// the selected request scope, and executes every runtime-complete admission/lifecycle scenario.
 fn run_ltx(request: &Value) -> Result<Value, String> {
     let geometry = validate_ltx_target(request)?;
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
-    // ORDER IS LOAD-BEARING (sc-18810 review). Every check that is a pure function of the REQUEST
-    // runs first; `LtxDecodePlan::resolve` runs last of the pre-weight checks because it is the only
-    // one whose verdict depends on the HOST — it budgets the decode against `get_memory_limit()`, so
-    // the same plan row resolves single-pass on a 128 GiB Mac and tiled on a 16 GiB CI runner. A
-    // malformed plan must be refused for the malformation, on every machine, rather than for
-    // whichever rung the local memory budget happened to select first.
     let load_shape = planned_load_shape(request)?;
     if load_shape != LoadShape::EagerMaterialization {
         return Err(
-            "the pinned mlx-gen-ltx crate never reads LoadSpec::load_shape — it rebuilds the text \
-             encoder and transformer inside every generate rather than materializing them through a \
-             deferred block schedule — so only eager_materialization can be truthfully attested"
+            "the pinned mlx-gen-ltx contract calibrates only eager_materialization; the provider \
+             stages text, transformer and decode phases inside each request rather than exposing a \
+             deferred block loader"
                 .to_owned(),
         );
     }
@@ -5839,8 +5983,6 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
              implements {LTX_CALIBRATION_FINGERPRINT}"
         ));
     }
-    let decode_plan = LtxDecodePlan::resolve(geometry)?;
-    let strategy = ltx_attested_strategy(request, decode_plan)?;
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, tier, &selection)?;
     // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
@@ -5861,21 +6003,75 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
 
     let registry =
         mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
-    if registry
+    let contract = registry
         .memory_strategy_contract(LTX_PROVIDER, &spec)
         .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
-        .is_some()
-    {
-        return Err(
-            "the pinned MLX LTX-2.3 provider now registers a memory-strategy contract; this arm's \
-             gated receipt asserts that it does not, so it must be upgraded to read the contract \
-             before it can keep emitting records"
-                .to_owned(),
-        );
+        .ok_or_else(|| "pinned MLX LTX-2.3 provider has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned LTX-2.3 contract rejected planned selection: {error}"))?;
+    let strategy = ltx_attested_strategy(request, &selection, &contract)?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
     }
     let generator = registry
         .load(LTX_PROVIDER, &spec)
         .map_err(|error| format!("load real LTX-2.3 {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded LTX-2.3 generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded LTX-2.3 generator contract differs from the registry contract".to_owned(),
+        );
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = ltx_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        hardware_bytes,
+        1,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&context),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("LTX-2.3 admission rejected a fitting pre-measurement budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("LTX-2.3 admission accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-ltx-2-3-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("LTX-2.3 admission accepted stale calibration evidence".to_owned());
+    }
 
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
@@ -5892,28 +6088,30 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let pre_rung_active = get_active_memory() as u64;
     let pre_rung_cache = get_cache_memory() as u64;
-    let (measured, output_fps, has_audio) = video_frames(
-        generator
-            .generate(&ltx_request(geometry, fps, seed), &mut |progress| {
-                match progress {
-                    // LTX emits no boundary between the staged text phase and the DiT build, so this
-                    // phase legitimately spans BOTH giants' materializations; the staging bound below
-                    // is what proves they did not co-reside.
-                    Progress::Step { current: 1, .. } => {
-                        conditioning.set(PhaseMemory::capture());
-                        denoise_entry.set(AllocatorState::capture_current());
-                        reset_peak_memory();
-                    }
-                    Progress::Decoding => {
-                        denoise.set(PhaseMemory::capture());
-                        decode_entry.set(AllocatorState::capture_current());
-                        reset_peak_memory();
-                    }
-                    _ => {}
+    let (measured, output_fps, has_audio) = video_frames(scoped_generate(
+        generator.as_ref(),
+        ltx_request(geometry, fps, seed),
+        &context,
+        None,
+        &mut |progress| {
+            match progress {
+                // LTX emits no boundary between the staged text phase and the DiT build, so this
+                // phase legitimately spans BOTH giants' materializations; the staging bound below
+                // is what proves they did not co-reside.
+                Progress::Step { current: 1, .. } => {
+                    conditioning.set(PhaseMemory::capture());
+                    denoise_entry.set(AllocatorState::capture_current());
+                    reset_peak_memory();
                 }
-            })
-            .map_err(|error| format!("generate measured LTX-2.3 render: {error}"))?,
-    )?;
+                Progress::Decoding => {
+                    denoise.set(PhaseMemory::capture());
+                    decode_entry.set(AllocatorState::capture_current());
+                    reset_peak_memory();
+                }
+                _ => {}
+            }
+        },
+    )?)?;
     let decode = PhaseMemory::capture();
     let conditioning = conditioning.get();
     let denoise = denoise.get();
@@ -5956,58 +6154,56 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         ));
     }
 
-    // Warm repeat determinism on this exact loaded provider. LTX rebuilds both giants per generate,
-    // so "warm" here means a warm PROCESS, not a warm working set — the repeat pays the full staged
-    // load again, which is why exactly one repeat is executed.
-    clear_cache();
-    reset_peak_memory();
-    let (repeat, _, _) = video_frames(
-        generator
-            .generate(&ltx_request(geometry, fps, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm LTX-2.3 repeat: {error}"))?,
-    )?;
-    let warm_peak = get_peak_memory() as u64;
-    clear_cache();
-    let warm_post_cleanup = AllocatorState::capture_current();
-    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &repeat)?;
-    if !ltx_quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "LTX-2.3 warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}"
-        ));
+    let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("LTX-2.3 admission rejected an exact-fit calibrated budget".to_owned());
     }
-    // Falsifiability: the envelope the clip just passed must be breachable. A gated receipt keeps
-    // `negativeMutation` null, so the measured breach lands in diagnostics, not in the field.
+
+    let lifecycle =
+        verify_ltx_lifecycle(generator.as_ref(), &context, &measured, geometry, fps, seed)?;
+    let maximum_error = lifecycle.maximum_error;
+    let mean_error = lifecycle.mean_error;
+    let rms_error = lifecycle.rms_error;
+
+    // Runtime-complete keeps the schema's unexecuted mutation slot null. The adapter still proves
+    // falsifiability and records the breach in diagnostics.
     let mutated = measured
         .iter()
         .map(qwen_negative_mutation)
         .collect::<Vec<_>>();
-    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &repeat)?;
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &measured)?;
     if ltx_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err("LTX-2.3 output mutation did not breach the determinism envelope".to_owned());
     }
 
-    let blocker = concat!(
-        "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no ",
-        "admission check, no calibration identity and no request scope: the exact_fit, ",
-        "unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run ",
-        "against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm ",
-        "repeat determinism and its negative mutation are attested in observedMemory, quality and ",
-        "diagnostics instead"
-    );
-    let scenarios = ltx_scenarios(blocker);
     let mut fragment = json!({
-        "status": "gated",
+        "status": "runtime_complete",
         "strategy": strategy,
-        "loadShape": load_shape_key(LoadShape::EagerMaterialization),
+        "loadShape": load_shape_key(calibration.load_shape),
         "artifact": {
             "repository": repository,
             "resolvedRevision": revision,
             "variant": tier,
         },
         "sweep": ltx_complete_sweep(request)?,
-        "scenarios": scenarios,
-        "predictedPeakBytes": ltx_predicted_peak_bytes(conditioning, denoise, decode),
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider contract rejected a zero/unknown budget" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider contract rejected a mutated calibration fingerprint" },
+            { "name": "warm_repeat", "result": "passed", "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope" },
+            { "name": "cancel", "result": "passed", "reason": "typed cancellation at the selected rung boundary cleaned up and recovered within the clean-warm bounds", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "provider fault injection at the selected rung boundary cleaned up and recovered within the clean-warm bounds", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -6015,7 +6211,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
             "overall": overall.json(),
         },
         "quality": {
-            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
             "identicalInputs": true,
             "result": "passed",
             "maximumError": maximum_error,
@@ -6031,9 +6227,9 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}+gemma"),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:ltx-2-3-staged-video",
+            "memory-mlx-adapter:ltx-2-3-provider-contract-video",
             "executed",
-            [blocker.to_owned()],
+            [],
             [
                 ("preRungActiveAfterClear", "bytes", pre_rung_active),
                 ("preRungCacheAfterClear", "bytes", pre_rung_cache),
@@ -6056,20 +6252,23 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("stagedTransformerBytes", "bytes", transformer_bytes),
                 ("costagedGiantsBytes", "bytes", costaged_bytes),
                 ("tierArtifactBytes", "bytes", tier_bytes),
-                ("warmRepeatPeak", "bytes", warm_peak),
-                ("warmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
-                ("warmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("warmRepeatPeak", "bytes", lifecycle.clean_warm_peak),
+                ("warmRepeatPostCleanupActive", "bytes", lifecycle.clean_post_cleanup.active),
+                ("warmRepeatPostCleanupCache", "bytes", lifecycle.clean_post_cleanup.cache),
+                ("lifecycleMaxFaultPostCleanupActive", "bytes", lifecycle.max_fault_post_cleanup.active),
+                ("lifecycleMaxFaultPostCleanupCache", "bytes", lifecycle.max_fault_post_cleanup.cache),
+                ("lifecycleMaxRecoveryPeak", "bytes", lifecycle.max_recovery_peak),
+                ("lifecycleMaxRecoveryPostCleanupActive", "bytes", lifecycle.max_recovery_post_cleanup.active),
+                ("lifecycleMaxRecoveryPostCleanupCache", "bytes", lifecycle.max_recovery_post_cleanup.cache),
                 ("renderedFrames", "count", u64::from(geometry.frames)),
                 ("latentTemporalDepth", "count", u64::from(geometry.latent_frames)),
                 ("latentTokens", "count", u64::from(geometry.latent_frames) * u64::from(geometry.width / 32) * u64::from(geometry.height / 32)),
                 ("outputFps", "count", u64::from(fps)),
                 ("audioTrackDecoded", "count", u64::from(has_audio)),
-                // The rung-2 engagement boundary, read from the engine's own selector at this exact
-                // geometry rather than inferred from the measured decode peak (sc-18810).
-                ("decodeTilingEngaged", "count", u64::from(decode_plan.tiling.is_some())),
-                ("decodeWritableFrameCap", "count", decode_plan.writable_frame_cap.max(0) as u64),
-                ("decodeTileSpatialPx", "count", decode_plan.spatial_tile_px()),
-                ("decodeTileFrames", "count", decode_plan.temporal_tile_frames()),
+                ("decodeTilingEngaged", "count", u64::from(context.selection.strategy == MemoryStrategy::BoundedDecode)),
+                ("decodeWritableFrameCap", "count", VaeTiling::LTX.writable_frame_cap(geometry.height as i32, geometry.width as i32).max(0) as u64),
+                ("decodeTileSpatialPx", "count", u64::from(context.selection.parameters.decode_tile_edge.unwrap_or(0))),
+                ("decodeTileOverlapPx", "count", u64::from(context.selection.parameters.decode_overlap.unwrap_or(0))),
                 ("mlxMemoryLimitBytes", "bytes", get_memory_limit() as u64),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
@@ -7145,37 +7344,45 @@ mod qwen_evidence_tests {
     }
 }
 
-/// sc-18808 — the first VIDEO arm, and the regression suite that keeps the six IMAGE arms strict
-/// while it exists.
+/// LTX video-arm regression suite. Historical SC-18810 artifacts stay immutable while this suite
+/// follows the permanent provider contract used by SC-18946.
 #[cfg(test)]
 mod ltx_tests {
     use super::*;
 
-    /// SC-19109 deliberately replaced the historical no-contract provider with a loaded-route LTX
-    /// contract. A synthetic path with no checkpoint identity must now fail closed rather than
-    /// resolving `None`: the registered contract verifies that the requested tier agrees with the
-    /// checkpoint itself. The SC-18946 campaign upgrades `run_ltx` against a real loaded provider;
-    /// until that atomic pin-and-evidence change lands, the historical arm remains `gated` and must
-    /// not pretend a weights-free fixture is runtime evidence.
-    #[test]
-    fn the_pinned_ltx_provider_rejects_the_historical_weights_free_contract_probe() {
-        assert_eq!(
-            mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT,
-            "sc-19109-ltx-2-3-mlx-memory-ladder-v1"
-        );
+    fn ltx_fixture_contract(quant: Option<Quant>) -> mlx_gen::gen_core::MemoryProviderContract {
         let registry = mlx_gen_ltx::provider_registry().unwrap();
-        let error = registry
-            .memory_strategy_contract(
-                LTX_PROVIDER,
-                &flux2_tests::weights_free_spec(Some(Quant::Q8)),
-            )
-            .expect_err("the registered LTX contract must validate checkpoint tier identity");
-        assert!(
-            error
-                .to_string()
-                .contains("requested Q8 does not match the checkpoint tier None"),
-            "unexpected loaded-contract validation error: {error}"
-        );
+        let fixture = registry
+            .memory_contract_fixture_registrations()
+            .find(|fixture| fixture.provider_id == LTX_PROVIDER)
+            .expect("the provider-owned LTX contract fixture");
+        (fixture.contract)(&flux2_tests::weights_free_spec(quant)).unwrap()
+    }
+
+    #[test]
+    fn the_pinned_ltx_provider_fixture_exposes_the_campaign_rungs_and_exact_parameters() {
+        for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
+            let contract = ltx_fixture_contract(quant);
+            assert_eq!(contract.provider_id, LTX_PROVIDER);
+            assert_eq!(
+                contract.engaged_composition(MemoryStrategy::StagedResidency),
+                [MemoryStrategy::Resident, MemoryStrategy::StagedResidency]
+            );
+            assert_eq!(
+                contract.engaged_composition(MemoryStrategy::BoundedDecode),
+                [
+                    MemoryStrategy::Resident,
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedDecode,
+                ]
+            );
+            let decode = contract.capability(MemoryStrategy::BoundedDecode).unwrap();
+            assert_eq!(
+                decode.parameters.decode_tile_edges,
+                vec![768, 640, 512, 448, 384, 320, 256, 192]
+            );
+            assert_eq!(decode.parameters.decode_overlaps, vec![64]);
+        }
     }
 
     /// A minimal, otherwise-valid LTX target. Every field the arm reads before it touches the
@@ -7354,14 +7561,9 @@ mod ltx_tests {
             // machine-independent half of the message; the rung itself is pinned, at a fixed
             // budget, by `the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary`.
             (
-                "/planned/strategy/rung",
-                json!("resident"),
-                "its rung is a FUNCTION of the request",
-            ),
-            (
                 "/planned/loadShape",
                 json!("deferred_materialization"),
-                "never reads LoadSpec::load_shape",
+                "calibrates only eager_materialization",
             ),
             (
                 "/planned/calibrationFingerprint",
@@ -7397,13 +7599,7 @@ mod ltx_tests {
         }
     }
 
-    /// The ORDER of `run_ltx`'s pre-weight checks, pinned host-independently.
-    ///
-    /// `LtxDecodePlan::resolve` budgets against `get_memory_limit()`, so it is the one pre-weight
-    /// check whose verdict depends on the machine. A request that is malformed AND rung-mismatched
-    /// must be refused for the malformation on every host — otherwise the same bad plan produces a
-    /// different reason on a 128 GiB Mac than on a CI runner, and the refusal is not reproducible.
-    /// Reverting the order makes this fail with the rung message instead.
+    /// Pure request malformations must still fail before environment or weight resolution.
     #[test]
     fn the_ltx_arm_refuses_a_malformed_plan_before_it_consults_the_host_budget() {
         for (pointer, value, expected) in [
@@ -7420,7 +7616,7 @@ mod ltx_tests {
             (
                 "/planned/loadShape",
                 json!("deferred_materialization"),
-                "never reads LoadSpec::load_shape",
+                "calibrates only eager_materialization",
             ),
             (
                 "/planned/target/tier",
@@ -7429,40 +7625,24 @@ mod ltx_tests {
             ),
         ] {
             let mut request = ltx_request_json(768, 512, 97);
-            // Rung-mismatched as well: `resident` is unreachable on this provider at ANY geometry,
-            // so whichever check runs first is the one that speaks.
-            request["planned"]["strategy"]["rung"] = json!("resident");
             *request.pointer_mut(pointer).unwrap() = value.clone();
             let error = run_ltx(&request).expect_err("a malformed LTX plan must be refused");
             assert!(
                 error.contains(expected),
-                "{pointer}={value} must be refused for the malformation, not the rung: {error}"
-            );
-            assert!(
-                !error.contains("is a FUNCTION of the request"),
-                "{pointer}={value} was refused by the host-dependent rung check first: {error}"
+                "{pointer}={value} must be refused for the malformation: {error}"
             );
         }
     }
-
-    /// A single-pass decode plan, stated rather than resolved.
-    ///
-    /// Both tests below are about what `ltx_attested_strategy` does GIVEN a single-pass decode. If
-    /// they resolved against the host instead, the input would silently become `bounded_decode` on a
-    /// machine whose memory budget tiles 768x512 x 97 — which is what a hosted CI runner does — and
-    /// the tests would then be asserting something they were never written to assert.
-    const SINGLE_PASS_768X512: LtxDecodePlan = LtxDecodePlan {
-        tiling: None,
-        writable_frame_cap: 682,
-    };
 
     #[test]
     fn the_ltx_arm_refuses_a_parameterized_staged_residency_row() {
         let mut request = ltx_request_json(768, 512, 97);
         request["planned"]["strategy"]["parameters"] = json!({ "decodeTileEdge": 512 });
-        let error = ltx_attested_strategy(&request, SINGLE_PASS_768X512)
-            .expect_err("no rung on this arm takes strategy parameters at the pin");
-        assert!(error.contains("takes strategy parameters"), "{error}");
+        let selection = planned_selection(&request).unwrap();
+        let error = ltx_fixture_contract(Some(Quant::Q8))
+            .validate_selection(&selection)
+            .expect_err("staged residency has no decode parameter domain");
+        assert!(error.to_string().contains("decode"), "{error}");
     }
 
     /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would
@@ -7470,7 +7650,10 @@ mod ltx_tests {
     #[test]
     fn the_ltx_arm_attests_exactly_resident_plus_staged_residency() {
         let request = ltx_request_json(768, 512, 97);
-        let strategy = ltx_attested_strategy(&request, SINGLE_PASS_768X512).unwrap();
+        let selection = planned_selection(&request).unwrap();
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        contract.validate_selection(&selection).unwrap();
+        let strategy = ltx_attested_strategy(&request, &selection, &contract).unwrap();
         assert_eq!(strategy["rung"], "staged_residency");
         assert_eq!(
             strategy["engagedRungs"],
@@ -7610,13 +7793,19 @@ mod ltx_tests {
             "at the cap and inside the memory budget the decode must stay single-pass"
         );
         assert_eq!(single.rung(), "staged_residency");
+        // SC-19109 replaces historical host inference with an explicit provider-owned selection:
+        // the same geometry can deliberately request bounded decode with its exact carrier tuple.
         let mut request = ltx_request_json(1280, 704, 297);
-        request["planned"]["strategy"]["rung"] = json!("bounded_decode");
-        request["planned"]["strategy"]["engagedRungs"] =
-            json!(["resident", "staged_residency", "bounded_decode"]);
-        let error = ltx_attested_strategy(&request, single)
-            .expect_err("a plan may not claim a rung the geometry does not engage");
-        assert!(error.contains("is a FUNCTION of the request"), "{error}");
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_decode",
+            "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+            "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 }
+        });
+        let selection = planned_selection(&request).unwrap();
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        contract.validate_selection(&selection).unwrap();
+        let attested = ltx_attested_strategy(&request, &selection, &contract).unwrap();
+        assert_eq!(attested, request["planned"]["strategy"]);
 
         // The one-sided half of the claim, asserted rather than assumed: the write cap is a CEILING
         // on single-pass frames, not the place tiling starts. A smaller host tiles the very same
@@ -7946,42 +8135,28 @@ mod ltx_tests {
             .contains("frame-count mismatch"));
     }
 
-    /// A gated receipt must not understate what it executed. Loadability has nothing to do with the
-    /// missing memory-strategy seam and genuinely runs, so it must NOT come back `not_run` — while
-    /// the six that truly have no seam must, each carrying the stated reason.
     #[test]
-    fn the_ltx_receipt_reports_loadability_as_executed_and_the_rest_as_blocked() {
-        let scenarios = ltx_scenarios("the pinned provider registers no contract");
-        let by_name: std::collections::BTreeMap<&str, &Value> = scenarios
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|scenario| (scenario["name"].as_str().unwrap(), scenario))
-            .collect();
-        assert_eq!(
-            by_name.len(),
-            8,
-            "all eight required scenarios, uniquely named"
+    fn the_ltx_runtime_context_binds_the_exact_video_route_and_selection() {
+        let request = ltx_request_json(1280, 704, 305);
+        let selection = planned_selection(&request).unwrap();
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        let calibration = contract.calibration.as_ref().unwrap();
+        let context = ltx_context(
+            selection,
+            calibration,
+            &calibration.fingerprint,
+            validate_ltx_geometry(1280, 704, 305).unwrap(),
+            64 * 1024 * 1024 * 1024,
+            1,
         );
+        assert_eq!(context.mode.as_key(), "text_to_video");
+        assert!(context.has_phases);
+        assert_eq!(context.geometry.frames, 305);
+        assert_eq!(context.selection.strategy, MemoryStrategy::StagedResidency);
         assert_eq!(
-            by_name["loadability"],
-            &json!({ "name": "loadability", "result": "passed" })
+            context.evidence_revision,
+            format!("sc-18946@{}", protocol::INFERENCE_PIN)
         );
-        for name in [
-            "exact_fit",
-            "unknown_budget",
-            "stale_evidence",
-            "warm_repeat",
-            "cancel",
-            "error",
-            "overlay",
-        ] {
-            assert_eq!(by_name[name]["result"], "not_run", "{name}");
-            assert_eq!(
-                by_name[name]["reason"], "the pinned provider registers no contract",
-                "{name} must carry the stated reason, not an empty refusal"
-            );
-        }
     }
 
     /// The staged-residency bound is a real inequality over real byte counts, not a comment.
