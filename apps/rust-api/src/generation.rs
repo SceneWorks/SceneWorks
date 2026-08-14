@@ -591,6 +591,33 @@ pub(crate) async fn create_video_job(
             job_payload.insert("duration".to_owned(), contract_number(duration));
         }
     }
+    // The model's declared `limits.hardMinSteps`, enforced at enqueue (sc-19426). A FOURTH axis: the
+    // three gates around it bound how long the clip is and how much conditioning media it carries,
+    // never how it is SAMPLED — so a MiniMax-H3 request at exactly its 5.1667s floor and its one
+    // advertised 24 fps, with no references at all, clears every one of them carrying
+    // `advanced.steps = 1`, and then fails in the scheduler, which needs at least two sigma grid
+    // points to have a single model evaluation between them. Until this key existed the constraint
+    // could only be written as a manifest comment, and a comment enforces nothing.
+    //
+    // Rejected, never clamped, for the duration cap's reason: raising the step count for the caller
+    // doubles the compute they asked for with no error and no signal.
+    //
+    // Same placement rationale as the three gates above — keyed off the post-preset `model_id` and
+    // the resolved entry, with the count read off `job_payload` so the gate judges the value
+    // actually enqueued. Unlike duration and fps there is no write-back and no resolved default:
+    // `advanced` is a verbatim passthrough map, so an omitted `steps` means the engine picks, which
+    // is not a value this gate may invent (see `requested_steps`).
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(steps) = job_payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(requested_steps)
+        {
+            if let Some(message) = steps_limit_error(&model_id, steps, entry) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
+    }
     // The model's declared `defaults.fps` + `limits.fps`, the other half of `frames = duration ×
     // fps` (sc-12347). The cap above closes the *duration* axis only: a legally-5s mochi_1 request
     // (cap 5 ✓) at 60 fps is 301 frames — double the shipped default's 151 — and `301 % 6 == 1`

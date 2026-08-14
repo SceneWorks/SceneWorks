@@ -21,7 +21,8 @@ use std::f32::consts::PI;
 use std::path::Path;
 
 use sceneworks_core::video_request::{
-    duration_limit_error, fps_limit_error, is_ltx_model, reference_limit_error, VideoRequest,
+    duration_limit_error, fps_limit_error, is_ltx_model, reference_limit_error, requested_steps,
+    steps_limit_error, VideoRequest,
 };
 
 // Used only by the video generation metrics builders below, which are themselves
@@ -406,6 +407,23 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
         fps_limit_error(&request.model, request.fps, &request.model_manifest_entry)
     {
         return Err(WorkerError::InvalidPayload(message));
+    }
+    // The model's declared `limits.hardMinSteps` (sc-19426). Bounds the SAMPLING axis, which neither
+    // bound above touches: `frames = duration × fps` says nothing about how many denoise steps run
+    // over those frames, so a request legal on both can still hand the engine a schedule it cannot
+    // build. MiniMax-H3's sigma grid is `linspace(1, 0, steps)` and one grid point yields zero model
+    // evaluations, so its scheduler raises rather than rendering.
+    //
+    // The API gate is the one that returns a caller a 400, but it only covers what IT enqueues — a
+    // job replayed from a pre-sc-19426 row, or produced by any future non-HTTP path, reaches the
+    // engine through here. Read through `requested_steps`, the same reader `advanced_opt_u32` is,
+    // so this judges exactly the number the adapters go on to pass down.
+    if let Some(steps) = requested_steps(&request.advanced) {
+        if let Some(message) =
+            steps_limit_error(&request.model, steps, &request.model_manifest_entry)
+        {
+            return Err(WorkerError::InvalidPayload(message));
+        }
     }
     // The model's declared reference-media caps (sc-17160). Bounds a THIRD axis the two above do
     // not touch: how much conditioning media the engine is handed. The API gate is the one that

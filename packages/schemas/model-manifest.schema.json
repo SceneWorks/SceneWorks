@@ -672,6 +672,13 @@
                 "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_min_duration" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = duration_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = duration_limit_error(" }],
                 "description": "Hard clip-duration FLOOR in seconds; API and worker reject rather than lengthen. The mirror of hardMaxDuration, and it exists because a family can have a floor its own engine refuses below rather than pads up to: MiniMax-H3's frame lattice is 17n+5 clamped to 124..=345 frames, so its shortest renderable clip is 124/24 = 5.1667 s and a 3 s request is REFUSED (sc-17158). ABSENT MEANS NO FLOOR, so every model that declares nothing is byte-for-byte unchanged — the same never-block-without-evidence posture hardMaxDuration takes."
               },
+              "hardMinSteps": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_min_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
+                "description": "Hard FLOOR on `advanced.steps` (denoise / sampling steps); API and worker reject rather than raise the count. The sampling-axis sibling of hardMinDuration, and it exists because a family can need more than one step to build a schedule at all: MiniMax-H3's sigma grid is linspace(1, 0, steps) with the terminal 0 as a GRID POINT, so N steps drive N-1 model evaluations and its scheduler raises `num_inference_steps` >= 2 rather than rendering a 1-step request (sc-19426). Enforced on the VIDEO enqueue path — the two gates named in x-sceneworks-readers are the only per-model rejection seams in the app, and the image lane has no counterpart. ABSENT MEANS NO FLOOR, so every model that declares nothing is byte-for-byte unchanged, the same never-block-without-evidence posture hardMinDuration takes. A declared floor must not exceed the model's own defaults.steps."
+              },
               "maxPixels": {
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
