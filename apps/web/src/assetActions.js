@@ -74,6 +74,15 @@ export function suggestedFilename(asset) {
   return `${base}.${ext}`;
 }
 
+// Whether "Save without workflow" is worth offering for this asset (sc-15953). The workflow
+// envelope only ever rides in a PNG, so for anything else the option would be a control that does
+// nothing — and offering it would imply the file might be carrying one. Deliberately a check on
+// the FORMAT, not on whether this particular file has a chunk: answering that needs the bytes, and
+// the answer is the same either way (a PNG with no chunk saves as a plain copy).
+export function assetCanCarryWorkflow(asset) {
+  return assetExtension(asset) === "png";
+}
+
 // localStorage key + in-memory fallback for the last directory a Save As succeeded in
 // (sc-8737). Persisted across reloads so the next Save As dialog re-opens where the user
 // last saved. localStorage access is guarded (private-mode / non-browser env can throw or
@@ -127,11 +136,24 @@ function resolveAbsolutePath(asset) {
   });
 }
 
+// Ask the file route for a copy with the embedded workflow chunk removed (sc-15953). A bare
+// `<a download>` cannot transform bytes or set headers, so the strip has to happen server-side;
+// this is a query param on the URL the anchor already points at, which means the media ticket
+// remote/LAN mode appends (`?ticket=…`, matched on the PATH by a GET-only allow-list) keeps
+// working with no change to the ticket rules.
+export function stripWorkflowUrl(href) {
+  if (!href) {
+    return href;
+  }
+  return `${href}${href.includes("?") ? "&" : "?"}stripWorkflow=true`;
+}
+
 // Trigger a normal browser download of the asset's served URL. Uses a transient
 // `<a download>` click, which is the portable way to name a cross-origin-safe,
 // same-origin download without a fetch/blob round-trip. Content-agnostic.
-function browserDownload(asset) {
-  const href = assetUrl(asset);
+function browserDownload(asset, { withoutWorkflow = false } = {}) {
+  const base = assetUrl(asset);
+  const href = withoutWorkflow ? stripWorkflowUrl(base) : base;
   if (!href) {
     throw new Error("This asset has no downloadable URL.");
   }
@@ -153,12 +175,12 @@ function browserDownload(asset) {
 //   - Browser/LAN: trigger a normal download of the asset URL. Returns null (there's no
 //     destination path to report).
 // Works for both image and video assets.
-export async function saveAssetAs(asset) {
+export async function saveAssetAs(asset, { withoutWorkflow = false } = {}) {
   if (!asset) {
     throw new Error("An asset is required.");
   }
   if (!isDesktop) {
-    browserDownload(asset);
+    browserDownload(asset, { withoutWorkflow });
     return null;
   }
   const absolutePath = await resolveAbsolutePath(asset);
@@ -168,6 +190,9 @@ export async function saveAssetAs(asset) {
   const args = {
     sourcePath: absolutePath,
     suggestedFilename: suggestedFilename(asset),
+    // sc-15953. Always sent so the desktop command's argument is never absent-by-accident; the
+    // Rust side treats a missing value as false either way.
+    withoutWorkflow,
   };
   if (startDir) {
     args.startDir = startDir;

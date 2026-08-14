@@ -54,6 +54,11 @@ function img2imgPidState(overrides = {}) {
     upscaleFactor: 2,
     upscaleEngine: "realesrgan",
     upscaleSoftness: 0.5,
+    hiresFixEnabled: false,
+    hiresFixSteps: 0,
+    hiresFixDenoisingStrength: 0.7,
+    hiresFixUpscaleBy: 2,
+    hiresFixCfgScale: "",
     // Advanced knobs — everything default except the PiD 2K tier.
     sampler: "default",
     scheduler: "default",
@@ -90,6 +95,39 @@ function img2imgPidState(overrides = {}) {
 }
 
 describe("buildImageJobRequest", () => {
+  it("emits Hires.fix only when enabled and preserves inherit semantics", () => {
+    const enabled = buildImageJobRequest(
+      img2imgPidState({
+        img2imgReferenceAssetId: "",
+        usePid: false,
+        hiresFixEnabled: true,
+        hiresFixSteps: "",
+        hiresFixDenoisingStrength: 0.6,
+        hiresFixUpscaleBy: 1.75,
+        hiresFixCfgScale: "",
+      }),
+    );
+    expect(enabled.hiresFix).toEqual({
+      enabled: true,
+      steps: 0,
+      denoisingStrength: 0.6,
+      upscaleBy: 1.75,
+    });
+
+    const overridden = buildImageJobRequest(
+      img2imgPidState({
+        img2imgReferenceAssetId: "",
+        usePid: false,
+        hiresFixEnabled: true,
+        hiresFixSteps: 18,
+        hiresFixCfgScale: 5.5,
+      }),
+    );
+    expect(overridden.hiresFix.steps).toBe(18);
+    expect(overridden.hiresFix.cfgScale).toBe(5.5);
+    expect(buildImageJobRequest(img2imgPidState()).hiresFix).toBeUndefined();
+  });
+
   it("keeps Mage Edit's required source separate from its ordered optional references", () => {
     const request = buildImageJobRequest(
       img2imgPidState({
@@ -186,6 +224,23 @@ describe("buildImageJobRequest", () => {
     );
     expect(request.referenceAssetId).toBe("character-ref");
     expect(request.advanced).not.toHaveProperty("strength");
+  });
+
+  it("keeps a character reference but fails closed on a stale unsupported enhancement state", () => {
+    const request = buildImageJobRequest(
+      img2imgPidState({
+        mode: "character_image",
+        referenceAssetId: "character-ref",
+        supportsImg2img: false,
+        img2imgReferenceAssetId: null,
+        // The route gate has already turned false, but React may not have committed the effect that
+        // clears the sticky checkbox state yet. The submit builder must remain independently safe.
+        promptEnhance: false,
+        enhancePrompt: true,
+      }),
+    );
+    expect(request.referenceAssetId).toBe("character-ref");
+    expect(request.advanced).not.toHaveProperty("enhancePrompt");
   });
 
   // Krea 2 multi-phase denoise round-trip (epic 13879 S5, sc-13885): a krea_2_raw t2i job with the

@@ -1,6 +1,8 @@
 use std::path::Path;
 
 use image::DynamicImage;
+use sceneworks_core::workflow_png::write_workflow_chunk;
+use sceneworks_core::workflow_share::WorkflowShare;
 use serde_json::{json, Value};
 
 use crate::{fresh_asset_id, now_rfc3339, task_join_error, JsonObject, WorkerError, WorkerResult};
@@ -18,6 +20,14 @@ pub(crate) struct SingleChildAssetSpec<'a> {
     pub model: &'a str,
     pub adapter: &'a str,
     pub encode_label: &'a str,
+    /// The sanitized workflow to embed in the written PNG, or `None` to write the file exactly as
+    /// this seam always has (epic 15945, sc-15948).
+    ///
+    /// Not defaulted, and deliberately not `Default`-derived: this is the FOURTH place the worker
+    /// writes a generated PNG, and the reason the standalone upscale shipped with no chunk is that
+    /// nobody had to decide. A new caller of this seam now has to say which it is, and to say why in
+    /// the `None` case.
+    pub workflow: Option<WorkflowShare>,
 }
 
 /// Persist one PNG child and build the common one-asset generation result. Upscale and smart-select
@@ -26,7 +36,7 @@ pub(crate) struct SingleChildAssetSpec<'a> {
 pub(crate) async fn write_single_child_asset<F>(
     project_path: &Path,
     image: DynamicImage,
-    spec: SingleChildAssetSpec<'_>,
+    mut spec: SingleChildAssetSpec<'_>,
     build_fact: F,
 ) -> WorkerResult<JsonObject>
 where
@@ -45,10 +55,16 @@ where
     }
     let tmp_path = absolute_path.with_extension("tmp.png");
     let encode_tmp = tmp_path.clone();
-    tokio::task::spawn_blocking(move || {
-        image
+    let workflow = spec.workflow.take();
+    tokio::task::spawn_blocking(move || match workflow {
+        // The embed lane (sc-15948). `write_workflow_chunk` encodes RGB8, which is what the upscale
+        // lane already hands in (`DynamicImage::ImageRgb8`), so this is a move rather than a
+        // conversion. The grayscale mask lane passes `None` and keeps its L8 encoding untouched.
+        Some(share) => write_workflow_chunk(&image.into_rgb8(), &encode_tmp, Some(&share))
+            .map_err(|error| WorkerError::Io(std::io::Error::other(error))),
+        None => image
             .save_with_format(&encode_tmp, image::ImageFormat::Png)
-            .map_err(|error| WorkerError::Io(std::io::Error::other(error)))
+            .map_err(|error| WorkerError::Io(std::io::Error::other(error))),
     })
     .await
     .map_err(|error| task_join_error(spec.encode_label, error))??;
@@ -107,6 +123,7 @@ mod tests {
                 model: "sam3",
                 adapter: "sam3",
                 encode_label: "test encode",
+                workflow: None,
             },
             |write| {
                 json!({
@@ -135,6 +152,125 @@ mod tests {
                 .color(),
             image::ColorType::L8,
             "mask encoding remains grayscale"
+        );
+        assert_eq!(
+            sceneworks_core::workflow_png::read_workflow_chunk_file(&dir.path().join(relative))
+                .expect("the mask PNG is readable"),
+            None,
+            "a segmentation mask carries no generation recipe — see the `workflow: None` at the \
+             smart-select call site"
+        );
+    }
+
+    /// The FOURTH write seam embeds too (sc-15948).
+    ///
+    /// `write_single_child_asset` is where the standalone `image_upscale` job's PNG is written, and
+    /// it wrote a bare `save_with_format` with no chunk — so the most-shared asset class in the app
+    /// was the one with no recipe inside it. This drives the real seam and reads the envelope back
+    /// out of the file on disk, because the AC is about what is IN the written PNG.
+    #[tokio::test]
+    async fn an_upscaled_png_carries_the_workflow_of_the_pass_that_produced_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // The payload `buildUpscaleJobBody` posts, plus the geometry the pass resolved.
+        let payload = json!({
+            "projectId": "project_7a10",
+            "sourceAssetId": "asset_source_1",
+            "factor": 2,
+            "engine": "seedvr2",
+            "displayName": "Lighthouse in fog",
+            "softness": 0.25
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+        let share = crate::image_jobs::standalone_upscale_workflow_share(
+            &payload,
+            "seedvr2",
+            2,
+            Some(0.25),
+            4242,
+            320,
+            256,
+        )
+        .expect("a fixture envelope is far under the recording ceiling");
+
+        let image =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([12, 34, 56])));
+        let result = write_single_child_asset(
+            dir.path(),
+            image,
+            SingleChildAssetSpec {
+                filename_stem: "upscaled_x2",
+                mode: "image_upscale",
+                model: "seedvr2",
+                adapter: "seedvr2",
+                encode_label: "test encode",
+                workflow: Some(share),
+            },
+            |write| json!({ "mediaPath": write.media_path }),
+        )
+        .await
+        .expect("child writes");
+
+        let media = dir.path().join(
+            result["assetWrites"][0]["mediaPath"]
+                .as_str()
+                .expect("path"),
+        );
+        let embedded = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+            .expect("the written PNG is readable")
+            .expect("the standalone upscale must embed its own workflow");
+
+        assert_eq!(embedded.mode, "image_upscale");
+        assert_eq!(
+            embedded.model, "seedvr2",
+            "the engine IS the model of this pass"
+        );
+        assert_eq!(embedded.seed, Some(4242));
+        // Source geometry, not the written file's: the envelope is a recipe, and "this 320x256
+        // image, upscaled 2x" is what reproduces it.
+        assert_eq!((embedded.width, embedded.height), (Some(320), Some(256)));
+        let upscale = embedded.upscale.as_ref().expect("the pass is recorded");
+        assert!(upscale.enabled);
+        assert_eq!(upscale.engine.as_deref(), Some("seedvr2"));
+        assert_eq!(upscale.factor, Some(2));
+        assert_eq!(upscale.softness, Some(0.25));
+        // The source image rides as a SHAPE, never as the local asset id.
+        assert_eq!(embedded.inputs.len(), 1);
+        assert_eq!(embedded.inputs[0].kind, "source");
+        let text = serde_json::to_string(&embedded).expect("serializes");
+        for local in ["asset_source_1", "project_7a10", "Lighthouse in fog"] {
+            assert!(!text.contains(local), "{local} leaked: {text}");
+        }
+
+        // And it is still an ordinary PNG that every decoder reads.
+        let decoded = image::open(&media).expect("decodes");
+        assert_eq!((decoded.width(), decoded.height()), (8, 8));
+    }
+
+    /// Real-ESRGAN has no softness control, so the envelope must not invent one.
+    #[test]
+    fn a_softness_less_engine_records_no_softness() {
+        let payload = json!({ "sourceAssetId": "asset_source_1", "factor": 4 })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let share = crate::image_jobs::standalone_upscale_workflow_share(
+            &payload,
+            "real-esrgan",
+            4,
+            None,
+            0,
+            512,
+            512,
+        )
+        .expect("a fixture envelope is far under the recording ceiling");
+        let upscale = share.upscale.as_ref().expect("the pass is recorded");
+        assert_eq!(upscale.engine.as_deref(), Some("real-esrgan"));
+        assert_eq!(upscale.factor, Some(4));
+        assert_eq!(
+            upscale.softness, None,
+            "recording a softness on an engine with no such knob would be inventing a fact"
         );
     }
 }

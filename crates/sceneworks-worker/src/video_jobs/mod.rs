@@ -41,7 +41,17 @@ use crate::media_jobs::{run_ffmpeg, run_ffmpeg_with_stdin_chunks, FfmpegContext}
 /// list explicit prevents a family from silently inheriting newly imported parent
 /// names or flattening another engine family's namespace.
 mod prelude {
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
+    pub(super) use super::load_reference_image;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle"),
+        test
+    ))]
     #[allow(unused_imports)]
     pub(super) use super::ltx_frame_count;
     #[cfg(any(
@@ -66,18 +76,29 @@ mod prelude {
         ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError,
         WorkerResult, WorkerStatus, CANCEL_MESSAGE,
     };
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
+    pub(super) use super::{classify_adapter, lora_path};
     #[cfg(target_os = "macos")]
     #[allow(unused_imports)]
-    pub(super) use super::{
-        classify_adapter, load_reference_image, lora_path, resolve_mlx_dense_quant, AdapterKind,
-        MoeExpert,
-    };
+    pub(super) use super::{resolve_mlx_dense_quant, AdapterKind, MoeExpert};
 }
 
 // Real MLX Wan2.2 generation (macOS, sc-3034). `runtime-macos` explicitly includes all three Wan
 // registrations in its validated media catalog.
-#[cfg(target_os = "macos")]
-use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use crate::image_jobs::load_reference_image;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use crate::image_jobs::{classify_adapter, lora_path};
 // epic 3720 (sc-3724): the backend-neutral generation contract types come from `gen_core` while the
 // compile-time runtime bundle decides which backend catalog this module loads from.
 // Backend-neutral contract types shared by the macOS MLX video path AND the Windows candle video
@@ -121,13 +142,15 @@ use sceneworks_core::character_store::CharacterStore;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::video_request::{video_frame_count, wan_frame_count};
-// `ltx_frame_count` is the MLX LTX arm's own stride expression (the candle lane resolves LTX through
-// the shared `video_frame_count` ladder, so the candle LIB never names it) and is also asserted by
-// the lattice + asset-fact tests, which run on EVERY cfg — hence `any(macos, test)`.
+// `ltx_frame_count` is used by both native LTX conditioning lanes and by cross-platform tests.
 // `mochi_frame_count` is named only by tests that are themselves macOS/candle-gated.
 // Each is gated to exactly the configs that use it: an import left dead on a single cfg fails the
 // parity lane's `-D warnings` while a macOS check stays green (sc-10404's trap).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 use sceneworks_core::video_request::ltx_frame_count;
 #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 use sceneworks_core::video_request::mochi_frame_count;
@@ -152,6 +175,10 @@ struct DecodedVideo {
     frames: Vec<RgbFrame>,
     fps: u32,
     audio: Option<AudioTrack>,
+    /// Actual provider-owned adapter install outcomes from this generation. Empty for providers that
+    /// do not expose partial-install reports.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    adapter_apply_reports: Vec<gen_core::AdapterApplyReport>,
 }
 
 /// One RGB8 frame, row-major, `pixels.len() == width * height * 3` (the engine's
@@ -219,9 +246,14 @@ enum VideoRoute {
 /// ladder for every other mode.
 #[cfg(target_os = "macos")]
 fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
+    if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
+        return VideoRoute::Stub;
+    }
     if request.mode == "replace_person" {
         if let Some(engine_id) = scail2_engine_id(&request.model) {
             VideoRoute::ReplacePersonScail2(engine_id)
+        } else if let Some(engine_id) = ltx_engine_id(&request.model) {
+            VideoRoute::Ltx(engine_id)
         } else if request.model == "wan_2_2_vace_fun_14b" {
             VideoRoute::ReplacePersonWanVaceFun
         } else {
@@ -275,14 +307,16 @@ fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRout
 /// The candle (Windows/CUDA/Linux) video engine a `run_video_generate_job` request routes to — the
 /// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). Every arm is gated on
 /// `settings.backend_candle_enabled`; when that is off (default) the resolver returns
-/// [`CandleVideoRoute::Stub`] so routing is unchanged until parity is accepted. Conditioning shapes
-/// never reach the candle lane — the router's `video_job_is_candle_eligible` confines it — so this is
-/// a narrow replace/animate/extend/txt2video ladder.
+/// [`CandleVideoRoute::Stub`] so routing is unchanged until parity is accepted. The ladder preserves
+/// each model-native conditioned provider: LTX/Eros owns I2V, FLF, extend, bridge, and replacement;
+/// Wan TI2V-5B owns I2V/FLF; VACE-Fun owns its dedicated dual-expert replacement route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleVideoRoute {
     /// `replace_person` on a `scail2_*` model → candle SCAIL-2 replacement (sc-6837). Carries the id.
     ReplacePersonScail2(&'static str),
+    /// `replace_person` on `wan_2_2_vace_fun_14b` → the dedicated dual-expert Candle engine.
+    ReplacePersonWanVaceFun,
     /// `replace_person` on any other candle-VACE model → candle Wan-VACE replacement (sc-5494).
     ReplacePersonWanVace,
     /// `animate_character` on a `scail2_*` model → candle SCAIL-2 animation (sc-6837). Carries the id.
@@ -311,14 +345,27 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
     if !settings.backend_candle_enabled {
         return CandleVideoRoute::Stub;
     }
+    if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
+        return CandleVideoRoute::Stub;
+    }
     if request.mode == "replace_person" {
         match scail2_engine_id(&request.model) {
             Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
+            None if request.model == "wan_2_2_vace_fun_14b" => {
+                CandleVideoRoute::ReplacePersonWanVaceFun
+            }
+            None if candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled") => {
+                CandleVideoRoute::CandleVideo
+            }
             None => CandleVideoRoute::ReplacePersonWanVace,
         }
     } else if request.mode == "animate_character" && scail2_engine_id(&request.model).is_some() {
         let engine_id = scail2_engine_id(&request.model).expect("scail2 model");
         CandleVideoRoute::AnimateScail2(engine_id)
+    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
+        && candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled")
+    {
+        CandleVideoRoute::CandleVideo
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
         CandleVideoRoute::WanVaceExtendBridge
     } else if let Some(engine_id) = bernini_engine_id(&request.model) {
@@ -449,18 +496,16 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
     // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B routes to the NEW dual-expert VACE engine
-    // `wan2_2_vace_fun_14b`. macOS is served natively (mlx-gen sc-6604, merged + pinned) via
-    // `generate_wan_vace_fun` in the macOS block below. The native **candle** engine (sc-6605) is
-    // not done, so on Windows/Linux (candle) and the no-backend stub path a VACE-Fun job must fail
-    // honestly here — it must NEVER fall through to the Wan2.1 `generate_candle_wan_vace` /
-    // `generate_wan_vace` backend, which would silently render with the WRONG checkpoint (the exact
-    // failure the epic forbids).
-    #[cfg(not(target_os = "macos"))]
+    // `wan2_2_vace_fun_14b`. macOS is served natively via MLX and Windows/Linux via Candle. A worker
+    // binary built without either native backend must fail honestly here — it must NEVER fall
+    // through to the Wan2.1 `generate_wan_vace` backend, which would silently render with the wrong
+    // checkpoint (the exact failure the epic forbids).
+    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
     if request.model == "wan_2_2_vace_fun_14b" {
         return Err(WorkerError::InvalidPayload(
-            "wan_2_2_vace_fun_14b: the native Wan2.2 VACE-Fun engine is macOS-only for now (the \
-             candle backend is pending sc-6605). The job will not be routed to the Wan2.1 VACE \
-             backend. Choose another model on this platform."
+            "wan_2_2_vace_fun_14b requires the native MLX worker on macOS or a worker built with \
+             Candle backend support on Windows/Linux. This worker has neither backend, and the job \
+             will not be routed to the incompatible Wan2.1 VACE engine."
                 .to_owned(),
         ));
     }
@@ -496,7 +541,7 @@ pub(crate) async fn run_video_generate_job(
             // (a person-replace must never silently degrade to a different backend or the stub). Both
             // report the honest `replacementStatus` the asset sidecar folds in.
             VideoRoute::ReplacePersonScail2(engine_id) => {
-                let (decoded, status) = generate_scail2_replace(
+                let (decoded, status, lightning) = generate_scail2_replace(
                     api,
                     settings,
                     job,
@@ -507,10 +552,9 @@ pub(crate) async fn run_video_generate_job(
                 )
                 .await?;
                 (
-                    // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
                     decoded,
                     SCAIL2_ADAPTER,
-                    scail2_raw_settings(&request, false),
+                    scail2_raw_settings(&request, lightning),
                     Some(status),
                 )
             }
@@ -596,8 +640,8 @@ pub(crate) async fn run_video_generate_job(
                 wan_raw_settings(&request, engine_id),
                 None,
             ),
-            VideoRoute::Ltx(engine_id) => (
-                generate_ltx(
+            VideoRoute::Ltx(engine_id) => {
+                let (decoded, status) = generate_ltx(
                     api,
                     settings,
                     job,
@@ -606,11 +650,9 @@ pub(crate) async fn run_video_generate_job(
                     engine_id,
                     backend,
                 )
-                .await?,
-                LTX_ADAPTER,
-                ltx_raw_settings(&request),
-                None,
-            ),
+                .await?;
+                (decoded, LTX_ADAPTER, ltx_raw_settings(&request), status)
+            }
             VideoRoute::Svd(engine_id) => (
                 generate_svd(
                     api,
@@ -677,10 +719,11 @@ pub(crate) async fn run_video_generate_job(
                 // shipped checkpoint is Wan 2.1 T2V 14B weight-for-weight. `generate_krea_realtime` maps
                 // the supplied media to the engine conditioning (a reference still → i2v `Reference`,
                 // strength no-op; a source clip → v2v `VideoClip`, strength honored; else t2v) and drives
-                // the shared `generate_video` heartbeat funnel. CFG off; no LoRA yet (S15). It resolves
-                // the installed quant tier and returns which one LOADED, so the record names the tier
-                // that actually ran rather than the one the request asked for (sc-15258).
-                let (decoded, tier) = generate_krea_realtime(
+                // the shared `generate_video` heartbeat funnel. CFG off; Wan-family LoRAs ride
+                // `LoadSpec::adapters` (sc-15017 S15). It returns its own `rawSettings` because the tier
+                // that actually LOADED (sc-15258) and any partial LoRA application are only knowable
+                // inside the arm — so the record names what actually ran, not what the request asked for.
+                let (decoded, raw_settings) = generate_krea_realtime(
                     api,
                     settings,
                     job,
@@ -690,12 +733,7 @@ pub(crate) async fn run_video_generate_job(
                     backend,
                 )
                 .await?;
-                (
-                    decoded,
-                    KREA_REALTIME_ADAPTER,
-                    krea_realtime_raw_settings(&request, tier),
-                    None,
-                )
+                (decoded, KREA_REALTIME_ADAPTER, raw_settings, None)
             }
             VideoRoute::Mochi(engine_id) => {
                 // Mochi 1 (epic 1788 / sc-11992): 10B AsymmDiT text-to-video, true CFG, pre-quantized
@@ -739,7 +777,7 @@ pub(crate) async fn run_video_generate_job(
             // keeps candle Wan-VACE. Routed by model id, not weight availability — `generate_candle_scail2_
             // replace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
             CandleVideoRoute::ReplacePersonScail2(engine_id) => {
-                let (decoded, status) = generate_candle_scail2_replace(
+                let (decoded, status, lightning) = generate_candle_scail2_replace(
                     api,
                     settings,
                     job,
@@ -752,8 +790,7 @@ pub(crate) async fn run_video_generate_job(
                 (
                     decoded,
                     CANDLE_SCAIL2_ADAPTER,
-                    // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
-                    scail2_raw_settings(&request, false),
+                    scail2_raw_settings(&request, lightning),
                     Some(status),
                 )
             }
@@ -770,6 +807,23 @@ pub(crate) async fn run_video_generate_job(
                     decoded,
                     CANDLE_WAN_VACE_ADAPTER,
                     wan_vace_raw_settings(&request, "wan_vace"),
+                    Some(status),
+                )
+            }
+            CandleVideoRoute::ReplacePersonWanVaceFun => {
+                let (decoded, status) = generate_candle_wan_vace_fun(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_WAN_VACE_FUN_ADAPTER,
+                    wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
                     Some(status),
                 )
             }
@@ -836,10 +890,10 @@ pub(crate) async fn run_video_generate_job(
                 )
             }
             CandleVideoRoute::CandleVideo => {
-                let (decoded, adapter, raw_settings) =
+                let (decoded, adapter, raw_settings, status) =
                     generate_candle_video(api, settings, job, &request, &project_path, backend)
                         .await?;
-                (decoded, adapter, raw_settings, None::<Value>)
+                (decoded, adapter, raw_settings, status)
             }
             CandleVideoRoute::WanComfyui => {
                 let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
@@ -892,7 +946,30 @@ pub(crate) async fn run_video_generate_job(
     // than merely fixed for today's models. `video_asset_fact` cannot be called without it.
     let clip = EncodedClip::measure(&decoded);
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
-    encode_media(&plan.media_path, decoded, Some(ctx)).await?;
+    // sc-15956: the sanitized workflow, written beside the clip as an `ffmetadata` document for
+    // the encoder to read. `None` means "encode exactly as before" — the user turned the setting
+    // off, the job carries no payload, or the envelope is over the recording ceiling — which is
+    // the same three-reasons-one-`Option` shape the image seam's `workflow_source` has.
+    let workflow_metadata = plan.media_path.with_extension("workflow.ffmeta");
+    let embedded =
+        video_workflow_metadata(settings, job, &request, &plan, seed, &workflow_metadata);
+    let encoded = encode_media(
+        &plan.media_path,
+        decoded,
+        embedded.then_some(workflow_metadata.as_path()),
+        Some(ctx),
+    )
+    .await;
+    // The scratch goes on EVERY path, and the `?` waits for it. `encode_media(...).await?` here
+    // propagated FIRST, so a failed or cancelled encode left `*.workflow.ffmeta` — the whole
+    // envelope, prompt in plaintext — sitting in the user's project directory permanently, next to
+    // no video. A metadata document is a file the user never asked for; it must not outlive the
+    // encode it was written for. `encode_media` already keeps its own three temporaries on this
+    // exact shape (`let result = …; remove; result`), and `seedvr2.rs` uses an RAII `ScratchDir`
+    // for the same reason. Pinned by `the_workflow_metadata_scratch_does_not_outlive_a_failed_
+    // encode` in `crates/sceneworks-worker/src/video_jobs/tests.rs`.
+    let _ = tokio::fs::remove_file(&workflow_metadata).await;
+    encoded?;
 
     let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status, clip);
     let result = streaming_result(&plan, &fact, adapter);
@@ -910,6 +987,98 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
     Ok(())
+}
+
+/// Build the sanitized workflow envelope for this clip and write it beside the media as an
+/// `ffmetadata` document, returning whether the encoder should attach it (sc-15956).
+///
+/// **The video lane's write seam** — the counterpart of `image_jobs::workflow_source` plus
+/// `write_image_asset`, collapsed into one function because a video job produces exactly one file.
+/// Declared in `WORKFLOW_WRITE_SEAMS` as `Embeds`, naming the six video builders sc-15956 promoted
+/// into `ADVANCED_BUILDERS`.
+///
+/// Returns `false` — "encode exactly as before" — for the same three reasons the image seam has,
+/// and logs which one at `debug`, because a user asking why a clip has no recipe needs to know
+/// whether they turned it off or the payload was empty:
+///
+/// * the job carries no payload to describe (a stub or dry-run write);
+/// * `embedWorkflowInImages` did not resolve to true;
+/// * the envelope is over the recording ceiling, or could not be written.
+///
+/// The last one degrades to no-workflow rather than to a failed job. A clip that generated fine is
+/// not worth failing over a metadata document, and the same reasoning already governs
+/// `faststart_mp4` and `write_poster_frame` below.
+///
+/// # The setting
+///
+/// Video honours `embedWorkflowInImages` — the SAME switch as images, not one of its own. The
+/// setting is a privacy control over what leaves in a file, and the reason someone turns it off
+/// ("my prompts are not going out in the files I share") does not stop applying at the container
+/// boundary. Giving video its own switch would mean a user who had deliberately opted out started
+/// embedding again the day this lane shipped, silently, which is the exact inversion
+/// `embed_workflow_in_images`'s fails-closed rule exists to prevent. The stored key keeps its
+/// `embedWorkflowInImages` name for back-compatibility — renaming it would reset every existing
+/// opt-out to the default-on — and the UI copy is what names both media, since that is what the
+/// user actually reads.
+fn video_workflow_metadata(
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    plan: &VideoPlan,
+    seed: i64,
+    metadata_path: &Path,
+) -> bool {
+    if job.payload.is_empty() {
+        tracing::debug!(
+            reason = "empty_job_payload",
+            "not embedding a workflow: the job carries no payload to describe"
+        );
+        return false;
+    }
+    if !sceneworks_core::app_paths::embed_workflow_in_images(&settings.config_dir) {
+        tracing::debug!(
+            reason = "preference_off",
+            config_dir = %settings.config_dir.display(),
+            "not embedding a workflow: `embedWorkflowInImages` did not resolve to true"
+        );
+        return false;
+    }
+    let facts = sceneworks_core::workflow_share::WorkflowAssetFacts {
+        mode: request.mode.clone(),
+        model: request.model.clone(),
+        prompt: request.prompt.clone(),
+        negative_prompt: request.negative_prompt.clone(),
+        // The seed this clip actually rendered with, resolved by `resolve_video_seed` — never the
+        // payload's `seed`, which is `None` whenever the run derived one from the prompt.
+        seed,
+        width: Some(request.width),
+        height: Some(request.height),
+    };
+    let Some(share) =
+        sceneworks_core::workflow_share::embeddable_video_workflow_share(&facts, &job.payload)
+    else {
+        tracing::debug!(
+            reason = "over_recording_ceiling",
+            "not embedding a workflow: the envelope is larger than the recording ceiling"
+        );
+        return false;
+    };
+    match sceneworks_core::workflow_mp4::write_workflow_metadata_file(&share, metadata_path) {
+        Ok(()) => {
+            tracing::debug!(
+                asset_id = %plan.asset_id,
+                "embedding the sanitized workflow in the clip this job writes"
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "not embedding a workflow: the metadata document could not be written"
+            );
+            false
+        }
+    }
 }
 
 /// Per-job invariants for the single video this job produces.
@@ -1009,7 +1178,12 @@ fn generate_stub_video(request: &VideoRequest, seed: i64) -> DecodedVideo {
         })
         .collect();
     let audio = is_ltx_model(&request.model).then(|| stub_audio_track(frame_count, fps));
-    DecodedVideo { frames, fps, audio }
+    DecodedVideo {
+        frames,
+        fps,
+        audio,
+        adapter_apply_reports: Vec::new(),
+    }
 }
 
 /// Deterministic per-frame pixels: a vertical gradient from a per-seed base colour to
@@ -1082,12 +1256,22 @@ fn stub_audio_track(frame_count: u32, fps: u32) -> AudioTrack {
 async fn encode_media(
     media_path: &Path,
     decoded: DecodedVideo,
+    workflow_metadata: Option<&Path>,
     ctx: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
     let enc_tmp = media_path.with_extension("enc.mp4");
     let wav_tmp = media_path.with_extension("audio.wav");
     let mux_tmp = media_path.with_extension("mux.mp4");
-    let result = encode_inner(media_path, decoded, ctx, &enc_tmp, &wav_tmp, &mux_tmp).await;
+    let result = encode_inner(
+        media_path,
+        decoded,
+        workflow_metadata,
+        ctx,
+        &enc_tmp,
+        &wav_tmp,
+        &mux_tmp,
+    )
+    .await;
     let _ = tokio::fs::remove_file(&enc_tmp).await;
     let _ = tokio::fs::remove_file(&wav_tmp).await;
     let _ = tokio::fs::remove_file(&mux_tmp).await;
@@ -1103,6 +1287,7 @@ async fn encode_media(
 async fn encode_inner(
     media_path: &Path,
     decoded: DecodedVideo,
+    workflow_metadata: Option<&Path>,
     ctx: Option<FfmpegContext<'_>>,
     enc_tmp: &Path,
     wav_tmp: &Path,
@@ -1139,34 +1324,49 @@ async fn encode_inner(
     // 1. Stream the engine-owned RGB buffers directly into FFmpeg. This moves one existing frame
     // buffer at a time through the pipe: no per-frame PNG encode, no multi-GB scratch tree, and no
     // second whole-video concatenation.
+    //
+    // The workflow envelope (sc-15956) rides in HERE rather than in a post-hoc rewrite, so the tag
+    // is part of the file from the moment it exists: there is no window in which a clip is on disk
+    // without its recipe, and no extra pass over what can be gigabytes. It survives the two steps
+    // below — measured, and pinned by `the_envelope_survives_the_whole_encode_chain` in
+    // `crates/sceneworks-worker/src/video_jobs/tests.rs`.
     let chunks = frames.into_iter().map(|frame| frame.pixels).collect();
-    run_ffmpeg_with_stdin_chunks(
-        vec![
-            "ffmpeg".to_owned(),
-            "-nostdin".to_owned(),
-            "-y".to_owned(),
-            "-f".to_owned(),
-            "rawvideo".to_owned(),
-            "-pix_fmt".to_owned(),
-            "rgb24".to_owned(),
-            "-video_size".to_owned(),
-            format!("{width}x{height}"),
-            "-framerate".to_owned(),
-            fps.to_string(),
-            "-i".to_owned(),
-            "pipe:0".to_owned(),
-            "-c:v".to_owned(),
-            "libx264".to_owned(),
-            "-pix_fmt".to_owned(),
-            "yuv420p".to_owned(),
-            "-r".to_owned(),
-            fps.to_string(),
-            enc_tmp.to_string_lossy().into_owned(),
-        ],
-        chunks,
-        ctx,
-    )
-    .await?;
+    let mut args = vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-y".to_owned(),
+        "-f".to_owned(),
+        "rawvideo".to_owned(),
+        "-pix_fmt".to_owned(),
+        "rgb24".to_owned(),
+        "-video_size".to_owned(),
+        format!("{width}x{height}"),
+        "-framerate".to_owned(),
+        fps.to_string(),
+        "-i".to_owned(),
+        "pipe:0".to_owned(),
+    ];
+    if let Some(metadata_path) = workflow_metadata {
+        // Input 1. The frames are input 0 and stay mapped by ffmpeg's own stream selection (an
+        // `ffmetadata` input carries no streams to compete with), so only the metadata source has
+        // to be named.
+        args.extend(sceneworks_core::workflow_mp4::ffmetadata_input_args(
+            metadata_path,
+        ));
+    }
+    args.extend([
+        "-c:v".to_owned(),
+        "libx264".to_owned(),
+        "-pix_fmt".to_owned(),
+        "yuv420p".to_owned(),
+        "-r".to_owned(),
+        fps.to_string(),
+    ]);
+    if workflow_metadata.is_some() {
+        args.extend(sceneworks_core::workflow_mp4::ffmetadata_map_args(1));
+    }
+    args.push(enc_tmp.to_string_lossy().into_owned());
+    run_ffmpeg_with_stdin_chunks(args, chunks, ctx).await?;
 
     // 2. Mux the audio track (LTX) as AAC, else the video-only mp4 is the result.
     let finished_tmp = if let Some(audio) = audio {
@@ -1185,6 +1385,13 @@ async fn encode_inner(
                 "-c:a".to_owned(),
                 "aac".to_owned(),
                 "-shortest".to_owned(),
+                // Explicit, though it is also ffmpeg's default for a multi-input command: the
+                // container metadata — including the sc-15956 workflow tag written in step 1 —
+                // comes from the VIDEO, never from the WAV. Stated because "the default happens to
+                // be right" is not a property anyone maintains, and the step below it depends on
+                // this one having carried the tag through.
+                "-map_metadata".to_owned(),
+                "0".to_owned(),
                 mux_tmp.to_string_lossy().into_owned(),
             ],
             ctx,
@@ -1556,7 +1763,8 @@ use bernini::{
 use candle::{
     generate_candle_scail2, generate_candle_scail2_replace, generate_candle_video,
     generate_candle_wan_comfyui, generate_candle_wan_vace, generate_candle_wan_vace_extend_bridge,
-    is_candle_video_engine, wan_comfyui_available, CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER,
+    generate_candle_wan_vace_fun, is_candle_video_engine, wan_comfyui_available,
+    CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER, CANDLE_WAN_VACE_FUN_ADAPTER,
 };
 mod scail2;
 #[cfg(target_os = "macos")]
@@ -1569,8 +1777,7 @@ use scail2::{scail2_engine_id, scail2_raw_settings};
 mod krea_realtime;
 #[cfg(target_os = "macos")]
 use krea_realtime::{
-    generate_krea_realtime, krea_realtime_available, krea_realtime_engine_id,
-    krea_realtime_raw_settings, KREA_REALTIME_ADAPTER,
+    generate_krea_realtime, krea_realtime_available, krea_realtime_engine_id, KREA_REALTIME_ADAPTER,
 };
 pub(crate) mod ltx;
 #[cfg(target_os = "macos")]
@@ -1591,6 +1798,79 @@ use vace::{
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use vace::{wan_vace_extend_raw_settings, wan_vace_raw_settings};
+
+/// Resolve the inference generator descriptors the production dispatch can load for one routed
+/// video model/mode. This is the matching-platform mapping source consumed by the capability-facts
+/// dumper; it deliberately reuses the same family resolvers as [`resolve_video_route`] and
+/// [`resolve_candle_video_route`] instead of maintaining a second model table.
+#[cfg(target_os = "macos")]
+pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    if model == "wan_2_2_vace_fun_14b" {
+        return if mode == "replace_person" {
+            vec!["wan2_2_vace_fun_14b"]
+        } else {
+            Vec::new()
+        };
+    }
+    if mode == "replace_person" {
+        return if let Some(engine_id) = scail2_engine_id(model) {
+            vec![engine_id]
+        } else if let Some(engine_id) = ltx_engine_id(model) {
+            vec![engine_id]
+        } else {
+            vec!["wan_vace"]
+        };
+    }
+    if matches!(mode, "extend_clip" | "video_bridge")
+        && wan_engine_id(model) == Some("wan2_2_ti2v_5b")
+    {
+        // Production prefers the ControlClip VACE engine and falls back to the TI2V keyframe path
+        // when that snapshot is not provisioned. Both descriptors therefore govern the route.
+        return vec!["wan_vace", "wan2_2_ti2v_5b"];
+    }
+    wan_engine_id(model)
+        .or_else(|| ltx_engine_id(model))
+        .or_else(|| svd_engine_id(model))
+        .or_else(|| bernini_engine_id(model))
+        .or_else(|| scail2_engine_id(model))
+        .or_else(|| krea_realtime_engine_id(model))
+        .or_else(|| mochi_engine_id(model))
+        .into_iter()
+        .collect()
+}
+
+/// Candle sibling of [`runtime_descriptor_engine_ids`], sourced from the actual Candle dispatch
+/// ladder and its `candle_video_engine_id` registry join.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    if model == "wan_2_2_vace_fun_14b" {
+        return if mode == "replace_person" {
+            vec!["wan2_2_vace_fun_14b"]
+        } else {
+            Vec::new()
+        };
+    }
+    if mode == "replace_person" {
+        return vec![scail2_engine_id(model)
+            .or_else(|| {
+                candle::candle_video_engine_id(model)
+                    .filter(|engine_id| *engine_id == "ltx_2_3_distilled")
+            })
+            .unwrap_or("wan_vace")];
+    }
+    if mode == "animate_character" {
+        return scail2_engine_id(model).into_iter().collect();
+    }
+    if matches!(mode, "extend_clip" | "video_bridge") {
+        return vec![candle::candle_video_engine_id(model)
+            .filter(|id| *id == "ltx_2_3_distilled")
+            .unwrap_or("wan_vace")];
+    }
+    bernini_engine_id(model)
+        .or_else(|| candle::candle_video_engine_id(model))
+        .into_iter()
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Backend-neutral video helpers shared by the MLX (macOS) and candle

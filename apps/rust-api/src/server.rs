@@ -61,6 +61,11 @@ pub struct Settings {
     pub port: u16,
     pub data_dir: PathBuf,
     pub config_dir: PathBuf,
+    /// Directory holding the `credentials.json` store (sc-16540). Resolved by
+    /// [`sceneworks_core::credentials::credentials_dir`] and deliberately independent
+    /// of `config_dir`, which is pointed at the repo checkout in dev — see that
+    /// function for the precedence and why a plaintext token must not live there.
+    pub credentials_dir: PathBuf,
     pub access_token: String,
     pub cors_origins: Vec<String>,
     pub worker_timeout_seconds: u64,
@@ -161,12 +166,15 @@ impl Settings {
             .and_then(|value| value.parse().ok())
             .unwrap_or(8000);
         let host = env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST);
+        let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
+        let credentials_dir = sceneworks_core::credentials::credentials_dir(&config_dir);
         Self {
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
             host: host.clone(),
             port,
             data_dir,
-            config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
+            config_dir,
+            credentials_dir,
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
                 .unwrap_or_default()
                 .trim()
@@ -289,6 +297,13 @@ pub struct AppState {
     pub(crate) media_tickets: Arc<TicketStore>,
     /// Bounds CPU and memory consumed by on-demand Library thumbnail backfills.
     pub(crate) thumbnail_generation_slots: Arc<Semaphore>,
+    /// Bounds memory consumed by `?stripWorkflow=true` downloads (sc-15953).
+    ///
+    /// The sibling of `thumbnail_generation_slots`, deliberately: they are the two derived
+    /// representations of the same route, and both read a whole file into memory. A strip holds
+    /// the source buffer for as long as the response body is being written, so without a gate the
+    /// ceiling is "however many clients ask at once" times the file size.
+    pub(crate) workflow_strip_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
@@ -558,17 +573,24 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // any missing manifests here so launching the API binary directly works too,
     // and fail loudly rather than serving an empty catalog if seeding can't finish.
     //
-    // Seed mode by config-dir origin (sc-10212): an EXPLICIT `SCENEWORKS_CONFIG_DIR`
-    // marks an operator-owned dir — a repo checkout or a Compose bind mount — that must
-    // stay authoritative, so keep `IfMissing` there (fill gaps, never clobber an edited
-    // copy or dirty a checked-out `config/`). When unset, `config_dir` is the platform
-    // default app-owned dir (the same one the desktop seeds `Overwrite`), so refresh it
-    // on launch — otherwise a directly-launched API binary keeps serving a STALE seeded
-    // catalog after an upgrade (the sc-10193 img2img flag stayed invisible because the
-    // months-old seed was never rewritten). Builtin manifests are app-managed; operator
+    // Seed mode by config-dir origin (sc-10212, sc-15504): an EXPLICIT `SCENEWORKS_CONFIG_DIR`
+    // marks an operator-owned dir — a repo checkout, a Compose bind mount, or a RunPod
+    // persistent volume — so seed `SyncFromEmbedded`: refresh each builtin manifest that
+    // is missing or has DRIFTED from the binary's embedded copy, while leaving a
+    // byte-identical file untouched so a matching checkout is never dirtied. That stops a
+    // directly-launched API binary from serving a STALE seeded catalog after an upgrade —
+    // the failure that hid the sc-10193 img2img flag and the Krea Turbo memory-ladder curves
+    // (a persisted `builtin.models.jsonc` without `turboFit` made a 24 GB card wrongly reject
+    // a q4/1024² render). A deployment that intentionally ships its OWN `builtin.*.jsonc` and
+    // wants it used verbatim opts out with a truthy `SCENEWORKS_OWN_MANIFESTS` (→ `IfMissing`:
+    // fill gaps only, never self-heal). When `SCENEWORKS_CONFIG_DIR` is unset, `config_dir`
+    // is the platform default app-owned dir (the same one the desktop seeds `Overwrite`), so
+    // refresh unconditionally on launch. Builtin manifests are app-managed; operator
     // customizations live in the separate `user.*.jsonc` files, which seeding never touches.
-    let seed_mode =
-        seed_mode_for_config_dir(std::env::var("SCENEWORKS_CONFIG_DIR").ok().as_deref());
+    let seed_mode = seed_mode_for_config_dir(
+        std::env::var("SCENEWORKS_CONFIG_DIR").ok().as_deref(),
+        std::env::var("SCENEWORKS_OWN_MANIFESTS").ok().as_deref(),
+    );
     {
         let _phase =
             StartupPhaseTimer::start("builtin_manifest_seed", StartupCriticality::BindCritical);
@@ -613,10 +635,45 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // HTTP, but a sysadmin or restore could leave the on-disk file group/world
     // readable. Warn (don't fail) at startup so the secret's only at-rest
     // protection — its file mode — is visibly broken instead of silently so.
+    // Move a pre-sc-16540 store out of the config dir before anything reads it. The
+    // API is the file's sole writer, so this is the one place it can happen without a
+    // race. A failure here is logged, not fatal: the worker still falls back to the
+    // legacy path, so an un-migrated install keeps working.
+    match sceneworks_core::credentials::migrate_legacy_store(
+        &settings.config_dir,
+        &settings.credentials_dir,
+    ) {
+        Ok(sceneworks_core::credentials::LegacyMigration::Migrated(from)) => {
+            tracing::info!(
+                event = "credentials_store_migrated",
+                from = %from.display(),
+                to = %settings.credentials_dir.display(),
+                "moved the credential store out of the config dir (sc-16540)",
+            );
+        }
+        Ok(sceneworks_core::credentials::LegacyMigration::BothPresent(legacy)) => {
+            tracing::warn!(
+                event = "credentials_store_duplicate",
+                legacy = %legacy.display(),
+                active = %settings.credentials_dir.display(),
+                "a credential store exists at BOTH the old and new locations; the new one is \
+                 authoritative. Delete the old file — it still holds tokens in plaintext.",
+            );
+        }
+        Ok(sceneworks_core::credentials::LegacyMigration::NotNeeded) => {}
+        Err(error) => {
+            tracing::warn!(
+                event = "credentials_store_migration_failed",
+                error = %error,
+                "could not migrate the credential store out of the config dir; leaving it in \
+                 place (readers fall back to the old path)",
+            );
+        }
+    }
     #[cfg(unix)]
     {
         let creds_path = settings
-            .config_dir
+            .credentials_dir
             .join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
         if let Some(mode) = sceneworks_core::credentials::loose_credentials_mode(&creds_path) {
             tracing::warn!(

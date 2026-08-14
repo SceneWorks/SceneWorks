@@ -24,7 +24,7 @@
 
 use serde_json::Value;
 
-use crate::contracts::{ImageUpscaleRequest, JsonObject};
+use crate::contracts::{HiresFixRequest, ImageUpscaleRequest, JsonObject};
 use crate::payload_util::{
     array_or_empty, clamped_u32, declared_resolution, int_array, nonempty_string_or,
     object_or_empty, optional_i64, optional_id, string_list, string_or,
@@ -33,7 +33,15 @@ use crate::payload_util::{
 /// Default model when the payload omits one (matches the Python worker).
 const DEFAULT_MODEL: &str = "z_image_turbo";
 const DEFAULT_MODE: &str = "text_to_image";
-const DEFAULT_STYLE_PRESET: &str = "cinematic";
+/// Default `stylePreset` when the payload omits one (matches the Python worker, and the
+/// rust-api DTO's `default_style_preset`).
+///
+/// Public because it is the value that means "no preset ran": the API overwrites this field with a
+/// recipe-preset id when one does, so anything still holding this literal names nothing.
+/// [`crate::workflow_resolution::INERT_STYLE_PRESETS`] reads it from here rather than repeating the
+/// literal, because every generated envelope carries it — misreading it as an unresolved preset
+/// would mark every shared image unreplayable.
+pub const DEFAULT_STYLE_PRESET: &str = "cinematic";
 /// Default fit mode (epic 2551): never distort, cover the frame. Shared with the
 /// video request (sc-6139) so image- and video-conditioned sources normalize identically.
 pub(crate) const DEFAULT_FIT_MODE: &str = "crop";
@@ -50,7 +58,22 @@ const DEFAULT_COUNT: u32 = 4;
 /// The payload-sanity bounds on batch size. NOT a model's limit: that is `limits.count`, which is
 /// still unread (sc-12335 — a menu, and a separate question from this default).
 const MIN_COUNT: u32 = 1;
-const MAX_COUNT: u32 = 8;
+/// `pub(crate)` so `workflow_share`'s pose budget can be derived from it rather than restate it:
+/// a pose set is the pose lane's batch size (one image per pose), so this is the ceiling it is
+/// measured against.
+pub(crate) const MAX_COUNT: u32 = 8;
+
+/// The maximum number of strict poses one image-generation job may render.
+///
+/// A pose set is not ordinary batch metadata: every entry becomes a separate generated image and
+/// therefore a separate output artifact. Keep that fan-out finite at eight ordinary maximum-size
+/// batches. The resulting 64-pose ceiling still admits the complete shipped 46-pose library plus
+/// 18 user-created Key Point Library entries in one run, while preventing an accidentally huge
+/// library selection from becoming an effectively unbounded job.
+///
+/// This is the product/request contract. The workflow-share envelope derives its entry cap from
+/// this value, and the web's mechanically pinned twin is checked by a cross-file drift test.
+pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
 
 /// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
 ///
@@ -150,6 +173,8 @@ pub struct ImageRequest {
     /// generated image with `engine` (`seedvr2` / `real-esrgan`) at `factor` and writes a
     /// second "(Nx upscaled)" asset — mirroring the Python worker. Disabled when omitted.
     pub upscale: ImageUpscaleRequest,
+    /// Optional A1111-style two-pass high-resolution refinement. Disabled when omitted.
+    pub hires_fix: HiresFixRequest,
 }
 
 impl ImageRequest {
@@ -198,6 +223,7 @@ impl ImageRequest {
             model_manifest_entry,
             advanced: object_or_empty(payload, "advanced"),
             upscale: parse_upscale(payload),
+            hires_fix: parse_hires_fix(payload),
         }
     }
 }
@@ -208,6 +234,16 @@ impl ImageRequest {
 fn parse_upscale(payload: &JsonObject) -> ImageUpscaleRequest {
     payload
         .get("upscale")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+/// Parse the optional `hiresFix` object. As with `upscale`, malformed data falls back to the
+/// disabled default so older and hand-authored payloads remain compatibility-safe.
+fn parse_hires_fix(payload: &JsonObject) -> HiresFixRequest {
+    payload
+        .get("hiresFix")
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default()
@@ -253,6 +289,7 @@ mod tests {
         assert!(request.advanced.is_empty());
         // No `upscale` object ⇒ the disabled default (the Image Studio toggle is off).
         assert!(request.upscale.is_disabled());
+        assert!(request.hires_fix.is_disabled());
     }
 
     #[test]
@@ -271,6 +308,30 @@ mod tests {
             "projectId": "p", "upscale": "yes please"
         })));
         assert!(bad.upscale.is_disabled());
+    }
+
+    #[test]
+    fn parses_hires_fix_request_and_malformed_payload_defaults_off() {
+        let request = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p",
+            "hiresFix": {
+                "enabled": true,
+                "steps": 18,
+                "denoisingStrength": 0.6,
+                "upscaleBy": 2.5,
+                "cfgScale": 5.5
+            }
+        })));
+        assert!(request.hires_fix.enabled);
+        assert_eq!(request.hires_fix.steps, 18);
+        assert_eq!(request.hires_fix.effective_denoising_strength(), 0.6);
+        assert_eq!(request.hires_fix.effective_upscale_by(), 2.5);
+        assert_eq!(request.hires_fix.cfg_scale, Some(5.5));
+
+        let bad = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "hiresFix": "yes please"
+        })));
+        assert!(bad.hires_fix.is_disabled());
     }
 
     #[test]

@@ -390,6 +390,7 @@ fn krea_multiphase_generate_one(
     guidance: Option<f32>,
     text_style_gain: Option<f32>,
     phases: Vec<gen_core::GenerationPhase>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -408,6 +409,7 @@ fn krea_multiphase_generate_one(
         guidance,
         text_style_gain,
         phases: Some(phases),
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -465,6 +467,21 @@ async fn generate_krea_multiphase_stream(
     // per `request.loras` entry, in order, so `LoadSpec::adapters[i]` is `request.loras[i]` and a
     // phase's lora `index` selects it directly.
     let adapters = resolve_adapters(request, settings)?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let adapter_resident_bytes = adapters.iter().fold(0_u64, |total, adapter| {
+        total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
+    });
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let offload_policy = admit_candle_base(
+        request,
+        settings,
+        &weights_dir,
+        "Krea multi-phase",
+        CandleBaseEvidence::Catalog,
+        adapter_resident_bytes,
+        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
+    )
+    .await?;
     let repo = model_repo(request, &raw_model);
     let adapter_label = raw_model.adapter_label();
     let text_style_gain = resolve_text_style_gain(request);
@@ -487,6 +504,8 @@ async fn generate_krea_multiphase_stream(
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
     let spec = load_spec(weights_dir, quant, adapters, None);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let spec = spec.with_offload_policy(offload_policy);
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -495,7 +514,7 @@ async fn generate_krea_multiphase_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -509,6 +528,7 @@ async fn generate_krea_multiphase_stream(
                     guidance,
                     text_style_gain,
                     phases.clone(),
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

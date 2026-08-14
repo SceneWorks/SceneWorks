@@ -75,10 +75,14 @@ const PERSIST_DEBOUNCE_MS = 400;
 export function SimpleShell({
   accent,
   onAccentChange,
+  embedWorkflow = true,
+  onEmbedWorkflowChange,
   simpleDefault,
   onSimpleDefaultChange,
   onModeChange,
   onScreenChange,
+  requestedScreen,
+  settingsSharingFocusRequest,
   lockedToSimple,
   preferencesHydrated = true,
 }) {
@@ -181,6 +185,16 @@ export function SimpleShell({
   useEffect(() => {
     onScreenChange?.(screen);
   }, [onScreenChange, screen]);
+
+  useEffect(() => {
+    if (requestedScreen && SCREEN_BY_ID.has(requestedScreen)) {
+      setScreen(requestedScreen);
+      setDrawer(false);
+      setSheet(null);
+      setPreview(null);
+      setGuideOpen(false);
+    }
+  }, [requestedScreen]);
 
   // Opening an asset. An audio asset also becomes the loaded take, so the grid rings it and
   // the viewer opens on its deck; `play` (the tile's play button) starts it immediately.
@@ -363,9 +377,12 @@ export function SimpleShell({
               {screen === "settings" ? (
                 <SimpleSettings
                   accent={accent}
+                  embedWorkflow={embedWorkflow}
                   lockedToSimple={lockedToSimple}
                   onAccentChange={onAccentChange}
+                  onEmbedWorkflowChange={onEmbedWorkflowChange}
                   onSimpleDefaultChange={onSimpleDefaultChange}
+                  sharingFocusRequest={settingsSharingFocusRequest}
                   simpleDefault={simpleDefault}
                 />
               ) : null}

@@ -21,3 +21,4 @@ mod startup;
 pub(crate) mod support;
 mod training;
 mod uploads;
+mod workflows;

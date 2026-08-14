@@ -12,7 +12,7 @@ fn extend_capabilities_unique(
     }
 }
 
-pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
+pub(crate) async fn discover_gpu(settings: &Settings, health: &GpuHealth) -> DiscoveredGpu {
     let requested_gpu_id = settings.gpu_id.as_str();
     if requested_gpu_id == "cpu" {
         return cpu_gpu();
@@ -41,18 +41,30 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
             .find(|gpu| gpu.id == requested_gpu_id)
             .unwrap_or_else(|| fallback_gpu(requested_gpu_id))
     };
-    // Compute-capability probe for the INT8-ConvRot sm_89 gate (sc-9300) and the NVFP4 sm_120 gate
+    // Selected-GPU compute-capability probe for the INT8-ConvRot sm_89 gate (sc-9300), the NVFP4
+    // sm_120 gate, and request-scoped calibration evidence. Never borrow another visible GPU's cap.
     // (sc-11042). Probed here (the async discovery) and threaded into the sync
     // `with_candle_capabilities` — the worker has no nvml, so this is a bounded
     // `nvidia-smi --query-gpu=compute_cap` subprocess like the utilization query.
     // Only meaningful on the candle lane; a cheap no-op probe on CPU / non-NVIDIA (returns `None`).
-    let compute_cap = nvidia_max_compute_cap().await;
+    let compute_cap = nvidia_compute_cap(&gpu.id).await;
     // Publish the probed cap for the SYNC tier-select path (sc-11042). `discover_gpu` runs once at
     // startup (`lib.rs`) BEFORE the job-claim loop, so every generation resolves against a populated
     // value; a worker that somehow never probed reads `None` and is treated as NVFP4-INELIGIBLE
     // (fail-safe: the tier falls back rather than routing an FP4 load at hardware that can't run it).
-    cache_compute_cap(compute_cap);
-    with_candle_capabilities(gpu, settings, compute_cap)
+    //
+    // Skipped while the GPU is UNUSABLE (sc-16260). `cache_compute_cap` is first-call-wins by
+    // design, and sc-16260 gave `discover_gpu` a second caller: the recovery re-check. Caching an
+    // unhealthy startup's probe would therefore be permanent — and on a host whose driver stack
+    // was still coming up, `nvidia-smi` can be unready too, so that permanent value would be the
+    // fail-safe `None`. The worker would recover, re-advertise everything, and still hide the
+    // NVFP4/ConvRot tiers for the rest of the process. Deferring means the recovery pass makes the
+    // first (and correct) call. An unhealthy worker publishing no cap is right anyway: it routes
+    // nothing, so there is no tier decision for it to inform.
+    if health.is_usable() {
+        cache_compute_cap(compute_cap);
+    }
+    with_candle_capabilities(gpu, settings, compute_cap, health)
 }
 
 /// Light up the Windows/CUDA candle SDXL lane on the discovered nvidia GPU (epic 3672, sc-3678).
@@ -67,20 +79,82 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
 ///
 /// All-targets signature so `discover_gpu` is uniform; a no-op everywhere except the Windows candle
 /// build with `backend_candle_enabled`, so production routing is unchanged until the lane is on.
+///
+/// **A failed startup CUDA preflight withholds this entire block (sc-16260).** `health` is the
+/// verdict of `preflight::cuda_preflight`, run once at GPU-worker startup by
+/// `crate::cuda_startup_health`. When the driver stack is unusable, every capability advertised
+/// below is one this worker is *certain* to fail — the generation would die at the first model
+/// load with the same `DriverError` the probe already saw. Withholding them degrades the worker
+/// so `jobs_store::worker_supports_job` refuses every generation job and the work stays QUEUED for
+/// a host that gets fixed instead of being claimed and failed one job at a time.
+///
+/// **The `candle` LANE MARKER is kept even when unhealthy — that is load-bearing, not an
+/// oversight.** The marker says "this host serves the candle lane", not "this worker can run your
+/// job", and two things read it that way:
+///
+///   * `jobs_store::fail_stranded_candle_jobs` treats "no live worker advertising `candle`" as
+///     candle being *unavailable* and TERMINALLY FAILS every queued candle-eligible job after the
+///     grace window — with a `candle_unavailable: ... confirm the candle worker is running`
+///     message that is both wrong (it is running) and silent about the driver. Since
+///     `SCENEWORKS_CANDLE_REQUIRED=1` ships in `docker-compose.yml`, `docker/rust.Dockerfile` and
+///     the desktop, dropping the marker would convert this story's "jobs wait for a fixed host"
+///     into "jobs fail en masse with a misleading error" — the exact opposite of AC 2.
+///   * `appHelpers::isPlaceholderOnlyGpuWorker` matches the bare `[placeholder, gpu, nvidia]`
+///     triple, and `App.jsx` filters those workers out of `visibleWorkers` entirely. Without the
+///     marker the Queue screen would render "No GPU workers registered" for a worker that is
+///     registered, heartbeating and reporting exactly why it cannot work — hiding the remedy this
+///     story exists to surface.
+///
+/// The marker routes nothing on its own: every candle branch in `worker_supports_job` falls
+/// through to the advertised-capability check, which now fails for every job type, and the
+/// `WorkerStatus::Unhealthy` backstop refuses the claim before that. So the marker buys the two
+/// behaviours above at no routing cost.
+///
+/// The routing consequence is deliberately paired with the visible one: the same verdict puts the
+/// worker in `WorkerStatus::Unhealthy` with the remedy attached, because a worker that silently
+/// advertises nothing while reporting "Ready" would leave an operator staring at a stalled queue.
 #[cfg_attr(
     not(all(not(target_os = "macos"), feature = "backend-candle")),
     allow(unused_mut, unused_variables)
 )]
-fn with_candle_capabilities(
+pub(crate) fn with_candle_capabilities(
     mut gpu: DiscoveredGpu,
     settings: &Settings,
     compute_cap: Option<f32>,
+    health: &GpuHealth,
 ) -> DiscoveredGpu {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if settings.backend_candle_enabled && gpu.capabilities.contains(&WorkerCapability::Gpu) {
         let derived = crate::engines::registry_capabilities(settings);
         if !derived.is_empty() {
+            // sc-16260: an unusable GPU advertises the lane marker and NOTHING ELSE. Every
+            // capability below names work this worker would be certain to fail — the generation
+            // would die at the first model load with the same `DriverError` the probe already saw
+            // — so none of them may be claimed. Returning here rather than filtering afterwards
+            // means a capability added below is withheld by construction, with no second list to
+            // keep in sync. See the doc comment for why the marker itself stays.
+            if !health.is_usable() {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown("candle".to_owned()));
+                return gpu;
+            }
             extend_capabilities_unique(&mut gpu.capabilities, derived);
+            // Advanced video generation is routed through production video-engine predicates,
+            // not the generic descriptor modality: Candle's Wan-VACE/SCAIL providers serve
+            // replace_person, extend_clip, and video_bridge, but `registry_capabilities` can only
+            // derive the coarse `video_generate` capability. Advertise the three concrete job
+            // types so scheduler eligibility, worker claiming, and the rich descriptor mappings
+            // describe the same executable surface. Per-model/mode routing remains fail-closed in
+            // `jobs_store::video_job_is_candle_eligible`; advertising these capabilities does not
+            // admit unsupported video models.
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::VideoExtend,
+                    WorkerCapability::VideoBridge,
+                    WorkerCapability::PersonReplace,
+                ],
+            );
             // Plain Image Edit (sc-5487, epic 5480): the distinct `image_edit` job type
             // (`mode == "edit_image"` + `sourceAssetId`, epic 2427) runs the bespoke candle edit lanes
             // (SdxlEdit / Flux2Edit / QwenEdit) via `run_image_generate_job`, which dispatches by payload
@@ -143,6 +217,17 @@ fn with_candle_capabilities(
             extend_capabilities_unique(
                 &mut gpu.capabilities,
                 [WorkerCapability::FaceLikenessCompare],
+            );
+            // SDXL-family tile detail and SAM3 box smart-select are bespoke job surfaces rather
+            // than registry modalities, so advertise the concrete handlers explicitly. The SAM3
+            // handler rejects point prompts before I/O because the pinned Candle provider exposes
+            // box PVS only; the capability truthfully advertises the executable box surface.
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::ImageDetail,
+                    WorkerCapability::ImageSegment,
+                ],
             );
             // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
@@ -394,29 +479,43 @@ pub(crate) const INT8_CONVROT_CAPABILITY: &str = "int8_convrot";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const INT8_CONVROT_MIN_COMPUTE_CAP: f32 = 8.9;
 
-/// Highest CUDA compute capability across the visible NVIDIA GPUs, via
+/// CUDA compute capability for the exact GPU selected by this worker, via
 /// `nvidia-smi --query-gpu=compute_cap` (e.g. `8.9`, `12.0`). `None` when nvidia-smi is absent /
 /// times out / reports no parseable cap (a non-NVIDIA or CPU worker) — the caller then treats the
 /// worker as ConvRot-ineligible. Cheap, bounded (3s) subprocess, matching [`query_nvidia_gpus`]; the
 /// `compute_cap` query field is a stable nvidia-smi column (driver R495+, well below any CUDA-12 box).
-pub(crate) async fn nvidia_max_compute_cap() -> Option<f32> {
+pub(crate) async fn nvidia_compute_cap(gpu_id: &str) -> Option<f32> {
+    if gpu_id.trim().is_empty() || gpu_id == "auto" || gpu_id == "cpu" {
+        return None;
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(3),
         Command::new("nvidia-smi")
+            .arg(format!("--id={gpu_id}"))
             .args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"])
             .output(),
     )
     .await;
     match output {
         Ok(Ok(output)) if output.status.success() => {
-            parse_max_compute_cap(&String::from_utf8_lossy(&output.stdout))
+            parse_selected_compute_cap(&String::from_utf8_lossy(&output.stdout))
         }
         _ => None,
     }
 }
 
+pub(crate) fn parse_selected_compute_cap(output: &str) -> Option<f32> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .parse::<f32>()
+        .ok()
+}
+
 /// Parse the highest `major.minor` compute cap from the `nvidia-smi --query-gpu=compute_cap` CSV
 /// (one row per GPU). Ignores blank / unparseable rows; `None` when nothing parses.
+#[cfg(test)]
 pub(crate) fn parse_max_compute_cap(output: &str) -> Option<f32> {
     output
         .lines()
@@ -458,7 +557,7 @@ pub(crate) fn compute_cap_meets_nvfp4(cap: Option<f32>) -> bool {
     cap.is_some_and(|c| c >= NVFP4_MIN_COMPUTE_CAP)
 }
 
-/// Process-wide cache of the startup compute-cap probe, published by [`discover_gpu`].
+/// Process-wide cache of the selected GPU's startup compute-cap probe, published by [`discover_gpu`].
 ///
 /// The NVFP4 tier gate (sc-11042) is consulted from the SYNC tier-select path (`image_jobs/base.rs`),
 /// which has no async context to re-probe `nvidia-smi` from and must not spawn a subprocess per job.
@@ -467,8 +566,7 @@ pub(crate) fn compute_cap_meets_nvfp4(cap: Option<f32>) -> bool {
 /// "never probed" (⇒ `None` ⇒ ineligible, fail-safe) from "probed, no NVIDIA GPU" (also `None`).
 static COMPUTE_CAP: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
 
-/// Publish the startup compute-cap probe. First call wins; later calls are ignored (the cap of a
-/// running worker's GPU cannot change mid-process, and tests set it explicitly).
+/// Publish the selected GPU's startup compute-cap probe. First call wins; later calls are ignored.
 pub(crate) fn cache_compute_cap(cap: Option<f32>) {
     let _ = COMPUTE_CAP.set(cap);
 }
@@ -613,6 +711,32 @@ pub(crate) async fn nvidia_vram_budget_gb(gpu_id: &str) -> Option<crate::vram_ga
     })
 }
 
+/// Fresh, bounded NVIDIA budget probe for the serialized generator-cache cold-load transaction.
+///
+/// The cache worker is a dedicated OS thread, not a Tokio executor thread. Building a private
+/// current-thread runtime here therefore cannot block the worker runtime that owns the request, and
+/// lets [`run_bounded_command`] retain its three-second timeout/kill-on-drop contract. This bypasses
+/// [`gpu_utilization`]'s one-second heartbeat cache deliberately: SCAIL calls it only after evicting
+/// a different resident generator, so a pre-eviction sample could reject a load whose reclaimed VRAM
+/// now fits (or, worse, credit memory that was not actually returned).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(
+    gpu_id: &str,
+) -> Option<crate::vram_gate::VramBudget> {
+    if gpu_id == "cpu" {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let snapshot = runtime.block_on(query_gpu_utilization(gpu_id))?;
+    Some(crate::vram_gate::VramBudget {
+        free_gb: snapshot.memory_free_mb? as f64 / 1024.0,
+        total_gb: snapshot.memory_total_mb? as f64 / 1024.0,
+    })
+}
+
 /// Apple-Silicon unified-memory + GPU-load snapshot for the `mlx` worker, shaped
 /// like the nvidia path. Total = the machine's unified RAM (`sysctl hw.memsize`).
 /// Used = **system-wide** memory pressure from `vm_stat` (App + Wired + Compressed,
@@ -663,8 +787,8 @@ async fn sysctl_memsize_mb() -> Option<u64> {
 
 /// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the
 /// FLUX.2-dev multi-reference edit footprint check (sc-6124). `None` if the probe fails (the guard
-/// then no-ops rather than blocking a possibly-fine job). macOS-only — its sole caller, the FLUX.2
-/// edit path (`image_jobs/flux2.rs`), is itself `#[cfg(target_os = "macos")]`.
+/// then no-ops rather than blocking a possibly-fine job). This helper is macOS-only because its sole
+/// caller is the MLX FLUX.2 edit path; the native Candle lane applies its own device-memory policy.
 #[cfg(target_os = "macos")]
 pub(crate) async fn total_unified_memory_gb() -> Option<f64> {
     sysctl_memsize_mb().await.map(|mb| mb as f64 / 1024.0)
@@ -974,9 +1098,8 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation, served in-process by `segment_jobs::run_image_segment_job` (the
         // box-PVS path of the sc-4926 SAM3 stack). The Image Editor smart-select tool's
-        // backend: a box prompt → a binary inpaint mask asset. Advertised ONLY here (there is no
-        // off-Mac standalone image-segment lane), so a segment job routes to the Mac worker by
-        // construction.
+        // backend: a box prompt → a binary inpaint mask asset. The off-Mac Candle worker advertises
+        // the sibling box-PVS handler explicitly in `with_candle_capabilities`.
         WorkerCapability::ImageSegment,
         // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
         // (`mlx-gen-seedvr2`), served in-process by `video_jobs::run_video_upscale_job` —

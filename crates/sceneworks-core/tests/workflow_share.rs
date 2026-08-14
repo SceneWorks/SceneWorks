@@ -1,0 +1,5828 @@
+//! Contract tests for the sanitized workflow share envelope (sc-15946, epic 15945).
+//!
+//! Three are load-bearing. [`every_registered_builder_has_its_advanced_keys_classified`] parses
+//! every builder in `ADVANCED_BUILDERS` so a new knob can neither silently leak nor silently
+//! vanish; [`every_advanced_builder_in_the_web_app_is_accounted_for`] walks `apps/web/src` so a
+//! new BUILDER cannot appear unclassified (sc-15946's lint read one file on the premise that it
+//! was the only one — it was not); and [`no_value_in_a_built_envelope_is_path_shaped`] seeds the
+//! request with paths on purpose and asserts none of them reach the file.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::PathBuf;
+
+use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+use sceneworks_core::contracts::{Asset, JsonObject};
+use sceneworks_core::jsonc::strip_jsonc_comments;
+use sceneworks_core::workflow_share::{
+    advanced_key_rule, build_workflow_share, build_workflow_share_from, is_path_shaped,
+    parse_workflow_share, AdvancedBuilder, AdvancedBuilderShape, AdvancedDisposition,
+    AdvancedKeySource, SeamDisposition, WebBuilderRef, WorkflowAssetFacts, WorkflowShare,
+    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION,
+    PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
+    WORKFLOW_WRITE_SEAMS,
+};
+use serde_json::{json, Value};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+}
+
+fn read_repo_file(relative_path: &str) -> String {
+    let path = repo_root().join(relative_path);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
+#[test]
+fn malformed_foreign_model_hash_is_ignored_without_losing_the_recipe() {
+    let mut value = serde_json::to_value(build_workflow_share(
+        &golden_asset(),
+        json!({ "projectId": "project_7a10", "prompt": "still import me" })
+            .as_object()
+            .expect("payload object"),
+    ))
+    .expect("serializes");
+    value["modelHash"] = json!("not a sha-256");
+
+    let parsed = parse_workflow_share(&value).expect("the rest of the recipe remains usable");
+    assert_eq!(parsed.prompt, "still import me");
+    assert_eq!(parsed.model_hash, None);
+}
+
+// ---------------------------------------------------------------------------
+// Golden input
+// ---------------------------------------------------------------------------
+
+/// A generated asset's sidecar, in the shape `project_store::build_image_sidecar_parts` writes.
+fn golden_asset() -> Asset {
+    serde_json::from_value(json!({
+        "schemaVersion": 1,
+        "id": "asset_9f2c",
+        "projectId": "project_7a10",
+        "generationSetId": "genset_31bb",
+        "type": "image",
+        "displayName": "Lighthouse in fog #2",
+        "createdAt": "2026-07-29T13:04:11Z",
+        "file": {
+            "path": "assets/images/2026-07-29_krea_2_turbo_lighthouse_0002.png",
+            "mimeType": "image/png",
+            "width": 1024,
+            "height": 1024,
+            "duration": null,
+            "fps": null
+        },
+        "status": { "favorite": true, "rating": 4, "rejected": false, "trashed": false },
+        "recipe": {
+            "mode": "edit_image",
+            "model": "krea_2_turbo",
+            "adapter": "flux_diffusers",
+            "prompt": "a lighthouse in heavy fog, cinematic",
+            "negativePrompt": "text, watermark",
+            "seed": 880412,
+            "loras": [],
+            "stylePreset": "cinematic",
+            "normalizedSettings": {},
+            "rawAdapterSettings": {}
+        },
+        "lineage": {
+            "parents": ["asset_source_1"],
+            "sourceAssetId": "asset_source_1",
+            "sourceTimestamp": null,
+            "jobId": "job_5c8e"
+        }
+    }))
+    .expect("golden asset parses")
+}
+
+/// The job row's `payload_json` for that asset — the exact `ImageJobRequest` the API stored,
+/// including the fields it stamps on (`modelManifestEntry`, `seeds`, the resolved geometry).
+fn golden_payload() -> JsonObject {
+    json!({
+        "projectId": "project_7a10",
+        "projectName": "Michael's Unreleased Film",
+        "mode": "edit_image",
+        "prompt": "a lighthouse in heavy fog, cinematic",
+        "negativePrompt": "text, watermark",
+        "model": "krea_2_turbo",
+        "count": 2,
+        "seed": 880411,
+        "seeds": [880411, 880412],
+        "width": 1024,
+        "height": 1024,
+        "stylePreset": "cinematic",
+        "styleId": "noir_bloom",
+        "fitMode": "crop",
+        "characterId": "character_c001",
+        "characterLookId": "look_l001",
+        "sourceAssetId": "asset_source_1",
+        "referenceAssetIds": ["asset_ref_1", "asset_ref_2"],
+        "maskAssetId": "asset_mask_1",
+        "upscale": { "enabled": true, "factor": 2, "engine": "seedvr2", "softness": 0.25 },
+        "modelManifestEntry": {
+            "id": "krea_2_turbo",
+            "installPath": "E:\\models\\krea_2_turbo",
+            "downloads": [{ "repo": "kreaai/krea-2-turbo" }]
+        },
+        "loras": [{
+            "id": "lora_1f0d",
+            "name": "Foggy Coast",
+            "weight": 0.65,
+            "installedPath": "E:\\loras\\foggy-coast",
+            "sourcePath": "/mnt/nas/loras/foggy-coast.safetensors",
+            "source": { "provider": "huggingface", "repo": "acme/foggy-coast", "file": "v2.safetensors" }
+        }],
+        "advanced": {
+            "resolution": "1024x1024",
+            "sampler": "euler",
+            "scheduler": "beta",
+            "schedulerShift": 1.15,
+            "steps": 28,
+            "guidanceScale": 3.5,
+            "guidanceMethod": "cfg_pp",
+            "strength": 0.55,
+            "styleId": "noir_bloom",
+            "stylePrompt": "a lighthouse in heavy fog",
+            "controlMode": "canny",
+            "controlScale": 0.9,
+            "controlImage": "asset_control_1",
+            "controlWeights": { "overlayId": "overlay_7", "path": "E:\\overlays\\pose.safetensors" },
+            "quantTier": "nvfp4",
+            "mlxQuantize": 4,
+            "flashAttn": false,
+            "recipePresetId": "preset_local_1"
+        }
+    })
+    .as_object()
+    .cloned()
+    .expect("golden payload is an object")
+}
+
+fn golden_fixture_path() -> PathBuf {
+    repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("workflow_share")
+        .join("image-workflow-share.json")
+}
+
+fn load_golden_fixture() -> Value {
+    let path = golden_fixture_path();
+    let payload = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    serde_json::from_str(&payload)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// Golden fixture + round trip (matching tests/contract_roundtrip.rs)
+// ---------------------------------------------------------------------------
+
+// The three tests below compare parsed `Value`s and MUST keep doing so — never serialized text,
+// and never a byte comparison against the fixture file. `serde_json::Map` is a `BTreeMap`
+// (sorted) or an `IndexMap` (insertion-ordered) depending on the `preserve_order` feature, which
+// Cargo unifies across the workspace, so the same envelope serializes its keys in a different
+// ORDER under `cargo test -p sceneworks-core` than under the workspace build the `parity` job
+// runs. `Value` equality is order-independent under both; a text comparison would not be, and
+// would fail in exactly one of the two configurations while nothing was wrong (sc-15946).
+
+#[test]
+fn golden_envelope_round_trips_without_field_drift() {
+    let original = load_golden_fixture();
+    let typed: WorkflowShare =
+        serde_json::from_value(original.clone()).expect("golden envelope deserializes");
+    let encoded = serde_json::to_value(typed).expect("golden envelope serializes");
+
+    assert_eq!(
+        encoded, original,
+        "the golden workflow-share envelope drifted after a typed round-trip"
+    );
+}
+
+#[test]
+fn the_builder_reproduces_the_golden_envelope() {
+    let built = build_workflow_share(&golden_asset(), &golden_payload());
+    let encoded = serde_json::to_value(&built).expect("built envelope serializes");
+    let mut golden = load_golden_fixture();
+    // The fixture pins the SHAPE, so a release version bump is not drift: the producer version
+    // is asserted against `CARGO_PKG_VERSION` and the workspace manifest in
+    // `producer_version_is_strict_semver_and_matches_the_workspace` instead.
+    golden["producer"]["version"] = json!(PRODUCER_VERSION);
+
+    assert_eq!(
+        encoded,
+        golden,
+        "builder output drifted from the golden fixture.\nActual:\n{}",
+        serde_json::to_string_pretty(&encoded).expect("pretty")
+    );
+}
+
+/// The two build entry points are one builder (sc-15948).
+///
+/// sc-15948 embeds at the worker's write seam, where no `Asset` exists yet, so it calls
+/// [`build_workflow_share_from`] with the per-image facts directly. If that were a second
+/// implementation, the allow-list, the path guard and the payload-over-facts precedence could all
+/// drift between "embedded when the file was written" and "rebuilt from a sidecar" — and the
+/// embedded copy is the one that leaves the machine.
+#[test]
+fn build_workflow_share_is_the_facts_builder() {
+    let asset = golden_asset();
+    let payload = golden_payload();
+    let via_asset = build_workflow_share(&asset, &payload);
+    let via_facts = build_workflow_share_from(&WorkflowAssetFacts::from_asset(&asset), &payload);
+    assert_eq!(
+        serde_json::to_value(&via_facts).expect("serializes"),
+        serde_json::to_value(&via_asset).expect("serializes"),
+    );
+
+    // And the facts really are the fallbacks: with an EMPTY payload nothing but them is left, so
+    // each one has to show up in the envelope on its own.
+    let facts = WorkflowAssetFacts {
+        mode: "image_detail".to_owned(),
+        model: "realvisxl".to_owned(),
+        prompt: "ultra detailed, sharp focus".to_owned(),
+        negative_prompt: "blurry, soft".to_owned(),
+        seed: 7,
+        width: Some(1536),
+        height: Some(1024),
+    };
+    let bare = build_workflow_share_from(&facts, &JsonObject::new());
+    assert_eq!(bare.mode, "image_detail");
+    assert_eq!(bare.model, "realvisxl");
+    assert_eq!(bare.prompt, "ultra detailed, sharp focus");
+    assert_eq!(bare.negative_prompt, "blurry, soft");
+    assert_eq!(bare.seed, Some(7));
+    assert_eq!((bare.width, bare.height), (Some(1536), Some(1024)));
+    assert!(bare.advanced.is_empty());
+    assert!(bare.inputs.is_empty());
+
+    // The payload wins over the facts wherever it speaks — except the seed, which is per-image and
+    // is the one thing the payload cannot know.
+    let payload = json!({ "mode": "text_to_image", "seed": 999, "seeds": [999, 1000] })
+        .as_object()
+        .cloned()
+        .expect("object");
+    let overridden = build_workflow_share_from(&facts, &payload);
+    assert_eq!(overridden.mode, "text_to_image");
+    assert_eq!(
+        overridden.seed,
+        Some(7),
+        "the payload's batch base seed must never displace the produced image's own"
+    );
+}
+
+/// The sanitizer runs in exactly ONE place, and it is the reducer both directions share.
+///
+/// `build_workflow_share` used to sanitize `advanced` and then hand the result to
+/// `reduce_workflow_share`, which sanitizes it again. Every rule is idempotent today, so that
+/// cost nothing but a second pass — and that is precisely why no assertion could see it. It is
+/// pinned here as source structure because the failure it invites is a future shape rule that is
+/// NOT idempotent (a truncation, a normalization, a de-duplication) quietly applying twice on
+/// the build side and once on the parse side, which would put the two directions out of sync in
+/// the one function written to keep them in step.
+#[test]
+fn the_builder_leaves_advanced_sanitizing_to_the_single_reducer() {
+    let source = read_repo_file("crates/sceneworks-core/src/workflow_share.rs").replace('\r', "");
+    // Comments stripped, so this reads CALLS and not the prose explaining them.
+    let body = |name: &str| {
+        let start = source
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("workflow_share.rs no longer defines {name}"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("could not find the end of {name}"));
+        strip_comments(&rest[..end])
+    };
+
+    assert!(
+        !body("build_workflow_share").contains("sanitize_advanced("),
+        "`build_workflow_share` sanitizes `advanced` before handing it to \
+         `reduce_workflow_share`, which sanitizes it again. Pass the raw map through and let the \
+         reducer's single call do it."
+    );
+    assert!(
+        body("reduce_workflow_share").contains("sanitize_advanced("),
+        "the reducer stopped sanitizing `advanced`, so nothing does — this test's other half \
+         would then pass while the allow-list was bypassed entirely"
+    );
+}
+
+#[test]
+fn the_golden_envelope_parses_back_through_the_reader() {
+    let golden = load_golden_fixture();
+    let parsed = parse_workflow_share(&golden).expect("the golden envelope parses");
+    assert_eq!(
+        serde_json::to_value(&parsed).expect("re-serializes"),
+        golden,
+        "parsing the golden envelope changed it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Producer block
+// ---------------------------------------------------------------------------
+
+#[test]
+fn producer_version_is_strict_semver_and_matches_the_workspace() {
+    let share = build_workflow_share(&golden_asset(), &golden_payload());
+    let version = share.producer.version;
+
+    assert_eq!(version, PRODUCER_VERSION);
+
+    // Strict MAJOR.MINOR.PATCH. A dirty-tree suffix (`0.8.1-dirty`), build metadata
+    // (`0.8.1+ci.42`), a `v` prefix or a hostname must all fail here — that string ships in
+    // every image and is the one field the allow-list cannot catch.
+    let parts: Vec<&str> = version.split('.').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "producer.version must be MAJOR.MINOR.PATCH, got {version:?}"
+    );
+    for part in &parts {
+        assert!(
+            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
+            "producer.version segment {part:?} is not numeric ({version:?}) — a git describe, \
+             dirty-tree suffix, CI build number or hostname must never reach the envelope"
+        );
+        assert!(
+            *part == "0" || !part.starts_with('0'),
+            "producer.version segment {part:?} has a leading zero ({version:?})"
+        );
+    }
+
+    // The canonical repo URL, and nothing derived from this machine.
+    assert_eq!(share.producer.url, PRODUCER_URL);
+    assert_eq!(share.producer.name, "SceneWorks");
+
+    // The workspace version is the single source of truth (scripts/sync-version.mjs keeps the
+    // web/desktop manifests in lockstep with it).
+    let workspace_version = read_repo_file("Cargo.toml")
+        .lines()
+        .skip_while(|line| line.trim() != "[workspace.package]")
+        .find_map(|line| {
+            line.strip_prefix("version")
+                .and_then(|rest| rest.split('"').nth(1))
+                .map(str::to_owned)
+        })
+        .expect("root Cargo.toml declares [workspace.package] version");
+    assert_eq!(
+        version, workspace_version,
+        "producer.version must be the workspace version"
+    );
+}
+
+#[test]
+fn the_parser_branches_on_schema_version_and_never_on_producer_version() {
+    let base = serde_json::to_value(build_workflow_share(&golden_asset(), &golden_payload()))
+        .expect("serializes");
+
+    // A wildly different producer.version is irrelevant to parsing: same schemaVersion, so it
+    // reads, and it reads to the SAME workflow.
+    let mut alien_build = base.clone();
+    alien_build["producer"]["version"] = json!("99.0.0");
+    let parsed =
+        parse_workflow_share(&alien_build).expect("producer.version must not gate parsing");
+    assert_eq!(parsed.producer.version, "99.0.0");
+    assert_eq!(parsed.prompt, base["prompt"].as_str().expect("prompt"));
+
+    // Our own producer.version with a future schemaVersion must be rejected — proving the
+    // branch is on schemaVersion alone and not on the build string.
+    let mut future_contract = base;
+    future_contract["schemaVersion"] = json!(WORKFLOW_SHARE_SCHEMA_VERSION + 1);
+    let error = parse_workflow_share(&future_contract)
+        .expect_err("a future schemaVersion must be rejected");
+    let message = error.to_string();
+    assert!(
+        message.contains(&(WORKFLOW_SHARE_SCHEMA_VERSION + 1).to_string())
+            && message.contains(&WORKFLOW_SHARE_SCHEMA_VERSION.to_string()),
+        "the error must name both versions, got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Coverage lint
+// ---------------------------------------------------------------------------
+
+/// The registry entry for one source tag, or a failure naming what is missing.
+fn builder_for(source: AdvancedKeySource) -> &'static AdvancedBuilder {
+    ADVANCED_BUILDERS
+        .iter()
+        .find(|builder| builder.source == source)
+        .unwrap_or_else(|| panic!("no `ADVANCED_BUILDERS` entry for {source:?}"))
+}
+
+/// Every key `ADVANCED_KEY_RULES` classifies, in either direction.
+fn classified_keys() -> BTreeSet<String> {
+    ADVANCED_KEY_RULES
+        .iter()
+        .map(|rule| rule.key.to_owned())
+        .collect()
+}
+
+/// The whole coverage lint for ONE registered builder, in both directions.
+///
+/// Split out of the per-builder tests so the registry-wide sweep and the two named lints
+/// sc-15946/sc-15948 shipped assert exactly the same thing about their own entries — a builder
+/// cannot be covered by the sweep and not by its own test, or vice versa.
+fn assert_builder_is_fully_classified(builder: &AdvancedBuilder) {
+    let path = builder.path;
+    let function = builder.function;
+    let source = read_repo_file(path);
+    let emitted = emitted_keys(builder, &source);
+
+    // A sanity floor plus named anchors: if an extractor ever stops understanding its file (a
+    // refactor to a different shape, a move), it must fail loudly rather than pass with an empty
+    // set. A lint that has quietly stopped looking protects nothing.
+    assert!(
+        emitted.len() >= builder.minimum_keys,
+        "only {} keys were extracted from {function} in {path}, below the registry's declared \
+         floor of {} — the extractor no longer understands that file, so this lint is not \
+         protecting anything. Fix `emitted_keys` in this test.",
+        emitted.len(),
+        builder.minimum_keys
+    );
+    for anchor in builder.anchors {
+        assert!(
+            emitted.contains(*anchor),
+            "the extractor missed the known key `{anchor}` in {function} ({path}), so this lint \
+             is not protecting anything"
+        );
+    }
+
+    let classified = classified_keys();
+    let unclassified: Vec<&String> = emitted.difference(&classified).collect();
+    assert!(
+        unclassified.is_empty(),
+        "{function} in {path} can emit {unclassified:?}, which `ADVANCED_KEY_RULES` in \
+         crates/sceneworks-core/src/workflow_share.rs does not classify.\n\
+         That builder feeds an embedding lane ({lane}), so an unclassified key is dropped \
+         silently from every shared image it writes.\n\
+         A new advanced knob must be classified before it ships: add it to the table as \
+         `allow(..)` if it describes WHAT TO MAKE (it travels in shared images) or `deny(..)` \
+         if it describes WHAT THIS MACHINE CAN AFFORD (tier, kernel, GPU) or names anything \
+         local (an id, a path, a preset). Either way write the reason — an unclassified key \
+         is dropped silently today and that is exactly what this lint exists to stop.",
+        lane = builder.lane
+    );
+
+    let tagged: BTreeSet<String> = ADVANCED_KEY_RULES
+        .iter()
+        .filter(|rule| rule.source == builder.source)
+        .map(|rule| rule.key.to_owned())
+        .collect();
+    if builder.shape == AdvancedBuilderShape::NoAdvancedMap {
+        assert!(
+            tagged.is_empty(),
+            "{function} in {path} is registered as emitting no `advanced` map, but \
+             `ADVANCED_KEY_RULES` tags {tagged:?} to it. Either it grew a map (change its \
+             registry `shape`) or those rules belong to another builder."
+        );
+        return;
+    }
+
+    // Reverse-direction accountability. A rule's `source` is the builder whose JS the lint reads
+    // to decide whether the rule is stale, so a key that ONLY this builder emits must be tagged to
+    // it — otherwise nothing ever notices the knob being deleted from the UI. Keys several builders
+    // emit are held by whichever one owns them; that builder's own stale check covers them.
+    //
+    // Stricter than the flat "at least one rule names this builder" this generalizes: it is
+    // per-key, so a builder can gain an exclusive knob tagged to the wrong source and still fail.
+    let elsewhere: BTreeSet<String> = ADVANCED_BUILDERS
+        .iter()
+        .filter(|other| other.source != builder.source)
+        .flat_map(|other| emitted_keys(other, &read_repo_file(other.path)))
+        .collect();
+    for key in emitted.difference(&elsewhere) {
+        let rule = advanced_key_rule(key).expect("classified above");
+        assert_eq!(
+            rule.source, builder.source,
+            "`{key}` is emitted ONLY by {function} in {path}, but its rule is tagged \
+             `AdvancedKeySource::{:?}`. The tag is what tells the lint which JS to re-read, so a \
+             key nobody else emits must be tagged to its own builder or nothing will ever notice \
+             it disappearing from the UI.",
+            rule.source
+        );
+    }
+
+    let stale: Vec<&String> = tagged.difference(&emitted).collect();
+    assert!(
+        stale.is_empty(),
+        "`ADVANCED_KEY_RULES` classifies {stale:?} as coming from {function}, but {path} no \
+         longer emits them.\n\
+         Either the knob was removed (drop the rule), it moved to another builder (re-tag the \
+         rule), or it moved to the server (`AdvancedKeySource::Server`). A rule that no longer \
+         matches its source is a classification nobody is maintaining."
+    );
+}
+
+/// Every builder in the registry has every key it can emit classified (sc-15948).
+///
+/// The generalized form of the two lints below. sc-15946 shipped one of them on the premise that
+/// `buildImageJobAdvanced` was the only builder filling `advanced`; sc-15948 found three more, one
+/// of which (`cnScale`) was already losing data and two of which (`angleSet`,
+/// `imageGuidanceScale`) were live leaks on lanes that embed. Patching one file per discovery
+/// closes nothing, so this walks the registry instead — and
+/// [`every_advanced_builder_in_the_web_app_is_accounted_for`] is what makes the registry complete.
+#[test]
+fn every_registered_builder_has_its_advanced_keys_classified() {
+    assert!(
+        ADVANCED_BUILDERS.len() >= 8,
+        "the builder registry shrank to {} entries — a lane was removed from the lint rather than \
+         from the product?",
+        ADVANCED_BUILDERS.len()
+    );
+    for builder in ADVANCED_BUILDERS {
+        assert_builder_is_fully_classified(builder);
+    }
+
+    // The rules table must not carry a key twice with two dispositions.
+    assert_eq!(
+        classified_keys().len(),
+        ADVANCED_KEY_RULES.len(),
+        "`ADVANCED_KEY_RULES` has duplicate keys"
+    );
+    // Every rule explains itself — the failure message above tells an author to write one.
+    for rule in ADVANCED_KEY_RULES {
+        assert!(
+            rule.reason.len() > 20,
+            "rule for `{}` needs a real reason",
+            rule.key
+        );
+    }
+}
+
+/// The registry and the source tag are one thing, asserted from both sides.
+///
+/// A `AdvancedKeySource` variant with no registry entry would silently opt its rules out of the
+/// reverse-direction check; a registry entry sharing a tag with another would make the reverse
+/// check read the wrong file.
+#[test]
+fn every_source_tag_names_exactly_one_registered_builder() {
+    for source in AdvancedKeySource::ALL {
+        let entries = ADVANCED_BUILDERS
+            .iter()
+            .filter(|builder| builder.source == *source)
+            .count();
+        let expected = usize::from(*source != AdvancedKeySource::Server);
+        assert_eq!(
+            entries, expected,
+            "`AdvancedKeySource::{source:?}` has {entries} `ADVANCED_BUILDERS` entries, expected \
+             {expected}. Every variant but `Server` names exactly one builder — that pairing is \
+             what lets the lint read the right file for a rule's tag."
+        );
+    }
+    for builder in ADVANCED_BUILDERS {
+        assert!(
+            AdvancedKeySource::ALL.contains(&builder.source),
+            "`AdvancedKeySource::ALL` is missing {:?}, so the check above cannot see it",
+            builder.source
+        );
+        assert!(
+            builder.lane.len() > 20,
+            "the registry entry for {} needs a real `lane` — it is what tells the next author why \
+             those keys matter",
+            builder.function
+        );
+    }
+}
+
+/// Every deferral either names a story or is an explicit permanent exemption, so "out of scope"
+/// cannot be a shrug (sc-15956 owns video; the training namespace is exempt).
+///
+/// The permanent category exists because the alternative is worse. `trainingConfigSnapshot` builds
+/// a ~20-key `advanced` map that no story will ever classify — it is trainer hyperparameters on a
+/// lane that embeds nothing, a different namespace that shares a name — and a deferral list that
+/// only accepts `sc-` ids would have forced either a fake story id or leaving the biggest
+/// unaccounted builder in the tree unaccounted. So a permanent reason must say what would have to
+/// change (an embedding write seam) and where the entry moves when it does.
+#[test]
+fn every_deferred_builder_names_the_story_that_owns_it() {
+    assert!(
+        !DEFERRED_ADVANCED_BUILDERS.is_empty(),
+        "the deferral list emptied — if every builder is now classified, the video lanes embed \
+         and their keys must be in `ADVANCED_KEY_RULES`"
+    );
+    for deferred in DEFERRED_ADVANCED_BUILDERS {
+        let permanent = deferred.reason.starts_with(PERMANENT_EXEMPTION);
+        assert!(
+            permanent || deferred.reason.contains("sc-"),
+            "the deferral for {} in {} must name the story that owns classifying its keys, or \
+             start with `{PERMANENT_EXEMPTION}` and say why no story ever will, got {:?}",
+            deferred.function,
+            deferred.path,
+            deferred.reason
+        );
+        if permanent {
+            // A permanent exemption is the one shape nobody will revisit on a story's schedule,
+            // so the reason has to carry the escape route itself.
+            assert!(
+                deferred.reason.contains("embed")
+                    && deferred.reason.contains("ADVANCED_BUILDERS")
+                    && deferred.reason.len() > 200,
+                "the permanent exemption for {} in {} must state what would have to change (a \
+                 write seam that EMBEDS) and that the entry then moves into `ADVANCED_BUILDERS`, \
+                 got {:?}",
+                deferred.function,
+                deferred.path,
+                deferred.reason
+            );
+        }
+        assert!(
+            !ADVANCED_BUILDERS
+                .iter()
+                .any(|builder| builder.path == deferred.path
+                    && builder.function == deferred.function),
+            "{} in {} is both registered and deferred",
+            deferred.function,
+            deferred.path
+        );
+    }
+}
+
+/// What to do about an `advanced` map nothing accounts for.
+///
+/// Three branches, and the third is not a formality. This sweep reads the NAME `advanced`, and
+/// nothing in the text separates a UI-state local called `advanced` from a payload map — a JSX prop
+/// and a parameter default can be recognized by their shape and are skipped, a plain local cannot
+/// be. Telling that author to "classify every key it can emit" would be wrong advice on a
+/// build-blocking failure, which is how a lint gets deleted instead of diagnosed. Renaming the local
+/// is the honest fix, and it is offered here rather than left to be guessed.
+const UNACCOUNTED_ADVANCED_ADVICE: &str = "\
+    Every place the web app fills `advanced` must be accounted for, because four of those places \
+    now feed a lane that embeds the map into the PNG (epic 15945). So either:\n\
+    * add the (file, function) pair to `ADVANCED_BUILDERS` in \
+    crates/sceneworks-core/src/workflow_share.rs and classify every key it can emit; or\n\
+    * if its lane does not embed yet, add it to `DEFERRED_ADVANCED_BUILDERS` with the story that \
+    owns turning it on; or\n\
+    * if this is not a job payload at all, RENAME THE LOCAL. This lint reads the name `advanced`, \
+    and a non-payload map that carries that name is indistinguishable from one that ships.";
+
+/// Call heads an indirect `advanced` expression may name WITHOUT being a declared builder.
+///
+/// (file, call head, why). One entry, and it is not a builder: `useCharacterAdvancedOptions` is the
+/// hook that returns the character panel's advanced-options CONTROLLER — the thing whose
+/// `buildAdvanced` is registered as [`AdvancedKeySource::CharacterBuilder`] and is called at
+/// `advanced.buildAdvanced(controller.advancedExtras)`. So `const advanced =
+/// useCharacterAdvancedOptions(…)` names a controller, not a map: there are no keys behind it for
+/// this lint to classify, and the keys that do exist are already covered by the entry for
+/// `buildAdvanced`.
+///
+/// Path-scoped on purpose. The same helper name called from another screen is a NEW indirection and
+/// has to be looked at rather than inherited.
+const ADVANCED_INDIRECTION_CALL_HEADS: &[(&str, &str, &str)] = &[(
+    "apps/web/src/screens/characterPanels.jsx",
+    "useCharacterAdvancedOptions",
+    "The hook that returns the CharacterAdvancedOptions controller. Its `buildAdvanced` is the \
+     registered builder; the local this initializes is the controller itself.",
+)];
+
+/// An exemption that no longer describes the tree is how a lint loses a subject quietly.
+///
+/// The same staleness check the registry and the deferral list get: if the hook call moves or is
+/// renamed, the entry must go rather than sit there excusing something that is not there.
+#[test]
+fn every_indirection_exemption_still_describes_the_tree() {
+    for (path, head, reason) in ADVANCED_INDIRECTION_CALL_HEADS {
+        assert!(
+            reason.len() > 40,
+            "the indirection exemption for `{head}` in {path} needs a real reason — it is the only \
+             thing telling the next author why an unreadable expression is allowed"
+        );
+        let stripped = scannable(&read_repo_file(path));
+        let found = advanced_map_signals(&stripped).into_iter().any(|signal| {
+            signal.kind == AdvancedSignalKind::Indirect && signal.called.as_deref() == Some(*head)
+        });
+        assert!(
+            found,
+            "`ADVANCED_INDIRECTION_CALL_HEADS` exempts `{head}` in {path}, but no `advanced` \
+             expression there comes from it any more — drop the exemption instead of leaving a \
+             hole open for whatever gets called `{head}` next"
+        );
+    }
+}
+
+/// The trip-wire that closes the class: every place `apps/web/src` builds an `advanced` map — or
+/// hands one in from a helper — is classified, deferred, or exempt by name (sc-15948).
+///
+/// This is the assertion sc-15946 was missing. Its lint read one file, so the second builder
+/// (`buildDetailJobBody`) and then the third and fourth (`CharacterAdvancedOptions.buildAdvanced`
+/// with the `advancedExtras` controllers, and `DocumentStudio.submit`) were each found by hand,
+/// after shipping, one bug at a time. Instead of trusting a premise about how many builders exist,
+/// this walks `apps/web/src` for every place an `advanced` map is built and demands that each one
+/// sit inside a registered builder or a declared deferral.
+///
+/// # Exactly what it proves
+///
+/// In every non-test `.js`/`.jsx` file under `apps/web/src`, each of these fails the build unless
+/// it falls inside the body of a function [`ADVANCED_BUILDERS`] or [`DEFERRED_ADVANCED_BUILDERS`]
+/// declares:
+///
+/// * an inline literal — `advanced: { … }`, `advancedExtras: { … }`;
+/// * an assigned literal — `advanced = { … }`;
+/// * a property assignment — `advanced.key = …`;
+/// * INDIRECTION — `advanced: buildFoo(state)`, `advanced: someVar`, `advanced =
+///   compactObject({ … })`. The map is assembled somewhere this scan cannot read, so the call has
+///   to name a declared builder (that builder's own entry accounts for the keys) or the signal
+///   stands. This is the hole the first cut of this sweep had: it matched only a literal `{`, so
+///   `trainingConfigSnapshot` built a ~20-key map through `compactObject` and the lint stayed
+///   green — a live counterexample to the "we found all the builders" premise sc-15946 died of.
+///
+/// Plus, in every file it reads and not merely inside a declared builder, a write it could not
+/// follow at all: `advanced["k"] = v`, `Object.assign(x.advanced, …)`, `advanced.push(…)`.
+///
+/// # What it does NOT prove
+///
+/// * That a declared builder's keys are classified. That is
+///   [`every_registered_builder_has_its_advanced_keys_classified`], which also refuses a SECOND,
+///   unread `advanced` map inside a declared span — a nested helper inside `DocumentStudio.submit`
+///   is not accounted for by `submit`'s entry, because the extractor never reads it.
+/// * That indirection is caught in assignment position when the right-hand side is not a call.
+///   `const advanced = defaults.advanced ?? {}` is a READ of someone else's map, not a build, and
+///   flagging member reads made this sweep fire on the training config's draft reader. Key
+///   position (`advanced:`) is strict about every non-brace expression; assignment position needs
+///   a call.
+/// * Anything about `advanced` maps assembled outside `apps/web/src`.
+///
+/// A NEW builder therefore fails the build the moment it appears — a new file, a new function in a
+/// file that is already covered, a new `advancedExtras` on a controller, or a new helper a payload
+/// calls — and the author has to decide: classify its keys (move it into [`ADVANCED_BUILDERS`]) or
+/// state which story owns it (add it to [`DEFERRED_ADVANCED_BUILDERS`]).
+#[test]
+fn every_advanced_builder_in_the_web_app_is_accounted_for() {
+    // (path, function) → the declared body span, plus whether it is classified or deferred.
+    let mut declared: Vec<(&str, &str, bool)> = ADVANCED_BUILDERS
+        .iter()
+        .map(|builder| (builder.path, builder.function, true))
+        .collect();
+    declared.extend(
+        DEFERRED_ADVANCED_BUILDERS
+            .iter()
+            .map(|deferred| (deferred.path, deferred.function, false)),
+    );
+
+    let files = web_source_files();
+    assert!(
+        files.len() >= 100,
+        "only {} web source files were walked — the discovery scan lost the tree it is supposed \
+         to sweep, so it is not protecting anything",
+        files.len()
+    );
+
+    // Every declared builder must resolve to a real function in a real file. `function_body_span`
+    // panics with instructions when a rename or a move has left the registry pointing at nothing.
+    let mut spans: Vec<(&str, &str, usize, usize)> = Vec::new();
+    for (path, function, _) in &declared {
+        let stripped = scannable(&read_repo_file(path));
+        let (start, end) = function_body_span(&stripped, function, path);
+        spans.push((path, function, start, end));
+    }
+
+    let declared_functions = declared_builder_functions();
+
+    let mut covered_by: Vec<(&str, &str)> = Vec::new();
+    for relative in &files {
+        let stripped = scannable(&read_repo_file(relative));
+        // Not only inside a declared builder: a write this lint cannot follow is invisible
+        // wherever it is, and `body.payload.advanced["k"] = v` in a brand-new file was green
+        // before this call moved out of the `AssignedObject` arm.
+        refuse_invisible_advanced_writes(&stripped, relative);
+        for signal in advanced_map_signals(&stripped) {
+            if signal.calls_a_declared_builder(relative, &declared_functions) {
+                continue;
+            }
+            // The INNERMOST declared span wins, so a nested helper that has been given its own
+            // registry entry is credited to that entry rather than to the function around it.
+            let owner = spans
+                .iter()
+                .filter(|(path, _, start, end)| {
+                    *path == relative.as_str() && signal.offset >= *start && signal.offset < *end
+                })
+                .min_by_key(|(_, _, start, end)| end - start);
+            let (_, function, _, _) = owner.unwrap_or_else(|| {
+                let line = 1 + stripped[..signal.offset].matches('\n').count();
+                panic!(
+                    "{relative}:{line} builds an `advanced` map ({}) inside no builder that \
+                     `ADVANCED_BUILDERS` or `DEFERRED_ADVANCED_BUILDERS` declares.{}\n{}",
+                    signal.kind.describe(),
+                    signal.indirection_advice(),
+                    UNACCOUNTED_ADVANCED_ADVICE,
+                )
+            });
+            covered_by.push((relative.as_str(), function));
+        }
+    }
+
+    // The other direction: a declared builder that no longer builds an `advanced` map is a stale
+    // entry, and a stale deferral is how a video lane could start embedding unnoticed.
+    //
+    // Two shapes are exempt by construction. `NoAdvancedMap` asserts the absence of a map — that is
+    // its whole point. `ReturnedObject` builds one by RETURNING it (`buildImageJobAdvanced` never
+    // writes the word `advanced`), so there is nothing for a signal scan to find; the floor and
+    // anchors in `assert_builder_is_fully_classified` are what hold that shape honest.
+    for builder in ADVANCED_BUILDERS {
+        if matches!(
+            builder.shape,
+            AdvancedBuilderShape::NoAdvancedMap | AdvancedBuilderShape::ReturnedObject
+        ) {
+            continue;
+        }
+        assert!(
+            covered_by
+                .iter()
+                .any(|(path, function)| *path == builder.path && *function == builder.function),
+            "`ADVANCED_BUILDERS` registers {} in {} but the discovery scan finds no `advanced` map \
+             built there any more",
+            builder.function,
+            builder.path
+        );
+    }
+    for deferred in DEFERRED_ADVANCED_BUILDERS {
+        assert!(
+            covered_by
+                .iter()
+                .any(|(path, function)| *path == deferred.path && *function == deferred.function),
+            "`DEFERRED_ADVANCED_BUILDERS` defers {} in {} but the discovery scan finds no \
+             `advanced` map built there any more — drop the deferral",
+            deferred.function,
+            deferred.path
+        );
+    }
+}
+
+/// The lint sc-15946 shipped, still asserting exactly what it did, now through the registry.
+#[test]
+fn every_advanced_key_the_studio_can_emit_is_classified() {
+    assert_builder_is_fully_classified(builder_for(AdvancedKeySource::StudioBuilder));
+}
+
+/// The Detail pass's own knobs are classified too (sc-15948).
+///
+/// `buildImageJobAdvanced` is not the only builder that fills `advanced`: the standalone
+/// `image_detail` job has its own, and its keys land in the same untyped map and go through the
+/// same allow-list. Before this lint existed, `cnScale` — half of what that UI exposes — was
+/// unclassified and therefore silently dropped from every shared detail-refined image.
+#[test]
+fn every_advanced_key_the_detail_pass_can_emit_is_classified() {
+    assert_builder_is_fully_classified(builder_for(AdvancedKeySource::DetailBuilder));
+}
+
+/// The character lane leaked `angleSet` — the knob that decides how many images exist (sc-15948).
+///
+/// `advanced.angleSet` is what makes the worker emit one image per view angle, and
+/// `mode: "character_image"` posts to `/api/v1/image/jobs`, which embeds. Unclassified, it was
+/// dropped, so a shared angle-set image replayed as a SINGLE image. Its neighbour
+/// `keypointCollectionId` is a local id and is denied.
+#[test]
+fn every_advanced_key_the_character_lane_can_emit_is_classified() {
+    for source in [
+        AdvancedKeySource::CharacterBuilder,
+        AdvancedKeySource::CharacterAngleExtras,
+        AdvancedKeySource::CharacterPoseExtras,
+    ] {
+        assert_builder_is_fully_classified(builder_for(source));
+    }
+    assert_eq!(
+        advanced_key_rule("angleSet").map(|rule| rule.disposition),
+        Some(AdvancedDisposition::Allow),
+        "`angleSet` decides how many images the job makes, so it must travel"
+    );
+    assert_eq!(
+        advanced_key_rule("keypointCollectionId").map(|rule| rule.disposition),
+        Some(AdvancedDisposition::Deny),
+        "a Key Point Library collection id resolves to nothing on another install"
+    );
+}
+
+/// The interleave lane BECAME an embedding lane in this story, so its keys are classified here.
+///
+/// `sensenova_jobs.rs` threads `workflow_source` into `ImagePlan`, which reaches
+/// `write_image_asset` — so every shared interleaved document image carries whatever
+/// `DocumentStudio.submit` put in `advanced`, and dropped whatever it did not classify. Making a
+/// lane embed and not classifying its keys is the same bug as the `cnScale` one, on a lane this
+/// story created.
+#[test]
+fn every_advanced_key_the_interleave_lane_can_emit_is_classified() {
+    assert_builder_is_fully_classified(builder_for(AdvancedKeySource::InterleaveBuilder));
+    for (key, disposition) in [
+        ("systemMessage", AdvancedDisposition::Allow),
+        ("imageGuidanceScale", AdvancedDisposition::Allow),
+    ] {
+        assert_eq!(
+            advanced_key_rule(key).map(|rule| rule.disposition),
+            Some(disposition),
+            "`{key}` is authored generation intent on a lane that embeds"
+        );
+    }
+}
+
+/// The standalone upscale job posts NO `advanced` map — and that is now asserted, not assumed.
+///
+/// sc-15948 made that job embed (ISSUE 1), which puts `buildUpscaleJobBody` on the same footing as
+/// the other three builders: the day it grows a knob, the lint demands a classification instead of
+/// dropping it silently.
+#[test]
+fn the_standalone_upscale_builder_still_posts_no_advanced_map() {
+    let builder = builder_for(AdvancedKeySource::UpscaleBuilder);
+    assert_eq!(builder.shape, AdvancedBuilderShape::NoAdvancedMap);
+    assert_builder_is_fully_classified(builder);
+}
+
+#[test]
+fn the_key_extractor_reads_a_representative_builder() {
+    // Pins the extractor itself against the exact JS shapes `imageJobAdvanced.js` uses:
+    // shorthand keys, `key: value`, conditional spreads, a spread nested inside a spread,
+    // an object VALUE (whose keys are not advanced keys), a call argument object (likewise),
+    // and string literals that must not be mistaken for keys.
+    let source = r#"
+export function buildImageJobAdvanced(state) {
+  const { resolution, sampler } = state;
+  return {
+    resolution,
+    // A comment naming notAKey: 1
+    /* block comment: alsoNotAKey: 2 */
+    ...(sampler && sampler !== "default" ? { sampler } : {}),
+    ...(steps !== "" ? { steps: Number(steps) } : {}),
+    ...(flashAttn ? {} : { flashAttn: false }),
+    ...(tier !== null
+      ? {
+          mlxQuantize: tierQuantize(tier),
+          ...(tierExplicit ? { mlxQuantizeExplicit: true } : {}),
+        }
+      : {}),
+    ...(pidTarget === "2k" ? { pidTarget: "2k" } : {}),
+    ...(posePayload.length ? { poses: posePayload, faceRestore } : {}),
+    ...(overlayId ? { controlWeights: { overlayId: controlOverlayId } } : {}),
+    ...(sendStructured ? { structuredPrompt: buildRecipe({ intent: a, caption: b }) } : {}),
+  };
+}
+"#;
+    let keys = emitted_advanced_keys(source);
+    let expected: BTreeSet<String> = [
+        "resolution",
+        "sampler",
+        "steps",
+        "flashAttn",
+        "mlxQuantize",
+        "mlxQuantizeExplicit",
+        "pidTarget",
+        "poses",
+        "faceRestore",
+        "controlWeights",
+        "structuredPrompt",
+    ]
+    .iter()
+    .map(|key| (*key).to_owned())
+    .collect();
+    assert_eq!(keys, expected);
+}
+
+/// A builder shaped the way the scanner cannot read, so the tests below can hand it one.
+fn builder_with_return_body(body: &str) -> String {
+    format!("export function buildImageJobAdvanced(state) {{\n  return {{\n{body}\n  }};\n}}\n")
+}
+
+#[test]
+#[should_panic(expected = "cannot read")]
+fn the_key_extractor_refuses_a_spread_of_a_call_expression() {
+    // Verified against the real lint: adding this line plus a helper returning
+    // `{ secretLocalPathKnob: state.weightsPath }` made the whole coverage lint PASS SILENTLY —
+    // the `>= 25` floor and all five anchors still resolved while the new knob became invisible.
+    emitted_advanced_keys(&builder_with_return_body(
+        "    resolution,\n    ...buildFutureKnobs(state),",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "cannot read")]
+fn the_key_extractor_refuses_a_spread_of_a_bare_identifier() {
+    // A parenthesis-less spread also used to leave a spread open forever, so the next nested
+    // object VALUE would have been read as an emit scope — quiet corruption, not just a miss.
+    emitted_advanced_keys(&builder_with_return_body(
+        "    resolution,\n    ...defaults,\n    ...(a ? { controlWeights: { overlayId } } : {}),",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "contains no object literal")]
+fn the_key_extractor_refuses_a_spread_with_no_object_literal_in_it() {
+    emitted_advanced_keys(&builder_with_return_body(
+        "    resolution,\n    ...(buildFutureKnobs(state)),",
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// The discovery scan's own unit tests: what it sees, and what it must not
+// ---------------------------------------------------------------------------
+
+/// Every signal `advanced_map_signals` reports for one snippet, as (kind, callee).
+fn signal_shapes(source: &str) -> Vec<(AdvancedSignalKind, Option<String>)> {
+    advanced_map_signals(&scannable(source))
+        .into_iter()
+        .map(|signal| (signal.kind, signal.called))
+        .collect()
+}
+
+/// Indirection is a signal, not silence — the hole that let `trainingConfigSnapshot` stay green.
+///
+/// The first cut of this sweep only ever matched a literal `{` after `advanced:`, so every one of
+/// these was invisible: the map was assembled in a helper, a variable or a ternary, and a ~20-key
+/// builder sat in neither the registry nor the deferral list with the lint reporting 27/27.
+#[test]
+fn the_discovery_scan_sees_a_map_handed_in_from_somewhere_else() {
+    for (source, called) in [
+        (
+            "const body = { advanced: probeExtrasMap(opts) };",
+            Some("probeExtrasMap"),
+        ),
+        ("const body = { advanced: someVar };", None),
+        (
+            "const body = { advanced: cond ? { a: 1 } : { b: 2 } };",
+            None,
+        ),
+        (
+            "const advanced = compactObject({ probeKnob: 1 });",
+            Some("compactObject"),
+        ),
+        ("const advanced = helpers.build(opts);", Some("build")),
+    ] {
+        assert_eq!(
+            signal_shapes(source),
+            vec![(AdvancedSignalKind::Indirect, called.map(str::to_owned))],
+            "indirection went unreported for {source:?}, which is how a builder stays invisible"
+        );
+    }
+}
+
+/// A call site of a REGISTERED builder stays exempt, or every screen would need an entry.
+#[test]
+fn the_discovery_scan_lets_a_declared_builders_call_site_through() {
+    let declared = declared_builder_functions();
+    for source in [
+        "const body = { advanced: buildImageJobAdvanced({ prompt }) };",
+        "const body = { advanced: advanced.buildAdvanced(controller.advancedExtras) };",
+    ] {
+        let signals = advanced_map_signals(&scannable(source));
+        assert_eq!(signals.len(), 1, "expected one signal for {source:?}");
+        assert!(
+            signals[0].calls_a_declared_builder("apps/web/src/imageJobRequest.js", &declared),
+            "{source:?} calls a registered builder, so demanding a registry entry for the SCREEN \
+             would say nothing about which keys exist"
+        );
+    }
+    // ... and an unregistered helper of the same shape is NOT exempt.
+    let signals = advanced_map_signals(&scannable("const b = { advanced: probeMap(o) };"));
+    assert!(
+        !signals[0].calls_a_declared_builder("apps/web/src/imageJobRequest.js", &declared),
+        "an indirection through an unregistered helper must stand as a signal"
+    );
+}
+
+/// A member READ is not a build, and flagging it fired on the training config's draft reader.
+#[test]
+fn the_discovery_scan_ignores_a_read_of_somebody_elses_advanced() {
+    assert!(
+        signal_shapes("const advanced = defaults.advanced ?? {};").is_empty(),
+        "`defaults.advanced ?? {{}}` reads a saved config; the sweep must not demand a registry \
+         entry for every screen that inspects one"
+    );
+}
+
+/// A JSX prop is not a payload, and a build-blocking lint that says otherwise gets deleted.
+///
+/// `advanced` appears in 59 non-test files under `apps/web/src`. Failing the BUILD on
+/// `<Child advanced={state.opts} />` with "classify every key it can emit" is advice that cannot be
+/// followed, on work that has nothing to do with sharing.
+#[test]
+fn the_discovery_scan_ignores_a_jsx_prop() {
+    for source in [
+        "const row = <Child advanced={state.opts} />;",
+        "const row = <Child title=\"a > b; not a tag\" advanced={{ open: false }} />;",
+        "const row = <ProbeRow advanced = {renamed} label=\"spaced\" />;",
+        "const row = <Outer>{items.map((item) => <Child advanced={item.opts} />)}</Outer>;",
+    ] {
+        assert!(
+            signal_shapes(source).is_empty(),
+            "{source:?} is a JSX prop, not a map this app builds"
+        );
+    }
+}
+
+/// A binding is not a build: a parameter default, and a destructuring rename.
+#[test]
+fn the_discovery_scan_ignores_a_binding_pattern() {
+    for source in [
+        "function Row({ advanced = {} }) { return advanced; }",
+        "function Row({ advanced = {} }, ref) { return ref ?? advanced; }",
+        "const Row = ({ advanced = {} }) => advanced;",
+        "const { advanced = {} } = props;",
+        "const { advanced: renamed } = props;",
+    ] {
+        assert!(
+            signal_shapes(source).is_empty(),
+            "{source:?} BINDS `advanced`, it does not build one"
+        );
+    }
+}
+
+/// A ternary's middle arm wears the same colon and builds nothing.
+#[test]
+fn the_discovery_scan_ignores_a_colon_that_is_not_a_key() {
+    assert!(
+        signal_shapes("const map = useSaved ? advanced : fallback;").is_empty(),
+        "`cond ? advanced : fallback` is not an object key"
+    );
+}
+
+/// Handing on a map that was already built is not building a second one.
+///
+/// `{ advanced: advanced }` is the long spelling of the `{ advanced }` shorthand three registered
+/// builders use. Reporting it would fail the build on a rewrite that changes nothing, and it can
+/// hide nothing: the map still has to be created somewhere, and creation is what this scan reads.
+#[test]
+fn the_discovery_scan_ignores_a_hand_on_of_the_same_map() {
+    for source in [
+        "const body = { mode, advanced: advanced };",
+        "return { advancedExtras: advancedExtras };",
+    ] {
+        assert!(
+            signal_shapes(source).is_empty(),
+            "{source:?} hands on a map this scan already saw being built"
+        );
+    }
+    // But a member read or a call on it is still indirection.
+    assert_eq!(
+        signal_shapes("const body = { advanced: advanced.buildAdvanced(extras) };"),
+        vec![(
+            AdvancedSignalKind::Indirect,
+            Some("buildAdvanced".to_owned())
+        )]
+    );
+}
+
+/// The one shape nothing in the text can settle, so the failure has to offer the rename.
+///
+/// A plain local named `advanced` holding UI state is indistinguishable from a payload map — the
+/// same `const advanced = { … }` that `buildEditJobBody` and `DocumentStudio.submit` use. Narrowing
+/// the signal to "locals that visibly flow into a request" would let `const advanced = { probeKnob:
+/// 1 }; body.advanced = advanced;` back through, so the signal stands and the message carries the
+/// third branch instead.
+#[test]
+fn a_plain_local_still_signals_and_the_advice_offers_the_rename() {
+    assert_eq!(
+        signal_shapes("const advanced = { open: false };"),
+        vec![(AdvancedSignalKind::AssignedLiteral, None)],
+    );
+    assert!(
+        UNACCOUNTED_ADVANCED_ADVICE.contains("RENAME THE LOCAL"),
+        "a local this lint cannot classify must be told the one fix that applies to it, or the \
+         next author deletes the lint rather than diagnosing it"
+    );
+}
+
+/// The literal shapes the sweep has always caught, pinned so a rewrite cannot drop one.
+#[test]
+fn the_discovery_scan_still_sees_every_literal_shape() {
+    assert_eq!(
+        signal_shapes("const body = { advanced: { steps: 4 } };"),
+        vec![(AdvancedSignalKind::InlineLiteral, None)]
+    );
+    assert_eq!(
+        signal_shapes("return { advancedExtras: { angleSet } };"),
+        vec![(AdvancedSignalKind::ExtrasLiteral, None)]
+    );
+    assert_eq!(
+        signal_shapes("const advanced = {};\nadvanced.steps = 4;"),
+        vec![
+            (AdvancedSignalKind::AssignedLiteral, None),
+            (AdvancedSignalKind::PropertyAssignment, None)
+        ]
+    );
+    // Never an equality test, and never a method call on the map.
+    assert!(signal_shapes("if (advanced == null) return;").is_empty());
+    assert!(signal_shapes("const n = advanced.steps;").is_empty());
+}
+
+#[test]
+#[should_panic(expected = "a computed key")]
+fn an_invisible_write_is_refused_through_any_object_path() {
+    refuse_invisible_advanced_writes(
+        &scannable("body.payload.advanced[\"probeKnob\"] = value;"),
+        "a probe",
+    );
+}
+
+#[test]
+#[should_panic(expected = "Object.assign(body.payload.advanced, …)")]
+fn an_object_assign_onto_a_nested_advanced_is_refused() {
+    // `Object.assign(advanced` as a literal substring missed this: the target was nested.
+    refuse_invisible_advanced_writes(
+        &scannable("Object.assign(body.payload.advanced, { probeKnob: 1 });"),
+        "a probe",
+    );
+}
+
+#[test]
+#[should_panic(expected = "`advanced.push(…)`")]
+fn an_array_mutator_on_advanced_is_refused() {
+    refuse_invisible_advanced_writes(&scannable("advanced.push(knob);"), "a probe");
+}
+
+/// The refusal must not fire on an `Object.assign` that has nothing to do with `advanced`.
+#[test]
+fn an_unrelated_object_assign_is_not_an_invisible_advanced_write() {
+    for source in [
+        "Object.assign(target, { a: 1 });",
+        "const merged = Object.assign({}, base, extra);",
+        "Object.assign(state.advancedOpen, { a: 1 });",
+    ] {
+        assert!(
+            invisible_advanced_writes(&scannable(source)).is_empty(),
+            "{source:?} does not write an `advanced` map"
+        );
+    }
+}
+
+/// A nested helper inside a declared span is not accounted for by that declaration.
+#[test]
+#[should_panic(expected = "builds a SECOND `advanced` map")]
+fn a_second_map_inside_a_declared_builder_is_refused() {
+    // Shaped like `DocumentStudio.submit`: the registered `AssignedObject` initializer, plus a
+    // nested helper with its own literal that the arm never reads. Verified against the real lint:
+    // inserting this into the real `submit` left 27/27 green before this refusal existed.
+    emitted_keys(
+        builder_for(AdvancedKeySource::InterleaveBuilder),
+        r#"
+async function submit(event) {
+  const advanced = {};
+  advanced.systemMessage = trimmedSystem;
+  advanced.imageGuidanceScale = referenceGuidance;
+  function probeNestedBody(probeKnob, probeSecret) {
+    return { advanced: { probeKnob, probeSecret } };
+  }
+  return probeNestedBody(1, 2);
+}
+"#,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Leak tests
+// ---------------------------------------------------------------------------
+
+/// Every value in a built envelope, checked against an INDEPENDENTLY written path sniffer.
+///
+/// The seeds are the point: the guard only ever gets as strong as what this test throws at it,
+/// and the first cut seeded only absolute paths — which is exactly the subset the first cut of
+/// `is_path_shaped` already caught, so the two could agree while both being wrong. The relative,
+/// traversing and drive-relative seeds below are the ones that used to travel verbatim, and the
+/// top-level ones (`model`, `stylePreset`, `styleId`, `fitMode`, `mode`) cover the fields that
+/// were copied with no check at all while `advanced.styleId` — literally the same value — was
+/// guarded.
+///
+/// The deliberate PROSE exemption is not seeded here; it is pinned by
+/// [`authored_prose_travels_verbatim_even_when_it_names_a_path`] so that each test asserts one
+/// thing.
+#[test]
+fn no_value_in_a_built_envelope_is_path_shaped() {
+    let mut payload = golden_payload();
+    // Top-level request fields, copied straight onto the envelope. `mode` and `model` are
+    // required strings, so a path-shaped one reduces to empty rather than vanishing.
+    for (key, value) in [
+        ("mode", "..\\..\\Users\\Michael"),
+        ("model", "C:\\models\\evil"),
+        ("stylePreset", "\\\\fileserver\\styles\\x"),
+        ("styleId", "../../etc/passwd"),
+        ("fitMode", "/etc/passwd"),
+    ] {
+        payload.insert(key.to_owned(), json!(value));
+    }
+    payload.insert(
+        "upscale".to_owned(),
+        json!({ "enabled": true, "factor": 2, "engine": "E:\\engines\\seedvr2" }),
+    );
+    payload.insert(
+        "loras".to_owned(),
+        json!([{
+            "name": "Users\\Michael\\Desktop\\coast.safetensors",
+            "weight": 0.65,
+            "source": { "provider": "huggingface", "repo": "../../../etc/passwd" }
+        }]),
+    );
+
+    let advanced = payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .expect("advanced object");
+    // Seeded on purpose: paths under allow-listed keys, under denied keys, under keys nobody
+    // has classified, and nested inside an object smuggled under a scalar key.
+    for (key, value) in [
+        ("sampler", json!("C:\\Users\\Michael\\samplers\\euler.json")),
+        ("scheduler", json!("/home/michael/schedules/beta")),
+        ("controlScale", json!("file:///D:/maps/canny.png")),
+        ("resolution", json!("~/renders/1024x1024")),
+        (
+            "steps",
+            json!({ "path": "\\\\fileserver\\share\\steps.json" }),
+        ),
+        (
+            "someFutureKnob",
+            json!("E:\\models\\future\\weights.safetensors"),
+        ),
+        ("weightsPath", json!("/opt/sceneworks/weights.safetensors")),
+        (
+            "poses",
+            json!([{ "id": "pose_1", "keypoints": "C:\\poses\\a.json" }]),
+        ),
+        // The escapes the first cut of the guard let through, one per family.
+        ("guidanceMethod", json!("Users\\Michael\\Desktop\\cfg.json")),
+        ("viewAngle", json!("..\\..\\Users\\Michael")),
+        ("schedulerShift", json!("../../etc/passwd")),
+        // A drive-RELATIVE path: a drive prefix with no separator after it.
+        ("controlMode", json!("C:foo")),
+        ("styleId", json!("c:secret\\noir")),
+        ("faceRestore", json!("%USERPROFILE%\\restore.json")),
+        ("textStyleGain", json!("~michael/gain.json")),
+        // Percent-encoded `file://D:/x`.
+        ("trueCfgScale", json!("file%3A%2F%2FD%3A%2Fx")),
+        ("ipAdapterScale", json!("assets/images/michael/x.png")),
+    ] {
+        advanced.insert(key.to_owned(), value);
+    }
+
+    let share = build_workflow_share(&golden_asset(), &payload);
+    let encoded = serde_json::to_value(&share).expect("serializes");
+
+    let mut offenders = Vec::new();
+    collect_strings(&encoded, String::from("$"), &mut offenders);
+    for (pointer, value) in &offenders {
+        // `producer.url` is the ONE URL the envelope deliberately carries. It names the
+        // software's repository, never this installation.
+        if pointer == "$.producer.url" {
+            continue;
+        }
+        assert!(
+            !looks_like_a_path(value),
+            "{pointer} = {value:?} is path-shaped and must never reach a shared image"
+        );
+    }
+
+    // And nothing from the seeded values survived as a substring anywhere.
+    let text = serde_json::to_string(&encoded).expect("serializes");
+    for fragment in [
+        "Michael",
+        "C:\\\\",
+        "c:secret",
+        "C:foo",
+        "/home/",
+        "file://",
+        "file%3A",
+        "fileserver",
+        "E:\\\\",
+        "/opt/",
+        "safetensors",
+        "USERPROFILE",
+        "etc/passwd",
+        "..",
+        "~",
+    ] {
+        assert!(
+            !text.contains(fragment),
+            "{fragment:?} leaked into the envelope: {text}"
+        );
+    }
+}
+
+/// The one deliberate exception to "every filesystem path without exception", made explicit.
+///
+/// `stylePrompt`, `systemMessage` and the structured prompt's `intent` / `runtimePrompt` are the
+/// same class as the top-level `prompt`, which the story puts IN: they are what the user typed.
+/// Silently mangling authored text because it mentions a directory would be worse than the leak it
+/// prevents — the user wrote it and can see it before sharing. That decision was previously
+/// implicit in a `PROSE_KEYS` constant no test seeded; this pins it in both directions.
+///
+/// All SIX exempt pointers are seeded, `systemMessage` included: the shipped set is what the
+/// privacy callout in `docs/workflow-share-envelope.md` promises, and a test that seeds five of six
+/// lets a reader — and this file's own comment — conclude that an interleave system prompt naming a
+/// directory is path-guarded, when it is not.
+#[test]
+fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
+    const STYLE_PROMPT: &str = "C:\\Users\\Michael\\Desktop\\secret_project\\brief.txt";
+    const INTENT: &str = "/home/michael/clients/acme/nda.md";
+    const RUNTIME_PROMPT: &str = "rendered from ..\\..\\briefs\\acme.json";
+    const PROMPT: &str = "a lighthouse, per D:\\briefs\\fog.md";
+    const NEGATIVE_PROMPT: &str = "no text, nothing like \\\\fileserver\\rejects\\list.txt";
+    const SYSTEM_MESSAGE: &str = "follow the house style in E:\\Clients\\Acme\\style-guide.md";
+
+    let mut payload = golden_payload();
+    payload.insert("prompt".to_owned(), json!(PROMPT));
+    payload.insert("negativePrompt".to_owned(), json!(NEGATIVE_PROMPT));
+    let advanced = payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .expect("advanced object");
+    advanced.insert("stylePrompt".to_owned(), json!(STYLE_PROMPT));
+    advanced.insert("systemMessage".to_owned(), json!(SYSTEM_MESSAGE));
+    advanced.insert(
+        "structuredPrompt".to_owned(),
+        json!({ "intent": INTENT, "runtimePrompt": RUNTIME_PROMPT }),
+    );
+
+    let share = build_workflow_share(&golden_asset(), &payload);
+    assert_eq!(share.prompt, PROMPT);
+    assert_eq!(share.negative_prompt, NEGATIVE_PROMPT);
+    assert_eq!(share.advanced["stylePrompt"], json!(STYLE_PROMPT));
+    assert_eq!(share.advanced["systemMessage"], json!(SYSTEM_MESSAGE));
+    let recipe = share.advanced["structuredPrompt"]
+        .as_object()
+        .expect("structuredPrompt object");
+    assert_eq!(recipe["intent"], json!(INTENT));
+    assert_eq!(recipe["runtimePrompt"], json!(RUNTIME_PROMPT));
+
+    // The exemption is per key, not a hole in the guard: a NON-prose neighbour with the same
+    // text is still dropped, and the exempt pointers are exactly these six.
+    let mut offenders = Vec::new();
+    collect_strings(
+        &serde_json::to_value(&share).expect("serializes"),
+        String::from("$"),
+        &mut offenders,
+    );
+    let path_shaped: BTreeSet<&str> = offenders
+        .iter()
+        .filter(|(_, value)| looks_like_a_path(value))
+        .map(|(pointer, _)| pointer.as_str())
+        .collect();
+    assert_eq!(
+        path_shaped,
+        [
+            "$.prompt",
+            "$.negativePrompt",
+            "$.advanced.stylePrompt",
+            "$.advanced.systemMessage",
+            "$.advanced.structuredPrompt.intent",
+            "$.advanced.structuredPrompt.runtimePrompt",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<&str>>(),
+        "only the authored prose fields may carry a path"
+    );
+}
+
+/// The false-positive half, pinned against REAL data rather than a hand-picked corpus.
+///
+/// The relative-tree tally read `"PiD 1.5 Decoder (FLUX.1 / Boogu / Chroma / Z-Image)"` — a
+/// display name shipped in `config/manifests/builtin.models.jsonc` — as a four-deep path,
+/// because it counted a ` / ` list separator as a path separator. Those display names do not
+/// themselves travel (the envelope carries the model SLUG), but `loras[].name` is exactly this
+/// class of free human label and DOES travel, and a dropped LoRA name is silent: the user chose
+/// those words and nothing tells them the name went missing. So the manifest's own labels stand
+/// in as the corpus of what people actually type.
+#[test]
+fn shipped_display_labels_that_list_with_slashes_are_not_path_shaped() {
+    let source = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("the builtin model manifest is embedded");
+    let manifest: Value = serde_json::from_str(&strip_jsonc_comments(source))
+        .expect("builtin.models.jsonc parses as JSON");
+
+    let mut strings = Vec::new();
+    collect_strings(&manifest, String::from("$"), &mut strings);
+    let listed: Vec<&String> = strings
+        .iter()
+        .filter(|(pointer, _)| {
+            [".name", ".label", ".displayName"]
+                .iter()
+                .any(|suffix| pointer.ends_with(suffix))
+        })
+        .map(|(_, value)| value)
+        .filter(|value| value.contains(" / "))
+        .collect();
+
+    assert!(
+        listed.len() >= 5,
+        "the manifest no longer carries the ` / ` display labels this test pins ({} found). If \
+         they were renamed, retarget this test at the labels that replaced them — do not delete \
+         it: it is the only place the guard meets real human labels.",
+        listed.len()
+    );
+    for label in listed {
+        assert!(
+            !is_path_shaped(label),
+            "the shipped display label {label:?} reads as a filesystem path, so the same shape in \
+             a `loras[].name` would be dropped from the user's own share with no signal"
+        );
+    }
+}
+
+/// The shipped guard must never be WEAKER than the sniffer this file asserts with.
+///
+/// That inversion is exactly how the first cut shipped: [`looks_like_a_path`] already treated
+/// any backslash as a path while `is_path_shaped` tested only the FIRST character, so the two
+/// disagreed on every relative Windows path — and the property test passed anyway, because its
+/// seeds happened to be precisely the subset both agreed on. A seed corpus can only ever fail to
+/// notice that; the relationship itself has to be asserted, so it is asserted here.
+///
+/// The other direction is deliberately NOT asserted: the shipped guard is allowed to be
+/// stricter (it also catches relative POSIX trees and percent-encoded `file://`), because the
+/// cost of a false positive is one dropped label and the cost of a false negative is a username
+/// inside every copy of a shared image.
+#[test]
+fn the_shipped_path_guard_is_never_weaker_than_the_independent_sniffer() {
+    for value in [
+        // Paths, one per family.
+        "/home/michael/x.png",
+        "C:\\Users\\Michael\\x.png",
+        "Users\\Michael\\Desktop\\secret.png",
+        "models\\weights\\x.safetensors",
+        "..\\..\\Users\\Michael",
+        "../../etc/passwd",
+        "./local/thing",
+        "C:foo",
+        "c:secret\\file",
+        "%USERPROFILE%\\x",
+        "assets/images/x.png",
+        "~/models/x.png",
+        "~michael/x",
+        "\\\\fileserver\\share\\x.png",
+        "file:///D:/x.png",
+        "file%3A%2F%2FD%3A%2Fx",
+        "engine loaded from D:/models/x",
+        // Legitimate values, which neither may flag.
+        "euler",
+        "dpmpp_2m",
+        "beta",
+        "cfg_pp",
+        "1024x1024",
+        "2k",
+        "acme/mira",
+        "acme/foggy-coast",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "https://github.com/SceneWorks/SceneWorks",
+        "text_to_image",
+        "krea_2_turbo",
+        "seedvr2",
+        "noir_bloom",
+        "cinematic",
+        "crop",
+        "canny",
+        "",
+    ] {
+        if looks_like_a_path(value) {
+            assert!(
+                is_path_shaped(value),
+                "the shipped `is_path_shaped` misses {value:?}, which this file's independent \
+                 sniffer flags — so the leak tests here are checking a guard weaker than their \
+                 own assertion and a bug in it can hide behind itself. Strengthen \
+                 `workflow_share::is_path_shaped`; do NOT weaken `looks_like_a_path`."
+            );
+        }
+    }
+}
+
+/// The two live leaks sc-15948's review found, asserted as BEHAVIOUR rather than as coverage.
+///
+/// The lint tests above would have caught these at build time; this catches them at the seam, so
+/// the fix cannot regress by someone re-tagging a rule while leaving it denied. Both lanes post to
+/// endpoints that embed, so each of these keys either travels inside a shared PNG or is lost:
+///
+/// * `angleSet` is what makes the worker emit one image per view angle. Dropped, a shared angle-set
+///   image replays as a SINGLE image.
+/// * `imageGuidanceScale` is the authored reference-guidance strength for an interleaved document,
+///   and `systemMessage` is the system prompt the user typed. Dropped, a shared interleaved image
+///   loses both.
+/// * `keypointCollectionId` is a local Key Point Library id and must NOT travel.
+#[test]
+fn the_character_and_interleave_lane_knobs_survive_the_allow_list() {
+    let mut payload = golden_payload();
+    let advanced = payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .expect("advanced object");
+    advanced.insert("angleSet".to_owned(), json!(true));
+    advanced.insert("keypointCollectionId".to_owned(), json!("kpc_7f31"));
+    advanced.insert("imageGuidanceScale".to_owned(), json!(1.8));
+    advanced.insert(
+        "systemMessage".to_owned(),
+        json!("Keep every panel on the same character."),
+    );
+
+    let share = build_workflow_share(&golden_asset(), &payload);
+    assert_eq!(share.advanced.get("angleSet"), Some(&json!(true)));
+    assert_eq!(share.advanced.get("imageGuidanceScale"), Some(&json!(1.8)));
+    assert_eq!(
+        share.advanced.get("systemMessage"),
+        Some(&json!("Keep every panel on the same character."))
+    );
+    assert!(
+        !share.advanced.contains_key("keypointCollectionId"),
+        "a local Key Point Library id must not travel"
+    );
+    assert!(
+        !serde_json::to_string(&share)
+            .expect("serializes")
+            .contains("kpc_7f31"),
+        "the collection id leaked into the envelope"
+    );
+}
+
+#[test]
+fn input_ids_become_shape_descriptors_with_zero_id_leakage() {
+    let mut payload = golden_payload();
+    payload.insert("referenceAssetId".to_owned(), json!("asset_ref_solo"));
+    let share = build_workflow_share(&golden_asset(), &payload);
+
+    let kinds: Vec<(&str, u32, Option<&str>)> = share
+        .inputs
+        .iter()
+        .map(|input| {
+            (
+                input.kind.as_str(),
+                input.count,
+                input.control_mode.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("source", 1, None),
+            ("reference", 3, None),
+            ("mask", 1, None),
+            ("control", 1, Some("canny")),
+        ]
+    );
+
+    let text = serde_json::to_string(&share).expect("serializes");
+    for id in [
+        "asset_source_1",
+        "asset_ref_1",
+        "asset_ref_2",
+        "asset_ref_solo",
+        "asset_mask_1",
+        "asset_control_1",
+        "asset_9f2c",
+        "project_7a10",
+        "genset_31bb",
+        "job_5c8e",
+        "character_c001",
+        "look_l001",
+        "lora_1f0d",
+        "overlay_7",
+        "preset_local_1",
+        "Michael's Unreleased Film",
+        "2026-07-29T13:04:11Z",
+        "nvfp4",
+        "krea_2_turbo\\\\", // the install path's model dir, not the catalog slug
+    ] {
+        assert!(!text.contains(id), "{id} leaked into the envelope: {text}");
+    }
+
+    // The catalog slug itself IS in — it names a model, not an installation.
+    assert_eq!(share.model, "krea_2_turbo");
+}
+
+#[test]
+fn denied_top_level_request_fields_never_travel() {
+    let share = build_workflow_share(&golden_asset(), &golden_payload());
+    let encoded = serde_json::to_value(&share).expect("serializes");
+    let object = encoded.as_object().expect("envelope is an object");
+    for denied in [
+        "projectId",
+        "projectName",
+        "jobId",
+        "assetId",
+        "generationSetId",
+        "characterId",
+        "characterLookId",
+        "requestedGpu",
+        "quantTier",
+        "tierExplicit",
+        "modelManifestEntry",
+        "seeds",
+        "createdAt",
+        "recipePresetId",
+    ] {
+        assert!(
+            !object.contains_key(denied),
+            "`{denied}` must not be a top-level envelope field"
+        );
+    }
+    for denied in [
+        "quantTier",
+        "mlxQuantize",
+        "flashAttn",
+        "controlWeights",
+        "controlImage",
+    ] {
+        assert!(
+            !share.advanced.contains_key(denied),
+            "`advanced.{denied}` must not travel"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Collection bounds (sc-15949 review)
+// ---------------------------------------------------------------------------
+
+/// `workflow_share::MAX_SHARE_PHASES` against the two validators it claims to be.
+///
+/// `sceneworks-worker` depends on `sceneworks-core`, so the constant cannot be imported and the
+/// derivation would otherwise be a comment nobody checks. Read from source instead, the same
+/// technique the `ADVANCED_BUILDERS` lint uses on `apps/web/src`: if either validator's cap moves,
+/// this fails and the envelope's cap becomes a decision rather than a stale copy.
+#[test]
+fn the_phase_cap_matches_the_multi_phase_validators() {
+    let worker = read_repo_file("crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs");
+    assert!(
+        worker.contains("const MAX_MULTIPHASE_PHASES: usize = 8;"),
+        "the worker's multi-phase cap moved; `workflow_share::MAX_SHARE_PHASES` (8) has to move \
+         with it or the envelope will drop a phase set the worker would have run"
+    );
+    let web = read_repo_file("apps/web/src/imageMultiPhase.js");
+    assert!(
+        web.contains("export const MULTIPHASE_MAX_PHASES = 8;"),
+        "the web's multi-phase cap moved; see `workflow_share::MAX_SHARE_PHASES`"
+    );
+}
+
+/// The share envelope inherits the pose-output ceiling from the Rust request contract, while the
+/// web must repeat the number because it cannot import Rust. Pin all three declarations together
+/// so a valid UI/API job can never first discover a stale limit when it is shared.
+#[test]
+fn the_pose_cap_matches_the_request_and_web_validators() {
+    let request = read_repo_file("crates/sceneworks-core/src/image_request.rs");
+    assert!(
+        request.contains("pub(crate) const MAX_COUNT: u32 = 8;")
+            && request.contains("pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;"),
+        "the Rust pose-output ceiling moved; reconcile the API, share envelope, and web picker"
+    );
+    let share = read_repo_file("crates/sceneworks-core/src/workflow_share.rs");
+    assert!(
+        share.contains("const MAX_SHARE_POSES: usize = crate::image_request::MAX_JOB_POSES;"),
+        "the share envelope must derive its pose cap from image_request::MAX_JOB_POSES"
+    );
+    let web = read_repo_file("apps/web/src/poseSelection.js");
+    assert!(
+        web.contains("export const MAX_JOB_POSES = 64;"),
+        "the web pose picker moved; reconcile it with image_request::MAX_JOB_POSES and MAX_SHARE_POSES"
+    );
+}
+
+/// The bounds against REAL requests, not fixtures written to pass them.
+///
+/// A cap is only correct if nothing legitimate touches it, and the failure mode of getting that
+/// wrong is silent: the envelope simply arrives without its LoRAs. So the three widest shapes the
+/// studio actually submits are run through the builder and every collection is asserted to have
+/// survived whole.
+#[test]
+fn no_real_request_is_truncated_by_the_collection_bounds() {
+    // 1. The golden fixture — an edit with a source, two references, a mask, a control map and a
+    //    LoRA, i.e. all four input kinds at once.
+    let golden = build_workflow_share(&golden_asset(), &golden_payload());
+    assert_eq!(golden.loras.len(), 1, "{:?}", golden.loras);
+    assert_eq!(golden.inputs.len(), 4, "{:?}", golden.inputs);
+    // And the fixture ON DISK, which is what a reader will actually be handed.
+    let parsed = parse_workflow_share(&load_golden_fixture()).expect("the golden fixture parses");
+    assert_eq!(parsed.loras.len(), 1);
+    assert_eq!(parsed.inputs.len(), 4);
+
+    // 2. A Krea multi-phase recipe at the validators' own ceiling: 8 phases, each naming phase
+    //    LoRAs by index into a full 5-LoRA stack.
+    let mut krea = golden_payload();
+    krea.insert("model".to_owned(), json!("krea_2_turbo"));
+    krea.insert(
+        "loras".to_owned(),
+        json!((0..5)
+            .map(|index| json!({
+                "id": format!("lora_{index}"),
+                "name": format!("Foggy Coast {index}"),
+                "weight": 0.6,
+                "source": { "provider": "huggingface", "repo": format!("acme/foggy-{index}") }
+            }))
+            .collect::<Vec<Value>>()),
+    );
+    krea.insert(
+        "advanced".to_owned(),
+        json!({
+            "steps": 28,
+            "phases": (0..8)
+                .map(|index| json!({
+                    "steps": index + 2,
+                    "guidance": 3.5,
+                    "loras": (0..5).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
+                }))
+                .collect::<Vec<Value>>(),
+        }),
+    );
+    let krea_share = build_workflow_share(&golden_asset(), &krea);
+    assert_eq!(krea_share.loras.len(), 5, "{:?}", krea_share.loras);
+    let phases = krea_share.advanced["phases"].as_array().expect("phases");
+    assert_eq!(phases.len(), 8);
+    for phase in phases {
+        assert_eq!(
+            phase["loras"].as_array().expect("phase loras").len(),
+            5,
+            "a phase's LoRA indices point into the job's own 5-LoRA stack and must all survive"
+        );
+    }
+
+    // 3. A multi-reference FLUX.2 request: many reference images, which the builder records as ONE
+    //    input entry with a count — the reason `MAX_SHARE_INPUTS` can be the number of kinds.
+    let mut flux = golden_payload();
+    flux.insert("model".to_owned(), json!("flux2_dev"));
+    flux.insert("mode".to_owned(), json!("edit_image"));
+    flux.remove("maskAssetId");
+    flux.insert(
+        "referenceAssetIds".to_owned(),
+        json!((0..10)
+            .map(|index| json!(format!("asset_ref_{index}")))
+            .collect::<Vec<Value>>()),
+    );
+    let flux_share = build_workflow_share(&golden_asset(), &flux);
+    let references = flux_share
+        .inputs
+        .iter()
+        .find(|input| input.kind == "reference")
+        .expect("the reference inputs travel");
+    assert_eq!(references.count, 10, "the COUNT carries the breadth");
+    assert!(flux_share.inputs.len() <= 4, "{:?}", flux_share.inputs);
+
+    // Every one of the three round-trips through the reader unchanged, so the bounds cannot be
+    // asymmetric between the direction that wrote the file and the direction that reads it.
+    for share in [golden, krea_share, flux_share] {
+        let envelope = serde_json::to_value(&share).expect("serializes");
+        assert_eq!(
+            parse_workflow_share(&envelope).expect("parses"),
+            share,
+            "a real envelope must survive its own reader"
+        );
+    }
+}
+
+/// Nothing legitimate is anywhere near the recording ceiling.
+///
+/// A ceiling is only correct if no real envelope reaches it, and getting that wrong is silent in the
+/// worst way: the image simply arrives with no recipe. So the four widest real shapes are measured
+/// against it in ABSOLUTE bytes, and the margin is printed rather than described.
+#[test]
+fn no_legitimate_envelope_comes_close_to_the_recording_ceiling() {
+    let mut widest = 0;
+    let mut measure = |label: &str, share: &WorkflowShare| {
+        let bytes = serde_json::to_string(share).expect("serializes").len();
+        println!(
+            "sc-15949: {label} is {bytes} bytes, {:.0}x under the {WORKFLOW_SHARE_MAX_BYTES} byte \
+             ceiling",
+            WORKFLOW_SHARE_MAX_BYTES as f64 / bytes as f64
+        );
+        assert!(
+            bytes * 4 < WORKFLOW_SHARE_MAX_BYTES,
+            "{label} is {bytes} bytes, within 4x of the {WORKFLOW_SHARE_MAX_BYTES} byte ceiling — \
+             the ceiling has stopped having real headroom over what this app produces"
+        );
+        assert!(
+            share.omitted.is_empty(),
+            "{label} lost something: {share:?}"
+        );
+        widest = widest.max(bytes);
+    };
+
+    // 1. The golden fixture, both as the builder makes it and as it sits on disk.
+    measure(
+        "the golden envelope",
+        &build_workflow_share(&golden_asset(), &golden_payload()),
+    );
+    let parsed = parse_workflow_share(&load_golden_fixture()).expect("the golden fixture parses");
+    measure("the golden fixture on disk", &parsed);
+
+    // 2. A Krea multi-phase recipe at the validators' own ceiling: 8 phases, a full 5-LoRA stack,
+    //    every phase naming every LoRA.
+    let mut krea = golden_payload();
+    krea.insert("model".to_owned(), json!("krea_2_turbo"));
+    krea.insert(
+        "loras".to_owned(),
+        json!((0..5)
+            .map(|index| json!({
+                "id": format!("lora_{index}"),
+                "name": format!("Foggy Coast {index}"),
+                "weight": 0.6,
+                "source": { "provider": "huggingface", "repo": format!("acme/foggy-{index}") }
+            }))
+            .collect::<Vec<Value>>()),
+    );
+    krea.insert(
+        "advanced".to_owned(),
+        json!({
+            "steps": 28,
+            "guidanceScale": 3.5,
+            "sampler": "euler",
+            "scheduler": "beta",
+            "phases": (0..8)
+                .map(|index| json!({
+                    "steps": index + 2,
+                    "guidance": 3.5,
+                    "loras": (0..5).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
+                }))
+                .collect::<Vec<Value>>(),
+        }),
+    );
+    measure(
+        "a Krea multi-phase recipe at the validators' ceiling",
+        &build_workflow_share(&golden_asset(), &krea),
+    );
+
+    // 3. A multi-reference FLUX.2 request: ten reference images, all four input kinds in play.
+    let mut flux = golden_payload();
+    flux.insert("model".to_owned(), json!("flux2_dev"));
+    flux.insert(
+        "referenceAssetIds".to_owned(),
+        json!((0..10)
+            .map(|index| json!(format!("asset_ref_{index}")))
+            .collect::<Vec<Value>>()),
+    );
+    measure(
+        "a multi-reference FLUX.2 request",
+        &build_workflow_share(&golden_asset(), &flux),
+    );
+
+    // 4. A realistic long non-Latin prompt — the case a BYTE bound on prose could have truncated
+    //    where a character bound would not. 3 bytes per character, at a length people really type.
+    let cjk = "霧の中の灯台、シネマティック、レンズに雨、35mmフィルムで撮影、\
+               ボリューメトリックライト、夜明けの海岸線、遠くの汽笛、"
+        .repeat(12);
+    assert!(
+        cjk.chars().count() > 700 && cjk.len() > 2_000,
+        "the fixture must be a long non-Latin prompt: {} chars, {} bytes",
+        cjk.chars().count(),
+        cjk.len()
+    );
+    let mut japanese = golden_payload();
+    japanese.insert("prompt".to_owned(), json!(cjk.clone()));
+    japanese.insert("negativePrompt".to_owned(), json!(cjk.clone()));
+    let advanced = japanese
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .expect("advanced object");
+    advanced.insert("stylePrompt".to_owned(), json!(cjk.clone()));
+    advanced.insert("systemMessage".to_owned(), json!(cjk.clone()));
+    let japanese_share = build_workflow_share(&golden_asset(), &japanese);
+    measure("a long CJK prompt in every prose slot", &japanese_share);
+    // Character for character, not "roughly the same length": a byte bound must not have cut it.
+    assert_eq!(japanese_share.prompt, cjk);
+    assert_eq!(japanese_share.negative_prompt, cjk);
+    assert_eq!(japanese_share.advanced["stylePrompt"], json!(cjk));
+    assert_eq!(japanese_share.advanced["systemMessage"], json!(cjk));
+
+    // Every one of them round-trips through the reader unchanged, so the ceiling and the marker are
+    // not asymmetric between the direction that wrote the file and the direction that reads it.
+    for share in [
+        build_workflow_share(&golden_asset(), &golden_payload()),
+        build_workflow_share(&golden_asset(), &krea),
+        build_workflow_share(&golden_asset(), &flux),
+        japanese_share,
+    ] {
+        let envelope = serde_json::to_value(&share).expect("serializes");
+        assert_eq!(
+            parse_workflow_share(&envelope).expect("a real envelope survives its own reader"),
+            share
+        );
+    }
+    println!("sc-15949: the widest legitimate envelope measured here is {widest} bytes");
+}
+
+/// Every write seam goes through the GATED builder.
+///
+/// `build_workflow_share_from` does not run the recording ceiling — `embeddable_workflow_share` is
+/// the form that does, and it is the one the worker must call. A seam that called the ungated builder
+/// would embed a chunk our own reader then refuses with `TooLarge`, which is the writer-and-reader
+/// drift every guard in `workflow_share.rs` is arranged to prevent. Pinned as source structure
+/// because `sceneworks-worker` depends on this crate and cannot be inspected any other way.
+///
+/// sc-16113 replaced this test's hard-coded four-file list with the DISCOVERED seams, so a fifth
+/// file calling the ungated builder is no longer invisible to it.
+#[test]
+fn every_write_seam_embeds_through_the_gated_builder() {
+    let sources = worker_sources();
+    let seams = discover_workflow_seams(&sources);
+    let ungated = ["build_workflow_share_from", "build_workflow_share"];
+    let mut checked = 0usize;
+    for seam in &seams {
+        for name in ungated {
+            assert!(
+                !seam.calls.iter().any(|call| call == name),
+                "{}::{} builds an embedded envelope with `{name}`, which does not run the \
+                 recording ceiling. Call `embeddable_workflow_share` and treat `None` as `write \
+                 the file exactly as today`.",
+                seam.path,
+                seam.function
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 8,
+        "only {checked} worker seams were checked — the discovery scan lost the crate it is \
+         supposed to sweep, so this is not protecting anything"
+    );
+    assert!(
+        seams.iter().any(|seam| seam
+            .calls
+            .iter()
+            .any(|call| call == "embeddable_workflow_share")),
+        "the worker stopped building envelopes through the gated builder"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The worker write-seam lint (sc-16113)
+// ---------------------------------------------------------------------------
+
+/// The core entry points through which a `WorkflowShare` reaches a FILE, with the reason each one
+/// is on the write side.
+///
+/// A list, but not one a human maintains silently: [`the_core_workflow_surface_is_classified`]
+/// asserts every name here still exists as a `pub fn` in the file it names, AND that every `pub fn`
+/// in the four `workflow_*` modules whose signature mentions `WorkflowShare` is in this list or in
+/// [`WORKFLOW_READ_SURFACE`]. A new core entry point is therefore a decision, not an omission —
+/// which is the same property [`ADVANCED_BUILDERS`] has, applied to the Rust side.
+const WORKFLOW_WRITE_SURFACE: &[(&str, &str, &str)] = &[
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "build_workflow_share",
+        "Builds an envelope from a sidecar asset. Ungated — no recording ceiling.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "build_workflow_share_from",
+        "Builds an envelope from per-image facts. Ungated — no recording ceiling.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "embeddable_workflow_share",
+        "The gated builder: the one form that runs the recording ceiling, and the one a write \
+         seam must call.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "build_video_workflow_share_from",
+        "Builds a VIDEO envelope from per-clip facts. Ungated — no recording ceiling (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "embeddable_video_workflow_share",
+        "The gated VIDEO builder: the one video form that runs the recording ceiling, and the one \
+         a video write seam must call.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "write_workflow_chunk",
+        "Writes the PNG, with the envelope in an iTXt chunk — and its A1111 `parameters` rendering \
+         beside it — when one is handed in.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_parameters.rs",
+        "parameters_text",
+        "Renders the envelope as the A1111 `parameters` text a third-party gallery displays \
+         (sc-15957). A second rendering of already-sanitized data, and the only thing that decides \
+         what the second chunk says.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "ffmetadata_document",
+        "Encodes the envelope as the `ffmetadata` document ffmpeg muxes into an MP4's `comment` \
+         tag (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "write_workflow_metadata_file",
+        "Writes that document to disk for ffmpeg to read — the MP4 lane's `write_workflow_chunk`.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "workflow_metadata_size",
+        "Measures an envelope's encoded size in an MP4's tag store.",
+    ),
+];
+
+/// The core entry points that READ an envelope, listed so the completeness half of
+/// [`the_core_workflow_surface_is_classified`] has somewhere to put them.
+///
+/// A reader is not a seam: `read_workflow_chunk_file` in the import path or a test says nothing
+/// about which lane's `advanced` map travels. Splitting them out is what keeps the discovery scan
+/// from flagging every call site of the reader as an unclassified write.
+const WORKFLOW_READ_SURFACE: &[(&str, &str, &str)] = &[
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "parse_workflow_share",
+        "Reads an envelope back out of a `Value`.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "parse_workflow_share_json",
+        "Reads an envelope back out of chunk text.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "read_workflow_chunk",
+        "Reads the chunk out of PNG bytes.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "read_workflow_chunk_file",
+        "Reads the chunk out of a PNG on disk.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "workflow_chunk_size",
+        "Measures an envelope's encoded size for the recording ceiling.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "parameters_chunk_size",
+        "Measures the A1111 chunk's encoded size, so the per-image cost of sc-15957 is a measured \
+         number. Writes nothing (sc-15957).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "read_workflow_metadata",
+        "Reads the envelope out of MP4 bytes (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "read_workflow_metadata_file",
+        "Reads the envelope out of an MP4 on disk, without buffering `mdat`.",
+    ),
+];
+
+/// Both halves of the core surface are declared, and nothing in core has slipped between them.
+#[test]
+fn the_core_workflow_surface_is_classified() {
+    let mut declared: BTreeSet<String> = BTreeSet::new();
+    for (path, function, reason) in WORKFLOW_WRITE_SURFACE
+        .iter()
+        .chain(WORKFLOW_READ_SURFACE.iter())
+    {
+        assert!(
+            reason.len() > 20,
+            "the surface entry for `{function}` needs a real reason"
+        );
+        let stripped = rust_scannable(&read_repo_file(path));
+        assert!(
+            rust_fn_spans(&stripped)
+                .iter()
+                .any(|item| item.name == *function),
+            "`{function}` is declared on the workflow surface but {path} no longer defines it — a \
+             surface list pointing at nothing classifies nothing"
+        );
+        assert!(
+            declared.insert((*function).to_owned()),
+            "`{function}` is on the workflow surface twice"
+        );
+    }
+
+    // The completeness half: nothing in those modules handles a `WorkflowShare` in public without
+    // being classified as read or write. This is what stops a new core entry point from becoming a
+    // write seam nobody's discovery scan looks for.
+    //
+    // It found nothing at all until sc-15957, and the reason is worth recording rather than quietly
+    // fixing. `RustFn::signature_start` is the offset of the `fn` KEYWORD, so the slice below has
+    // never begun with a visibility modifier — `signature.contains("pub fn")` was false for every
+    // function in the tree, and the loop `continue`d on all of them. A lint that reads zero items
+    // and passes is the exact failure mode this file's own registry doctrine exists to prevent, and
+    // it was sitting inside the test that enforces it. Publicity is read off the text BEFORE the
+    // keyword now, which is where it lives.
+    let mut examined = 0usize;
+    for path in [
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "crates/sceneworks-core/src/workflow_parameters.rs",
+    ] {
+        let stripped = rust_scannable(&read_repo_file(path));
+        for item in rust_fn_spans(&stripped) {
+            let signature = &stripped[item.signature_start..item.body_start];
+            if !is_public_fn(&stripped, item.signature_start)
+                || !signature.contains("WorkflowShare")
+            {
+                continue;
+            }
+            examined += 1;
+            assert!(
+                declared.contains(&item.name),
+                "{path} exposes `{}`, whose signature handles a `WorkflowShare`, and neither \
+                 `WORKFLOW_WRITE_SURFACE` nor `WORKFLOW_READ_SURFACE` classifies it. A new public \
+                 entry point that BUILDS or WRITES an envelope has to join the write surface, or \
+                 `every_worker_write_seam_declares_the_lane_it_embeds_for` will not look for its \
+                 call sites; one that only READS one goes on the read surface.",
+                item.name
+            );
+        }
+    }
+    // The floor against the check going blind again. Every declared entry is a `pub fn` naming a
+    // `WorkflowShare`, so the scan must have found at least as many as are declared; anything less
+    // means it stopped recognizing them.
+    assert!(
+        examined >= declared.len(),
+        "the public-surface scan saw {examined} functions handling a `WorkflowShare` but \
+         {} are declared — the scan has gone blind, which is how this half of the test passed \
+         while checking nothing",
+        declared.len()
+    );
+}
+
+/// Whether the `fn` at `signature_start` is declared `pub` (and not `pub(crate)` / `pub(super)`).
+///
+/// Read from the text preceding the keyword on the same line, because that is where a visibility
+/// modifier is. Handles `pub fn`, `pub const fn`, `pub async fn` and `pub unsafe fn` — everything
+/// between `pub` and `fn` is a keyword, never an identifier, so the whole prefix is checked rather
+/// than only its first word.
+fn is_public_fn(stripped: &str, signature_start: usize) -> bool {
+    let line_start = stripped[..signature_start]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    let prefix = stripped[line_start..signature_start].trim_start();
+    // `pub(crate)` is not public surface, and its prefix starts `pub(` rather than `pub `.
+    prefix.starts_with("pub ")
+}
+
+/// **The gate the deferral list only claimed to be** (sc-16113).
+///
+/// # The bug this closes
+///
+/// `DEFERRED_ADVANCED_BUILDERS` said, in its own doc comment, that "nothing about a video lane can
+/// start embedding while its keys sit in this list". Nothing did.
+/// `every_advanced_builder_in_the_web_app_is_accounted_for` accepts membership in EITHER registry,
+/// and this test's previous form read four hard-coded worker files. Adding a
+/// `write_workflow_chunk` + `embeddable_workflow_share` call to a real video-lane PNG write in
+/// `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left all 46 tests here green while every
+/// one of `VideoStudio.jsx`'s ~15 unclassified keys was silently dropped from the file.
+///
+/// # Exactly what it proves
+///
+/// * **Discovery, not enumeration.** Every `.rs` file under `crates/sceneworks-worker/src` is
+///   walked. A function is a seam if its body NAMES something on [`WORKFLOW_WRITE_SURFACE`] —
+///   called or taken as a value — or names a worker function that carries a `WorkflowShare` in its
+///   own signature, or carries one itself. `use … as …` renames of those names are resolved first,
+///   so a file that imports the writer under another name is not a file the lint is asleep for.
+///   That closure is what reaches `upscale_jobs.rs` and `segment_jobs.rs` through
+///   `write_single_child_asset` without either being named anywhere. A brand-new worker file with
+///   an embedding call is caught the moment it appears
+///   ([`a_brand_new_worker_file_with_an_embedding_call_is_discovered`],
+///   [`a_renamed_import_of_the_write_surface_is_resolved`],
+///   [`the_write_surface_taken_as_a_value_is_still_discovered`]).
+/// * **Every seam is declared, exactly once.** A discovered seam with no
+///   [`WORKFLOW_WRITE_SEAMS`] entry fails, naming the file and the function. Two same-named
+///   functions in one file fail too, because the registry joins on `(path, function)` and the
+///   second would otherwise inherit the first's declaration
+///   ([`two_same_named_seams_in_one_file_fail_the_build`]).
+/// * **A declared lane may not be deferred.** A [`SeamDisposition::Embeds`] entry names the web
+///   builders that feed it; one that resolves into [`DEFERRED_ADVANCED_BUILDERS`] fails, naming
+///   the seam, the lane and the builder. That is the enforcement the doc comment now describes
+///   ([`a_seam_that_embeds_for_a_deferred_builder_fails_the_build`]).
+/// * **Declining is not a dodge, whatever the envelope's provenance.** The disposition is checked
+///   POSITIVELY against the source. [`SeamDisposition::Declines`] requires that the seam calls
+///   `write_workflow_chunk` with nothing but a literal `None`, never names `WorkflowShare` in its
+///   body, never accepts one through its signature, and fills every share-carrying field with
+///   `None` — by initializer, by `x.field = ..` assignment, or in shorthand. So a seam that got
+///   its envelope from a parse, a clone or a `from_value::<WorkflowShare>` and wrote it on is
+///   embedding, and flips to a failure rather than staying quiet
+///   ([`a_declining_seam_that_writes_a_carried_envelope_fails_the_build`],
+///   [`a_share_assigned_onto_a_field_after_a_none_initializer_is_read`],
+///   [`a_parsed_envelope_written_on_is_seen_as_embedding`]).
+/// * **The other two dispositions say something true.** [`SeamDisposition::Conduit`] requires that
+///   it accepts a share, reaches a writer, and sources none of its own; a carrier that reaches no
+///   writer is [`SeamDisposition::Inert`] instead, so "writes an envelope its caller built" is
+///   never written about a function that writes nothing
+///   ([`a_conduit_that_writes_nothing_fails_the_build`]).
+/// * **Both directions.** A registry entry whose function no longer touches an envelope fails as a
+///   stale claim, and every [`ADVANCED_BUILDERS`] entry must be named by some embedding seam — a
+///   builder classified *because its lane embeds* with no seam behind it is a claim nobody is
+///   maintaining.
+///
+/// # What it does NOT prove
+///
+/// Re-derived after the sc-16113 review, which found three working evasions that this list did not
+/// mention — two of them worse than anything it did. Those three are closed above; what is left is
+/// what is left.
+///
+/// * **That a seam's declared builder list is the whole truth.** The mapping is an explicit
+///   declaration, because a Rust write seam has no inherent knowledge of which web builder feeds
+///   it and every inference available (the job type, the file's directory) fails open. An author
+///   who declares a video seam as embedding for `buildImageJobAdvanced` has written a false
+///   statement into a public registry next to prose describing the lane; the lint cannot tell, and
+///   review is what catches it. **This is the biggest hole, and it is deliberate**: what the lint
+///   guarantees is that the statement had to be written at all, and that the honest version of it
+///   fails the build.
+/// * **That an envelope reaching a seam through a Rust `type` ALIAS is seen.** `use … as …` is
+///   resolved; `type Ws = WorkflowShare; fn f() -> Option<Ws>` is not, and would not register as a
+///   carrier. The same goes for a share reached only through a generic parameter or a trait
+///   object, and for a writer reached through a macro that pastes the name together.
+/// * **That an `Inert` or `Conduit` claim survives an indirection the scan cannot follow.** Both
+///   are checked on the names the body mentions. A helper that reaches a writer through a `dyn`
+///   call or a trait method could be declared inert and pass.
+/// * **Anything about seams outside `crates/sceneworks-worker/src`.** `apps/rust-api` writes
+///   chunks in its own tests; the product write path is the worker's.
+/// * The macOS-gated `image_jobs/detail.rs` is `include!`d rather than a `mod`, and this scan is
+///   TEXTUAL, so that seam is read on every platform — the same reason the old form could list it
+///   as a plain path. Test-only code is excluded by name (`tests.rs`, `tests/`) and by stripping
+///   `#[cfg(test)]` items, so a fixture in a `mod tests` is not a product seam.
+#[test]
+fn every_worker_write_seam_declares_the_lane_it_embeds_for() {
+    let sources = worker_sources();
+    assert!(
+        sources.len() >= 80,
+        "only {} worker source files were walked — the discovery scan lost the crate it is \
+         supposed to sweep, so it is not protecting anything",
+        sources.len()
+    );
+    let seams = discover_workflow_seams(&sources);
+    assert_declared_seams(&seams);
+
+    // The floor and the anchors: a scan that has quietly stopped understanding Rust reports no
+    // seams and passes, which is the failure mode this whole registry exists to prevent.
+    assert!(
+        seams.len() >= 8,
+        "only {} worker seams were discovered — the scan no longer understands the crate",
+        seams.len()
+    );
+    for anchor in [
+        "write_image_asset",
+        "write_single_child_asset",
+        "run_image_segment_job",
+        "run_image_upscale_job",
+        "run_image_detail_job",
+    ] {
+        assert!(
+            seams.iter().any(|seam| seam.function == anchor),
+            "the discovery scan missed the known seam `{anchor}`, so this lint is not protecting \
+             anything"
+        );
+    }
+
+    // The other direction: a registry entry nobody can find is as much a failure as an undeclared
+    // seam — it is how a stale declaration keeps excusing a seam that has moved.
+    for entry in WORKFLOW_WRITE_SEAMS {
+        assert!(
+            seams
+                .iter()
+                .any(|seam| seam.path == entry.path && seam.function == entry.function),
+            "`WORKFLOW_WRITE_SEAMS` declares {}::{} but the discovery scan finds no function there \
+             that touches a `WorkflowShare` any more — drop the entry or fix the path/name",
+            entry.path,
+            entry.function
+        );
+        assert!(
+            entry.lane.len() > 20,
+            "the seam entry for {}::{} needs a real `lane` — it is what tells the next author \
+             which product surface those builders sit behind",
+            entry.path,
+            entry.function
+        );
+    }
+
+    // And every registered builder is behind some embedding seam. A builder is in
+    // `ADVANCED_BUILDERS` because its lane embeds; if no seam names it, that reason has expired.
+    for builder in ADVANCED_BUILDERS {
+        assert!(
+            WORKFLOW_WRITE_SEAMS
+                .iter()
+                .any(|entry| match entry.disposition {
+                    SeamDisposition::Embeds(refs) =>
+                        refs.iter().any(|reference| reference.path == builder.path
+                            && reference.function == builder.function),
+                    _ => false,
+                }),
+            "`ADVANCED_BUILDERS` registers {} in {} — which means its keys are classified because \
+             its lane EMBEDS — but no `WORKFLOW_WRITE_SEAMS` entry names it. Either a seam lost \
+             the reference or the lane stopped embedding, in which case the entry belongs in \
+             `DEFERRED_ADVANCED_BUILDERS`.",
+            builder.function,
+            builder.path
+        );
+    }
+}
+
+/// Nothing on the core write surface is called in the worker where the scan cannot see it.
+///
+/// The counterpart to the floor and the anchors, and the one that answers "what if the blanking
+/// eats too much?". Every call to a [`WORKFLOW_WRITE_SURFACE`] function in the whole crate is found
+/// in a source that has only comments and literals removed, and each one must then either
+///
+/// * survive `#[cfg(test)]` blanking and land inside a function
+///   [`every_worker_write_seam_declares_the_lane_it_embeds_for`] declared — so a product call site
+///   the seam scan does not own fails here; or
+/// * lie INSIDE a region [`blank_test_only_items_with_spans`] removed, and that region must
+///   actually be a test item — so blanking that ran past its own item and swallowed product code
+///   fails here rather than making a seam quietly disappear.
+///
+/// The containment form matters: keying the rescue on a `#[test]` appearing textually BETWEEN the
+/// attribute and the call failed the build on the ordinary house layout, where a fixture sits
+/// above the first `#[test]` in a `#[cfg(test)] mod tests`. Eighty-four worker files use inline
+/// test modules, so that false positive was aimed at the team rather than at a bug.
+#[test]
+fn no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan() {
+    let sources = worker_sources();
+    let seams = discover_workflow_seams(&sources);
+    let mut product = 0usize;
+    for (path, source) in &sources {
+        let light = blank_comments_and_literals(source);
+        let (full, blanked) = blank_test_only_items_with_spans(&light);
+        let spans = rust_fn_spans(&full);
+        // Rename imports resolved the same way discovery resolves them, so this net cannot be
+        // switched off by the shape it exists to catch.
+        let aliases = import_aliases(&full);
+        for (_, canonical, _) in WORKFLOW_WRITE_SURFACE {
+            let mut names = vec![(*canonical).to_owned()];
+            names.extend(
+                aliases
+                    .iter()
+                    .filter(|(_, original)| original == canonical)
+                    .map(|(alias, _)| alias.clone()),
+            );
+            for name in &names {
+                for offset in call_sites(&light, name) {
+                    if !full[offset..].starts_with(name.as_str()) {
+                        let span = blanked
+                            .iter()
+                            .find(|(start, end)| offset >= *start && offset < *end)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{path}: the scan dropped a call to `{name}` that no \
+                                     `#[cfg(test)]` item covers — the blanking is eating product \
+                                     code"
+                                )
+                            });
+                        assert!(
+                            blanked_span_is_one_whole_item(&light[span.0..span.1]),
+                            "{path}: the scan dropped a call to `{name}` inside a `#[cfg(test)]` \
+                             region whose braces do not balance — that blanking ran past its own \
+                             item and is hiding product code from the seam scan"
+                        );
+                        continue;
+                    }
+                    let owner = innermost_owner(&spans, offset)
+                        .map(|(_, span)| span)
+                        .unwrap_or_else(|| {
+                            panic!("{path} calls `{name}` outside any function the scan can read")
+                        });
+                    assert!(
+                        seams
+                            .iter()
+                            .any(|seam| seam.path == *path && seam.function == owner.name),
+                        "{path}::{} calls `{name}` and the seam scan did not report it — the \
+                         discovery layers no longer reach it, so a lane could embed unmapped",
+                        owner.name
+                    );
+                    product += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        product >= 6,
+        "only {product} product call sites of the core write surface were found in the worker — \
+         the scan has stopped reading the crate"
+    );
+}
+
+/// A blanked `#[cfg(test)]` region is ONE WHOLE item and nothing after it.
+///
+/// The independent structural check on the blanking, and the only one it needs now that the spans
+/// are exact. A runaway — the historical bug, where `#[cfg(test)] probe_scans: u64,` ran on to the
+/// next `{` and swallowed the `impl` after it — starts inside a struct and therefore closes a
+/// brace it never opened. Balanced braces that never dip below zero say the region began and ended
+/// at the same nesting level, which one item does and a runaway does not.
+///
+/// Deliberately NOT "does it contain a `#[test]`". That reading failed the build on a standalone
+/// `#[cfg(test)] fn generic_fixture(..)` and on a `#[cfg(test)] impl`, neither of which carries a
+/// test attribute of its own and both of which are ordinary scaffolding.
+fn blanked_span_is_one_whole_item(item: &str) -> bool {
+    let mut depth = 0i32;
+    for byte in item.bytes() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// A brand-new worker file with an embedding call is discovered, with no list to add it to.
+///
+/// The proof for "seam discovery is not a hard-coded file list", run against the scanner itself so
+/// it cannot rot: `probe_video_jobs.rs` exists nowhere in the tree.
+#[test]
+fn a_brand_new_worker_file_with_an_embedding_call_is_discovered() {
+    let sources = vec![(
+        "crates/sceneworks-worker/src/video_jobs/probe_video_jobs.rs".to_owned(),
+        r#"
+fn write_probe_frame(img: &image::RgbImage, path: &Path) -> WorkerResult<()> {
+    let share = embeddable_workflow_share(&facts, &payload);
+    write_workflow_chunk(img, path, share.as_ref()).map_err(other)
+}
+"#
+        .to_owned(),
+    )];
+    let seams = discover_workflow_seams(&sources);
+    assert_eq!(seams.len(), 1);
+    assert_eq!(seams[0].function, "write_probe_frame");
+    assert!(seams[0].constructs, "it calls the gated builder");
+}
+
+#[test]
+#[should_panic(expected = "no `WORKFLOW_WRITE_SEAMS` entry")]
+fn an_undeclared_seam_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/video_jobs/seedvr2.rs".to_owned(),
+        function: "append_seedvr2_frames".to_owned(),
+        constructs: true,
+        obtains_an_envelope: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// A declared seam whose builder is still deferred fails, naming the registry.
+///
+/// **Re-pointed by sc-15956**, exactly as sc-16113 predicted it would have to be. This test used
+/// `VideoStudio.jsx::submit` as its deferred example; sc-15956 promoted that builder into
+/// `ADVANCED_BUILDERS` — which is what the whole gate was built to force — so the mutation stopped
+/// panicking and the proof turned into a "did not panic as expected" failure.
+///
+/// The example is now `trainingConfig.js::trainingConfigSnapshot`, the PERMANENT exemption, and
+/// that is a better anchor than the one it replaces: a story-owned deferral is by definition
+/// temporary, so any test hard-coding one has an expiry date. This one does not — a permanent
+/// exemption only leaves `DEFERRED_ADVANCED_BUILDERS` if a training write seam appears, at which
+/// point its own entry says the whole classification has to be redone anyway.
+///
+/// What is proved is unchanged: SOME deferred builder is refused, and the message names the
+/// registry so the next author knows where to look.
+#[test]
+#[should_panic(expected = "DEFERRED_ADVANCED_BUILDERS")]
+fn a_seam_that_embeds_for_a_deferred_builder_fails_the_build() {
+    assert_embedded_builders_are_registered(
+        "crates/sceneworks-worker/src/video_jobs/seedvr2.rs",
+        "append_seedvr2_frames",
+        "the SeedVR2 video lane",
+        &[WebBuilderRef {
+            path: "apps/web/src/training/trainingConfig.js",
+            function: "trainingConfigSnapshot",
+        }],
+    );
+}
+
+/// And the deferral list still HAS an entry to point that test at.
+///
+/// The companion to the re-pointing above: `a_seam_that_embeds_for_a_deferred_builder_fails_the_build`
+/// is only a proof while some builder is deferred, and an empty registry would turn it into a test
+/// that panics for the wrong reason. sc-15956 emptied the list of everything except the permanent
+/// exemption, so this is the floor that says so out loud.
+#[test]
+fn the_deferral_registry_still_has_something_in_it() {
+    assert!(
+        !DEFERRED_ADVANCED_BUILDERS.is_empty(),
+        "`DEFERRED_ADVANCED_BUILDERS` is empty, so \
+         `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` has no example left to \
+         mutate. If the last entry really has been classified, that test needs a different \
+         construction — not a stale reference to a builder nobody defers."
+    );
+}
+
+/// A builder nobody declared at all is not a way in either.
+#[test]
+#[should_panic(expected = "neither")]
+fn a_seam_that_embeds_for_an_unknown_builder_fails_the_build() {
+    assert_embedded_builders_are_registered(
+        "crates/sceneworks-worker/src/video_jobs/seedvr2.rs",
+        "append_seedvr2_frames",
+        "the SeedVR2 video lane",
+        &[WebBuilderRef {
+            path: "apps/web/src/screens/ProbeStudio.jsx",
+            function: "submit",
+        }],
+    );
+}
+
+/// Declining is checked against the source, so it cannot be used to dodge classification.
+#[test]
+#[should_panic(expected = "declares that it writes no envelope")]
+fn a_declining_seam_that_builds_an_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        // The real declining seam, mutated to build an envelope while keeping its declaration.
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        constructs: true,
+        obtains_an_envelope: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        share_field_values: vec!["None".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// ... and neither is passing a share into a field while still calling it a decline.
+#[test]
+#[should_panic(expected = "hands a workflow")]
+fn a_declining_seam_that_hands_a_share_on_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        calls: vec!["write_single_child_asset".to_owned()],
+        share_field_values: vec!["Some".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// ... and neither is writing a chunk with an envelope that came from somewhere else entirely.
+///
+/// The provenance-blind half (sc-16113). Nothing here BUILDS: `constructs` is false, no builder is
+/// called, no share-carrying field is filled. The envelope was parsed out of another file — which
+/// is the likeliest shape of sc-15956 and exactly what sc-15954 did for the editor export — and
+/// the only thing that catches it is reading the chunk writer's own argument.
+#[test]
+#[should_panic(expected = "not the literal `None`")]
+fn a_declining_seam_that_writes_a_carried_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        writes_a_share_chunk: true,
+        calls: vec!["write_workflow_chunk".to_owned()],
+        share_field_values: vec!["None".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// ... and neither is a body that gets hold of one without writing it here.
+#[test]
+#[should_panic(expected = "gets hold of one")]
+fn a_declining_seam_that_parses_an_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        obtains_an_envelope: true,
+        calls: vec!["write_single_child_asset".to_owned()],
+        share_field_values: vec!["None".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// A conduit that starts building its own envelope stops being a conduit.
+#[test]
+#[should_panic(expected = "gets hold of one itself")]
+fn a_conduit_that_builds_an_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/single_child_asset.rs".to_owned(),
+        function: "write_single_child_asset".to_owned(),
+        constructs: true,
+        carrier: true,
+        obtains_an_envelope: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// A conduit that reaches no writer is inert, and saying "writes an envelope its caller built"
+/// about it would be a false sentence in the registry (sc-16113).
+#[test]
+#[should_panic(expected = "calls nothing that reaches a write")]
+fn a_conduit_that_writes_nothing_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/single_child_asset.rs".to_owned(),
+        function: "write_single_child_asset".to_owned(),
+        carrier: true,
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// Two functions of the same name in one file cannot share one declaration.
+///
+/// The registry joins on `(path, function)`. A second `write_image_asset` in `image_jobs.rs`
+/// embedding for the video lane inherited the first one's entry and passed every test.
+#[test]
+#[should_panic(expected = "can only describe one of them")]
+fn two_same_named_seams_in_one_file_fail_the_build() {
+    let seam = WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/image_jobs.rs".to_owned(),
+        function: "write_image_asset".to_owned(),
+        constructs: true,
+        obtains_an_envelope: true,
+        writes_a_share_chunk: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        ..WorkflowSeamSite::default()
+    };
+    assert_declared_seams(&[seam.clone(), seam]);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn collect_strings(value: &Value, pointer: String, out: &mut Vec<(String, String)>) {
+    match value {
+        Value::String(text) => out.push((pointer, text.clone())),
+        Value::Array(values) => {
+            for (index, item) in values.iter().enumerate() {
+                collect_strings(item, format!("{pointer}[{index}]"), out);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                collect_strings(item, format!("{pointer}.{key}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An independent path sniffer for the assertion side, deliberately written without reusing
+/// `workflow_share::is_path_shaped` so a bug in that function cannot hide behind itself.
+fn looks_like_a_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("file://") {
+        return true;
+    }
+    if value.starts_with('/') || value.starts_with('\\') || value.starts_with("~/") {
+        return true;
+    }
+    if value.contains('\\') {
+        return true;
+    }
+    // `X:/…` or `X:\…` where the letter is not part of a URL scheme.
+    lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != ':')
+        .any(|token| {
+            let bytes = token.as_bytes();
+            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+        })
+}
+
+// ---------------------------------------------------------------------------
+// The JS key extractor
+// ---------------------------------------------------------------------------
+
+/// Comments removed and every non-ASCII character replaced by a space.
+///
+/// The ASCII normalization is not cosmetic: the discovery scan compares byte offsets of `advanced`
+/// signals against byte offsets of function-body spans, and every builder file carries em-dashes in
+/// its comments and prose in its string literals. Normalizing first makes byte offsets and
+/// character offsets the same number, so a `&str` slice can never land mid-codepoint and the two
+/// halves of the scan cannot silently disagree. Identifiers are ASCII, so nothing the extractors
+/// read is affected.
+fn scannable(source: &str) -> String {
+    strip_comments(source)
+        .chars()
+        .map(|character| if character.is_ascii() { character } else { ' ' })
+        .collect()
+}
+
+/// Every web source file the discovery scan reads, repo-relative with forward slashes.
+///
+/// Test scaffolding is excluded by name: `main.testSupport.jsx` builds request bodies with
+/// `advanced` maps on purpose (they are fixtures for the tests, not payloads a user can send), and
+/// `*.test.js(x)` do the same.
+fn web_source_files() -> Vec<String> {
+    let root = repo_root().join("apps").join("web").join("src");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            if !(name.ends_with(".js") || name.ends_with(".jsx"))
+                || name.contains(".test.")
+                || name.contains(".testSupport.")
+            {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(repo_root())
+                .expect("under the repo root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(relative);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// What a web file did with the name `advanced`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvancedSignalKind {
+    /// `advanced: { … }` — a map written inline into a request body.
+    InlineLiteral,
+    /// `advancedExtras: { … }` — a character-lane controller's contribution.
+    ExtrasLiteral,
+    /// `advanced = { … }` — the initializer half of an assignment-style builder.
+    AssignedLiteral,
+    /// `advanced.key = …` — the assignment half.
+    PropertyAssignment,
+    /// `advanced: buildFoo(state)`, `advanced: someVar`, `advanced = compactObject({ … })` — the
+    /// map exists but is assembled somewhere this scan cannot read.
+    Indirect,
+}
+
+impl AdvancedSignalKind {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::InlineLiteral => "an inline object literal",
+            Self::ExtrasLiteral => "an inline `advancedExtras` object literal",
+            Self::AssignedLiteral => "an assigned object literal",
+            Self::PropertyAssignment => "a property assignment",
+            Self::Indirect => "an expression this lint cannot read",
+        }
+    }
+}
+
+/// One place a web file builds an `advanced` map.
+struct AdvancedSignal {
+    /// Offset into the [`scannable`] text of the `advanced` / `advancedExtras` identifier.
+    offset: usize,
+    /// What was matched, for the failure message.
+    kind: AdvancedSignalKind,
+    /// For [`AdvancedSignalKind::Indirect`], the callee the map comes from:
+    /// `advanced: buildImageJobAdvanced({ … })` → `buildImageJobAdvanced`,
+    /// `advanced: advanced.buildAdvanced(extras)` → `buildAdvanced`. `None` when the expression is
+    /// not a call at all (`advanced: someVar`), which can never be a builder call site.
+    called: Option<String>,
+}
+
+impl AdvancedSignal {
+    /// True when this is indirection through a builder the registry already accounts for.
+    ///
+    /// `advanced: buildImageJobAdvanced({ … })` and `advanced: advanced.buildAdvanced(extras)` are
+    /// CALL SITES of a registered builder: demanding a registry entry for every screen that
+    /// submits a job would say nothing about which keys exist. The difference from before is that
+    /// the callee now has to be NAMED somewhere — an indirection through an unregistered helper is
+    /// a signal, not silence.
+    fn calls_a_declared_builder(&self, path: &str, declared: &BTreeSet<&str>) -> bool {
+        let Some(called) = self.called.as_deref() else {
+            return false;
+        };
+        declared.contains(called)
+            || ADVANCED_INDIRECTION_CALL_HEADS
+                .iter()
+                .any(|(exempt_path, head, _)| *exempt_path == path && *head == called)
+    }
+
+    /// The indirection-specific half of the failure message.
+    fn indirection_advice(&self) -> String {
+        if self.kind != AdvancedSignalKind::Indirect {
+            return String::new();
+        }
+        match self.called.as_deref() {
+            Some(called) => format!(
+                "\nThe map comes from `{called}(…)`, so its keys are assembled where this scan \
+                 never looks. Either build it inline (`advanced: {{ … }}`) inside a builder that \
+                 is declared, or declare `{called}` itself."
+            ),
+            None => "\nThe map comes from a bare expression (a variable, a member read, a \
+                     ternary), so its keys are assembled where this scan never looks. Build it \
+                     inline (`advanced: { … }`) inside a builder that is declared, or move the \
+                     assembly into a function and declare that."
+                .to_owned(),
+        }
+    }
+}
+
+/// Every place `stripped` builds an `advanced` map, or takes one from somewhere unreadable.
+///
+/// Five shapes; see [`AdvancedSignalKind`]. The first four are literal writes. The fifth,
+/// [`AdvancedSignalKind::Indirect`], is what makes the sweep a class-closer rather than a
+/// pattern-matcher: any indirection is enough to hide a map, and this scan reports it so the
+/// caller can insist the callee be named.
+///
+/// # Not every `advanced` is a payload
+///
+/// Three ordinary React shapes carry the name and build nothing, and a build-blocking lint that
+/// misfires on them gets deleted rather than diagnosed:
+///
+/// * a JSX prop — `<Child advanced={state.opts} />`;
+/// * a destructuring default or rename — `function Row({ advanced = {} })`,
+///   `const { advanced: opts } = props`;
+/// * (not suppressible) a plain local named `advanced` that holds something else. Nothing in the
+///   text distinguishes it from a payload map, so it still fails, and the failure message offers
+///   the only honest fix: rename the local.
+///
+/// A computed write (`advanced["key"] = …`) or an `Object.assign(x.advanced, …)` is invisible here
+/// no matter where it sits, so [`refuse_invisible_advanced_writes`] refuses those over every file
+/// the sweep reads rather than reading past them.
+fn advanced_map_signals(stripped: &str) -> Vec<AdvancedSignal> {
+    let bytes = stripped.as_bytes();
+    let mask = string_literal_mask(bytes);
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            byte if is_identifier_start(byte as char) => {
+                let start = index;
+                while index < bytes.len() && is_identifier_char(bytes[index] as char) {
+                    index += 1;
+                }
+                let word = &stripped[start..index];
+                if word != "advanced" && word != "advancedExtras" {
+                    continue;
+                }
+                let extras = word == "advancedExtras";
+                let lookahead = skip_ascii_whitespace(bytes, index);
+                let mut called = None;
+                let kind = match bytes.get(lookahead) {
+                    // `advanced: {` / `advancedExtras: {`, or `advanced: <expression>`. Only in KEY
+                    // position: `cond ? advanced : fallback` wears the same colon and builds
+                    // nothing, and `const { advanced: opts } = props` is a rename, not a build.
+                    Some(b':')
+                        if is_object_key_position(bytes, &mask, start)
+                            && !is_binding_pattern_position(bytes, &mask, start) =>
+                    {
+                        let after = skip_ascii_whitespace(bytes, lookahead + 1);
+                        if bytes.get(after) == Some(&b'{') {
+                            Some(if extras {
+                                AdvancedSignalKind::ExtrasLiteral
+                            } else {
+                                AdvancedSignalKind::InlineLiteral
+                            })
+                        } else {
+                            called = call_head(bytes, stripped, after);
+                            (called.is_some() || !is_pass_through(bytes, stripped, after))
+                                .then_some(AdvancedSignalKind::Indirect)
+                        }
+                    }
+                    // `advanced = {` or `advanced = someBuilder(…)`, but never `advanced == …`, a
+                    // JSX prop, or a parameter default.
+                    Some(b'=')
+                        if bytes.get(lookahead + 1) != Some(&b'=')
+                            && !is_jsx_attribute_position(bytes, &mask, start)
+                            && !is_binding_pattern_position(bytes, &mask, start) =>
+                    {
+                        let after = skip_ascii_whitespace(bytes, lookahead + 1);
+                        if bytes.get(after) == Some(&b'{') {
+                            Some(AdvancedSignalKind::AssignedLiteral)
+                        } else {
+                            // A CALL can build a map; `defaults.advanced ?? {}` and friends are
+                            // reads of someone else's, and flagging those fires on every screen
+                            // that merely inspects a saved config.
+                            called = call_head(bytes, stripped, after);
+                            called.is_some().then_some(AdvancedSignalKind::Indirect)
+                        }
+                    }
+                    // `advanced.key = …`, but never `advanced.key ==` or `advanced.key(…)`.
+                    Some(b'.') if word == "advanced" => {
+                        let key_start = lookahead + 1;
+                        let mut key_end = key_start;
+                        while key_end < bytes.len() && is_identifier_char(bytes[key_end] as char) {
+                            key_end += 1;
+                        }
+                        let after = skip_ascii_whitespace(bytes, key_end);
+                        (key_end > key_start
+                            && bytes.get(after) == Some(&b'=')
+                            && bytes.get(after + 1) != Some(&b'=')
+                            && bytes.get(after + 1) != Some(&b'>'))
+                        .then_some(AdvancedSignalKind::PropertyAssignment)
+                    }
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    out.push(AdvancedSignal {
+                        offset: start,
+                        kind,
+                        called,
+                    });
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    out
+}
+
+/// True when the expression at `from` is just the tracked name again: `advanced: advanced`.
+///
+/// The long spelling of the `{ advanced }` shorthand every builder already uses. It hands on a map
+/// that had to be BUILT somewhere first — and building it is what this scan catches — so reporting
+/// the hand-on adds nothing and would fail the build on rewriting `advanced,` as `advanced:
+/// advanced` inside a builder that is already registered.
+fn is_pass_through(bytes: &[u8], text: &str, from: usize) -> bool {
+    let (name, end) = identifier_at(bytes, text, from);
+    if name != "advanced" && name != "advancedExtras" {
+        return false;
+    }
+    // `advanced: advanced.buildAdvanced(x)` and `advanced: advanced[key]` are not hand-ons.
+    !matches!(
+        bytes.get(skip_ascii_whitespace(bytes, end)),
+        Some(b'.') | Some(b'(') | Some(b'[') | Some(b'?')
+    )
+}
+
+/// The callee of a call expression starting at `from`: `buildFoo(x)` → `buildFoo`,
+/// `advanced.buildAdvanced(x)` → `buildAdvanced`. `None` when this is not a plain call.
+fn call_head(bytes: &[u8], text: &str, from: usize) -> Option<String> {
+    let mut index = from;
+    loop {
+        if index >= bytes.len() || !is_identifier_start(bytes[index] as char) {
+            return None;
+        }
+        let start = index;
+        while index < bytes.len() && is_identifier_char(bytes[index] as char) {
+            index += 1;
+        }
+        let next = skip_ascii_whitespace(bytes, index);
+        match bytes.get(next) {
+            // `Object.keys(x)` → keep walking, the callee is the LAST name in the chain.
+            Some(b'.') => index = skip_ascii_whitespace(bytes, next + 1),
+            Some(b'(') => return Some(text[start..index].to_owned()),
+            _ => return None,
+        }
+    }
+}
+
+/// Every position inside a string literal, so a BACKWARD scan can skip them.
+///
+/// The forward scanners skip strings by jumping over them; the context checks below walk backwards
+/// and cannot, so a `<` or a `;` inside a string would otherwise decide whether a signal fires.
+fn string_literal_mask(bytes: &[u8]) -> Vec<bool> {
+    let mut mask = vec![false; bytes.len()];
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                let end = skip_string_ascii(bytes, index).min(bytes.len());
+                for slot in mask[index..end].iter_mut() {
+                    *slot = true;
+                }
+                index = end.max(index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    mask
+}
+
+/// The nearest significant character before `at`, skipping whitespace and string bodies.
+fn previous_significant(bytes: &[u8], mask: &[bool], at: usize) -> Option<u8> {
+    let mut index = at;
+    while index > 0 {
+        index -= 1;
+        if mask[index] {
+            return Some(bytes[index]);
+        }
+        if !bytes[index].is_ascii_whitespace() {
+            return Some(bytes[index]);
+        }
+    }
+    None
+}
+
+/// True when the identifier at `at` starts an object-literal entry (`{ advanced:`, `, advanced:`).
+///
+/// The discriminator against a ternary's middle arm (`cond ? advanced : fallback`) and against a
+/// labelled statement, both of which put a colon after the name and build nothing.
+fn is_object_key_position(bytes: &[u8], mask: &[bool], at: usize) -> bool {
+    match previous_significant(bytes, mask, at) {
+        Some(b'{') | Some(b',') => true,
+        // A body slice can begin mid-literal, so "nothing before it" stays permissive.
+        None => true,
+        _ => false,
+    }
+}
+
+/// True when the identifier at `at` sits in JSX attribute position: `<Child advanced={…} />`.
+///
+/// Walks back to the tag that would own the attribute. Anything that cannot appear between a tag
+/// name and one of its attributes — a statement end, an open brace or paren at this level — means
+/// this is ordinary JS.
+fn is_jsx_attribute_position(bytes: &[u8], mask: &[bool], at: usize) -> bool {
+    let mut depth = 0_usize;
+    let mut index = at;
+    while index > 0 {
+        index -= 1;
+        if mask[index] {
+            continue;
+        }
+        match bytes[index] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            b'(' | b')' | b';' | b',' if depth == 0 => return false,
+            // `=>` is an arrow, not a tag that just closed.
+            b'>' if depth == 0 && bytes.get(index.wrapping_sub(1)) != Some(&b'=') => return false,
+            b'<' if depth == 0 => {
+                return bytes
+                    .get(index + 1)
+                    .is_some_and(|next| is_identifier_start(*next as char));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when the identifier at `at` is being BOUND rather than built: a parameter destructuring
+/// default (`function Row({ advanced = {} })`, `({ advanced = {} }) => …`) or a destructuring
+/// declaration (`const { advanced = {} } = props`, `const { advanced: opts } = props`).
+///
+/// Decided by what follows the pattern, because what PRECEDES it cannot tell a parameter list from
+/// a call argument: `foo({ advanced: 1 })` and `function foo({ advanced = {} })` both put a `(`
+/// before the brace. A pattern's closing brace is followed by `=` (a binding), or by the `)` of a
+/// parameter list that a body or an `=>` follows.
+fn is_binding_pattern_position(bytes: &[u8], mask: &[bool], at: usize) -> bool {
+    let Some(open) = enclosing_open_brace(bytes, mask, at) else {
+        return false;
+    };
+    let Some(close) = matching_close_brace(bytes, open) else {
+        return false;
+    };
+    let after = skip_ascii_whitespace(bytes, close + 1);
+    match bytes.get(after) {
+        // `const { advanced = {} } = props`
+        Some(b'=') => bytes.get(after + 1) != Some(&b'=') && bytes.get(after + 1) != Some(&b'>'),
+        // `function Row({ advanced = {} }) {` / `({ advanced = {} }) => …`
+        Some(b')') => opens_a_function_body(bytes, after + 1),
+        // `function Row({ advanced = {} }, ref) {` — a non-final parameter.
+        Some(b',') => enclosing_close_paren(bytes, after + 1)
+            .is_some_and(|paren| opens_a_function_body(bytes, paren + 1)),
+        _ => false,
+    }
+}
+
+/// True when a function body (`{`) or an arrow (`=>`) starts at or after `from`.
+fn opens_a_function_body(bytes: &[u8], from: usize) -> bool {
+    let at = skip_ascii_whitespace(bytes, from);
+    match bytes.get(at) {
+        Some(b'{') => true,
+        Some(b'=') => bytes.get(at + 1) == Some(&b'>'),
+        _ => false,
+    }
+}
+
+/// The innermost `{` still open at `at`.
+fn enclosing_open_brace(bytes: &[u8], mask: &[bool], at: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut index = at;
+    while index > 0 {
+        index -= 1;
+        if mask[index] {
+            continue;
+        }
+        match bytes[index] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `}` that closes the `{` at `open`.
+fn matching_close_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The `)` that closes the parenthesis `from` is already inside.
+fn enclosing_close_paren(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut index = from;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            b')' => {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The offsets of `function <name>`'s body in `stripped` — the text BETWEEN its braces.
+///
+/// Panics with instructions rather than returning nothing when the function is gone: a registry
+/// entry pointing at a renamed function must fail the lint, not quietly stop covering it.
+fn function_body_span(stripped: &str, function: &str, path: &str) -> (usize, usize) {
+    let needle = format!("function {function}");
+    // On a NAME boundary, not a prefix: `function buildDetailJobBody` matches inside
+    // `function buildDetailJobBodyV2`, so a rename could leave the registry pointing at a
+    // different function while the lint reported one clean match.
+    let occurrences: Vec<usize> = stripped
+        .match_indices(needle.as_str())
+        .filter(
+            |(at, _)| match stripped[at + needle.len()..].chars().next() {
+                Some(next) => !is_identifier_char(next),
+                None => true,
+            },
+        )
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        occurrences.len(),
+        1,
+        "`{needle}` appears {} times in {path}; this coverage lint needs exactly one so it reads an \
+         unambiguous body. Either the function was renamed or moved — point the \
+         `ADVANCED_BUILDERS` entry at wherever that `advanced` map is built now — or a second \
+         function shares the name, in which case rename one.",
+        occurrences.len()
+    );
+    let at = occurrences[0];
+    let bytes = stripped.as_bytes();
+
+    // Walk the parameter list first: a default value carries braces of its own
+    // (`buildAdvanced(base = {})`), so the body's `{` is not simply the next one.
+    let mut index = at + needle.len();
+    while index < bytes.len() && bytes[index] != b'(' {
+        index += 1;
+    }
+    assert!(
+        index < bytes.len(),
+        "`{needle}` in {path} has no parameter list"
+    );
+    let mut depth = 0_usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    index += 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    while index < bytes.len() && bytes[index] != b'{' {
+        index += 1;
+    }
+    assert!(
+        index < bytes.len(),
+        "`{needle}` in {path} has no body — an arrow-bodied function is a shape this lint cannot \
+         read"
+    );
+    let open = index;
+    let mut depth = 0_usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (open + 1, index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("`{needle}` in {path} has an unbalanced body");
+}
+
+/// The balanced text inside the first `{` at or after `from`.
+fn object_literal_body(text: &str, from: usize, what: &str) -> String {
+    let bytes = text.as_bytes();
+    let open = from
+        + text[from..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{what} is not followed by an object literal"));
+    let mut depth = 0_usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return text[open + 1..index].to_owned();
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("{what}'s object literal is unbalanced");
+}
+
+/// Every `advanced` key one registered builder can emit, read out of its own JS shape.
+///
+/// The dispatch the registry's [`AdvancedBuilderShape`] exists for. Each arm fails loudly when the
+/// file stops matching the shape it claims, because a green lint that has quietly stopped reading
+/// anything is worse than no lint — it is the exact failure that let `cnScale` ship unclassified.
+fn emitted_keys(builder: &AdvancedBuilder, source: &str) -> BTreeSet<String> {
+    let stripped = scannable(source);
+    let (start, end) = function_body_span(&stripped, builder.function, builder.path);
+    let body = &stripped[start..end];
+    let what = format!("`{}` in {}", builder.function, builder.path);
+
+    // Every shape, not just `AssignedObject`: a `FlatAdvancedLiteral` builder can grow a computed
+    // write too, and reading past one is how a knob goes missing with the lint still green.
+    refuse_invisible_advanced_writes(body, &what);
+
+    // Which signals each arm actually READ. Anything left over is a second map the registry entry
+    // does not account for, refused below.
+    let signals = advanced_map_signals(body);
+    let (keys, consumed): (BTreeSet<String>, Vec<usize>) = match builder.shape {
+        AdvancedBuilderShape::ReturnedObject => {
+            let return_at = body
+                .find("return {")
+                .unwrap_or_else(|| panic!("{what} no longer returns an object literal"))
+                + "return ".len();
+            let literal = object_literal_body(body, return_at, &what);
+            (scan_object_literal(&literal, &what, false).0, Vec::new())
+        }
+        AdvancedBuilderShape::ExtrasLiteral => {
+            let at = body.find("advancedExtras:").unwrap_or_else(|| {
+                panic!(
+                    "{what} no longer carries an `advancedExtras:` literal, so this lint cannot \
+                     see which knobs that form contributes"
+                )
+            });
+            let literal = object_literal_body(body, at + "advancedExtras:".len(), &what);
+            (scan_object_literal(&literal, &what, false).0, vec![at])
+        }
+        AdvancedBuilderShape::FlatAdvancedLiteral => {
+            let at = body
+                .find("advanced:")
+                .unwrap_or_else(|| panic!("{what} no longer carries an `advanced:` literal"));
+            let literal = object_literal_body(body, at + "advanced:".len(), &what);
+            assert!(
+                !literal.contains('{') && !literal.contains("..."),
+                "{what}'s `advanced` literal is no longer flat — re-tag its registry `shape` (the \
+                 conditional-spread scanner reads that shape) rather than letting this arm \
+                 misread it"
+            );
+            let keys = literal
+                .split(',')
+                // `key` and `key: value` alike — take the identifier before any colon.
+                .filter_map(|entry| entry.split(':').next())
+                .map(str::trim)
+                .filter(|key| !key.is_empty() && key.chars().all(is_identifier_char))
+                .map(str::to_owned)
+                .collect();
+            (keys, vec![at])
+        }
+        AdvancedBuilderShape::AssignedObject => {
+            let at = body
+                .find("advanced =")
+                .unwrap_or_else(|| panic!("{what} no longer initializes an `advanced` object"));
+            let literal = object_literal_body(body, at + "advanced =".len(), &what);
+            let (mut keys, spreads) = scan_object_literal(&literal, &what, true);
+            let declared: BTreeSet<String> = builder
+                .spread_of
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+            assert_eq!(
+                spreads, declared,
+                "{what} spreads {spreads:?} into its `advanced` initializer, but its registry \
+                 entry declares `spread_of: {declared:?}`. A spread nobody declared is a whole \
+                 set of keys this lint cannot see — either point `spread_of` at it and register \
+                 the builder that produces those keys, or stop spreading it."
+            );
+            let (assigned, mut consumed) = assigned_advanced_keys(body, &signals);
+            keys.extend(assigned);
+            consumed.push(at);
+            (keys, consumed)
+        }
+        AdvancedBuilderShape::NoAdvancedMap => {
+            assert!(
+                !body.contains("advanced"),
+                "{what} is registered as posting NO `advanced` map, but its body now mentions \
+                 `advanced`. It feeds a lane that embeds the map into every PNG it writes, so \
+                 give it a real registry `shape` and classify every key it can emit."
+            );
+            (BTreeSet::new(), Vec::new())
+        }
+        // The video builders' shape (sc-15956): an `advanced:` literal WITH conditional spreads,
+        // in a payload handed to a call rather than returned. `FlatAdvancedLiteral` refuses a
+        // spread and `ReturnedObject` looks for a `return {`, so neither could read these.
+        AdvancedBuilderShape::SpreadAdvancedLiteral => {
+            let at = body
+                .find("advanced:")
+                .unwrap_or_else(|| panic!("{what} no longer carries an `advanced:` literal"));
+            let literal = object_literal_body(body, at + "advanced:".len(), &what);
+            let (keys, spreads) = scan_object_literal(&literal, &what, true);
+            let declared: BTreeSet<String> = builder
+                .spread_of
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+            assert_eq!(
+                spreads, declared,
+                "{what} spreads {spreads:?} into its `advanced` literal, but its registry entry \
+                 declares `spread_of: {declared:?}`. A spread nobody declared is a whole set of \
+                 keys this lint cannot see — either point `spread_of` at it and register the \
+                 builder that produces those keys, or stop spreading it."
+            );
+            (keys, vec![at])
+        }
+    };
+    refuse_unread_advanced_signals(body, &what, builder, &signals, &consumed);
+    keys
+}
+
+/// A second `advanced` map inside a declared builder is NOT accounted for by that declaration.
+///
+/// [`every_advanced_builder_in_the_web_app_is_accounted_for`] credits every signal inside a declared
+/// function's body span to that function, but the extractors above read exactly one shape each — the
+/// one the registry names. So a nested helper declared inside `DocumentStudio.submit`, with its own
+/// `advanced: { probeKnob, probeSecret }`, counted as accounted for while its keys were never
+/// classified and the sweep stayed green. This is the refusal
+/// [`refuse_invisible_advanced_writes`] makes for a write it cannot follow, applied to a map the arm
+/// can see and did not read.
+fn refuse_unread_advanced_signals(
+    body: &str,
+    what: &str,
+    builder: &AdvancedBuilder,
+    signals: &[AdvancedSignal],
+    consumed: &[usize],
+) {
+    let declared = declared_builder_functions();
+    for signal in signals {
+        if consumed.contains(&signal.offset)
+            || signal.calls_a_declared_builder(builder.path, &declared)
+        {
+            continue;
+        }
+        let line = 1 + body[..signal.offset].matches('\n').count();
+        panic!(
+            "{what} builds a SECOND `advanced` map at line {line} of its body ({}), which the \
+             `{:?}` arm of this extractor never reads. Its keys are invisible here, so they would \
+             be dropped from every shared image exactly as if the builder were unregistered. A \
+             nested helper is not accounted for by the entry around it: fold those keys into the \
+             map this arm does read, or give the helper its own `ADVANCED_BUILDERS` entry — the \
+             innermost declared span wins, so a nested entry is credited to itself.",
+            signal.kind.describe(),
+            builder.shape,
+        );
+    }
+}
+
+/// Every function name the registry declares, registered or deferred.
+fn declared_builder_functions() -> BTreeSet<&'static str> {
+    ADVANCED_BUILDERS
+        .iter()
+        .map(|builder| builder.function)
+        .chain(
+            DEFERRED_ADVANCED_BUILDERS
+                .iter()
+                .map(|deferred| deferred.function),
+        )
+        .collect()
+}
+
+/// A write this lint cannot follow must fail rather than be scanned past.
+///
+/// Three shapes set keys without ever naming one: a computed key (`advanced["k"] = v`),
+/// `Object.assign(x.advanced, { … })`, and an array mutator. Called over EVERY file the sweep
+/// reads, not only inside an `AssignedObject` body: while this ran in that one arm,
+/// `body.payload.advanced["probeKnob"] = v` was green both in a brand-new file and inside
+/// `buildDetailJobBody`.
+///
+/// The `Object.assign` check reads the first ARGUMENT instead of matching the text
+/// `Object.assign(advanced`, which `Object.assign(body.payload.advanced, { … })` walked straight
+/// past.
+fn refuse_invisible_advanced_writes(text: &str, what: &str) {
+    if let Some((offset, how)) = invisible_advanced_writes(text).into_iter().next() {
+        let line = 1 + text[..offset].matches('\n').count();
+        panic!(
+            "{what} writes `advanced` through {how} at line {line}, which this coverage lint \
+             cannot read — the keys it sets are invisible here and would be silently dropped from \
+             every shared image. Write them as plain `advanced.key = …` assignments, or as an \
+             `advanced: {{ … }}` literal, inside a builder `ADVANCED_BUILDERS` declares."
+        );
+    }
+}
+
+/// Mutators that reshape a map/array without naming a key.
+const INVISIBLE_ADVANCED_MUTATORS: &[&str] = &["push", "unshift", "splice"];
+
+/// Every `advanced` write in `text` that this lint cannot follow, as (offset, how).
+fn invisible_advanced_writes(text: &str) -> Vec<(usize, String)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            byte if is_identifier_start(byte as char) => {
+                let start = index;
+                while index < bytes.len() && is_identifier_char(bytes[index] as char) {
+                    index += 1;
+                }
+                let word = &text[start..index];
+                let after = skip_ascii_whitespace(bytes, index);
+                match word {
+                    "advanced" | "advancedExtras" => match bytes.get(after) {
+                        Some(b'[') => out.push((start, format!("a computed key (`{word}[…]`)"))),
+                        Some(b'.') => {
+                            let (method, method_end) = identifier_at(bytes, text, after + 1);
+                            if INVISIBLE_ADVANCED_MUTATORS.contains(&method)
+                                && bytes.get(skip_ascii_whitespace(bytes, method_end))
+                                    == Some(&b'(')
+                            {
+                                out.push((start, format!("`{word}.{method}(…)`")));
+                            }
+                        }
+                        _ => {}
+                    },
+                    "Object" => {
+                        if bytes.get(after) != Some(&b'.') {
+                            continue;
+                        }
+                        let (method, method_end) = identifier_at(bytes, text, after + 1);
+                        let open = skip_ascii_whitespace(bytes, method_end);
+                        if method != "assign" || bytes.get(open) != Some(&b'(') {
+                            continue;
+                        }
+                        let Some(target) = first_argument(bytes, text, open + 1) else {
+                            continue;
+                        };
+                        let target = target.trim();
+                        if ["advanced", "advancedExtras"].contains(&target)
+                            || target.ends_with(".advanced")
+                            || target.ends_with(".advancedExtras")
+                        {
+                            out.push((start, format!("`Object.assign({target}, …)`")));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    out
+}
+
+/// The identifier starting at or after `from`, plus the offset just past it.
+fn identifier_at<'text>(bytes: &[u8], text: &'text str, from: usize) -> (&'text str, usize) {
+    let start = skip_ascii_whitespace(bytes, from);
+    let mut end = start;
+    while end < bytes.len() && is_identifier_char(bytes[end] as char) {
+        end += 1;
+    }
+    (&text[start..end], end)
+}
+
+/// The text of the first argument of a call whose `(` ends just before `from`.
+fn first_argument(bytes: &[u8], text: &str, from: usize) -> Option<String> {
+    let mut depth = 0_usize;
+    let mut index = from;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' | b',' if depth == 0 => {
+                return (bytes[index] != b']' && bytes[index] != b'}')
+                    .then(|| text[from..index].to_owned());
+            }
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Every `advanced.key = …` assignment in one function body, with the signal offsets it read.
+fn assigned_advanced_keys(
+    body: &str,
+    signals: &[AdvancedSignal],
+) -> (BTreeSet<String>, Vec<usize>) {
+    let mut keys = BTreeSet::new();
+    let mut consumed = Vec::new();
+    for signal in signals
+        .iter()
+        .filter(|signal| signal.kind == AdvancedSignalKind::PropertyAssignment)
+    {
+        let after_dot = signal.offset + "advanced.".len();
+        let bytes = body.as_bytes();
+        let mut end = after_dot;
+        while end < bytes.len() && is_identifier_char(bytes[end] as char) {
+            end += 1;
+        }
+        keys.insert(body[after_dot..end].to_owned());
+        consumed.push(signal.offset);
+    }
+    (keys, consumed)
+}
+
+/// Every key an object literal built from conditional spreads can contribute, plus the bare
+/// identifiers it spreads.
+///
+/// A small brace-aware scanner rather than a regex, because the studio builder's whole shape is
+/// conditional spreads: `...(cond ? { key: value } : {})` contributes a TOP-LEVEL advanced
+/// key from brace depth two, while `{ controlWeights: { overlayId } }` and a call argument
+/// object like `buildStructuredPromptRecipe({ intent })` do not. A regex cannot tell those
+/// apart, and getting it wrong in the permissive direction would make this lint pass on a key
+/// that is never emitted while missing one that is.
+///
+/// Rule: a brace is an "emit scope" when it is the literal itself, or when it is an
+/// object literal at the top level of a spread expression (`...( … )`) written inside another
+/// emit scope — which covers BOTH branches of the `cond ? { a } : { b }` the builder uses.
+/// Only identifiers in key position inside an emit scope count.
+///
+/// # Fails loud, never quiet
+///
+/// The scanner understands ONE shape, and a lint that silently understands nothing is worse
+/// than no lint: `...buildFutureKnobs(state)` in the return object would contribute no keys, the
+/// key floor and every anchor would still resolve, and a brand-new knob would stop
+/// travelling with zero signal. So a spread this scanner cannot follow — a call expression, or a
+/// parenthesized expression with no object literal in it — PANICS with instructions instead of
+/// scanning past it. Fail-safe on the privacy axis (the key is dropped, not leaked) is only half
+/// of what this lint is for; the other half is noticing that a knob went missing.
+///
+/// `allow_identifier_spreads` is the one exception, for `{ ...base, key }`: an
+/// [`AdvancedBuilderShape::AssignedObject`] builder merges another registered builder's map in by
+/// name. Those identifiers are RETURNED rather than ignored, so the caller can assert they are
+/// exactly the ones the registry declares.
+fn scan_object_literal(
+    body: &str,
+    what: &str,
+    allow_identifier_spreads: bool,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let chars: Vec<char> = body.chars().collect();
+    let mut keys = BTreeSet::new();
+    let mut identifier_spreads = BTreeSet::new();
+    // (is_emit_scope, expecting_a_key, paren_depth_at_open)
+    //
+    // The third field is sc-15956's. A `,` only starts a new KEY at the scope's own paren
+    // depth: `timelineContext: generationContext("extend", selectedItem, { .. })` separates
+    // CALL ARGUMENTS with commas, and reading those as keys made `selectedItem` look like an
+    // advanced knob that nobody had classified.
+    let mut scopes: Vec<(bool, bool, usize)> = vec![(true, true, 0)];
+    // Open spread expressions, as (open scope count, paren depth at the `...`, produced an
+    // object literal). Nested, because `...(a ? { k, ...(b ? { j } : {}) } : {})` happens.
+    let mut spreads: Vec<(usize, usize, bool)> = Vec::new();
+    let mut paren_depth = 0_usize;
+    let mut index = 0;
+
+    while index < chars.len() {
+        let character = chars[index];
+        if character.is_whitespace() {
+            index += 1;
+            continue;
+        }
+        match character {
+            '{' => {
+                let in_spread = spreads
+                    .last()
+                    .is_some_and(|(scope_count, _, _)| *scope_count == scopes.len());
+                let is_emit = in_spread && scopes.last().is_some_and(|(emit, _, _)| *emit);
+                if let (true, Some(spread)) = (is_emit, spreads.last_mut()) {
+                    spread.2 = true;
+                }
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1 = false;
+                }
+                scopes.push((is_emit, true, paren_depth));
+                index += 1;
+            }
+            '}' => {
+                scopes.pop();
+                index += 1;
+                if scopes.is_empty() {
+                    break;
+                }
+            }
+            '(' => {
+                paren_depth += 1;
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1 = false;
+                }
+                index += 1;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                while let Some((_, spread_paren, produced)) = spreads.last().copied() {
+                    if spread_paren < paren_depth {
+                        break;
+                    }
+                    assert!(
+                        produced,
+                        "a spread in {what} contains no object literal, so `scan_object_literal` \
+                         in this test scanned past it and contributed nothing. Every key inside \
+                         it is invisible to this lint. Write the spread as \
+                         `...(cond ? {{ key }} : {{}})`, or teach the scanner the new shape."
+                    );
+                    spreads.pop();
+                }
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1 = false;
+                }
+                index += 1;
+            }
+            ',' => {
+                if let Some(scope) = scopes.last_mut() {
+                    // Only at this scope's own depth — a comma deeper in is a call argument
+                    // separator, not the start of the next key (sc-15956).
+                    scope.1 = paren_depth == scope.2;
+                }
+                index += 1;
+            }
+            '.' => {
+                if index + 2 < chars.len() && chars[index + 1] == '.' && chars[index + 2] == '.' {
+                    if scopes.last().is_some_and(|(emit, _, _)| *emit) {
+                        // The scanner follows `...( … )`, plus a bare identifier where the caller
+                        // has declared one. Anything else — a call, a member expression — would
+                        // leave a spread open forever, so the next nested object VALUE would read
+                        // as an emit scope: refuse rather than guess.
+                        let mut lookahead = index + 3;
+                        while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                            lookahead += 1;
+                        }
+                        let identifier_spread = allow_identifier_spreads
+                            && chars
+                                .get(lookahead)
+                                .copied()
+                                .is_some_and(is_identifier_start);
+                        if identifier_spread {
+                            let start = lookahead;
+                            // A dotted MEMBER path (`...base.advanced`) reads as one name, not as
+                            // a refusal (sc-15956). The three timeline actions spread
+                            // `buildBasePayload`'s own map that way, and the property the refusal
+                            // protects is unchanged: the whole dotted name goes into
+                            // `identifier_spreads`, so `spread_of` must declare it and a builder
+                            // must account for the keys behind it. A CALL is still refused, below
+                            // — a call's keys have no declarable name.
+                            while lookahead < chars.len()
+                                && (is_identifier_char(chars[lookahead])
+                                    || (chars[lookahead] == '.'
+                                        && chars
+                                            .get(lookahead + 1)
+                                            .copied()
+                                            .is_some_and(is_identifier_start)))
+                            {
+                                lookahead += 1;
+                            }
+                            let mut after = lookahead;
+                            while after < chars.len() && chars[after].is_whitespace() {
+                                after += 1;
+                            }
+                            assert!(
+                                matches!(chars.get(after), Some(',') | Some('}') | None),
+                                "{what} spreads something this coverage lint cannot read: a call \
+                                 expression or a computed member (`...{}`). Every key it \
+                                 contributes is invisible to this lint, so a new knob would \
+                                 silently stop travelling.",
+                                chars[start..]
+                                    .iter()
+                                    .take(24)
+                                    .collect::<String>()
+                                    .trim_end()
+                            );
+                            identifier_spreads
+                                .insert(chars[start..lookahead].iter().collect::<String>());
+                            index = lookahead;
+                            if let Some(scope) = scopes.last_mut() {
+                                scope.1 = false;
+                            }
+                            continue;
+                        }
+                        assert!(
+                            chars.get(lookahead) == Some(&'('),
+                            "{what} spreads something this coverage lint cannot read: a bare \
+                             identifier or a call expression (`...{}`). Every key it contributes \
+                             is invisible to this lint, so a new knob would silently stop \
+                             travelling. Write it as `...(cond ? {{ key }} : {{}})`, or teach the \
+                             scanner the new shape.",
+                            chars[lookahead..]
+                                .iter()
+                                .take(24)
+                                .collect::<String>()
+                                .trim_end()
+                        );
+                        spreads.push((scopes.len(), paren_depth, false));
+                    }
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1 = false;
+                }
+            }
+            '"' | '\'' | '`' => {
+                index = skip_string(&chars, index);
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1 = false;
+                }
+            }
+            character if is_identifier_start(character) => {
+                let start = index;
+                while index < chars.len() && is_identifier_char(chars[index]) {
+                    index += 1;
+                }
+                let (is_emit, expecting, _) = *scopes.last().expect("a scope is always open");
+                if is_emit && expecting {
+                    let mut lookahead = index;
+                    while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                        lookahead += 1;
+                    }
+                    // End of the literal counts as a terminator: the caller passes the text
+                    // INSIDE the braces, so a final entry with no trailing comma
+                    // (`{ ...base, ipAdapterScale }`) ends at the slice's end rather than at `}`.
+                    if lookahead >= chars.len() || matches!(chars[lookahead], ':' | ',' | '}') {
+                        keys.insert(chars[start..index].iter().collect::<String>());
+                    }
+                }
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1 = false;
+                }
+            }
+            _ => {
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1 = false;
+                }
+                index += 1;
+            }
+        }
+    }
+    assert!(
+        spreads.is_empty(),
+        "a spread in {what} never closed, so `scan_object_literal` in this test lost track of the \
+         literal's shape. Fix the scanner rather than letting it scan a shape it does not \
+         understand."
+    );
+    (keys, identifier_spreads)
+}
+
+/// Every key `buildImageJobAdvanced` can put into the `advanced` payload — the studio builder's
+/// extractor, exposed on its own so the scanner's own unit tests can feed it a synthetic builder.
+fn emitted_advanced_keys(source: &str) -> BTreeSet<String> {
+    emitted_keys(
+        ADVANCED_BUILDERS
+            .iter()
+            .find(|builder| builder.source == AdvancedKeySource::StudioBuilder)
+            .expect("the studio builder is registered"),
+        source,
+    )
+}
+
+/// Blank out `//` and `/* */` comments without disturbing string literals.
+fn strip_comments(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        match character {
+            '/' if index + 1 < chars.len() && chars[index + 1] == '/' => {
+                while index < chars.len() && chars[index] != '\n' {
+                    index += 1;
+                }
+            }
+            '/' if index + 1 < chars.len() && chars[index + 1] == '*' => {
+                index += 2;
+                while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                    index += 1;
+                }
+                index = (index + 2).min(chars.len());
+                out.push(' ');
+            }
+            '"' | '\'' | '`' => {
+                let end = skip_string(&chars, index);
+                out.extend(&chars[index..end]);
+                index = end;
+            }
+            _ => {
+                out.push(character);
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Index just past the string literal starting at `start`.
+fn skip_string(chars: &[char], start: usize) -> usize {
+    let quote = chars[start];
+    let mut index = start + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            character if character == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    chars.len()
+}
+
+/// [`skip_string`] over the ASCII-normalized text the offset-based scanners work on.
+fn skip_string_ascii(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The first non-whitespace offset at or after `from`.
+fn skip_ascii_whitespace(bytes: &[u8], from: usize) -> usize {
+    let mut index = from;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn is_identifier_start(character: char) -> bool {
+    character.is_ascii_alphabetic() || character == '_' || character == '$'
+}
+
+fn is_identifier_char(character: char) -> bool {
+    is_identifier_start(character) || character.is_ascii_digit()
+}
+
+// ---------------------------------------------------------------------------
+// The Rust seam scanner (sc-16113)
+// ---------------------------------------------------------------------------
+
+/// Every worker source file the seam scan reads, as (repo-relative path, source).
+///
+/// Test code is excluded by NAME rather than by hoping it looks different: `tests.rs` and anything
+/// under a `tests/` directory are fixtures, and a fixture that writes a chunk is not a product
+/// write seam. Everything else in the crate is read, including the macOS-gated
+/// `image_jobs/detail.rs` — the scan is textual, so a `cfg`-gated seam is as visible here as any
+/// other, which is the property the old four-path list depended on without saying so.
+fn worker_sources() -> Vec<(String, String)> {
+    let root = repo_root()
+        .join("crates")
+        .join("sceneworks-worker")
+        .join("src");
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) != Some("tests") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            if !name.ends_with(".rs") || name == "tests.rs" {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(repo_root())
+                .expect("under the repo root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            out.push((relative, source));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// One discovered function that a `WorkflowShare` can pass through.
+#[derive(Debug, Clone, Default)]
+struct WorkflowSeamSite {
+    path: String,
+    function: String,
+    /// It BUILDS an envelope here — it calls a core builder, or a worker function that returns one.
+    constructs: bool,
+    /// It CARRIES one in its own signature (directly, or inside a struct that holds one), so a
+    /// caller decided the envelope and this function only passes it on.
+    carrier: bool,
+    /// It calls `write_workflow_chunk` — under that name or a rename import — with a share
+    /// argument that is not the literal `None`.
+    ///
+    /// PROVENANCE-BLIND on purpose (sc-16113). The first cut asked only whether the body called a
+    /// BUILDER, so a seam that got its envelope some other way — `parse_workflow_share_json(..)
+    /// .ok()`, a `.clone()` of one held elsewhere, `serde_json::from_value::<WorkflowShare>` — and
+    /// then wrote it could declare `Declines` and pass. That is the likeliest shape of sc-15956
+    /// ("carry the source's workflow into the output frame"), and it is exactly what sc-15954 did
+    /// for the editor export.
+    writes_a_share_chunk: bool,
+    /// Its body gets hold of an envelope of its own: a builder, a parser, or the type named
+    /// outright (`from_value::<WorkflowShare>`, `WorkflowShare::…`, a typed local).
+    obtains_an_envelope: bool,
+    /// Which surface names its body NAMES — called, or taken as a value — for the gated-builder
+    /// assertion. Canonical names, so a rename import is recorded as what it really is.
+    calls: Vec<String>,
+    /// The first token each share-carrying struct field is given in this body (`None`, `Some`, an
+    /// identifier). What separates "declines" from "hands one on" — read from struct-literal
+    /// initializers, from `x.field = ..` ASSIGNMENTS, and from field shorthand.
+    share_field_values: Vec<String>,
+}
+
+impl WorkflowSeamSite {
+    /// A share-carrying field is filled with something other than `None` somewhere in this body.
+    fn hands_a_share_on(&self) -> bool {
+        self.share_field_values.iter().any(|value| value != "None")
+    }
+
+    /// Any evidence at all that an envelope leaves this function: it builds one, it writes one
+    /// into a file, or it puts one in a field somebody else will write.
+    fn moves_an_envelope(&self) -> bool {
+        self.constructs || self.writes_a_share_chunk || self.hands_a_share_on()
+    }
+}
+
+/// Every function in the given worker sources through which a `WorkflowShare` can reach a file.
+///
+/// Discovery, in three derived layers rather than a list:
+///
+/// 1. the core write surface ([`WORKFLOW_WRITE_SURFACE`], itself checked against core's own
+///    `pub fn`s by [`the_core_workflow_surface_is_classified`]);
+/// 2. worker STRUCTS that hold a `WorkflowShare`, and the worker functions whose signature names
+///    one of those structs or the type itself — the "carriers";
+/// 3. every function whose body calls a name from (1) or (2).
+///
+/// Layer 2 is what makes `write_single_child_asset` a carrier without naming it, and layer 3 is
+/// what then reaches its two callers in `upscale_jobs.rs` and `segment_jobs.rs` — neither of which
+/// mentions anything from `sceneworks_core` at all.
+fn discover_workflow_seams(sources: &[(String, String)]) -> Vec<WorkflowSeamSite> {
+    let stripped: Vec<(String, String)> = sources
+        .iter()
+        .map(|(path, source)| (path.clone(), rust_scannable(source)))
+        .collect();
+
+    // Layer 0: rename imports, resolved before anything else reads a name. A single
+    // `use sceneworks_core::workflow_png::write_workflow_chunk as embed_png;` used to turn every
+    // layer below OFF for that file, because all three match surface names textually.
+    let mut alias_of: BTreeMap<String, String> = BTreeMap::new();
+    for (_, text) in &stripped {
+        for (alias, original) in import_aliases(text) {
+            alias_of.insert(alias, original);
+        }
+    }
+    let spellings = |canonical: &str| -> Vec<String> {
+        let mut out = vec![canonical.to_owned()];
+        out.extend(
+            alias_of
+                .iter()
+                .filter(|(_, original)| original.as_str() == canonical)
+                .map(|(alias, _)| alias.clone()),
+        );
+        out
+    };
+    // Every name the `WorkflowShare` TYPE can be written as in this crate.
+    let share_spellings = spellings("WorkflowShare");
+    let names_a_share_type =
+        |text: &str| -> bool { share_spellings.iter().any(|name| names_word(text, name)) };
+
+    // Layer 2a: structs whose body mentions a `WorkflowShare`, and the fields that hold one.
+    let mut share_types: BTreeSet<String> = BTreeSet::new();
+    let mut share_fields: BTreeSet<String> = BTreeSet::new();
+    for (_, text) in &stripped {
+        for (name, body) in rust_struct_bodies(text) {
+            if !names_a_share_type(&body) {
+                continue;
+            }
+            share_types.insert(name);
+            for line in body.lines() {
+                let line = line.trim();
+                if !names_a_share_type(line) {
+                    continue;
+                }
+                let field = line
+                    .trim_start_matches("pub(crate) ")
+                    .trim_start_matches("pub ")
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                if !field.is_empty() && field.bytes().all(is_rust_identifier_char) {
+                    share_fields.insert(field.to_owned());
+                }
+            }
+        }
+    }
+
+    // Layer 1 + 2b: the names whose appearance in a body makes that body a seam. Split into the
+    // ones that BUILD an envelope (a call to one of them is construction here) and the rest.
+    let mut constructors: BTreeSet<String> = WORKFLOW_WRITE_SURFACE
+        .iter()
+        .filter(|(_, function, _)| *function != "write_workflow_chunk")
+        .map(|(_, function, _)| (*function).to_owned())
+        .collect();
+    let mut surface: BTreeSet<String> = WORKFLOW_WRITE_SURFACE
+        .iter()
+        .map(|(_, function, _)| (*function).to_owned())
+        .collect();
+    // Not part of discovery — a reader is not a seam — but a body that PARSES an envelope has one
+    // of its own, which is what separates a conduit from a lane decision.
+    let parsers: BTreeSet<String> = WORKFLOW_READ_SURFACE
+        .iter()
+        .filter(|(_, function, _)| function.starts_with("parse_workflow_share"))
+        .map(|(_, function, _)| (*function).to_owned())
+        .collect();
+    let mut carriers: BTreeSet<String> = BTreeSet::new();
+    for (_, text) in &stripped {
+        for item in rust_fn_spans(text) {
+            let signature = &text[item.signature_start..item.body_start];
+            let names_a_share = names_a_share_type(signature)
+                || share_types.iter().any(|name| signature.contains(name));
+            if !names_a_share {
+                continue;
+            }
+            carriers.insert(item.name.clone());
+            surface.insert(item.name.clone());
+            // A carrier that RETURNS one builds it; a carrier that only accepts one passes it on.
+            if signature.split("->").skip(1).any(&names_a_share_type) {
+                constructors.insert(item.name.clone());
+            }
+        }
+    }
+
+    let mut out: Vec<WorkflowSeamSite> = Vec::new();
+    for (path, text) in &stripped {
+        let spans = rust_fn_spans(text);
+        // Every call, attributed to the INNERMOST function that contains it, so a nested helper is
+        // credited to itself rather than to the function around it.
+        let mut calls_by_function: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        let mut parses_by_function: BTreeSet<usize> = BTreeSet::new();
+        let mut chunk_arguments: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for name in surface.iter().chain(parsers.iter()) {
+            for spelling in spellings(name) {
+                // MENTIONS, not calls. A body that names a writer at all is a seam, so taking one
+                // as a value (`let write = write_workflow_chunk; write(..)`) is not an indirection
+                // the scan can be walked around with. Comments and literals are already blanked,
+                // and a `use` at module level sits inside no function body.
+                for offset in name_sites(text, &spelling) {
+                    let Some((index, span)) = innermost_owner(&spans, offset) else {
+                        continue;
+                    };
+                    if span.name == *name || span.name == spelling {
+                        continue;
+                    }
+                    if parsers.contains(name) {
+                        parses_by_function.insert(index);
+                        continue;
+                    }
+                    if name == "write_workflow_chunk" {
+                        if let Some(argument) = call_last_argument(text, offset + spelling.len()) {
+                            chunk_arguments.entry(index).or_default().push(argument);
+                        }
+                    }
+                    calls_by_function
+                        .entry(index)
+                        .or_default()
+                        .insert(name.clone());
+                }
+            }
+        }
+        for (index, item) in spans.iter().enumerate() {
+            let calls: Vec<String> = calls_by_function
+                .get(&index)
+                .map(|names| names.iter().cloned().collect())
+                .unwrap_or_default();
+            let carrier = carriers.contains(&item.name);
+            if calls.is_empty() && !carrier {
+                continue;
+            }
+            let body = &text[item.body_start..item.body_end];
+            let constructs = calls.iter().any(|name| constructors.contains(name));
+            out.push(WorkflowSeamSite {
+                path: path.clone(),
+                function: item.name.clone(),
+                constructs,
+                carrier,
+                writes_a_share_chunk: chunk_arguments
+                    .get(&index)
+                    .is_some_and(|arguments| arguments.iter().any(|argument| argument != "None")),
+                obtains_an_envelope: constructs
+                    || parses_by_function.contains(&index)
+                    || names_a_share_type(body),
+                calls,
+                share_field_values: share_fields
+                    .iter()
+                    .flat_map(|field| share_field_values(body, field))
+                    .collect(),
+            });
+        }
+    }
+    out.sort_by(|a, b| (&a.path, &a.function).cmp(&(&b.path, &b.function)));
+    out
+}
+
+/// Every discovered seam is declared, and its declaration matches what the code does.
+fn assert_declared_seams(seams: &[WorkflowSeamSite]) {
+    // The registry joins on `(path, function)`, so two same-named functions in one file would
+    // share one declaration — and the SECOND one would inherit whatever the first one declared. A
+    // second `write_image_asset` in `image_jobs.rs` embedding for the video lane passed every test
+    // before this check existed (sc-16113).
+    let mut seen: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for seam in seams {
+        *seen
+            .entry((seam.path.as_str(), seam.function.as_str()))
+            .or_default() += 1;
+    }
+    for ((path, function), count) in seen {
+        assert_eq!(
+            count, 1,
+            "{path} defines {count} functions named `{function}` that an envelope reaches, and \
+             `WORKFLOW_WRITE_SEAMS` can only describe one of them — the second would inherit the \
+             first's disposition and its builder list. Rename one."
+        );
+    }
+    for seam in seams {
+        let entry = WORKFLOW_WRITE_SEAMS
+            .iter()
+            .find(|entry| entry.path == seam.path && entry.function == seam.function)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}::{} handles a `WorkflowShare` and has no `WORKFLOW_WRITE_SEAMS` entry in \
+                     crates/sceneworks-core/src/workflow_share.rs.\n\
+                     Every place an envelope can reach a written file has to say which lane it \
+                     writes for, because that is what ties embedding to classification. Add an \
+                     entry with:\n\
+                     * `SeamDisposition::Embeds(&[..])` naming the web builders whose `advanced` \
+                     map reaches this file — every one of them must be in `ADVANCED_BUILDERS`, so \
+                     if the lane you are turning on is still in `DEFERRED_ADVANCED_BUILDERS` \
+                     (video, today), move it up and classify its keys FIRST; or\n\
+                     * `SeamDisposition::Conduit(reason)` if it writes an envelope its caller \
+                     built and obtains none itself; or\n\
+                     * `SeamDisposition::Declines(reason)` if this asset has no generation recipe \
+                     to record. Declining is checked POSITIVELY against the source — it may not \
+                     write a chunk with anything but a literal `None`, name a `WorkflowShare`, or \
+                     fill a share-carrying field with anything else; or\n\
+                     * `SeamDisposition::Inert(reason)` if a share reaches its signature and it \
+                     writes nothing at all.",
+                    seam.path, seam.function
+                )
+            });
+        match entry.disposition {
+            SeamDisposition::Embeds(builders) => {
+                assert!(
+                    seam.moves_an_envelope(),
+                    "`WORKFLOW_WRITE_SEAMS` declares {}::{} as embedding, but no envelope leaves \
+                     it: it builds none, writes no chunk with one, and fills no share-carrying \
+                     field. Either it became a `SeamDisposition::Conduit` (it writes one its \
+                     caller built) or the entry is stale.",
+                    seam.path,
+                    seam.function
+                );
+                assert_embedded_builders_are_registered(
+                    &seam.path,
+                    &seam.function,
+                    entry.lane,
+                    builders,
+                );
+            }
+            SeamDisposition::Conduit(reason) => {
+                assert!(
+                    reason.len() > 40,
+                    "the conduit reason for {}::{} must say why the lane decision is not made \
+                     there",
+                    seam.path,
+                    seam.function
+                );
+                assert!(
+                    !seam.obtains_an_envelope,
+                    "{}::{} declares that it only passes on an envelope its caller built, but it \
+                     gets hold of one itself — it builds, parses or names a `WorkflowShare`. \
+                     Sourcing an envelope IS deciding a lane, however it is sourced, so it has to \
+                     name the builders behind it: make it `SeamDisposition::Embeds(&[..])`.",
+                    seam.path, seam.function
+                );
+                assert!(
+                    seam.carrier,
+                    "{}::{} is declared a conduit but no `WorkflowShare` reaches it through its \
+                     signature, so there is nothing for it to pass on",
+                    seam.path, seam.function
+                );
+                assert!(
+                    !seam.calls.is_empty(),
+                    "{}::{} is declared a conduit — \"writes an envelope its caller built\" — but \
+                     it calls nothing that reaches a write. A function a share merely passes \
+                     through without being written is `SeamDisposition::Inert`, and calling it a \
+                     conduit would put a false sentence in the registry.",
+                    seam.path,
+                    seam.function
+                );
+            }
+            SeamDisposition::Declines(reason) => {
+                assert!(
+                    reason.len() > 40,
+                    "the decline reason for {}::{} must say why that asset has no generation \
+                     recipe to record",
+                    seam.path,
+                    seam.function
+                );
+                assert!(
+                    !seam.writes_a_share_chunk,
+                    "{}::{} declares that it writes no envelope, but it calls \
+                     `write_workflow_chunk` with an argument that is not the literal `None`. \
+                     Where that envelope came from does not matter — building it, parsing it out \
+                     of another file, or cloning one held elsewhere all put somebody's `advanced` \
+                     map in this file. Name the web builders behind it with \
+                     `SeamDisposition::Embeds(&[..])`, and if one of them is still in \
+                     `DEFERRED_ADVANCED_BUILDERS` that is the work this change needs first.",
+                    seam.path, seam.function
+                );
+                assert!(
+                    !seam.obtains_an_envelope,
+                    "{}::{} declares that it writes no envelope, but its body gets hold of one — \
+                     it builds, parses or names a `WorkflowShare`. A declining seam has no reason \
+                     to touch the type at all; if it now has one, it owes a lane.",
+                    seam.path, seam.function
+                );
+                assert!(
+                    !seam.carrier,
+                    "{}::{} declares that it writes no envelope, but one reaches it through its \
+                     signature — that is a `SeamDisposition::Conduit`",
+                    seam.path, seam.function
+                );
+                for value in &seam.share_field_values {
+                    assert_eq!(
+                        value, "None",
+                        "{}::{} declares that it writes no envelope, but hands a workflow on as \
+                         `{value}`. A decline must pass `None` everywhere a share-carrying field \
+                         is filled — by initializer OR by later assignment — or it is embedding \
+                         for a lane nobody classified.",
+                        seam.path, seam.function
+                    );
+                }
+            }
+            SeamDisposition::Inert(reason) => {
+                assert!(
+                    reason.len() > 40,
+                    "the inert reason for {}::{} must say what it does with the share it is \
+                     handed, given that it does not write it",
+                    seam.path,
+                    seam.function
+                );
+                assert!(
+                    seam.carrier,
+                    "{}::{} is declared inert, but no `WorkflowShare` reaches it through its \
+                     signature — so it is not a seam at all and the entry is stale",
+                    seam.path, seam.function
+                );
+                assert!(
+                    seam.calls.is_empty(),
+                    "{}::{} is declared inert — \"writes nothing\" — but it calls {:?}, which \
+                     reaches a write. It is a `SeamDisposition::Conduit` or a \
+                     `SeamDisposition::Embeds`.",
+                    seam.path,
+                    seam.function,
+                    seam.calls
+                );
+                assert!(
+                    !seam.moves_an_envelope() && !seam.obtains_an_envelope,
+                    "{}::{} is declared inert but an envelope leaves it, or it gets hold of one \
+                     of its own. Inert means the share it is handed goes nowhere.",
+                    seam.path,
+                    seam.function
+                );
+            }
+        }
+    }
+}
+
+/// The heart of it: a seam may not embed for a builder that is deferred, or for one nobody knows.
+fn assert_embedded_builders_are_registered(
+    path: &str,
+    function: &str,
+    lane: &str,
+    builders: &[WebBuilderRef],
+) {
+    assert!(
+        !builders.is_empty(),
+        "{path}::{function} is declared as embedding but names no builder. An embedding seam \
+         writes SOMEBODY's `advanced` map into the file; naming none says the map came from \
+         nowhere."
+    );
+    for reference in builders {
+        if ADVANCED_BUILDERS
+            .iter()
+            .any(|builder| builder.path == reference.path && builder.function == reference.function)
+        {
+            continue;
+        }
+        let deferred = DEFERRED_ADVANCED_BUILDERS.iter().find(|builder| {
+            builder.path == reference.path && builder.function == reference.function
+        });
+        if let Some(deferred) = deferred {
+            panic!(
+                "{path}::{function} embeds a workflow on the lane \"{lane}\", which is fed by {} \
+                 in {} — and that builder is in `DEFERRED_ADVANCED_BUILDERS`:\n  {}\n\n\
+                 Its `advanced` keys are NOT in `ADVANCED_KEY_RULES`, so every one of them would \
+                 be dropped silently from every file this seam writes, with nothing to say so. \
+                 Move the entry into `ADVANCED_BUILDERS` and classify every key it emits \
+                 (`every_registered_builder_has_its_advanced_keys_classified` names them), THEN \
+                 turn the seam on.",
+                reference.function, reference.path, deferred.reason
+            );
+        }
+        panic!(
+            "{path}::{function} embeds a workflow for {} in {}, which is in neither \
+             `ADVANCED_BUILDERS` nor `DEFERRED_ADVANCED_BUILDERS`. A seam cannot name a builder \
+             nobody has accounted for: register it (and classify its keys) or defer it with the \
+             story that owns it.",
+            reference.function, reference.path
+        );
+    }
+}
+
+/// Every offset in `text` where `name` appears as a whole identifier, called or not.
+///
+/// Discovery reads MENTIONS rather than calls, because `let write = write_workflow_chunk;` puts
+/// the writer in a local and `write(..)` is then a call to a name the scan has never heard of.
+/// Comments and string literals are blanked before this runs, and a module-level `use` sits inside
+/// no function body, so the two shapes that would make this noisy do not.
+fn name_sites(text: &str, name: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(name) {
+        let at = from + offset;
+        let after = at + name.len();
+        from = after;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        out.push(at);
+    }
+    out
+}
+
+/// Every offset in `text` where `name` is CALLED. Word-boundary, and the parenthesis has to be
+/// there, so `use …::write_workflow_chunk;` and a struct field of the same name are not calls.
+///
+/// The narrow half, used by the safety net: "this call site vanished from the scan" is a different
+/// claim from "this name is mentioned somewhere".
+fn call_sites(text: &str, name: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(name) {
+        let at = from + offset;
+        let after = at + name.len();
+        from = after;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        if bytes.get(skip_ascii_whitespace(bytes, after)) == Some(&b'(') {
+            out.push(at);
+        }
+    }
+    out
+}
+
+/// The first token every share-carrying `field` in `body` is GIVEN, so a `None` and a `Some(x)` are
+/// distinguishable.
+///
+/// Three shapes, because reading only the first of them made the `Declines` check satisfiable by
+/// dead syntax (sc-16113). The reviewer mutated the real declining seam to
+///
+/// ```text
+/// let mut spec = SingleChildAssetSpec { … workflow: None };
+/// spec.workflow = parse_workflow_share_json(&text).ok();
+/// ```
+///
+/// and every test stayed green: the `workflow: None` literal was still there to be read while a
+/// real envelope travelled into the mask PNG.
+///
+/// * `field: VALUE` — a struct-literal initializer, never a path (`spec::workflow`);
+/// * `.field = VALUE` — a later assignment onto a `mut` binding;
+/// * `field` alone between `{`/`,` and `,`/`}` — FIELD SHORTHAND, whose value is a local this scan
+///   cannot follow, so it is reported as `<shorthand>` and a decline has to spell `None` out.
+fn share_field_values(body: &str, field: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = body[from..].find(field) {
+        let at = from + offset;
+        let after = at + field.len();
+        from = after;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        let next = skip_ascii_whitespace(bytes, after);
+        let value = match bytes.get(next) {
+            // `field: value`, but not `path::field`.
+            Some(b':') if bytes.get(next + 1) != Some(&b':') => Some(next + 1),
+            // `spec.field = value`, but not `==`, `>=`, `!=` or any compound assignment.
+            Some(b'=')
+                if at > 0
+                    && bytes[at - 1] == b'.'
+                    && bytes.get(next + 1) != Some(&b'=')
+                    && !matches!(
+                        bytes.get(next.wrapping_sub(1)),
+                        Some(
+                            b'=' | b'!'
+                                | b'<'
+                                | b'>'
+                                | b'+'
+                                | b'-'
+                                | b'*'
+                                | b'/'
+                                | b'%'
+                                | b'&'
+                                | b'|'
+                                | b'^'
+                        )
+                    ) =>
+            {
+                Some(next + 1)
+            }
+            // Field shorthand: `SingleChildAssetSpec { .., workflow }`.
+            Some(b',' | b'}')
+                if at > 0
+                    && matches!(
+                        body[..at].trim_end().as_bytes().last(),
+                        Some(b'{') | Some(b',')
+                    ) =>
+            {
+                out.push("<shorthand>".to_owned());
+                continue;
+            }
+            _ => None,
+        };
+        let Some(value) = value else { continue };
+        let (token, _) = identifier_at(bytes, body, skip_ascii_whitespace(bytes, value));
+        if !token.is_empty() {
+            out.push(token.to_owned());
+        }
+    }
+    out
+}
+
+/// The innermost `fn` span containing `offset`, with its index.
+fn innermost_owner(spans: &[RustFn], offset: usize) -> Option<(usize, &RustFn)> {
+    spans
+        .iter()
+        .enumerate()
+        .filter(|(_, span)| offset >= span.body_start && offset < span.body_end)
+        .min_by_key(|(_, span)| span.body_end - span.body_start)
+}
+
+/// The LAST top-level argument of the call whose name ends at `after_name`, trimmed.
+///
+/// `write_workflow_chunk(image, path, share.as_ref())` is the only call this is asked about, and
+/// its last argument is the envelope. `None` there and anything else there are the two states the
+/// `Declines` check turns on, and reading the argument is what makes that check positive rather
+/// than a search for a builder call that a determined author simply does not make.
+fn call_last_argument(text: &str, after_name: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let open = skip_ascii_whitespace(bytes, after_name);
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let close = matching_paren(bytes, open)?;
+    let inner = &text[open + 1..close];
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (index, byte) in inner.as_bytes().iter().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' | b'<' => depth += 1,
+            b')' | b']' | b'}' | b'>' => depth -= 1,
+            b',' if depth <= 0 => start = index + 1,
+            _ => {}
+        }
+    }
+    Some(inner[start..].trim().to_owned())
+}
+
+/// `alias -> original` for every `use …::ORIGINAL as ALIAS;` in one blanked Rust source.
+///
+/// A rename import is the one shape that turns a surface-name scan off completely: a brand-new
+/// worker file that says `use …::write_workflow_chunk as embed_png;` and calls `embed_png` was
+/// invisible to discovery AND to its safety net, so the whole gate was off for that file
+/// (sc-16113). Resolving the rename is better than refusing it, because refusing would only move
+/// the problem to whichever spelling the refusal did not think of.
+fn import_aliases(text: &str) -> Vec<(String, String)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while let Some(offset) = text[index..].find("use") {
+        let at = index + offset;
+        index = at + 3;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(at + 3)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        let end = text[at..].find(';').map_or(text.len(), |o| at + o);
+        let statement = &text[at..end];
+        let statement_bytes = statement.as_bytes();
+        let mut cursor = 0usize;
+        while let Some(found) = statement[cursor..].find("as") {
+            let word = cursor + found;
+            cursor = word + 2;
+            if word > 0 && is_rust_identifier_char(statement_bytes[word - 1]) {
+                continue;
+            }
+            if statement_bytes
+                .get(word + 2)
+                .is_some_and(|byte| is_rust_identifier_char(*byte))
+            {
+                continue;
+            }
+            let Some(original) = identifier_ending_before(statement, word) else {
+                continue;
+            };
+            let (alias, _) = identifier_at(statement_bytes, statement, word + 2);
+            if alias.is_empty() || alias == "_" {
+                continue;
+            }
+            out.push((alias.to_owned(), original));
+        }
+        index = end;
+    }
+    out
+}
+
+/// The identifier that ends just before `at`, skipping whitespace.
+fn identifier_ending_before(text: &str, at: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut end = at;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && is_rust_identifier_char(bytes[start - 1]) {
+        start -= 1;
+    }
+    (start < end).then(|| text[start..end].to_owned())
+}
+
+/// `word` appears in `text` as a whole identifier, not as part of a longer one.
+fn names_word(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(word) {
+        let at = from + offset;
+        let after = at + word.len();
+        from = at + 1;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn is_rust_identifier_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// One Rust function definition: its name, where its signature starts, and its body span.
+#[derive(Debug, Clone)]
+struct RustFn {
+    name: String,
+    signature_start: usize,
+    body_start: usize,
+    body_end: usize,
+}
+
+/// Comments, string/char literals and `#[cfg(test)]` items blanked, byte for byte.
+///
+/// Length-preserving on purpose: the seam scan compares byte offsets of calls against byte offsets
+/// of function bodies, and blanking in place makes the two the same number. Blanked bytes become
+/// spaces (newlines survive), so a line number computed from an offset is still the file's.
+///
+/// `#[cfg(test)]` and `#[cfg(all(test, ..))]` items go with them. `#[cfg(any(.., test))]` does NOT:
+/// `image_jobs.rs` gates `detail_workflow_share` that way so the lineage contract is tested off
+/// macOS, and it is a real production seam on macOS. Neither does `#[cfg(not(test))]`, which is
+/// production-ONLY code — see [`cfg_predicate_is_test_only`].
+fn rust_scannable(source: &str) -> String {
+    blank_test_only_items(&blank_comments_and_literals(source))
+}
+
+/// Comments and string/char literals blanked, but `#[cfg(test)]` items left in place.
+///
+/// The half [`no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan`] compares against,
+/// so "the scan dropped this call site" and "the call site is test scaffolding" are two statements
+/// rather than one.
+fn blank_comments_and_literals(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let start = index;
+        let end = match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => source[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let mut depth = 1usize;
+                index += 2;
+                while index < bytes.len() && depth > 0 {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+                index
+            }
+            b'"' => rust_string_end(bytes, index + 1, 0),
+            b'r' | b'b'
+                if (index == 0 || !is_rust_identifier_char(bytes[index - 1]))
+                    && rust_raw_string_open(bytes, index).is_some() =>
+            {
+                let (quote, hashes) = rust_raw_string_open(bytes, index).expect("checked");
+                rust_string_end(bytes, quote + 1, hashes)
+            }
+            // A char literal, or a lifetime that only looks like one. Eating a lifetime would
+            // swallow the rest of the file.
+            b'\''
+                if bytes.get(index + 1) == Some(&b'\\') || bytes.get(index + 2) == Some(&b'\'') =>
+            {
+                let mut cursor = index + 1;
+                if bytes.get(cursor) == Some(&b'\\') {
+                    cursor += 1;
+                }
+                cursor += 1;
+                while cursor < bytes.len() && bytes[cursor] != b'\'' {
+                    cursor += 1;
+                }
+                (cursor + 1).min(bytes.len())
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        for byte in out.iter_mut().take(end).skip(start) {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        index = end.max(start + 1);
+    }
+
+    String::from_utf8(out).expect("blanking only ever replaces whole regions")
+}
+
+/// `#[cfg(test)]` items blanked out of an already comment- and literal-blanked source.
+fn blank_test_only_items(source: &str) -> String {
+    blank_test_only_items_with_spans(source).0
+}
+
+/// The same blanking, plus the `(start, end)` of every region it removed.
+///
+/// The spans are what [`no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan`] checks
+/// a vanished call site against. Keying that rescue on containment in a span — rather than on an
+/// attribute appearing textually between two offsets — is what stops the house layout
+/// (`#[cfg(test)] mod tests { fn fixture() { .. } #[test] fn t() { } }`, fixture ABOVE the first
+/// `#[test]`) from failing the build with a message describing a bug that did not happen.
+fn blank_test_only_items_with_spans(source: &str) -> (String, Vec<(usize, usize)>) {
+    let mut text = source.to_owned();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    while let Some((at, attribute_end)) = test_only_cfg_attribute(&text) {
+        // Always at least the attribute itself, so the loop cannot see it a second time.
+        let end = cfg_item_end(&text, attribute_end).max(attribute_end);
+        spans.push((at, end));
+        let mut blanked = text.into_bytes();
+        for byte in blanked.iter_mut().take(end).skip(at) {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        text = String::from_utf8(blanked).expect("ascii blanking");
+    }
+    spans.sort_unstable();
+    (text, spans)
+}
+
+/// Where the thing a `#[cfg(test)]` ending at `attribute_end` sits on ENDS.
+///
+/// Two shapes, and the ITEM KEYWORD is what tells them apart — which is the whole point of looking
+/// for it rather than stopping at the first `,` at paren depth zero:
+///
+/// * an item (`fn`, `impl`, `mod`, `struct`, `use`, `const`, …) ends at the matching `}` of its
+///   body or at its `;`, and commas inside its generics are not terminators. Stopping at the first
+///   comma turned `#[cfg(test)] fn fixture<P: AsRef<Path>, S: Into<String>>(..)` into a blank of
+///   the attribute alone, leaving the fixture in the scan as a product seam;
+/// * a struct FIELD or enum variant carries no keyword (`#[cfg(test)] probe_scans: u64,`) and ends
+///   at its comma — which this crate needs, because running on to the next `{` would blank a whole
+///   unrelated `impl` and hide every seam inside it.
+fn cfg_item_end(text: &str, attribute_end: usize) -> usize {
+    let bytes = text.as_bytes();
+    // Any further attributes stacked on the same item, skipped so the keyword scan sees the item.
+    let mut cursor = skip_ascii_whitespace(bytes, attribute_end);
+    while bytes.get(cursor) == Some(&b'#') {
+        let mut depth = 0i32;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        cursor += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        cursor = skip_ascii_whitespace(bytes, cursor);
+    }
+    // Visibility and the modifier keywords, none of which decide the shape.
+    let mut keyword = String::new();
+    loop {
+        let (word, after) = identifier_at(bytes, text, cursor);
+        if word.is_empty() {
+            break;
+        }
+        cursor = skip_ascii_whitespace(bytes, after);
+        if word == "pub" && bytes.get(cursor) == Some(&b'(') {
+            // `pub(crate)` / `pub(in path)`.
+            let mut depth = 0i32;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            cursor += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                cursor += 1;
+            }
+            cursor = skip_ascii_whitespace(bytes, cursor);
+            continue;
+        }
+        if matches!(word, "pub" | "async" | "unsafe" | "default" | "extern") {
+            continue;
+        }
+        if ITEM_KEYWORDS.contains(&word) {
+            keyword = word.to_owned();
+        }
+        break;
+    }
+    if keyword.is_empty() {
+        return field_or_variant_end(bytes, attribute_end);
+    }
+    // `use a::{b, c};` and `type`/`const`/`static` have no body brace of their own; a `{` inside
+    // them is a group or an initializer, so only the `;` ends them.
+    let semicolon_only = matches!(keyword.as_str(), "use" | "type" | "const" | "static");
+    let mut depth = 0i32;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'{' if depth <= 0 && !semicolon_only => {
+                return rust_matching_brace(bytes, cursor) + 1;
+            }
+            b'{' if depth <= 0 => depth += 1,
+            b'}' if depth <= 0 => return cursor,
+            b'}' => depth -= 1,
+            b';' if depth <= 0 => return cursor + 1,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
+/// The item keywords that mean "this is a definition, not a struct field".
+const ITEM_KEYWORDS: &[&str] = &[
+    "fn",
+    "impl",
+    "mod",
+    "struct",
+    "enum",
+    "trait",
+    "union",
+    "use",
+    "const",
+    "static",
+    "type",
+    "macro_rules",
+    "macro",
+];
+
+/// The end of a keyword-less `#[cfg(..)]` item — a struct field or an enum variant.
+///
+/// Angle depth is tracked so `#[cfg(test)] cache: HashMap<String, u64>,` ends at its own comma and
+/// not at the one inside the type.
+fn field_or_variant_end(bytes: &[u8], from: usize) -> usize {
+    let mut depth = 0i32;
+    let mut angle = 0i32;
+    let mut cursor = from;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'<' if depth <= 0 && bytes.get(cursor + 1) != Some(&b'<') => angle += 1,
+            b'>' if depth <= 0
+                && angle > 0
+                && !matches!(bytes.get(cursor - 1), Some(b'-') | Some(b'=')) =>
+            {
+                angle -= 1;
+            }
+            b'}' if depth <= 0 => return cursor,
+            b'}' => depth -= 1,
+            b',' | b';' if depth <= 0 && angle <= 0 => return cursor + 1,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
+/// `(start, end)` of the next test-only `#[cfg(..)]` attribute still present in `text`.
+fn test_only_cfg_attribute(text: &str) -> Option<(usize, usize)> {
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find("#[cfg(") {
+        let at = from + offset;
+        let open = at + "#[cfg".len();
+        from = open + 1;
+        let Some(close) = matching_paren(text.as_bytes(), open) else {
+            continue;
+        };
+        if cfg_predicate_is_test_only(&text[open + 1..close]) {
+            // Past the `)` and the `]`.
+            return Some((at, (close + 2).min(text.len())));
+        }
+    }
+    None
+}
+
+/// Whether a `cfg(..)` predicate can only ever hold under `--cfg test`.
+///
+/// Evaluated as the tree it is rather than sniffed for the token `test`, because both mistakes
+/// that reading makes are build-breaking in opposite directions. `#[cfg(any(target_os = "macos",
+/// test))]` is a real macOS seam (`image_jobs.rs` gates `detail_workflow_share` that way so the
+/// lineage contract is tested off macOS), and `#[cfg(not(test))]` — nine occurrences in this repo —
+/// is PRODUCTION-only code that the old bare-token reading blanked, failing the build with a
+/// message about a bug that had not happened.
+fn cfg_predicate_is_test_only(predicate: &str) -> bool {
+    let predicate = predicate.trim();
+    if predicate == "test" {
+        return true;
+    }
+    let Some(open) = predicate.find('(') else {
+        return false;
+    };
+    let head = predicate[..open].trim();
+    let Some(close) = matching_paren(predicate.as_bytes(), open) else {
+        return false;
+    };
+    let inner = &predicate[open + 1..close];
+    match head {
+        // A conjunction holds only when every arm does, so ONE test arm makes the whole thing
+        // test-only.
+        "all" => cfg_arguments(inner)
+            .iter()
+            .any(|arm| cfg_predicate_is_test_only(arm)),
+        // A disjunction holds when any arm does, so it is test-only only if EVERY arm is.
+        "any" => {
+            let arms = cfg_arguments(inner);
+            !arms.is_empty() && arms.iter().all(|arm| cfg_predicate_is_test_only(arm))
+        }
+        // A negation never narrows to test: `not(test)` is the production build.
+        "not" => false,
+        _ => false,
+    }
+}
+
+/// The top-level comma-separated arguments of a `cfg` predicate list.
+fn cfg_arguments(inner: &str) -> Vec<String> {
+    let bytes = inner.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(inner[start..index].trim().to_owned());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_owned());
+    }
+    out
+}
+
+/// The offset of the `)` matching the `(` at `open`.
+fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The offset just past the closing quote of a string starting at `from` with `hashes` hashes.
+fn rust_string_end(bytes: &[u8], from: usize, hashes: usize) -> usize {
+    let mut index = from;
+    while index < bytes.len() {
+        if hashes == 0 && bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'"' {
+            let close = (index + 1 + hashes).min(bytes.len());
+            if bytes[index + 1..close].iter().all(|byte| *byte == b'#') {
+                return close;
+            }
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// `(offset of the opening quote, hash count)` if a raw string starts at `at`.
+fn rust_raw_string_open(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
+    let mut index = at;
+    if bytes.get(index) == Some(&b'b') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'r') {
+        return None;
+    }
+    index += 1;
+    let hashes_start = index;
+    while bytes.get(index) == Some(&b'#') {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'"') {
+        Some((index, index - hashes_start))
+    } else {
+        None
+    }
+}
+
+/// The offset of the `}` matching the `{` at `open`.
+fn rust_matching_brace(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    bytes.len().saturating_sub(1)
+}
+
+/// Every `fn` in a blanked Rust source, innermost definitions included.
+fn rust_fn_spans(stripped: &str) -> Vec<RustFn> {
+    let bytes = stripped.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while let Some(offset) = stripped[index..].find("fn") {
+        let at = index + offset;
+        index = at + 2;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(at + 2)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        let name_at = skip_ascii_whitespace(bytes, at + 2);
+        let (name, after) = identifier_at(bytes, stripped, name_at);
+        if name.is_empty() {
+            // `fn(u8) -> u8` — a function POINTER type, not a definition.
+            continue;
+        }
+        let mut cursor = after;
+        let mut depth = 0i32;
+        let mut body = None;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth -= 1,
+                b'{' if depth <= 0 => {
+                    body = Some(cursor);
+                    break;
+                }
+                b';' if depth <= 0 => break,
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let Some(body_start) = body else { continue };
+        out.push(RustFn {
+            name: name.to_owned(),
+            signature_start: at,
+            body_start,
+            body_end: rust_matching_brace(bytes, body_start) + 1,
+        });
+    }
+    out
+}
+
+/// Every `struct NAME .. { .. }` in a blanked Rust source, as (name, body text).
+fn rust_struct_bodies(stripped: &str) -> Vec<(String, String)> {
+    let bytes = stripped.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while let Some(offset) = stripped[index..].find("struct") {
+        let at = index + offset;
+        index = at + 6;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        let name_at = skip_ascii_whitespace(bytes, at + 6);
+        let (name, after) = identifier_at(bytes, stripped, name_at);
+        if name.is_empty() {
+            continue;
+        }
+        let mut cursor = after;
+        let mut body = None;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'{' => {
+                    body = Some(cursor);
+                    break;
+                }
+                b';' => break,
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let Some(open) = body else { continue };
+        let close = rust_matching_brace(bytes, open);
+        out.push((name.to_owned(), stripped[open..=close].to_owned()));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The Rust scanner's own unit tests: what it sees, and what it must not
+// ---------------------------------------------------------------------------
+
+/// Prose naming a function is not a call to it — the reason the old lint stripped comment lines.
+#[test]
+fn the_rust_scanner_blanks_comments_strings_and_test_modules() {
+    let source = r##"
+/// Doc prose naming write_workflow_chunk(x) that calls nothing.
+fn real(path: &Path) {
+    // write_workflow_chunk(a) in a line comment
+    /* write_workflow_chunk(b) in a block /* nested */ comment */
+    let label = "write_workflow_chunk(c) in a string";
+    let raw = r#"write_workflow_chunk(d) in a raw string"#;
+    let quote = '"';
+    let _ = (path, label, raw, quote);
+}
+#[cfg(test)]
+mod tests {
+    fn fixture() {
+        write_workflow_chunk(e);
+    }
+}
+"##;
+    let stripped = rust_scannable(source);
+    assert!(
+        !stripped.contains("write_workflow_chunk"),
+        "every mention above is prose, a literal or a test fixture:\n{stripped}"
+    );
+    assert_eq!(
+        stripped.len(),
+        source.len(),
+        "blanking must preserve byte offsets"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["real"],
+        "the `mod tests` body is blanked, so its functions go with it"
+    );
+}
+
+/// A `mod tests;` declaration has no body, and blanking forward from it would eat the file.
+#[test]
+fn the_rust_scanner_survives_a_bodyless_test_module_declaration() {
+    let stripped = rust_scannable(
+        "#[cfg(test)]\nmod tests;\n\nfn kept() {\n    write_workflow_chunk(a);\n}\n",
+    );
+    assert!(
+        stripped.contains("write_workflow_chunk"),
+        "the code after `mod tests;` must survive:\n{stripped}"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["kept"]
+    );
+}
+
+/// A `#[cfg(test)]` STRUCT FIELD has no body, and blanking forward from one would eat the `impl`
+/// after it — every seam inside included.
+///
+/// Not hypothetical: `catalog_image_fetch.rs` and `catalog_parquet_scanner.rs` both gate fields
+/// that way, and the first cut of this scanner blanked from the attribute to the next `{` it found.
+#[test]
+fn the_rust_scanner_survives_a_test_only_struct_field() {
+    let stripped = rust_scannable(
+        "struct Budget {\n    bytes: u64,\n    #[cfg(test)]\n    probe_scans: u64,\n}\n\nimpl \
+         Budget {\n    fn write(&self) {\n        write_workflow_chunk(a);\n    }\n}\n",
+    );
+    assert!(
+        stripped.contains("write_workflow_chunk("),
+        "the `impl` after the gated field must survive:\n{stripped}"
+    );
+    assert!(!stripped.contains("cfg(test)"));
+}
+
+/// `#[cfg(any(target_os = "macos", test))]` is a real macOS seam, not test scaffolding.
+#[test]
+fn the_rust_scanner_keeps_a_cfg_that_is_only_partly_test() {
+    let stripped = rust_scannable(
+        "#[cfg(any(target_os = \"macos\", test))]\nfn detail_workflow_share() {\n    \
+         embeddable_workflow_share(a);\n}\n",
+    );
+    assert!(
+        stripped.contains("embeddable_workflow_share("),
+        "{stripped}"
+    );
+}
+
+/// Lifetimes look like an unterminated char literal, and eating one would swallow the file.
+#[test]
+fn the_rust_scanner_does_not_mistake_a_lifetime_for_a_char() {
+    let stripped = rust_scannable(
+        "struct Spec<'a> { path: &'a str }\nfn take(spec: Spec<'_>) {\n    \
+         write_workflow_chunk(a);\n}\n",
+    );
+    assert!(stripped.contains("write_workflow_chunk("), "{stripped}");
+    assert_eq!(
+        rust_struct_bodies(&stripped)
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["Spec"]
+    );
+}
+
+/// Generic bounds and where clauses carry parentheses; a body brace must still be found past them.
+#[test]
+fn the_rust_scanner_finds_a_body_past_generic_and_where_clauses() {
+    let stripped = rust_scannable(
+        "pub(crate) async fn write_single_child_asset<F>(spec: Spec, build: F) -> \
+         Result<()>\nwhere\n    F: FnOnce(&Write) -> Value,\n{\n    write_workflow_chunk(a);\n}\n",
+    );
+    let spans = rust_fn_spans(&stripped);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].name, "write_single_child_asset");
+    assert!(stripped[spans[0].body_start..spans[0].body_end].contains("write_workflow_chunk("));
+}
+
+/// The three layers of discovery, on a synthetic crate that names nothing the registry knows.
+///
+/// The carrier layer is the one that matters: `pass_on` never mentions `sceneworks_core`, and
+/// `caller` never mentions a `WorkflowShare` — the struct field is what connects them, which is how
+/// the real scan reaches `segment_jobs.rs` through `write_single_child_asset`.
+#[test]
+fn the_seam_scan_follows_a_share_through_a_struct_field() {
+    let sources = vec![
+        (
+            "crates/sceneworks-worker/src/probe_writer.rs".to_owned(),
+            "pub(crate) struct ProbeSpec<'a> {\n    pub label: &'a str,\n    pub workflow: \
+             Option<WorkflowShare>,\n}\nfn pass_on(spec: ProbeSpec) {\n    \
+             write_workflow_chunk(spec.workflow.as_ref());\n}\n"
+                .to_owned(),
+        ),
+        (
+            "crates/sceneworks-worker/src/probe_caller.rs".to_owned(),
+            "fn caller() {\n    pass_on(ProbeSpec { label: \"x\", workflow: None });\n}\n"
+                .to_owned(),
+        ),
+    ];
+    let seams = discover_workflow_seams(&sources);
+    assert_eq!(
+        seams
+            .iter()
+            .map(|seam| seam.function.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["caller", "pass_on"]
+    );
+    assert!(!seams[0].constructs && !seams[0].carrier);
+    assert_eq!(seams[0].share_field_values, vec!["None".to_owned()]);
+    assert!(seams[1].carrier, "it takes the spec that holds the share");
+}
+
+// ---------------------------------------------------------------------------
+// The evasions the first cut of this lint accepted (sc-16113 review)
+// ---------------------------------------------------------------------------
+
+/// One synthetic worker file through the scanner, as the one seam it must find.
+fn only_seam(path: &str, source: &str) -> WorkflowSeamSite {
+    let seams = discover_workflow_seams(&[(path.to_owned(), source.to_owned())]);
+    assert_eq!(
+        seams.len(),
+        1,
+        "expected exactly one seam, got {:?}",
+        seams
+            .iter()
+            .map(|seam| seam.function.as_str())
+            .collect::<Vec<&str>>()
+    );
+    seams.into_iter().next().expect("checked")
+}
+
+/// One named seam out of a synthetic worker file.
+fn seam_named(path: &str, source: &str, function: &str) -> WorkflowSeamSite {
+    let seams = discover_workflow_seams(&[(path.to_owned(), source.to_owned())]);
+    seams
+        .into_iter()
+        .find(|seam| seam.function == function)
+        .unwrap_or_else(|| panic!("the scan found no seam called `{function}`"))
+}
+
+/// A `None` initializer followed by an ASSIGNMENT is not a decline.
+///
+/// The exact mutation the review landed on the real declining seam: the `workflow: None` literal
+/// stays, so a check that reads only struct-literal initializers is satisfied by dead syntax while
+/// a real envelope travels into the mask PNG.
+#[test]
+fn a_share_assigned_onto_a_field_after_a_none_initializer_is_read() {
+    let seam = seam_named(
+        "crates/sceneworks-worker/src/probe_segment.rs",
+        "fn run_probe_segment_job() {\n    let mut spec = SingleChildAssetSpec { mode: \"m\", \
+         workflow: None };\n    spec.workflow = parse_workflow_share_json(&text).ok();\n    \
+         write_single_child_asset(&path, image, spec, build);\n}\nstruct SingleChildAssetSpec {\n \
+         mode: &'static str,\n    workflow: Option<WorkflowShare>,\n}\nfn \
+         write_single_child_asset(spec: SingleChildAssetSpec) {\n    \
+         write_workflow_chunk(a, b, spec.workflow.as_ref());\n}\n",
+        "run_probe_segment_job",
+    );
+    assert_eq!(
+        seam.share_field_values,
+        vec!["None".to_owned(), "parse_workflow_share_json".to_owned()],
+        "both the dead initializer AND the assignment have to be read"
+    );
+    assert!(seam.hands_a_share_on(), "the assignment moves an envelope");
+    assert!(
+        seam.obtains_an_envelope,
+        "it parses one out of another file"
+    );
+}
+
+/// Field SHORTHAND is not a `None` either, because the scan cannot follow the local.
+#[test]
+fn a_share_carrying_field_in_shorthand_is_not_a_decline() {
+    let caller = seam_named(
+        "crates/sceneworks-worker/src/probe_shorthand.rs",
+        "struct Spec {\n    workflow: Option<WorkflowShare>,\n}\nfn build_it(spec: Spec) {\n    \
+         write_workflow_chunk(a, b, spec.workflow.as_ref());\n}\nfn caller() {\n    let workflow \
+         = carried();\n    build_it(Spec { workflow });\n}\n",
+        "caller",
+    );
+    assert_eq!(caller.share_field_values, vec!["<shorthand>".to_owned()]);
+    assert!(
+        caller.hands_a_share_on(),
+        "the scan cannot follow the local, so a decline has to spell `None` out"
+    );
+}
+
+/// An envelope the seam did not BUILD is still an envelope: the provenance-blind half.
+///
+/// Nothing here calls a builder. The share is parsed back out of another file and written on,
+/// which is what sc-15954 did for the editor export and the likeliest shape of sc-15956 —
+/// "carry the source's workflow into the output frame".
+#[test]
+fn a_parsed_envelope_written_on_is_seen_as_embedding() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/video_jobs/probe_carry.rs",
+        "fn write_probe_frame(img: &image::RgbImage, path: &Path) -> WorkerResult<()> {\n    let \
+         carried = parse_workflow_share_json(&text).ok();\n    write_workflow_chunk(img, path, \
+         carried.as_ref()).map_err(other)\n}\n",
+    );
+    assert!(!seam.constructs, "it calls no builder at all");
+    assert!(!seam.carrier, "nothing reaches it through its signature");
+    assert!(
+        seam.writes_a_share_chunk,
+        "the chunk writer's last argument is not `None`"
+    );
+    assert!(seam.obtains_an_envelope, "it parses one");
+    assert!(seam.moves_an_envelope(), "so it embeds, and owes a lane");
+}
+
+/// A literal `None` argument is still a decline — the check has to distinguish the two.
+#[test]
+fn a_chunk_written_with_a_literal_none_is_not_embedding() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_none.rs",
+        "fn write_probe_mask(img: &image::GrayImage, path: &Path) {\n    \
+         write_workflow_chunk(img, path, None);\n}\n",
+    );
+    assert!(!seam.writes_a_share_chunk);
+    assert!(!seam.moves_an_envelope());
+    assert!(!seam.obtains_an_envelope);
+}
+
+/// A `use … as …` rename does not turn the gate off.
+///
+/// It did: a brand-new worker file that imported the chunk writer and the gated builder under
+/// other names called them with the whole lint asleep, because discovery AND its safety net both
+/// matched the surface names as literal text.
+#[test]
+fn a_renamed_import_of_the_write_surface_is_resolved() {
+    let source = "use sceneworks_core::workflow_png::write_workflow_chunk as embed_png;\nuse \
+                  sceneworks_core::workflow_share::embeddable_workflow_share as build_share;\nfn \
+                  append_probe_frames(img: &image::RgbImage, path: &Path) {\n    let share = \
+                  build_share(&facts, &payload);\n    embed_png(img, path, \
+                  share.as_ref());\n}\n";
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/video_jobs/probe_rename.rs",
+        source,
+    );
+    assert_eq!(seam.function, "append_probe_frames");
+    assert!(
+        seam.constructs,
+        "`build_share` IS `embeddable_workflow_share`"
+    );
+    assert!(
+        seam.writes_a_share_chunk,
+        "`embed_png` IS `write_workflow_chunk`, and its share argument is not `None`"
+    );
+    assert_eq!(
+        seam.calls,
+        vec![
+            "embeddable_workflow_share".to_owned(),
+            "write_workflow_chunk".to_owned()
+        ],
+        "the calls are recorded under the CANONICAL names, so downstream checks still match"
+    );
+    assert_eq!(
+        import_aliases(source),
+        vec![
+            ("embed_png".to_owned(), "write_workflow_chunk".to_owned()),
+            (
+                "build_share".to_owned(),
+                "embeddable_workflow_share".to_owned()
+            ),
+        ]
+    );
+}
+
+/// Taking the writer as a VALUE is not an indirection the scan can be walked around with.
+///
+/// Found while re-deriving the honest limits after the review: `call_sites` required the `(` to be
+/// there, so a local binding of the function itself was invisible to discovery AND to the safety
+/// net — the same class of hole as the rename import, one level further along.
+#[test]
+fn the_write_surface_taken_as_a_value_is_still_discovered() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_indirect.rs",
+        "fn write_probe_frame(img: &image::RgbImage, path: &Path) {\n    let writer = \
+         write_workflow_chunk;\n    let share = embeddable_workflow_share(&facts, \
+         &payload);\n    let _ = writer(img, path, share.as_ref());\n}\n",
+    );
+    assert_eq!(seam.function, "write_probe_frame");
+    assert!(
+        seam.calls.contains(&"write_workflow_chunk".to_owned()),
+        "the mention counts even though the call goes through a local: {:?}",
+        seam.calls
+    );
+    assert!(seam.constructs);
+}
+
+/// A renamed `WorkflowShare` TYPE still makes its holders carriers.
+#[test]
+fn a_renamed_import_of_the_share_type_is_resolved() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_type_rename.rs",
+        "use sceneworks_core::workflow_share::WorkflowShare as Ws;\nfn hand_on(share: \
+         Option<Ws>) {\n    write_workflow_chunk(a, b, share.as_ref());\n}\n",
+    );
+    assert!(seam.carrier, "the renamed type is still the share type");
+    assert!(seam.writes_a_share_chunk);
+}
+
+/// A carrier that reaches no writer is INERT, and the registry has a word for it.
+///
+/// Layer 2 makes any function whose signature names a share-carrying struct a seam, so a logging
+/// helper is one. Its only disposition used to be `Conduit`, whose doc says "writes an envelope
+/// its caller built" — a false statement about a function that writes nothing.
+#[test]
+fn a_carrier_that_writes_nothing_reaches_no_writer() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_logging.rs",
+        "struct Spec {\n    workflow: Option<WorkflowShare>,\n}\nfn log_spec(spec: &Spec) {\n    \
+         tracing::debug!(mode = spec.mode, \"single-child write\");\n}\n",
+    );
+    assert_eq!(seam.function, "log_spec");
+    assert!(seam.carrier);
+    assert!(
+        seam.calls.is_empty(),
+        "it calls nothing the scan can see reach a write"
+    );
+    assert!(!seam.moves_an_envelope() && !seam.obtains_an_envelope);
+}
+
+// ---------------------------------------------------------------------------
+// The false positives the first cut of this lint produced (sc-16113 review)
+// ---------------------------------------------------------------------------
+
+/// The safety net's rescue, run exactly as the net runs it.
+///
+/// Panics the way the net does, so the shapes below assert on the same code path rather than on a
+/// paraphrase of it.
+fn assert_the_rescue_accepts(source: &str, name: &str) {
+    let light = blank_comments_and_literals(source);
+    let (full, blanked) = blank_test_only_items_with_spans(&light);
+    let offset = call_sites(&light, name)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("the fixture calls `{name}`"));
+    assert!(
+        !full[offset..].starts_with(name),
+        "the fixture must be blanked in the first place"
+    );
+    let span = blanked
+        .iter()
+        .find(|(start, end)| offset >= *start && offset < *end)
+        .expect("the blanked call lies inside the `#[cfg(test)]` item's own span");
+    assert!(
+        blanked_span_is_one_whole_item(&light[span.0..span.1]),
+        "and that span is one whole item:\n{}",
+        &light[span.0..span.1]
+    );
+}
+
+/// The house `#[cfg(test)]` layout — fixture ABOVE the first `#[test]` — is not a bug report.
+///
+/// Eighty-four worker files use inline test modules. The rescue used to require a `#[test]`
+/// textually between the nearest preceding `#[cfg(` and the blanked call, so this ordinary shape
+/// failed the build with a message describing a bug that had not happened, and moving the fixture
+/// below the first `#[test]` "fixed" it.
+#[test]
+fn a_test_fixture_above_the_first_test_attribute_is_still_test_scaffolding() {
+    assert_the_rescue_accepts(
+        "fn product() {\n    let _ = 1;\n}\n#[cfg(test)]\nmod tests {\n    use super::*;\n    fn \
+         png_fixture() {\n        write_workflow_chunk(a, b, None);\n    }\n    #[test]\n    fn \
+         t() {\n        png_fixture();\n    }\n}\n",
+        "write_workflow_chunk",
+    );
+}
+
+/// A STANDALONE `#[cfg(test)]` fixture carries no test attribute of its own, and is scaffolding.
+#[test]
+fn a_standalone_test_only_fixture_is_still_test_scaffolding() {
+    assert_the_rescue_accepts(
+        "fn product() {\n    let _ = 1;\n}\n#[cfg(test)]\nfn generic_fixture<P: AsRef<Path>, S: \
+         Into<String>>(path: P, label: S) {\n    write_workflow_chunk(a, path, None);\n}\n",
+        "write_workflow_chunk",
+    );
+    assert_the_rescue_accepts(
+        "struct Probe<A, B>(A, B);\n#[cfg(test)]\nimpl Probe<u8, u16> {\n    fn fixture(&self) \
+         {\n        write_workflow_chunk(a, b, None);\n    }\n}\n",
+        "write_workflow_chunk",
+    );
+}
+
+/// ... and a RUNAWAY span is still refused, which is what the rescue is for.
+///
+/// The historical bug: a `#[cfg(test)]` struct field whose end was never found, so the blanking ran
+/// to the next `{` and swallowed the `impl` after it. Such a region starts inside the struct and
+/// therefore closes a brace it never opened.
+#[test]
+fn a_runaway_blanking_span_is_refused() {
+    assert!(blanked_span_is_one_whole_item(
+        "#[cfg(test)]\nmod tests {\n    fn f() {}\n}"
+    ));
+    assert!(blanked_span_is_one_whole_item(
+        "#[cfg(test)]\n    probes: u64,"
+    ));
+    assert!(
+        !blanked_span_is_one_whole_item(
+            "#[cfg(test)]\n    probes: u64,\n}\n\nimpl Budget {\n    fn write(&self) {\n        \
+             write_workflow_chunk(a, b, c);\n    }\n}"
+        ),
+        "a region that closes the struct it started inside is a runaway"
+    );
+}
+
+/// `#[cfg(not(test))]` is PRODUCTION-only code, not test scaffolding.
+///
+/// It contains a bare `test` token and no `any(`, so the first cut blanked it — and the safety net
+/// then failed the build on a production function with a message about blanking eating product
+/// code, which is precisely what had happened, to itself.
+#[test]
+fn the_rust_scanner_keeps_a_production_only_cfg() {
+    let stripped = rust_scannable(
+        "#[cfg(not(test))]\npub fn write_production_frame() {\n    write_workflow_chunk(a, b, \
+         c);\n}\n",
+    );
+    assert!(stripped.contains("write_workflow_chunk("), "{stripped}");
+    assert!(!cfg_predicate_is_test_only("not(test)"));
+    assert!(!cfg_predicate_is_test_only("all(not(test), unix)"));
+    assert!(cfg_predicate_is_test_only("test"));
+    assert!(cfg_predicate_is_test_only("all(test, feature = \"x\")"));
+    assert!(!cfg_predicate_is_test_only(
+        "any(target_os = \"macos\", test)"
+    ));
+    assert!(cfg_predicate_is_test_only("any(test, all(test, unix))"));
+}
+
+/// A GENERIC `#[cfg(test)]` fixture is stripped like any other.
+///
+/// The item scan used to stop at the first `,` at paren depth zero, so the comma inside
+/// `<P: AsRef<Path>, S: Into<String>>` ended the item before its body — leaving a test fixture in
+/// the scan, to be demanded as a product seam.
+#[test]
+fn the_rust_scanner_strips_a_generic_test_fixture() {
+    let stripped = rust_scannable(
+        "#[cfg(test)]\nfn generic_fixture<P: AsRef<Path>, S: Into<String>>(path: P, label: S) \
+         {\n    write_workflow_chunk(a, b, c);\n}\nfn product() {\n    let _ = 1;\n}\n",
+    );
+    assert!(
+        !stripped.contains("write_workflow_chunk"),
+        "the generic fixture must go with every other one:\n{stripped}"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["product"]
+    );
+}
+
+/// ... and so is a generic `#[cfg(test)] impl`.
+#[test]
+fn the_rust_scanner_strips_a_generic_test_only_impl() {
+    let stripped = rust_scannable(
+        "#[cfg(test)]\nimpl Probe<A, B> {\n    fn fixture(&self) {\n        \
+         write_workflow_chunk(a, b, c);\n    }\n}\nfn product() {\n    let _ = 1;\n}\n",
+    );
+    assert!(
+        !stripped.contains("write_workflow_chunk"),
+        "the generic impl must go too:\n{stripped}"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["product"]
+    );
+}
+
+/// A generic `#[cfg(test)]` FIELD still ends at its own comma, not at the one inside its type.
+#[test]
+fn the_rust_scanner_survives_a_generic_test_only_struct_field() {
+    let stripped = rust_scannable(
+        "struct Budget {\n    bytes: u64,\n    #[cfg(test)]\n    probes: HashMap<String, u64>,\n \
+         }\n\nimpl Budget {\n    fn write(&self) {\n        write_workflow_chunk(a, b, c);\n    \
+         }\n}\n",
+    );
+    assert!(
+        stripped.contains("write_workflow_chunk("),
+        "the `impl` after the gated field must survive:\n{stripped}"
+    );
+    assert!(!stripped.contains("cfg(test)"));
+}

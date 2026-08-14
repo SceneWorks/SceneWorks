@@ -1,6 +1,95 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+#[test]
+fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
+    let mlx = crate::training::effective_training_targets_for_candle(false);
+    let candle = crate::training::effective_training_targets_for_candle(true);
+
+    for kernel in ["kolors_lora", "sd3_lora", "mage_flow_lora"] {
+        let mlx_target = mlx
+            .targets
+            .iter()
+            .find(|target| target.kernel == kernel)
+            .expect("MLX target");
+        let candle_target = candle
+            .targets
+            .iter()
+            .find(|target| target.id == mlx_target.id)
+            .expect("Candle projection of the same target");
+        assert_eq!(
+            mlx_target.defaults.advanced["gradientCheckpointing"],
+            json!(true),
+            "{kernel} keeps its pre-existing MLX checkpointing default"
+        );
+        assert!(
+            mlx_target.defaults.advanced["sampleEvery"]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "{kernel} keeps its pre-existing MLX preview cadence"
+        );
+        assert_eq!(
+            candle_target.defaults.advanced["gradientCheckpointing"],
+            json!(false),
+            "{kernel} Candle metadata must not advertise unsupported checkpointing"
+        );
+        assert_eq!(candle_target.defaults.advanced["sampleEvery"], json!(0));
+        if kernel == "mage_flow_lora" {
+            assert!(mlx_target
+                .defaults
+                .advanced
+                .get("fullFinetuneConfig")
+                .is_none());
+            assert_eq!(
+                candle_target.defaults.advanced["fullFinetuneConfig"],
+                json!({
+                    "mixedPrecision": "f32",
+                    "gradientCheckpointing": false
+                })
+            );
+        }
+    }
+
+    let candle_wan5 = candle
+        .targets
+        .iter()
+        .find(|target| target.base_model == "wan_2_2")
+        .expect("Wan TI2V-5B target");
+    assert_eq!(candle_wan5.defaults.advanced["sampleEvery"], json!(0));
+    let candle_wan14 = candle
+        .targets
+        .iter()
+        .filter(|target| target.kernel == "wan_moe_lora")
+        .collect::<Vec<_>>();
+    assert_eq!(candle_wan14.len(), 2);
+    assert!(candle_wan14.iter().all(|target| {
+        target.defaults.advanced["gradientCheckpointing"] == json!(true)
+            && target.defaults.advanced["sampleEvery"] == json!(0)
+    }));
+
+    let mlx_presets = crate::training::effective_training_presets_for_candle(false);
+    let candle_presets = crate::training::effective_training_presets_for_candle(true);
+    let mlx_kolors = mlx_presets
+        .presets
+        .iter()
+        .find(|preset| preset.target_id == "kolors_lora")
+        .expect("Kolors preset");
+    let candle_kolors = candle_presets
+        .presets
+        .iter()
+        .find(|preset| preset.id == mlx_kolors.id)
+        .expect("Candle Kolors preset");
+    assert_eq!(
+        mlx_kolors.config.advanced["gradientCheckpointing"],
+        json!(true)
+    );
+    assert_eq!(
+        candle_kolors.config.advanced["gradientCheckpointing"],
+        json!(false)
+    );
+    assert_eq!(candle_kolors.config.advanced["sampleEvery"], json!(0));
+}
+
 #[tokio::test]
 async fn training_targets_route_returns_builtin_registry() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -1947,6 +2036,207 @@ async fn completed_training_job_registers_lora_with_provenance() {
             && item["provenance"]["trainingJobId"] == json!(job_id)));
 }
 
+fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let snapshot = materialize_snapshot(
+            data_dir,
+            "SceneWorks/wan2.2-i2v-a14b-mlx",
+            "test-wan-i2v-a14b-training",
+        );
+        seed_wan_mlx_tier(&snapshot.join("bf16"), true);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    seed_installed_training_base(data_dir, "wan_2_2_i2v_14b");
+}
+
+#[tokio::test]
+async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    seed_installed_wan_i2v_a14b_training_base(&settings.data_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Wan Experts Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Wan expert set",
+            "items": [{
+                "assetId": asset["id"],
+                "caption": { "text": "wanSubject portrait" }
+            }]
+        }),
+    )
+    .await;
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["baseModel"] == "wan_2_2_i2v_14b")
+        .expect("Wan I2V A14B target")
+        .clone();
+
+    let (status, missing_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": target["id"],
+            "datasetId": dataset["id"],
+            "config": target["defaults"],
+            "outputName": "Wan Missing",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{missing_job}");
+    let missing_job_id = missing_job["id"].as_str().expect("missing job id");
+    claim_training_job(&app, missing_job_id).await;
+    let missing_output_dir = std::path::PathBuf::from(
+        missing_job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("missing output dir"),
+    );
+    std::fs::create_dir_all(&missing_output_dir).expect("missing output dir creates");
+    write_test_safetensors(&missing_output_dir.join("wan_missing.high_noise.safetensors"));
+    let (status, missing_completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{missing_job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Only one Wan expert was written.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": missing_output_dir.join("wan_missing.high_noise.safetensors").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(missing_completed["result"]["loraRegistered"], false);
+    assert!(missing_completed["result"]["loraRegistrationError"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("No declared trained adapter")));
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": target["id"],
+            "datasetId": dataset["id"],
+            "config": target["defaults"],
+            "outputName": "Wan Pair",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["manifestEntry"]["files"],
+        json!([
+            "wan_pair.high_noise.safetensors",
+            "wan_pair.low_noise.safetensors"
+        ])
+    );
+
+    let job_id = job["id"].as_str().expect("job id");
+    claim_training_job(&app, job_id).await;
+    let output_dir = std::path::PathBuf::from(
+        job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("output dir"),
+    );
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    for name in [
+        "wan_pair.high_noise.safetensors",
+        "wan_pair.low_noise.safetensors",
+    ] {
+        write_test_safetensors(&output_dir.join(name));
+    }
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained both Wan experts.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": output_dir.join("wan_pair.high_noise.safetensors").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["result"]["loraRegistered"], true);
+
+    let (_, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let registered = loras
+        .as_array()
+        .expect("loras")
+        .iter()
+        .find(|entry| entry["name"] == "Wan Pair")
+        .expect("registered Wan pair");
+    assert_eq!(
+        registered["files"],
+        json!([
+            "wan_pair.high_noise.safetensors",
+            "wan_pair.low_noise.safetensors"
+        ])
+    );
+}
+
+#[test]
+fn trusted_adapter_files_rejects_a_missing_wan_expert() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_test_safetensors(&dir.path().join("wan_pair.high_noise.safetensors"));
+    let declared = json!([
+        "wan_pair.high_noise.safetensors",
+        "wan_pair.low_noise.safetensors"
+    ]);
+    assert!(crate::training::trusted_adapter_files(Some(&declared), dir.path()).is_none());
+    write_test_safetensors(&dir.path().join("wan_pair.low_noise.safetensors"));
+    assert_eq!(
+        crate::training::trusted_adapter_files(Some(&declared), dir.path()),
+        Some(vec![
+            "wan_pair.high_noise.safetensors".to_owned(),
+            "wan_pair.low_noise.safetensors".to_owned()
+        ])
+    );
+}
+
 #[tokio::test]
 async fn failed_or_unwritten_training_job_registers_no_lora() {
     let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
@@ -2440,13 +2730,30 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
 }
 
 /// A fixed oldest-first batch must not let persistent failures monopolize the
-/// recovery queue. The first pass poisons a full production-sized batch; the
-/// durable retry schedule must rotate all of them out so the newer healthy row
-/// completes on the next pass, without retrying the poison rows every second.
+/// recovery queue. The fixture creates one more row than fits in a batch and
+/// poisons the full batch, leaving exactly one healthy row that the first pass
+/// never reaches. The durable retry schedule must rotate the poison rows out so
+/// that healthy row completes on the next pass, without retrying the poison
+/// rows every second — and must then bring them back once that backoff expires,
+/// rather than deferring them out of the queue for good.
+///
+/// (All 129 rows go terminal within the same second, and `updated_at` has
+/// second granularity, so the row left out is the largest-`id` one rather than
+/// the newest. Which row it is does not matter — only that it is healthy and
+/// that both enumerations agree on it, which the shared ordering guarantees.)
+///
+/// Every *scan* below is driven at an explicit instant rather than at the wall
+/// clock, so the schedule decides the outcome and machine speed cannot. The
+/// deferrals themselves still stamp real time; the assertions are written to
+/// hold for any instant those stamps can land on (sc-17640). The exact length
+/// of the backoff is pinned separately, next to the schedule that computes it,
+/// by `terminal_side_effect_retry_backoff_doubles_and_survives_restart` in
+/// `sceneworks-core`.
 #[tokio::test]
 async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation() {
     use sceneworks_core::contracts::{JobStatus, JobType, ProgressStage};
     use sceneworks_core::jobs_store::{CreateJob, ProgressUpdate, RegisterWorker};
+    use sceneworks_core::time::now_unix_seconds;
 
     const BATCH: usize = crate::jobs::PROGRESS_SIDE_EFFECT_RECOVERY_BATCH;
 
@@ -2520,8 +2827,18 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         .lock()
         .extend(poison_ids.iter().cloned());
 
+    // Freeze the instant every scan below evaluates dueness against, captured
+    // BEFORE the first pass runs. Each poison row is deferred to
+    // `(its own deferral instant) + backoff`, and every deferral happens at or
+    // after `scan_at`, so relative to `scan_at` the whole batch is durably in
+    // the future no matter how slow this machine is. Scanning at the real wall
+    // clock instead made the final assertion a race against the 5-second
+    // first-failure backoff: a pass slow enough to outlast it (ordinary load, a
+    // busy CI runner) let correctly-deferred rows come back due, and the test
+    // reddened unrelated PRs through the shared `rust:test` gate (sc-17640).
+    let scan_at = now_unix_seconds();
     assert_eq!(
-        crate::jobs::recover_pending_terminal_progress_side_effects_once(&state)
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(&state, scan_at)
             .await
             .expect("poison batch recovery returns"),
         0
@@ -2533,6 +2850,10 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
             .all(|job_id| first_attempts.get(job_id) == Some(&1)),
         "every poison row must be attempted exactly once in the first pass"
     );
+    // Every deferral above committed at or after `scan_at`, so no row's durable
+    // deadline can have landed on or before it — the assertions below are
+    // decided by the retry schedule, never by elapsed real time.
+    let deferred_by = now_unix_seconds();
 
     drop(state);
     let (_, restarted_state) =
@@ -2540,24 +2861,65 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
     restarted_state
         .progress_side_effects_fail_job_ids
         .lock()
-        .extend(poison_ids);
+        .extend(poison_ids.iter().cloned());
     assert_eq!(
-        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
-            .await
-            .expect("healthy recovery returns"),
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(
+            &restarted_state,
+            scan_at
+        )
+        .await
+        .expect("healthy recovery returns"),
         1,
         "durably deferred poison rows must not starve the newer healthy handoff after restart"
     );
     assert_eq!(
-        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
-            .await
-            .expect("bounded retry scan returns"),
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(
+            &restarted_state,
+            scan_at
+        )
+        .await
+        .expect("bounded retry scan returns"),
         0
     );
     assert_eq!(
         *restarted_state.progress_side_effects_attempts.lock(),
         std::collections::HashMap::new(),
         "poison rows must stay out of the due set across restart until durable backoff expires"
+    );
+
+    // ...and the deferral is a bounded backoff, not a silent drop. Without this
+    // the assertion above passes just as happily if a row is deferred forever,
+    // which would strand its side effects instead of retrying them.
+    //
+    // `deferred_by` was read after every deferral committed, so no deadline can
+    // exceed it by more than one delay, and one delay is capped at
+    // `PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS` (5 minutes, in `sceneworks-core`).
+    // A day past `deferred_by` is therefore beyond every deadline the schedule
+    // can emit, by three orders of magnitude — so this scan too is decided by
+    // the schedule, not by the clock. Raising that cap past a day would fail
+    // this test loudly, on the `expired_attempts` assertion below.
+    //
+    // That assertion is the one with teeth: the `== 0` here is also what an
+    // empty batch returns, so the two must stay together.
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(
+            &restarted_state,
+            deferred_by.saturating_add(24 * 60 * 60),
+        )
+        .await
+        .expect("expired backoff scan returns"),
+        0,
+        "the poison rows still fail, so none of them recovers"
+    );
+    let expired_attempts = restarted_state
+        .progress_side_effects_attempts
+        .lock()
+        .clone();
+    assert!(
+        poison_ids
+            .iter()
+            .all(|job_id| expired_attempts.get(job_id) == Some(&1)),
+        "once the durable backoff expires every poison row must be retried again"
     );
 }
 
@@ -4325,13 +4687,60 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
     // `loraCompatibility.families = [family]` from the family token, which for a fine-tune is an
     // advertisement nothing can honour: the router's `mage-flow` arm, `mage_finetuned_available`
     // and `mlx_gen_mage::load_finetuned` all refuse adapters. Advertised, the API accepted the job
-    // and no worker could claim it — it queued forever with no error. Withdrawn, the same request
-    // is refused at submit by `validate_lora_specs_for_model` ("no declared LoRA families"), which
-    // is loud and terminal. Restoring the key without making a lane claim the job reopens the hang.
-    assert!(
-        entry.get("loraCompatibility").is_none(),
-        "a fine-tuned checkpoint must not advertise LoRA compatibility it cannot render: {:?}",
+    // and no worker could claim it — it queued forever with no error.
+    //
+    // 🔴 This originally asserted only that the manifest KEY was absent, and passed while the hang
+    // was still live: `families_from_value_chain` falls back to the top-level `family` (asserted
+    // present above), so the "no declared LoRA families" branch never fired and the strip was a
+    // no-op. Assert the WITHDRAWAL SHAPE the projection emits, and — below — that a submission
+    // carrying a LoRA is actually refused. Absence of a key proves nothing; the 400 does.
+    //
+    // Generated Mage full fine-tunes render plain text-to-image on both native lanes after
+    // sc-18480. Neither provider accepts adapters, so every deployment projection must publish the
+    // same explicit withdrawal while leaving the full model selectable.
+    assert_eq!(
+        entry["loraCompatibility"]["families"],
+        json!([]),
+        "the withdrawal must be an EXPLICIT empty family list — removing the key alone falls back \
+         to `family` and silently re-advertises: {:?}",
         entry.get("loraCompatibility")
+    );
+    assert_eq!(
+        entry["loraCompatibility"]["supported"],
+        json!(false),
+        "the web picker fails OPEN on an empty family list, so it needs this explicit signal"
+    );
+
+    // ...and the withdrawal is LOAD-BEARING, not decorative: a generation carrying a LoRA is
+    // refused at submit, terminally, instead of being accepted and queued forever.
+    //
+    // This is the assertion whose absence let the original no-op ship. The two failure modes
+    // are distinguishable by their message, and only one of them is this gate: "has no declared
+    // LoRA families" means the advertisement was withdrawn and the request died here; "LoRA not
+    // found" would mean the families check PASSED (the `family` fallback fired) and we only got
+    // as far as hydrating the adapter — which is exactly what the pre-fix code did.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": model_id,
+            "prompt": "a fine-tune with an adapter it cannot load",
+            "loras": [{ "id": "any_adapter" }]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a fine-tune + LoRA submission must be refused, not queued: {refused}"
+    );
+    let detail = refused["detail"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        detail.contains("no declared LoRA families"),
+        "the refusal must come from the withdrawn advertisement; \"LoRA not found\" would mean \
+         the `family` fallback re-advertised it and the hang is still live. Got: {detail}"
     );
 
     // It is NOT a LoRA — registering it as one would offer it as an adapter the engine cannot load.

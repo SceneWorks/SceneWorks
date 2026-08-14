@@ -1,7 +1,7 @@
 use super::advanced;
 use super::{
     curated_image_menu, normalize_sampling_knob, pid_effective_dims, pid_output_tier, pose_entries,
-    read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
+    read_advanced_sampling_knobs, resolve_adapters, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, resolve_pid_weights, run_candle_strict_control,
     trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
     ImageRequest, JobSnapshot, JsonObject, KolorsControl, KolorsControlPaths, KolorsControlRequest,
@@ -11,6 +11,7 @@ use super::{
     ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
     safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
+use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 
 // Candle (Windows/CUDA) Kolors ControlNet (strict pose) route (sc-5489, epic 5480; sc-8823 driver route)
@@ -244,6 +245,7 @@ pub(super) struct KolorsStrictControl {
     /// AND the `sdxl` PiD + Gemma snapshots are cached (Kolors composes the SDXL VAE). Threaded into
     /// `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native SDXL VAE decode.
     pid: Option<gen_core::PidWeights>,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -261,6 +263,7 @@ pub(super) fn kolors_strict_control_test_fixture(path: PathBuf) -> KolorsStrictC
         sampler: None,
         scheduler: None,
         pid: None,
+        adapters: Vec::new(),
     }
 }
 
@@ -287,10 +290,25 @@ impl CandleStrictControl for KolorsStrictControl {
         self.height
     }
 
+    /// The Kolors base tier dir + the ControlNet overlay, plus the PiD decoder pair when this
+    /// generation opted in — every path [`Self::load`] holds co-resident (sc-16069).
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        let mut overlays = vec![self.controlnet.as_path()];
+        overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
+        ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+            "Kolors",
+            "strict-pose ControlNet branch",
+            &self.kolors_base,
+            &overlays,
+        ))
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = KolorsControlPaths {
             kolors_base: self.kolors_base.clone(),
             controlnet: self.controlnet.clone(),
+            adapters: self.adapters.clone(),
         };
         let model = KolorsControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Kolors strict-pose control load failed: {error}"))
@@ -310,6 +328,10 @@ impl CandleStrictControl for KolorsStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        // `KolorsControlRequest` has no `preview` field yet — candle Kolors is not preview-wired
+        // upstream (epic 16948 Tier 1, sc-16954, which covers SDXL + kolors + instantid). `no_candle_image_lane_defaults_its_preview_sink`
+        // sweeps this file, so the guard fails the moment the field appears without being fed.
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
         let req = KolorsControlRequest {
@@ -325,6 +347,7 @@ impl CandleStrictControl for KolorsStrictControl {
             scheduler: self.scheduler.clone(),
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.pid.is_some(),
+            preview: preview.clone(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -414,6 +437,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
+    let adapters = resolve_adapters(request, settings)?;
     let provider = KolorsStrictControl {
         kolors_base,
         controlnet,
@@ -427,6 +451,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
         sampler,
         scheduler,
         pid: pid_weights,
+        adapters,
     };
 
     run_candle_strict_control(

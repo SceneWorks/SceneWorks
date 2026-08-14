@@ -1,3 +1,10 @@
+/// sc-17774: the live closure digest for the candle Krea control lane, read rather than frozen.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_control_closure_digest() -> String {
+    sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo_control")
+        .unwrap_or_default()
+}
+
 #[test]
 fn nvidia_smi_parsing_and_visible_device_filtering_match_python_worker() {
     let gpus = parse_nvidia_smi_gpus(
@@ -58,6 +65,15 @@ fn compute_cap_parse_takes_the_highest_and_tolerates_junk() {
     assert_eq!(parse_max_compute_cap("\n[N/A]\n"), None);
 }
 
+#[test]
+fn selected_compute_capability_never_borrows_a_later_gpu_row() {
+    assert_eq!(parse_selected_compute_cap("8.9\n12.0\n"), Some(8.9));
+    assert_eq!(parse_selected_compute_cap("N/A\n12.0\n"), None);
+    assert_eq!(parse_selected_compute_cap("12.0\n"), Some(12.0));
+    assert_eq!(parse_selected_compute_cap(""), None);
+    assert_eq!(parse_selected_compute_cap("N/A\n"), None);
+}
+
 /// sc-11042 (epic 11037): the NVFP4 tier's Blackwell gate floors at compute cap **12.0** (consumer
 /// Blackwell sm_120 — the FP4 tensor cores the cuBLASLt NVFP4 GEMM dispatches on).
 ///
@@ -66,7 +82,8 @@ fn compute_cap_parse_takes_the_highest_and_tolerates_junk() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn nvfp4_gate_floors_at_blackwell_sm_120() {
-    use crate::gpu::compute_cap_meets_nvfp4;
+use crate::gpu::compute_cap_meets_nvfp4;
+
     // Consumer Blackwell (RTX PRO 6000 / RTX 50-series = 12.0) — the epic's target, and eligible.
     assert!(compute_cap_meets_nvfp4(Some(12.0)));
     // A hypothetical future cap above the floor stays eligible (a floor, matching the ConvRot shape).
@@ -333,8 +350,8 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6539: Dataset Doctor one-tap upscale — reuses the Real-ESRGAN engine, advertised
         // wherever image_upscale is.
         WorkerCapability::DatasetUpscale,
-        // sc-6105: smart-select segmentation (native-MLX SAM3 box-prompt) — Mac-only, advertised
-        // only here so an `image_segment` job routes to the MLX worker by construction.
+        // sc-6105: smart-select segmentation uses native-MLX SAM3 box prompts here; the Candle GPU
+        // descriptor advertises the sibling route off-Mac.
         WorkerCapability::ImageSegment,
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
@@ -389,11 +406,20 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // descriptor-derived `true` is behavior-equivalent — the CFG-off recipe is
         // engine-enforced, not a model capability the worker has to suppress.
         ("qwen_image_edit_2511_lightning", true, true),
-        ("flux2_klein_9b", true, false),
-        ("flux2_klein_9b_kv", true, false),
-        ("flux2_klein_9b_true_v2", true, false),
-        // FLUX.2-dev (epic 5914 / sc-5921): its own `flux2_dev` engine id, embedded distilled
-        // guidance (supports_guidance=true) with no negative prompt / true-CFG.
+        // FLUX.2-klein (sc-15440): the engine advertises `supports_negative_prompt =
+        // !uses_embedded_guidance()`, and klein is NOT the embedded-guidance variant — the current
+        // txt2img path consumes a real user negative branch. That is standard guidance, NOT the
+        // `supports_true_cfg` capability. These rows read `false` until sc-15440 aligned the
+        // descriptor with what the engine actually does; the expectation follows the descriptor, it
+        // does not set it (`EngineModel::supports_negative_prompt` reads `descriptor.capabilities`
+        // directly).
+        ("flux2_klein_9b", true, true),
+        ("flux2_klein_9b_kv", true, true),
+        ("flux2_klein_9b_true_v2", true, true),
+        // FLUX.2-dev (epic 5914 / sc-5921): its own `flux2_dev` engine id. Dev IS the
+        // embedded-guidance variant (`uses_embedded_guidance() == is_dev()`), so it keeps
+        // `supports_guidance=true` with no negative prompt / true-CFG — the contrast that makes the
+        // klein rows above a real distinction rather than a blanket flip.
         ("flux2_dev", true, false),
         ("sdxl", true, true),
         ("realvisxl", true, true),
@@ -444,16 +470,15 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // supports_negative_prompt=true (unlike the CFG-free distilled Turbo). The Boogu-base pattern,
         // but Raw ALSO accepts a user negative prompt (the reference `sample()` takes `negative_prompts`).
         ("krea_2_raw", true, true),
-        // SD3.5 Large (epic 7841 / sc-7871): true-CFG MMDiT flagship — supports_guidance=true +
-        // supports_negative_prompt=true (the `sd3_5_large` descriptor advertises supports_true_cfg).
+        // SD3.5 Large (epic 7841 / sc-7871, corrected sc-15440): standard CFG MMDiT flagship —
+        // supports_guidance=true + supports_negative_prompt=true, but supports_true_cfg=false.
         ("sd3_5_large", true, true),
         // SD3.5 Large Turbo (epic 7841 / sc-7871): the ADD-distilled few-step, CFG-off sibling — the
         // `sd3_5_large_turbo` descriptor drops guidance + negative prompt (supports_guidance=false,
         // supports_negative_prompt=false), the distilled-turbo pattern.
         ("sd3_5_large_turbo", false, false),
-        // SD3.5 Medium (epic 7841 / sc-7869 M3, wired sc-7871): the MMDiT-X true-CFG variant —
-        // supports_guidance=true + supports_negative_prompt=true (the `sd3_5_medium` descriptor advertises
-        // supports_true_cfg, same as Large; only the transformer + step/guidance recipe differ).
+        // SD3.5 Medium (epic 7841 / sc-7869 M3, wired sc-7871, corrected sc-15440): standard CFG —
+        // supports_guidance=true + supports_negative_prompt=true, but supports_true_cfg=false.
         ("sd3_5_medium", true, true),
         // SANA 1600M (epic 8485 / sc-8489): true-CFG Linear-DiT — supports_guidance=true +
         // supports_negative_prompt=true (the `sana_1600m` descriptor advertises supports_true_cfg).
@@ -752,12 +777,13 @@ fn every_image_model_budgets_its_default_tier_against_a_measured_row() {
     }
 }
 
-/// sc-14053: every Mage variant is now a Candle/CUDA model and carries the same physically measured
-/// dense-snapshot, load-time quant tier peak. Pin all six rows and prove the generic gate rejects an
-/// oversized tier while admitting the lower one on the same emulated card.
+/// sc-14053/sc-16025: every Mage variant is a Candle/CUDA model and retains the same conservative
+/// historical tier estimates, but those estimates are not published as physical measurements. Pin
+/// all six rows and prove the generic gate rejects an oversized tier while admitting the lower one
+/// on the same emulated card.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn mage_cuda_catalog_rows_drive_tier_specific_vram_rejection() {
+fn mage_cuda_catalog_rows_are_unmeasured_but_drive_tier_specific_vram_rejection() {
     use crate::vram_gate::{fit_decision, predicted_peak_gb, FitDecision, VramBudget};
 
     let budget = Some(VramBudget {
@@ -780,18 +806,18 @@ fn mage_cuda_catalog_rows_drive_tier_specific_vram_rejection() {
                 .get("candle")
                 .and_then(|candle| candle.get("measured"))
                 .and_then(Value::as_bool),
-            Some(true),
-            "{id}: published Mage peaks must be physical measurements"
+            Some(false),
+            "{id}: historical Mage estimates must not claim physical measurement"
         );
         let q4_peak = predicted_peak_gb(object, "q4").expect("q4 peak plus headroom");
         assert!(
             (q4_peak - 16.67).abs() < f64::EPSILON * 8.0,
-            "{id}: expected measured 14.67 GB q4 peak plus headroom, got {q4_peak}"
+            "{id}: expected historical 14.67 GB q4 estimate plus headroom, got {q4_peak}"
         );
         let bf16_peak = predicted_peak_gb(object, "bf16").expect("bf16 peak plus headroom");
         assert!(
             (bf16_peak - 22.41).abs() < f64::EPSILON * 8.0,
-            "{id}: expected measured 20.41 GB bf16 peak plus headroom, got {bf16_peak}"
+            "{id}: expected historical 20.41 GB bf16 estimate plus headroom, got {bf16_peak}"
         );
         assert_eq!(
             fit_decision(Some(q4_peak), budget),
@@ -848,8 +874,9 @@ fn default_tier_key_mirrors_the_production_resolver() {
 /// a manifest edit that drops the flux2 `vramGbByTier` / `sequentialPeakGb` makes `predicted_*` return
 /// `None` → the whole gate goes INERT for flux2 (the exact "candle block missing" failure the story
 /// targets). Exercises the same `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation the worker honors via
-/// `apply_vram_cap`. Gated to the candle lane where `vram_gate` compiles (sc-10920 measured q4/q8;
-/// bf16 + klein are carried, and are asserted to reject on real cards, which is the intended outcome).
+/// `apply_vram_cap`. Gated to the candle lane where `vram_gate` compiles. SC-18474 replaces the old
+/// FLUX.2-dev estimates with bounded caption-aware q4/q8 route high-waters; BF16 remains absent until
+/// it has fresh evidence. Klein retains its separate historical gate.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
@@ -866,44 +893,62 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
         "flux2_dev candle block present (absent ⇒ fit-gate inert for flux2)"
     );
 
-    // Measured q4 (sc-10920): resident 44.0 / sequential 35.6, each + the gate's 2 GB headroom.
+    // SC-18474 bounded q4 high-water: 42.7 GB for edit, plus the gate's 2 GB headroom. The
+    // caption-aware captures do not prove a lower sequential peak, so both rows remain 44.7 GB.
     let q4_res = predicted_peak_gb(dev_entry, "q4").expect("q4 resident predicted");
     let q4_seq = predicted_sequential_peak_gb(dev_entry, "q4").expect("q4 sequential predicted");
-    assert!((q4_res - 46.0).abs() < 1e-6, "q4 resident 44.0 + 2 headroom, got {q4_res}");
-    assert!((q4_seq - 37.6).abs() < 1e-6, "q4 sequential 35.6 + 2 headroom, got {q4_seq}");
-    assert!(q4_seq < q4_res, "sequential is the lower peak");
+    assert!((q4_res - 44.7).abs() < 1e-6, "q4 resident 42.7 + 2 headroom, got {q4_res}");
+    assert!((q4_seq - 44.7).abs() < 1e-6, "q4 sequential 42.7 + 2 headroom, got {q4_seq}");
+    assert_eq!(q4_seq, q4_res, "no smaller caption-aware sequential peak is claimed");
 
-    // A 96 GB card fits q4 resident outright — no offload.
-    let card96 = apply_vram_cap(None, Some(96.0));
-    assert_eq!(fit_decision(Some(q4_res), card96), FitDecision::Fits);
+    // The conservative supported tier is 48 GB and fits q4 resident outright.
+    assert_eq!(dev_entry["candle"]["minMemoryGb"], 48);
+    let card48 = apply_vram_cap(None, Some(48.0));
+    assert_eq!(fit_decision(Some(q4_res), card48), FitDecision::Fits);
 
-    // Emulate a 40 GB card: resident 46 won't fit, but sequential 37.6 does → OFFLOAD, run sequentially.
+    // A 40 GB card cannot fit either row. Offload is attempted, then fails closed on the same
+    // caption-aware high-water rather than falling through to an obsolete v2 ladder rung.
     let card40 = apply_vram_cap(None, Some(40.0));
     let at40 = resolve_offload(fit_decision(Some(q4_res), card40), /* sequential_capable */ true);
     assert!(matches!(at40, FitDecision::Offload { .. }), "40 GB → offload, got {at40:?}");
-    assert_eq!(sequential_overflow_gb(Some(q4_seq), card40), None, "sequential fits 40 GB → run");
+    assert_eq!(
+        sequential_overflow_gb(Some(q4_seq), card40),
+        Some(q4_seq),
+        "sequential high-water still exceeds 40 GB"
+    );
 
-    // Emulate a 30 GB card: even the sequential 37.6 peak won't fit → REJECT-before-OOM (sc-10856 gate).
+    // A 30 GB card is also rejected before load.
     let card30 = apply_vram_cap(None, Some(30.0));
     let at30 = resolve_offload(fit_decision(Some(q4_res), card30), true);
     assert!(matches!(at30, FitDecision::Offload { .. }), "30 GB → offload attempt, got {at30:?}");
     assert_eq!(
         sequential_overflow_gb(Some(q4_seq), card30),
         Some(q4_seq),
-        "sequential 37.6 > 30 GB → reject carrying the number"
+        "sequential 44.7 > 30 GB → reject carrying the number"
     );
 
-    // Measured q8 is present too (resident 70.7 / sequential 64.9 + headroom).
-    assert!((predicted_peak_gb(dev_entry, "q8").unwrap() - 72.7).abs() < 1e-6);
-    assert!((predicted_sequential_peak_gb(dev_entry, "q8").unwrap() - 66.9).abs() < 1e-6);
+    // Q8 uses the larger 70.8 GB route high-water plus headroom and therefore starts at the next
+    // supported 80 GB tier; again, no smaller sequential peak is claimed.
+    assert!((predicted_peak_gb(dev_entry, "q8").unwrap() - 72.8).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(dev_entry, "q8").unwrap() - 72.8).abs() < 1e-6);
 
-    // The carried bf16 tier (128 / 97) rejects on a 96 GB card even sequentially — the intended outcome
-    // (113 GB dense weights can't run off-Mac), reject-before-OOM instead of a silent load-time OOM.
-    let bf16_seq = predicted_sequential_peak_gb(dev_entry, "bf16").expect("bf16 sequential carried");
     assert_eq!(
-        sequential_overflow_gb(Some(bf16_seq), card96),
-        Some(bf16_seq),
-        "bf16 sequential 99 > 96 GB → reject"
+        predicted_peak_gb(dev_entry, "bf16"),
+        Some(48.0),
+        "the legacy static fallback exists, so route admission must reject the missing tier row"
+    );
+    assert_eq!(predicted_sequential_peak_gb(dev_entry, "bf16"), None);
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "q4")
+            .is_ok()
+    );
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "q8")
+            .is_ok()
+    );
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "bf16")
+            .is_err()
     );
 
     // klein carries a candle block so ITS fit-gate is live: on a 16 GB epic-target card klein rejects
@@ -1020,9 +1065,15 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     // engine renders one 14B expert at a time (`OffloadPolicy::Sequential`, forced by
     // `video_jobs::candle_wan_offload_policy`), and q4/q8/bf16 are all measured USED_MEM_HIGH peaks at the
     // 1280x720 Lightning default (~22 / ~28 / ~39 GiB). q4 AND q8 both FIT a 32 GB RTX 5090 — the inverse of
-    // the old ~386 GiB OOM-floor that refused everything. q8 was validated to fit 32 GB under a GPU-memory
-    // balloon (the cudarc pool packs to the live peak, not its ~36 GiB high-water); bf16 (measured ~39,
+    // the old ~386 GiB OOM-floor that refused everything. q8's 32 GB fit came from a GPU-memory balloon
+    // (argued as: the cudarc pool packs to the live peak, not its ~36 GiB high-water); bf16 (measured ~39,
     // replacing the old derived 56) admits a 48 GB card but stays refused on 32.
+    //
+    // ⚠️ The q8/bf16 admissions are UNPROVEN (sc-16091 → sc-16118). The balloon argument is circular — it
+    // substitutes the LIVE peak for the pool high-water under test — and its "a spill would inflate wall
+    // time" premise is measured FALSE on that host (sc-15791: a 1.48 GiB overcommit ran at 1.07x, faster in
+    // a sibling run). If the pool does not trim, q8 needs ~34-36 GiB and this gate over-admits a 32 GB card.
+    // The expectations below pin what SHIPS, so drift still goes red; they do not certify the small-card fit.
     let card48 = apply_vram_cap(None, Some(48.0));
     let card32 = apply_vram_cap(None, Some(32.0)); // an RTX 5090 — epic sc-12732's small-card target
     // card16 is already bound above (the 5B section) and reused here.
@@ -1055,7 +1106,8 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
         );
         assert!(
             wan_video_fit_error(id, a14b, "q8", 0, "0", card32).is_none(),
-            "{id} q8 (~{q8} GB live) now fits a 32 GB card — validated under a ≤32 GB balloon"
+            "{id} q8 (~{q8} GB live) is ADMITTED on a 32 GB card — on the unproven pool-trim inference \
+             above, pending sc-16118's enforced-cap re-validation"
         );
         assert!(
             wan_video_fit_error(id, a14b, "q4", 0, "0", card16).is_some(),
@@ -1199,22 +1251,29 @@ fn z_image_turbo_candle_block_admits_q4_on_eight_gb() {
     );
 }
 
-/// sc-11754 + sc-11744 (epic 8459 → epic 10765): the Krea 2 Turbo `candle.control` block drives the
-/// pose-ControlNet VRAM fit LADDER end-to-end against the SHIPPED manifest bytes. The control-lane sibling
-/// of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the DATA half — dropping the `control`
-/// block makes `predicted_control_peak_gb` return `None` → the control fit-gate goes INERT (bf16 branch
-/// always, the pre-sc-11754 behavior). Exercises the `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation via
-/// `apply_vram_cap` across the cost-ordered rungs: big card → resident untiled bf16 branch (no penalty);
-/// sequential residency (sc-12176) first; then VAE tiling, chunking, branch quant, and reject-before-OOM.
-/// Expectations are expressed relative to the
-/// SHIPPED deltas (a manifest edit that drifts `decodeTileSaveGb` / `branchQuantSaveGb` fails here) rather
-/// than hard-coded arithmetic.
+/// sc-11754 + sc-11744 + sc-15799 (epic 8459 → epic 10765 → epic 15448): the Krea 2 Turbo
+/// `candle.control` block drives the pose-ControlNet VRAM fit LADDER end-to-end against the SHIPPED
+/// manifest bytes. The control-lane sibling of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards
+/// the DATA half — dropping the `control` block makes `predicted_control_peak_gb` return `None` → the
+/// control fit-gate goes INERT (the pre-sc-11754 behavior). Exercises the `SCENEWORKS_CUDA_VRAM_CAP_GB`
+/// small-card emulation via `apply_vram_cap` across the cost-ordered rungs: big card → resident untiled
+/// (no penalty); sequential residency (sc-12176) first; then VAE tiling, attention chunking, and
+/// reject-before-OOM. Expectations are expressed relative to the SHIPPED deltas (a manifest edit that
+/// drifts `decodeTileSaveGb` / `branchPackSaveGb` fails here) rather than hard-coded arithmetic.
+///
+/// sc-15799 changed three things this test now pins:
+///   * there is NO branch-quant rung — the branch's tier comes from the base tier, so the ladder's
+///     deepest rung is attention chunking;
+///   * every peak is the current direct packed-branch row read verbatim; the retracted
+///     `branchPackSaveGb` correction remains absent;
+///   * because the block declares current measured evidence, the deepest-rung floor is `TooBig`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn krea_control_candle_block_drives_the_fit_ladder() {
     use crate::krea_control_fit::{
-        branch_quant_save_gb, chunk_attn_save_gb, decode_tile_save_gb, fit_ladder,
-        predicted_control_peak_gb, predicted_control_sequential_peak_gb, KreaControlFit,
+        chunk_attn_save_gb, control_branch_tier_for_key, control_evidence_is_current,
+        decode_tile_save_gb, fit_ladder, fit_ladder_for_entry, predicted_control_peak_gb,
+        predicted_control_sequential_peak_gb, KreaControlFit,
     };
     use crate::vram_gate::apply_vram_cap;
     use gen_core::{OffloadPolicy, Quant};
@@ -1225,192 +1284,280 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         .get("candle")
         .and_then(Value::as_object)
         .expect("krea_2_turbo candle block");
-    assert!(
-        candle.get("control").and_then(Value::as_object).is_some(),
-        "krea_2_turbo candle.control block present (absent ⇒ control fit-gate inert → always bf16 branch)"
+    let control = candle
+        .get("control")
+        .and_then(Value::as_object)
+        .expect("krea_2_turbo candle.control block (absent ⇒ control fit-gate inert)");
+
+    // TIER INTEGRITY (sc-15799). The manifest DECLARES the branch tier per base tier, and the shared rule
+    // must agree with it — a declaration the code does not honor is the invisible carve-out this story
+    // exists to remove. The q4 → q8 row is the one declared exception (a q4 control residual measures
+    // "pose-locked; non-pose details drift"); q8 → q8 and bf16 → bf16 simply follow the tier.
+    let declared = control
+        .get("branchTierByBaseTier")
+        .and_then(Value::as_object)
+        .expect("shipped branchTierByBaseTier (sc-15799)");
+    for (base_tier, branch_tier) in declared {
+        let expected = match branch_tier.as_str().expect("branch tier string") {
+            "bf16" => None,
+            "q8" => Some(Quant::Q8),
+            "q4" => Some(Quant::Q4),
+            other => panic!("unexpected declared branch tier {other}"),
+        };
+        assert_eq!(
+            control_branch_tier_for_key(base_tier),
+            expected,
+            "the shared tier-integrity rule must agree with the catalog for base tier {base_tier}"
+        );
+    }
+    assert_eq!(
+        control_branch_tier_for_key("q4"),
+        Some(Quant::Q8),
+        "a q4 base must FLOOR its branch at q8, never carry it at bf16 (the sc-11748 defect) and never \
+         follow to q4 (the measured drift)"
     );
 
-    // Shipped MEASURED branch-quant deltas (sc-11743): q8 −8.4 (near-lossless), q4 −10.2 (pose-locked).
-    let q8 = branch_quant_save_gb(entry, "q8");
-    let q4 = branch_quant_save_gb(entry, "q4");
-    assert_eq!(q8, Some(8.4));
-    assert_eq!(q4, Some(10.2));
+    // The shipped rows are direct measurements against each tier's shipping branch configuration.
+    assert!(
+        control.get("peakGbByTier").is_some() && control.get("sequentialPeakGbByTier").is_some(),
+        "current direct control-lane peak rows must ship"
+    );
+    // The RETRACTION (sc-15799 review): `branchPackSaveGb` claimed 8.4/10.2 GB of "measured WEIGHT-side"
+    // reduction for a branch that is 6.6 GB in total, and the fit gate subtracted it. Neither the key nor
+    // any reader of it may come back without a re-measure that reconciles with the branch's real size.
+    assert!(
+        control.get("branchPackSaveGb").is_none(),
+        "branchPackSaveGb is retracted: direct packed-branch peaks need no derived correction"
+    );
+    assert!(
+        control_evidence_is_current(entry),
+        "the shipped control block is current measured evidence"
+    );
+    assert_eq!(
+        control.get("measured").and_then(Value::as_bool),
+        Some(true),
+        "the control block's peaks were measured against the configuration that ships"
+    );
+    assert!(control.get("supersededBy").is_none());
 
-    // Shipped MEASURED activation-chunking delta (sc-11745): the denoise-peak rung between tiling and
-    // branch-quant — a SCALAR (tier-independent), speed-only, byte-identical output.
+    // Shipped MEASURED activation-chunking delta (sc-11745): the DEEPEST rung — a SCALAR
+    // (tier-independent), speed-only, byte-identical output, and unaffected by the branch repack.
     let chunk = chunk_attn_save_gb(entry);
     let chunk_save = chunk.expect("chunkAttnSaveGb shipped (the sc-11745 chunking rung)");
     assert!(chunk_save > 0.0, "chunking must recover VRAM, got {chunk_save}");
 
-    // The common small-card install: q4 BASE tier. Resident and Sequential are both measured; every
-    // deeper rung composes from the Sequential baseline because residency is the cheapest adaptation.
+    // The common small-card install: q4 base with its shipping q8 branch. Both direct measurements gain
+    // only the standard 2 GB admission headroom.
     let q4_peak = predicted_control_peak_gb(entry, "q4");
     let peak = q4_peak.expect("q4 control peak");
-    assert!((peak - 38.2).abs() < 1e-6);
+    assert!(
+        (peak - 35.5).abs() < 1e-6,
+        "33.5 measured peak + 2.0 headroom, got {peak}"
+    );
     let q4_sequential = predicted_control_sequential_peak_gb(entry, "q4");
     let sequential_peak = q4_sequential.expect("q4 sequential control peak");
-    assert!((sequential_peak - 34.5).abs() < 1e-6);
+    assert!(
+        (sequential_peak - 31.6).abs() < 1e-6,
+        "29.6 measured staged peak + 2.0 headroom, got {sequential_peak}"
+    );
+    // The q8 base tier the same way — the tier whose sub-tier branch packing this change gives up.
+    let q8_peak = predicted_control_peak_gb(entry, "q8").expect("q8 control peak");
+    assert!((q8_peak - 43.9).abs() < 1e-6, "41.9 + 2.0, got {q8_peak}");
     let tile = decode_tile_save_gb(entry, "q4");
     let tile_save = tile.expect("q4 decodeTileSaveGb shipped (the sc-11744 tiling rung)");
     assert!(tile_save > 0.0, "tiling must recover VRAM, got {tile_save}");
     let tiled_peak = sequential_peak - tile_save;
     let chunked_peak = tiled_peak - chunk_save;
 
-    // 96 GB card: the monolithic peak fits outright — nothing engages, untiled full-speed bf16 branch.
+    // 96 GB card: the monolithic peak fits outright — nothing engages, untiled full-speed decode.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(96.0)),
             tile,
             chunk,
-            q8,
-            q4,
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
-            branch_quant: None,
+            estimate_scoped: false,
         }
+    );
+    // A 32 GB card misses the 35.5 GB resident admission peak but clears the measured 31.6 GB staged
+    // peak, so sequential residency is sufficient without tiled decode.
+    assert_eq!(
+        fit_ladder(
+            "q4",
+            q4_peak,
+            q4_sequential,
+            apply_vram_cap(None, Some(32.0)),
+            tile,
+            chunk,
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
+        ),
+        KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Sequential,
+            tile_vae_decode: false,
+            chunk_attention: false,
+            estimate_scoped: false,
+        },
+        "a 32 GB card only stages against the current 35.5/31.6 GB peaks"
     );
     // A card that fits the measured Sequential peak but not Resident engages residency only.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(sequential_peak)),
             tile,
             chunk,
-            q8,
-            q4,
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: false,
-            branch_quant: None,
+            estimate_scoped: false,
         }
     );
-    // A card at the staged+tiled peak engages Sequential then VAE tiling, keeping the bf16 branch.
+    // A card at the staged+tiled peak engages Sequential then VAE tiling — both speed-only.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(tiled_peak)),
             tile,
             chunk,
-            q8,
-            q4,
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: false,
-            branch_quant: None,
+            estimate_scoped: false,
         }
     );
-    // Just below the tiled peak: tiling alone no longer fits, but the next speed-only rung (chunking) does
-    // (chunked_peak fits) ⇒ tiling + chunking, STILL a bf16 branch — sc-11745's win over dropping to q8.
+    // Just below the tiled peak: the deepest rung (chunking) engages, still with zero quality cost.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(tiled_peak - 0.5)),
             tile,
             chunk,
-            q8,
-            q4,
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: true,
-            branch_quant: None,
+            estimate_scoped: false,
         }
     );
-    // Just below the chunked peak: both speed rungs stay on and q8 composes (chunked_peak − 8.4 fits) ⇒
-    // tiling + chunking + q8, near-lossless — a shallower quant than the chunk-less ladder would have taken.
-    assert_eq!(
-        fit_ladder(
-            q4_peak,
-            q4_sequential,
-            apply_vram_cap(None, Some(chunked_peak - 0.5)),
-            tile,
-            chunk,
-            q8,
-            q4,
-        ),
-        KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: true,
-            chunk_attention: true,
-            branch_quant: Some(Quant::Q8),
-        }
-    );
-    // A card between (…+q8) and (…+q4): tiling + chunking + q4 (chunked_peak − 10.2) fits ⇒ the deepest rung.
-    assert_eq!(
-        fit_ladder(
-            q4_peak,
-            q4_sequential,
-            apply_vram_cap(None, Some(chunked_peak - 8.9)),
-            tile,
-            chunk,
-            q8,
-            q4,
-        ),
-        KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: true,
-            chunk_attention: true,
-            branch_quant: Some(Quant::Q4),
-        }
-    );
-    // A card below even (tiling + chunking + q4) ⇒ reject-before-OOM at the best-case peak.
+    // Below the chunked peak there is nothing left to trade. Current measured evidence makes this a
+    // reject-before-OOM rather than a best-effort runtime attempt.
     match fit_ladder(
+        "q4",
         q4_peak,
         q4_sequential,
-        apply_vram_cap(None, Some(chunked_peak - 11.0)),
+        apply_vram_cap(None, Some(chunked_peak - 0.5)),
         tile,
         chunk,
-        q8,
-        q4,
+        control_evidence_is_current(entry),
+        &krea_control_closure_digest(),
     ) {
         KreaControlFit::TooBig { needed_gb, .. } => {
-            assert!(
-                (needed_gb - (chunked_peak - 10.2)).abs() < 1e-6,
-                "best-case (tiling + chunking + q4) peak, got {needed_gb}"
-            );
+            assert!((needed_gb - chunked_peak).abs() < 1e-6);
         }
-        other => panic!("below tiling+chunking+q4 → reject, got {other:?}"),
+        other => panic!("below the measured deepest-rung peak must be TooBig, got {other:?}"),
     }
 
-    // The bf16 BASE tier carries no tiling saving (its denoise
-    // steady-state, not the decode, is the peak), but the SCALAR chunking rung applies to every tier: a
-    // 41 GB card engages chunking (speed-only) then q8 (48.2 − chunk_save − 8.4 ≤ 41), the near-lossless
-    // preference before q4 — a shallower quant than the chunk-less walk (which took bare q8 at 39.8).
+    // The bf16 BASE tier carries no tiling saving (its denoise steady-state, not the decode, is the peak)
+    // and no branch-packing correction (a dense base carries a dense branch — nothing was packed), but
+    // the SCALAR chunking rung applies to every tier.
     let bf16_peak = predicted_control_peak_gb(entry, "bf16");
-    assert!((bf16_peak.expect("bf16 control peak") - 67.8).abs() < 1e-6);
+    assert!(
+        (bf16_peak.expect("bf16 control peak") - 67.8).abs() < 1e-6,
+        "65.8 + 2.0 — the dense tier was always exact: its branch really is dense, so it is the one \
+         tier the retracted correction never touched"
+    );
     let bf16_sequential = predicted_control_sequential_peak_gb(entry, "bf16");
-    assert!((bf16_sequential.expect("bf16 sequential control peak") - 52.0).abs() < 1e-6);
+    assert!((bf16_sequential.expect("bf16 sequential control peak") - 52.1).abs() < 1e-6);
     assert_eq!(decode_tile_save_gb(entry, "bf16"), None);
     assert_eq!(
         fit_ladder(
+            "bf16",
             bf16_peak,
             bf16_sequential,
-            apply_vram_cap(None, Some(42.0)),
+            apply_vram_cap(None, Some(52.1 - chunk_save)),
             decode_tile_save_gb(entry, "bf16"),
             chunk,
-            q8,
-            q4
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: true,
-            branch_quant: Some(Quant::Q8),
+            estimate_scoped: false,
         }
     );
+
+    // sc-16013 prices every hosted tier directly. The generic SC-16069 fail-safe still makes a malformed
+    // or future unpriced tier `Unverified`, naming itself on roomy and starved cards alike.
+    //
+    // Asserted through `fit_ladder_for_entry` — the seam the lane calls — because that is the only place
+    // that can tell "no control block" (no signal) from "no row for THIS tier" (a coverage hole). Read via
+    // the hand-threaded `fit_ladder` above, both look like the same `None`, which is exactly how the hole
+    // stayed invisible.
+    let priced: Vec<&str> = ["q4", "q8", "bf16", "int8-convrot"]
+        .into_iter()
+        .filter(|tier| predicted_control_peak_gb(entry, tier).is_some())
+        .collect();
+    assert_eq!(
+        priced,
+        vec!["q4", "q8", "bf16", "int8-convrot"],
+        "the shipped control block must price every reachable tier"
+    );
+    assert!(
+        (predicted_control_peak_gb(entry, "int8-convrot").unwrap() - 52.7).abs() < 1e-6
+    );
+    assert!(
+        (predicted_control_sequential_peak_gb(entry, "int8-convrot").unwrap() - 37.5).abs()
+            < 1e-6
+    );
+    for tier in ["some-future-tier"] {
+        assert!(
+            predicted_control_peak_gb(entry, tier).is_none(),
+            "{tier} is expected unpriced by the shipped control block — if it gained a row, drop it from \
+             this list and pin its ladder instead"
+        );
+        for cap in [96.0, 8.0] {
+            assert_eq!(
+                fit_ladder_for_entry(entry, tier, apply_vram_cap(None, Some(cap))),
+                KreaControlFit::Unverified {
+                    offload_policy: OffloadPolicy::Sequential,
+                    tile_vae_decode: false,
+                    chunk_attention: false,
+                    tier_key: tier.to_owned(),
+                },
+                "{tier} @ {cap} GB: an unpriced tier must be an explicit, named, non-rejecting verdict — \
+                 not the silent zero-adaptation path it used to take (sc-16069)"
+            );
+        }
+    }
 }
 
 /// Live real-hardware validation (sc-11754): the REAL `nvidia-smi` VRAM reading on GPU 0 + the cap →
@@ -1424,7 +1571,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
 #[ignore]
 async fn krea_control_live_ladder_on_a_real_card() {
     use crate::krea_control_fit::{
-        branch_quant_save_gb, chunk_attn_save_gb, decode_tile_save_gb, fit_ladder,
+        chunk_attn_save_gb, control_evidence_is_current, decode_tile_save_gb, fit_ladder,
         predicted_control_peak_gb, predicted_control_sequential_peak_gb, KreaControlFit,
     };
     use crate::vram_gate::apply_vram_cap;
@@ -1434,9 +1581,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
     let entry = krea.as_object().expect("krea_2_turbo entry object");
     let tile = decode_tile_save_gb(entry, "q4");
     let chunk = chunk_attn_save_gb(entry);
-    let q8 = branch_quant_save_gb(entry, "q8");
-    let q4 = branch_quant_save_gb(entry, "q4");
-    // The common small-card install: q4 base tier.
+    // The common small-card install: q4 base tier, branch packed to q8 (sc-15799).
     let peak = predicted_control_peak_gb(entry, "q4");
     let sequential = predicted_control_sequential_peak_gb(entry, "q4");
     let tiled_peak = sequential.unwrap() - tile.expect("q4 decodeTileSaveGb shipped");
@@ -1447,68 +1592,65 @@ async fn krea_control_live_ladder_on_a_real_card() {
         .expect("GPU 0 should report a live VRAM budget on a CUDA box");
     eprintln!("live CUDA budget GPU0: {real:?}");
 
-    // Uncapped real 96 GB card → untiled monolithic decode, unchunked, bf16 branch, no rung engages.
+    // Uncapped real 96 GB card → untiled monolithic decode, unchunked, no rung engages.
     assert_eq!(
         fit_ladder(
+            "q4",
             peak,
             sequential,
             apply_vram_cap(Some(real), None),
             tile,
             chunk,
-            q8,
-            q4,
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
-            branch_quant: None,
+            estimate_scoped: false,
         },
-        "uncapped 96 GB card keeps the untiled bf16 branch"
+        "uncapped 96 GB card engages nothing"
     );
-    // Cap just at the tiled peak (off the REAL reading) → residency and the first speed-cost rung engage:
-    // sequential + tiling, with the bf16 branch kept (no quality penalty).
+    // Cap just at the tiled peak (off the REAL reading) → residency and the first speed-cost rung engage.
     assert_eq!(
         fit_ladder(
+            "q4",
             peak,
             sequential,
             apply_vram_cap(Some(real), Some(tiled_peak)),
             tile,
             chunk,
-            q8,
-            q4,
+            control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: false,
-            branch_quant: None,
+            estimate_scoped: false,
         },
-        "cap at the tiled peak → VAE tiling keeps the bf16 branch"
+        "cap at the tiled peak → VAE tiling, no quality cost"
     );
-    // Cap below (tiling + chunking + q8) off the REAL reading → all three cheaper rungs on + q4 to fit,
-    // where the old tiling-only ladder rejected-before-OOM.
-    assert_eq!(
-        fit_ladder(
-            peak,
-            sequential,
-            apply_vram_cap(Some(real), Some(chunked_peak - 8.9)),
-            tile,
-            chunk,
-            q8,
-            q4,
-        ),
-        KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: true,
-            chunk_attention: true,
-            branch_quant: Some(gen_core::Quant::Q4),
-        },
-        "cap below tiling+chunking+q8 → tiling + chunking + q4 fits"
-    );
+    // Cap below the chunked peak off the REAL reading: current measured evidence rejects before OOM.
+    match fit_ladder(
+        "q4",
+        peak,
+        sequential,
+        apply_vram_cap(Some(real), Some(chunked_peak - 0.5)),
+        tile,
+        chunk,
+        control_evidence_is_current(entry),
+        &krea_control_closure_digest(),
+    ) {
+        KreaControlFit::TooBig { needed_gb, .. } => {
+            assert!((needed_gb - chunked_peak).abs() < 1e-6);
+        }
+        other => panic!("below the measured chunked peak → TooBig, got {other:?}"),
+    }
     eprintln!(
-        "krea control fit ladder on a real card: 96→untiled bf16, tiled-peak→tiling, \
-         below-chunk-peak→tiling+chunking, deep→+q4 ✓"
+        "krea control fit ladder on a real card: 96→nothing, tiled-peak→tiling, \
+         below-chunk-peak→reject ✓"
     );
 }
 
@@ -1609,6 +1751,102 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
         Some(l_seq),
         "lightning sequential 35.1 > 30 GB → reject (gate live for the distill entry too)"
     );
+}
+
+/// sc-16093: every built-in model that a bespoke single-base Candle route can load either carries a
+/// live per-tier peak row or is pinned here as an explicit unmeasured exception. This is the data half
+/// of the source guard in `image_jobs/tests.rs`: deleting a handler call fails there; deleting a row
+/// that makes an evidenced call effective fails here. Adding evidence to an exception also fails so
+/// its call site cannot quietly keep bypassing newly available evidence.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
+    const EVIDENCED: &[&str] = &[
+        "flux2_klein_9b",
+        "flux2_dev",
+        "z_image_turbo",
+        "krea_2_raw",
+        "krea_2_turbo",
+    ];
+    const EXPLICITLY_UNMEASURED: &[(&str, &str, &str)] = &[
+        (
+            "sdxl",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "realvisxl",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "illustrious_xl_v1",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "illustrious_xl_v2",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "flux2_klein_9b_true_v2",
+            "the local True V2 converted fine-tune has no CUDA calibration row",
+            include_str!("../image_jobs/flux2_edit_candle.rs"),
+        ),
+        (
+            "bernini_image",
+            "Bernini still-image tiers have not been CUDA-calibrated",
+            include_str!("../image_jobs/bernini.rs"),
+        ),
+    ];
+
+    let assert_resident_rows = |id: &str| {
+        let model = builtin_model_entry(id);
+        let tiers = model
+            .get("candle")
+            .and_then(|candle| candle.get("vramGbByTier"))
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{id}: bespoke Candle base route requires vramGbByTier"));
+        assert!(!tiers.is_empty(), "{id}: vramGbByTier must not be empty");
+        let default = default_tier_key(&model);
+        assert!(
+            tiers.get(default).and_then(Value::as_f64).is_some(),
+            "{id}: resolved/default tier {default} has no numeric resident peak"
+        );
+        tiers.clone()
+    };
+
+    for id in EVIDENCED {
+        assert_resident_rows(id);
+    }
+    let zimage_edit_arm = include_str!("../image_jobs.rs")
+        .split_once("CandleImageRoute::ZimageEdit => {")
+        .expect("Z-Image Edit route must remain explicit")
+        .1
+        .split_once("CandleImageRoute::")
+        .expect("Z-Image Edit route must end before the next route")
+        .0;
+    assert!(
+        zimage_edit_arm.contains("generate_candle_stream("),
+        "Z-Image Edit must use the generic provider path so z_image_turbo catalog evidence and the shared memory selector remain live"
+    );
+    for (id, reason, source) in EXPLICITLY_UNMEASURED {
+        let model = builtin_model_entry(id);
+        let resident = model
+            .get("candle")
+            .and_then(|candle| candle.get("vramGbByTier"))
+            .and_then(Value::as_object);
+        assert!(
+            resident.is_none_or(serde_json::Map::is_empty),
+            "{id}: now has catalog rows; remove its explicit unmeasured reason from the route and this guard"
+        );
+        assert!(!reason.trim().is_empty(), "{id}: unmeasured exception needs a recorded reason");
+        assert!(
+            source.contains(reason),
+            "{id}: its unmeasured reason must remain recorded at the live route call site"
+        );
+    }
 }
 
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
@@ -1712,11 +1950,11 @@ fn sd3_5_manifest_entries_gate_correctly() {
 }
 
 /// sc-8489 (SANA Phase B2): the SANA builtin-manifest entry gates correctly at the catalog layer —
-/// family `sana`, `capabilities == ["text_to_image"]` only (edit/reference rejected), the UN-gated
+/// family `sana`, text-to-image plus non-edit image-to-image, the UN-gated
 /// `SceneWorks/Sana_1600M_1024px_mlx` MLX re-host (NOT gated — the mirror carries the NVIDIA
 /// non-commercial NOTICE), dense bf16 (NO `mlx.quantize` — the load path rejects a quant), the
-/// `mlx.minMemoryGb` memory-eligibility lever, the sana LoRA family, and the NVIDIA non-commercial
-/// notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
+/// `mlx.minMemoryGb` memory-eligibility lever, no unsupported LoRA advertisement, and the NVIDIA
+/// non-commercial notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
 /// shipped) so manifest drift on any of these levers fails CI without a real download. The
 /// descriptor-derived guidance/negative/backend surface is covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
@@ -1729,13 +1967,17 @@ fn sana_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (base SANA is plain t2i).
+    // sc-18475: both native backends accept the advertised non-edit singular-reference img2img shape.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE; OK to
     // ship un-gated with notice, the Krea/Boogu precedent) — so NO `gated: true`.
     assert_ne!(
@@ -1782,18 +2024,12 @@ fn sana_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet) — an empty list would match every
-    // LoRA (sc-1927).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana loraCompatibility.families"
+    // SANA adapters are not wired. Do not advertise a reserved LoRA family: the request router
+    // rejects LoRA carriers fail-closed, so surfacing an adapter picker here would promise an
+    // operation the worker intentionally refuses.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
@@ -1807,10 +2043,10 @@ fn sana_manifest_entry_gates_correctly() {
     );
 }
 
-/// sc-8490: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family, text_to_image
-/// only (CFG-free few-step distillation, no edit/reference surface), un-gated `SceneWorks/*` MLX
-/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and the
-/// SANA LoRA family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
+/// sc-8490/sc-18475: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family,
+/// text-to-image plus non-edit image-to-image, un-gated `SceneWorks/*` MLX
+/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and no
+/// unsupported LoRA advertisement. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
 /// loop fails CI. Descriptor-derived guidance/negative/backend flags are covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
 #[test]
@@ -1822,13 +2058,17 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana-sprint family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (Sprint is plain few-step t2i).
+    // sc-18475: Sprint exposes the same non-edit singular-reference img2img shape as base SANA.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana-sprint capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana-sprint capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE) — no `gated`.
     assert_ne!(
         entry.get("gated").and_then(Value::as_bool),
@@ -1880,17 +2120,10 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana-sprint mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana-sprint loraCompatibility.families"
+    // Sprint shares the same fail-closed adapter contract as base SANA.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana-sprint must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
@@ -1906,8 +2139,9 @@ fn sana_sprint_manifest_entry_gates_correctly() {
 
 /// sc-9946 (epic 8506): the Kolors builtin entry ships the standard q4/q8/bf16 quant matrix from the
 /// un-gated `SceneWorks/kolors-mlx` re-host (was upstream `Kwai-Kolors/Kolors-diffusers` dense +
-/// install-time quant). Unlike SANA, Kolors keeps its full capability surface. Asserts the flip to the
-/// SceneWorks repo, the per-tier variants (q4 default + q8 + bf16) each an installable artifact with a
+/// install-time quant). Unlike SANA, Kolors keeps its live edit and character surfaces; the retired
+/// `style_variations` UI mode is intentionally absent. Asserts the flip to the SceneWorks repo, the
+/// per-tier variants (q4 default + q8 + bf16) each an installable artifact with a
 /// `footprint`, `mlx.quantize: 4` (packed q4 default) + `minMemoryGb`, and the reserved kolors LoRA
 /// family — so a manifest drift fails CI without a real download. Descriptor guidance/steps are covered
 /// by `model_table_rows_resolve_and_flags_match_descriptor`.
@@ -1920,7 +2154,8 @@ fn kolors_manifest_entry_gates_correctly() {
         Some("kolors"),
         "kolors family"
     );
-    // Kolors keeps its full surface (unlike base SANA's t2i-only): edit/character/style variations.
+    // Kolors keeps its live edit/character surface; SANA's narrower reference surface is non-edit
+    // singular-reference img2img. The retired style mode must not reappear in the catalog.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
@@ -1928,13 +2163,8 @@ fn kolors_manifest_entry_gates_correctly() {
         .unwrap_or_default();
     assert_eq!(
         caps,
-        vec![
-            "text_to_image",
-            "edit_image",
-            "character_image",
-            "style_variations"
-        ],
-        "kolors keeps its full capability surface"
+        vec!["text_to_image", "edit_image", "character_image"],
+        "kolors keeps its full live capability surface without the retired style mode"
     );
     // Un-gated SceneWorks/* MLX re-host (the tier LICENSE travels with the weights) — NO `gated: true`.
     assert_ne!(
@@ -2365,4 +2595,306 @@ async fn utilization_cache_shares_a_fresh_probe_and_refreshes_when_stale() {
     })
     .await;
     assert_eq!(probes.load(Ordering::SeqCst), 2);
+}
+
+/// sc-15799 (tier integrity): the dense-TE carve-out must be DECLARED IN THE SHIPPED CATALOG, because it
+/// is an above-tier residency — on a q4 or q8 tier a `denseTextEncoderTier` entry keeps its text encoder
+/// at a HIGHER precision than the user selected.
+///
+/// That story deleted the hardcoded `DENSE_TE_TIER_MODELS` list from `tier_resolver.rs`: an exception the
+/// shared decision cannot see is exactly the defect it removes, and while the ids lived in Rust the
+/// catalog, the audit table (`config/tier-integrity.jsonc`) and the parity lane had no way to know they
+/// existed. The deletion has a real hazard, though — if the manifest does NOT declare the flag,
+/// `resolve_quant` stops returning `None` and the load-time `.quantize()` re-quantizes a bf16 text encoder
+/// that sc-8711/sc-9362 deliberately kept dense. This test is the guard against that: it reads the SHIPPED
+/// manifest bytes, so a manifest edit dropping the flag fails here rather than silently degrading the
+/// FLUX.2-klein pair's output quality.
+///
+/// Ungated: it reads catalog data only, so it must hold on every build (the MLX and candle lanes both
+/// consult `is_dense_te_tier`).
+#[test]
+fn shipped_dense_te_turnkeys_declare_their_above_tier_text_encoder() {
+    for id in ["flux2_klein_9b", "flux2_klein_9b_kv"] {
+        let entry = builtin_model_entry(id);
+        let declared = entry
+            .get("mlx")
+            .and_then(Value::as_object)
+            .and_then(|mlx| mlx.get("denseTextEncoderTier"))
+            .and_then(Value::as_bool);
+        assert_eq!(
+            declared,
+            Some(true),
+            "{id} keeps a DENSE bf16 text encoder on every packed tier (only the transformer is packed, \
+             sc-8711), so it must declare `mlx.denseTextEncoderTier: true`. Without it `resolve_quant` \
+             no longer forces the load quant to None and the dense TE gets re-quantized — the hardcoded \
+             id list that used to cover this is deleted (sc-15799)."
+        );
+    }
+}
+
+/// sc-15799: `mlx.denseTextEncoderTier` may only be declared on an entry that actually SHIPS per-tier
+/// artifacts. The flag's whole meaning is "this tier subdir holds a packed transformer beside a dense
+/// TE"; on an entry with no packed tier it would force the load quant to `None` and silently disable
+/// quantization altogether rather than declaring an above-tier residency. Checked against the shipped
+/// download variants, which is the property that is actually true of a tiered turnkey — deliberately NOT
+/// against `mlx.standardTierLayout`, because the klein pair gets its standard-tier routing from the
+/// `STANDARD_TIER_MODELS` registry and does not set that flag (a separate, still-hardcoded declaration
+/// that is out of this story's scope).
+#[test]
+fn dense_te_declarations_only_appear_on_entries_with_packed_tiers() {
+    for entry in builtin_models_manifest() {
+        let mlx = entry.get("mlx").and_then(Value::as_object);
+        let dense_te = mlx
+            .and_then(|mlx| mlx.get("denseTextEncoderTier"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !dense_te {
+            continue;
+        }
+        let id = entry.get("id").and_then(Value::as_str).unwrap_or("<no id>");
+        let packed_variants: Vec<&str> = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .map(|downloads| {
+                downloads
+                    .iter()
+                    .filter_map(|download| download.get("variant").and_then(Value::as_str))
+                    .filter(|variant| matches!(*variant, "q4" | "q8"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !packed_variants.is_empty(),
+            "{id} declares denseTextEncoderTier but hosts no packed (q4/q8) tier variant. The flag \
+             describes a per-tier turnkey whose transformer is packed beside a dense TE; with no packed \
+             tier it would disable the load quant entirely instead of declaring an above-tier residency"
+        );
+    }
+}
+
+// sc-16247 (GH #1966): the startup CUDA probe must run on the candle GPU worker and NOWHERE else.
+// All three conditions are load-bearing and every one of them fails silently if inverted:
+//   * `cpu`  — the utility pool, INCLUDING the API's in-process loops (`spawn_inprocess_utility_worker`,
+//              2 by default), would each build and tear down a CUDA context on a lane that never
+//              touches CUDA;
+//   * `mlx`  — the macOS GPU worker, which has `metal_preflight` and no CUDA at all;
+//   * candle off — nothing to probe, and `cuda_preflight` is a compiled-out no-op anyway.
+// Inverting the whole predicate the other way makes the server-lane gate (AC5) dead code that
+// still compiles and still passes every other test.
+#[test]
+fn cuda_preflight_runs_on_the_candle_gpu_worker_and_no_other_lane() {
+    let gated = |candle: bool, gpu_id: &str| {
+        let mut settings = crate::Settings::from_env();
+        settings.backend_candle_enabled = candle;
+        settings.gpu_id = gpu_id.to_owned();
+        crate::should_run_cuda_preflight(&settings)
+    };
+
+    // The one lane that must probe: a candle build on a real GPU id (`auto` never reaches
+    // `run_worker_loop`, so the ids seen here are the per-GPU children's).
+    for gpu_id in ["0", "1"] {
+        assert!(
+            gated(true, gpu_id),
+            "the candle GPU worker on gpu {gpu_id} must run the CUDA preflight"
+        );
+    }
+
+    // Every lane that must NOT.
+    assert!(
+        !gated(true, "cpu"),
+        "the CPU utility pool must never build a CUDA context"
+    );
+    assert!(
+        !gated(true, "mlx"),
+        "the macOS MLX worker has its own Metal probe and no CUDA"
+    );
+    for gpu_id in ["0", "cpu", "mlx"] {
+        assert!(
+            !gated(false, gpu_id),
+            "with the candle backend disabled there is nothing to probe (gpu {gpu_id})"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sc-16260: an unusable GPU must change what the worker CLAIMS, not just what it logs.
+// ---------------------------------------------------------------------------
+
+/// The routing half of the story. sc-16247 shipped the loud startup log; a driver-mismatch host
+/// still registered, still advertised its full candle capability set, and so still claimed and
+/// failed every routed generation job. Withholding the capability block is what actually stops
+/// that: it degrades the worker to the `[placeholder, gpu, nvidia]` set a non-candle build
+/// advertises, which `jobs_store::worker_supports_job` refuses for every generation job, so the
+/// work stays QUEUED for a host that gets fixed.
+///
+/// Candle-gated because `with_candle_capabilities` is a no-op outside the candle lane — on a
+/// non-candle build BOTH sides would be the bare placeholder set and this test would pass with the
+/// health check ripped out entirely.
+///
+/// Asserts against the HEALTHY set rather than a hardcoded list, so this cannot rot into a false
+/// green as capabilities are added: whatever a healthy candle worker advertises, an unusable one
+/// must advertise none of it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn an_unusable_gpu_withholds_every_candle_capability() {
+    use crate::gpu::with_candle_capabilities;
+    use sceneworks_core::contracts::WorkerCapability;
+
+    let mut settings = crate::Settings::from_env();
+    settings.backend_candle_enabled = true;
+    settings.gpu_id = "0".to_owned();
+    // sm_120, so the compute-cap-gated markers (`int8_convrot`, `nvfp4`) are in the healthy set
+    // too — they are advertised eligibility for a GPU this worker cannot reach, so they must be
+    // withheld as well.
+    let compute_cap = Some(12.0);
+    let descriptor = || crate::gpu::parse_nvidia_smi_gpus("0, Test GPU, 98304, 1024, 97280, 3")
+        .into_iter()
+        .next()
+        .expect("one parsed descriptor");
+
+    let healthy =
+        with_candle_capabilities(descriptor(), &settings, compute_cap, &crate::GpuHealth::Usable);
+    let unusable = with_candle_capabilities(
+        descriptor(),
+        &settings,
+        compute_cap,
+        &crate::GpuHealth::Unusable {
+            reason: "DriverError(CUDA_ERROR_SYSTEM_DRIVER_MISMATCH, \"...\")".to_owned(),
+        },
+    );
+
+    // The healthy worker must actually have gained something, or the comparison below is vacuous.
+    assert!(
+        healthy.capabilities.len() > unusable.capabilities.len(),
+        "a healthy candle worker must advertise MORE than an unusable one; healthy={:?}",
+        healthy.capabilities
+    );
+    assert!(
+        healthy.capabilities.contains(&WorkerCapability::ImageGenerate),
+        "the healthy baseline must include image_generate, else this test proves nothing"
+    );
+    for capability in [
+        WorkerCapability::VideoExtend,
+        WorkerCapability::VideoBridge,
+        WorkerCapability::PersonReplace,
+        WorkerCapability::ImageDetail,
+        WorkerCapability::ImageSegment,
+        WorkerCapability::DatasetAnalysis,
+    ] {
+        assert!(
+            healthy.capabilities.contains(&capability),
+            "a healthy candle worker must advertise every native dispatch capability; \
+             missing {capability:?}"
+        );
+    }
+
+    // The withheld worker keeps the descriptor's own base set PLUS the `candle` lane marker, and
+    // nothing else. The marker is not a job capability — it says "this host serves the candle
+    // lane", which `fail_stranded_candle_jobs` needs in order to leave queued work WAITING instead
+    // of terminally failing it as `candle_unavailable`, and which keeps the worker out of the
+    // web's `isPlaceholderOnlyGpuWorker` filter so its card (and remedy) still render.
+    let marker = WorkerCapability::Unknown("candle".to_owned());
+    let mut expected = descriptor().capabilities;
+    expected.push(marker.clone());
+    assert_eq!(
+        unusable.capabilities, expected,
+        "an unusable GPU must advertise the bare nvidia descriptor plus the candle lane marker, \
+         and nothing else"
+    );
+    assert!(
+        healthy.capabilities.contains(&marker),
+        "the marker must be present on BOTH, or the unusable worker looks like a different lane"
+    );
+
+    // Every capability the healthy worker GAINED names work this GPU cannot do. The marker is the
+    // one deliberate exception, so exclude it explicitly rather than silently.
+    for gained in &healthy.capabilities {
+        if descriptor().capabilities.contains(gained) || *gained == marker {
+            continue;
+        }
+        assert!(
+            !unusable.capabilities.contains(gained),
+            "{gained:?} is served by the CUDA device the probe could not acquire, so an unusable \
+             GPU must not advertise it"
+        );
+    }
+}
+
+/// The verdict type's two consumers read it through these accessors — the capability gate asks
+/// `is_usable`, the heartbeat asks `reason` — so an inverted accessor would silently make an
+/// unhealthy worker advertise everything AND report `idle`.
+///
+/// Deliberately NOT candle-gated: `GpuHealth` is compiled on every target, and the parity lane
+/// (macOS / candle-off) is where most contributors run the suite.
+#[test]
+fn gpu_health_reports_usability_and_carries_the_remedy() {
+    assert!(crate::GpuHealth::Usable.is_usable());
+    assert_eq!(crate::GpuHealth::Usable.reason(), None);
+
+    let unusable = crate::GpuHealth::Unusable {
+        reason: "reboot onto the staged driver".to_owned(),
+    };
+    assert!(!unusable.is_usable());
+    assert_eq!(unusable.reason(), Some("reboot onto the staged driver"));
+}
+
+/// Which probe failures may withdraw a worker's capabilities — and AC 3, that the reason it then
+/// reports is the SHARED guidance rather than a second copy of that text.
+///
+/// Both halves run through the real `classify_probe_outcome`, not a value the test composed, so a
+/// future edit that hand-writes a status message or drops the severity check turns this red.
+///
+/// The severity split is the same one sc-16247 drew for the desktop setup screen, and it matters
+/// more here: a transient CUDA OOM (another process, or an orphaned worker from a crashed session,
+/// holding the GPU) says nothing about the driver stack. Treating it as unhealthy would strip every
+/// capability and — with `SCENEWORKS_CANDLE_REQUIRED=1` — fail queued work over a condition that
+/// clears by itself.
+#[test]
+fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
+    use crate::preflight::cuda_preflight_message;
+
+    let classify =
+        |underlying: &str| crate::classify_probe_outcome(Err(cuda_preflight_message(underlying)), "0");
+
+    // A clean probe is usable, obviously — but pin it so an inverted check can't pass the rest.
+    assert!(crate::classify_probe_outcome(Ok(()), "0").is_usable());
+
+    // DISQUALIFYING: the driver-class family this story exists for. The verbatim string from
+    // GH #1966.
+    let health = classify(
+        "DriverError(CUDA_ERROR_SYSTEM_DRIVER_MISMATCH, \"system has unsupported display driver / \
+         cuda driver combination\")",
+    );
+    assert!(
+        !health.is_usable(),
+        "a driver-stack mismatch must withdraw the worker's capabilities"
+    );
+    let reason = health.reason().expect("an unusable GPU carries a reason");
+    assert!(
+        reason.contains("reboot"),
+        "the reported reason must be the shared host-side remedy, got: {reason}"
+    );
+    assert!(
+        reason.contains("CUDA_ERROR_SYSTEM_DRIVER_MISMATCH"),
+        "the underlying CUDA error must survive into the reason for the logs, got: {reason}"
+    );
+
+    // NOT disqualifying: failures that may clear on their own. The worker keeps advertising and
+    // any job that does run reports the classified error itself.
+    for transient in [
+        "DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")",
+        "cuda error: CUBLAS_STATUS_NOT_INITIALIZED",
+        "the CUDA preflight probe did not complete: task panicked",
+    ] {
+        let health = classify(transient);
+        assert!(
+            health.is_usable(),
+            "{transient:?} may be transient and must NOT strip the worker's capabilities"
+        );
+        assert_eq!(
+            health.reason(),
+            None,
+            "a worker that stays usable must report no unhealthy reason"
+        );
+    }
 }

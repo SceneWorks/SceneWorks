@@ -11,6 +11,20 @@ enum GenEvent {
         index: usize,
         phase: LoadPhase,
     },
+    /// One latent-resolution preview frame of image `index`'s developing render (epic 16624,
+    /// sc-16904). Forwarded from a [`gen_core::PreviewSink`] by [`preview_sink_for`]; engines
+    /// that don't emit previews simply never produce this variant.
+    Preview {
+        index: usize,
+        frame: gen_core::PreviewFrame,
+    },
+    /// Typed, provider-authored account of the prompt that actually reached image `index`'s
+    /// renderer. Only an active request-local sink can produce this event.
+    PromptEnhancement {
+        index: usize,
+        expected_prompt: String,
+        report: gen_core::PromptEnhancementReport,
+    },
     Image {
         index: usize,
         seed: i64,
@@ -33,6 +47,57 @@ type GeneratedImage = (i64, u32, u32, Vec<u8>);
 /// four angle-set lanes — InstantID, FLUX.2 edit, Qwen-Edit, SenseNova-U1) can attach a per-image
 /// score without disturbing the shared [`GeneratedImage`] tuple every other generator returns.
 type ScoredGeneratedImage = (i64, u32, u32, Vec<u8>, Option<JsonObject>);
+
+/// Per-image preview sink for a [`GenerationRequest`](gen_core::GenerationRequest) (sc-16904).
+///
+/// `PreviewSink::emit` runs synchronously on the denoise thread, so the closure must never block:
+/// `try_send` drops the frame when the channel is momentarily full. The consumer keeps only the
+/// latest frame per job (single-slot, latest-wins), so a dropped intermediate frame is invisible.
+/// Contrast with [`send_gen_progress`]'s `blocking_send`, which is correct for `Progress` events
+/// (they are load-bearing for cancel polling) but would stall the GPU here.
+fn preview_sink_for(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+) -> gen_core::PreviewSink {
+    let tx = tx.clone();
+    gen_core::PreviewSink::new(move |frame| {
+        let _ = tx.try_send(GenEvent::Preview { index, frame });
+    })
+}
+
+#[derive(Clone)]
+struct PromptEnhancementEventSink {
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+}
+
+impl PromptEnhancementEventSink {
+    fn for_prompt(&self, prompt: &str) -> gen_core::PromptEnhancementSink {
+        let tx = self.tx.clone();
+        let index = self.index;
+        let expected_prompt = prompt.to_owned();
+        gen_core::PromptEnhancementSink::new(move |report| {
+            // One small load-bearing provenance event per image. Unlike decorative previews this
+            // must not be dropped under channel pressure: a missing report fails the enabled
+            // request closed.
+            let _ = tx.blocking_send(GenEvent::PromptEnhancement {
+                index,
+                expected_prompt: expected_prompt.clone(),
+                report,
+            });
+        })
+    }
+}
+
+fn prompt_enhancement_event_sink_for(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+) -> PromptEnhancementEventSink {
+    PromptEnhancementEventSink {
+        tx: tx.clone(),
+        index,
+    }
+}
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     let event = match progress {
@@ -89,11 +154,18 @@ fn drive_gen_items<I, Item, F>(
 ) -> WorkerResult<()>
 where
     I: IntoIterator<Item = Item>,
-    F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<GeneratedImage>>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<GeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
-        let Some(image) = generate(index, item, &mut on_progress)? else {
+        let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
+        else {
             break;
         };
         if !send_generated_image(&tx, index, image) {
@@ -105,7 +177,48 @@ where
         // ceiling — an OS memory-pressure SIGKILL (Jetsam) that the dense SenseNova-U1 8B
         // family hits first (sc-5567). Frees only freed/retained buffers; the cached
         // generator's live weight arrays are untouched.
-        release_gen_cache_between_items();
+    }
+    Ok(())
+}
+
+/// Prompt-reporting sibling of [`drive_gen_items`]. Kept separate so the additive inference
+/// contract changes only the FLUX.2-dev-capable generic lanes; every other producer remains source-
+/// and behavior-identical.
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn drive_gen_items_reported<I, Item, F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    items: I,
+    mut generate: F,
+) -> WorkerResult<()>
+where
+    I: IntoIterator<Item = Item>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        PromptEnhancementEventSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<GeneratedImage>>,
+{
+    for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
+        let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
+        let Some(image) = generate(
+            index,
+            item,
+            preview_sink_for(&tx, index),
+            prompt_enhancement_event_sink_for(&tx, index),
+            &mut on_progress,
+        )?
+        else {
+            break;
+        };
+        if !send_generated_image(&tx, index, image) {
+            break;
+        }
     }
     Ok(())
 }
@@ -134,17 +247,62 @@ fn drive_gen_items_scored<I, Item, F>(
 ) -> WorkerResult<()>
 where
     I: IntoIterator<Item = Item>,
-    F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<ScoredGeneratedImage>>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<ScoredGeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
-        let Some(image) = generate(index, item, &mut on_progress)? else {
+        let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
+        else {
             break;
         };
         if !send_scored_generated_image(&tx, index, image) {
             break;
         }
-        release_gen_cache_between_items();
+    }
+    Ok(())
+}
+
+/// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by the shared MLX lane.
+/// Face likeness and prompt provenance remain independent per-image facts. The Candle FLUX.2-dev
+/// edit route does not admit the character-image mode, so it has no scored/reporting combination.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn drive_gen_items_scored_reported<I, Item, F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    items: I,
+    mut generate: F,
+) -> WorkerResult<()>
+where
+    I: IntoIterator<Item = Item>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        PromptEnhancementEventSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<ScoredGeneratedImage>>,
+{
+    for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
+        let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
+        let Some(image) = generate(
+            index,
+            item,
+            preview_sink_for(&tx, index),
+            prompt_enhancement_event_sink_for(&tx, index),
+            &mut on_progress,
+        )?
+        else {
+            break;
+        };
+        if !send_scored_generated_image(&tx, index, image) {
+            break;
+        }
     }
     Ok(())
 }
@@ -162,6 +320,17 @@ fn release_gen_cache_between_items() {
 
 #[cfg(not(target_os = "macos"))]
 fn release_gen_cache_between_items() {}
+
+/// Always release allocator-cache buffers at the end of an item, including cancellation and error
+/// exits. Provider scopes synchronize/release active graphs and windows first; this guard then
+/// removes freed scratch so the next warm request observes an independent cache state.
+struct RequestCacheRelease;
+
+impl Drop for RequestCacheRelease {
+    fn drop(&mut self) {
+        release_gen_cache_between_items();
+    }
+}
 
 // Shared by the macOS MLX paths and the Windows/CUDA candle InstantID lane (sc-5491): both load a
 // `!Send` engine on the blocking thread and stream per-item events back. `G` is the loaded model
@@ -227,6 +396,44 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_with_request_state(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        move |generator, _cache_state, _load_policy, _external_committed_bytes, tx, cancel| {
+            drive(generator, tx, cancel)
+        },
+    )
+}
+
+/// Cached stream seam that exposes cold/warm state and the actual cold-load residency policy to the
+/// request callback. Geometry and request strategy remain absent from the generator cache key.
+fn start_cached_gen_stream_with_request_state<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            gen_core::OffloadPolicy,
+            u64,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
@@ -237,18 +444,25 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator(
+        crate::generator_cache::with_cached_generator_for_request(
             engine_id,
             spec,
             load_error_context,
-            move |generator| {
+            move |generator, cache_state, load_policy, external_committed_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
                     engine_id,
                     adapter_count,
                 );
-                drive(generator, tx, blocking_cancel)
+                drive(
+                    generator,
+                    cache_state,
+                    load_policy,
+                    external_committed_bytes,
+                    tx,
+                    blocking_cancel,
+                )
             },
         )
         .await

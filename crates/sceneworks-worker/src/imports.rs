@@ -101,17 +101,48 @@ pub(crate) async fn copy_dir_recursive(source: &Path, target: &Path) -> WorkerRe
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelFileIdentity {
+    pub(crate) name: String,
+    pub(crate) bytes: u64,
+    pub(crate) modified_nanos: String,
+}
+
+/// Cheap cache identity for a checkpoint digest. Renames and replacements deliberately miss this
+/// cache and trigger one fresh content hash; byte-identical renames still resolve after that hash.
+pub(crate) fn model_file_identity(path: &Path) -> Option<ModelFileIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .to_string();
+    Some(ModelFileIdentity {
+        name: path.file_name()?.to_string_lossy().into_owned(),
+        bytes: metadata.len(),
+        modified_nanos,
+    })
+}
+
 pub(crate) async fn write_model_install_marker(
     target_dir: &Path,
     payload: &JsonObject,
     repo: &str,
     job_id: &str,
+    model_file_identity: Option<&ModelFileIdentity>,
+    model_file_sha256: Option<&str>,
 ) -> WorkerResult<()> {
     tokio::fs::create_dir_all(target_dir).await?;
     let marker = json!({
         "repo": repo,
         "modelId": payload.get("modelId").cloned().unwrap_or(Value::Null),
         "modelName": payload.get("modelName").cloned().unwrap_or(Value::Null),
+        "modelFileName": model_file_identity.map(|identity| identity.name.as_str()),
+        "modelFileBytes": model_file_identity.map(|identity| identity.bytes),
+        "modelFileModifiedNanos": model_file_identity.map(|identity| identity.modified_nanos.as_str()),
+        "modelFileSha256": model_file_sha256,
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });
@@ -123,6 +154,14 @@ pub(crate) async fn write_model_install_marker(
 /// Write the versioned HF-cache install receipt. Unlike the legacy marker this records the exact
 /// resolved snapshot files, so a later manifest change can distinguish a still-usable install from
 /// a torn download.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DownloadArtifactReceipt<'a> {
+    pub(crate) resolved_tier: Option<&'a str>,
+    pub(crate) tree_stamp: Option<&'a str>,
+    pub(crate) lora_file_identity: Option<&'a ModelFileIdentity>,
+    pub(crate) lora_file_sha256: Option<&'a str>,
+}
+
 pub(crate) async fn write_model_download_receipt(
     target_dir: &Path,
     payload: &JsonObject,
@@ -130,20 +169,43 @@ pub(crate) async fn write_model_download_receipt(
     job_id: &str,
     resolved_files: &[String],
     snapshot_revision: Option<&str>,
+    artifact: DownloadArtifactReceipt<'_>,
 ) -> WorkerResult<()> {
     tokio::fs::create_dir_all(target_dir).await?;
-    let receipt = json!({
+    let variant = payload
+        .get("variant")
+        .cloned()
+        .unwrap_or_else(|| Value::String("default".to_owned()));
+    let mut receipt = json!({
         "schemaVersion": 2,
         "repo": repo,
         "modelId": payload.get("modelId").cloned().unwrap_or(Value::Null),
         "modelName": payload.get("modelName").cloned().unwrap_or(Value::Null),
-        "variant": payload.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
+        "variant": variant,
+        "resolvedTier": artifact.resolved_tier,
         "manifestFiles": payload.get("files").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "resolvedFiles": resolved_files,
         "snapshotRevision": snapshot_revision,
+        "artifactTreeStamp": artifact.tree_stamp,
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });
+    if let (Some(identity), Some(hash)) = (artifact.lora_file_identity, artifact.lora_file_sha256) {
+        let object = receipt.as_object_mut().expect("receipt is an object");
+        object.insert(
+            "loraFileName".to_owned(),
+            Value::String(identity.name.clone()),
+        );
+        object.insert(
+            "loraFileBytes".to_owned(),
+            Value::Number(identity.bytes.into()),
+        );
+        object.insert(
+            "loraFileModifiedNanos".to_owned(),
+            Value::String(identity.modified_nanos.clone()),
+        );
+        object.insert("loraFileSha256".to_owned(), Value::String(hash.to_owned()));
+    }
     let marker_path = target_dir.join(INSTALL_MARKER);
     let mut receipts = match tokio::fs::read(&marker_path).await {
         Ok(bytes) => serde_json::from_slice::<Value>(&bytes)

@@ -1,0 +1,189 @@
+SC15833_CAPTURED_AT=2026-08-04T12:22:32.1937972Z
+SC15833_SOURCE_V1 {"schema_version":1,"captured_at":"2026-08-04T12:22:32.1937972Z","repositories":{"sceneWorks":{"revision":"a9bb7303420855aeb276da33b31aa826a5d09faa","dirty":false,"matrixSourceRevision":"source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5"},"inference":{"revision":"5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d","dirty":false}},"hardware":{"probe":"CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version","memoryBytes":102641958912,"deviceId":"0","name":"NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition","computeCapability":"12.0","driverVersion":"596.36","runtimeVersion":"CUDA 12.9 (nvcc V12.9.41)"},"inputs":[{"role":"base","path":"E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146","bytes":33582076196,"sha256":"896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b","repository":"SceneWorks/flux2-dev-mlx","resolvedRevision":"2868b1461b2b6e6e05d84e52534df3632b4c7d5d","variant":"q4"}]}
+cmd.exe :    Compiling onig_sys v69.9.3
+At line:2 char:945
++ ... capture --test-threads=1'; & $env:ComSpec /d /c $cmdLine 2>&1 | Tee-O ...
++                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling onig_sys v69.9.3:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling ring v0.17.14
+   Compiling libsqlite3-sys v0.30.1
+   Compiling candle-kernels v0.10.2 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling rustls v0.23.40
+   Compiling rustls-webpki v0.103.13
+   Compiling onig v6.5.3
+   Compiling tokenizers v0.22.2
+   Compiling tokenizers v0.21.4
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling core-llm v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling sceneworks-gen-core v0.1.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling rusqlite v0.32.1
+   Compiling sceneworks-core v0.8.1 
+(C:\Users\Michael\.codex\worktrees\26c4\SceneWorks\.worktrees\sc-15833-flux2-dev\crates\sceneworks-core)
+   Compiling runtime-catalog v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling sceneworks-image-quality v0.8.1 
+(C:\Users\Michael\.codex\worktrees\26c4\SceneWorks\.worktrees\sc-15833-flux2-dev\crates\sceneworks-image-quality)
+   Compiling candle-core v0.10.2 
+(https://github.com/huggingface/candle?rev=1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d#1e6aa85e)
+   Compiling candle-nn v0.10.2 
+(https://github.com/huggingface/candle?rev=1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d#1e6aa85e)
+   Compiling candle-audio v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-transformers v0.10.2 
+(https://github.com/huggingface/candle?rev=1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d#1e6aa85e)
+   Compiling candle-llm v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-chatterbox-ve v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-clap v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-openvoice v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-moss-tts v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-kokoro v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-acestep v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-moss-tts-realtime v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-mmaudio v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-moss-sfx v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-stable-audio-3 v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-chatterbox v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-pid v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-face v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-wan v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-qwen-image v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-sana v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-bernini v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-anima v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-scail2 v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-seedvr2 v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-depth v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-svd v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-sensenova v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-sam3 v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-ltx v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-joycaption v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-sdxl v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-flux2 v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-boogu v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-z-image v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-sd3 v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-whisper v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-audio-catalog v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-mage v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-krea v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-ideogram v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-lens v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-flux v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-clip v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-instantid v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-kolors v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-pulid v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-mochi v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-chroma v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling candle-gen-catalog v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling runtime-cuda v0.0.0 
+(https://github.com/SceneWorks/inference?rev=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d#5ffd7612)
+   Compiling sceneworks-worker v0.8.1 
+(C:\Users\Michael\.codex\worktrees\26c4\SceneWorks\.worktrees\sc-15833-flux2-dev\crates\sceneworks-worker)
+warning: linker stdout: LINK : warning LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs; use 
+/NODEFAULTLIB:library
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `sceneworks-worker` (test "cuda_quant_smoke") generated 1 warning
+warning: `sceneworks-worker` (bin "dump-engine-capabilities") generated 1 warning (1 duplicate)
+warning: `sceneworks-worker` (lib test) generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 5m 43s
+     Running unittests src\lib.rs (target\release\deps\sceneworks_worker-354460de01d57b5d.exe)
+
+running 1 test
+test flux2_dev_gpu_smoke::flux2_dev_edit_candle_gpu_smoke ... [smoke] loading flux2_dev EDIT (Q4) from E:\huggingface\sceneworks-staging\sc15833-flux2-dev-q4-2868b146 ...
+[smoke] dev edit 512x512 @ 8 steps (single ref) ...
+[smoke] dev edit 512x512 std 81.54 -> docs/calibration/sc-15833\flux2_dev_edit_candle.png sha256=51500fa92ba68f72f366ab8f82e170164a12bf79336d858568f917e55138eb03
+[smoke] DONE: flux2_dev edit (candle) coherent
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1268 filtered out; finished in 111.29s
+
+     Running unittests src\bin\dump-engine-capabilities.rs 
+(target\release\deps\dump_engine_capabilities-2ef1f6ae096afd80.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\candle_kernels_patch_guard.rs (target\release\deps\candle_kernels_patch_guard-4b5c30f4374b47b0.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests\cuda_quant_smoke.rs (target\release\deps\cuda_quant_smoke-0258aabc33d0d78f.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\image_workspace_dep_guard.rs (target\release\deps\image_workspace_dep_guard-674e757aa371c0dd.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests\nax_guard.rs (target\release\deps\nax_guard-d3caba16c6b0c8bc.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

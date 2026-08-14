@@ -1,0 +1,602 @@
+{
+  "schemaVersion": 4,
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "id": "imc-aaaaaaaaaaaaaaaaaaaa",
+      "logicalCaseId": "implan-bbbbbbbbbbbbbbbbbbbb",
+      "status": "complete",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "repositories": {
+        "sceneWorks": {
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:1111111"
+        },
+        "inference": {
+          "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "dirty": false,
+          "closureDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "hardware": {
+        "probe": "mlx-rs",
+        "memoryBytes": 8589934592,
+        "model": "Fixture Mac",
+        "chip": "Fixture Silicon",
+        "osVersion": "26.0",
+        "metalDevice": "Fixture GPU",
+        "mlxMemoryLimitBytes": 5368709120,
+        "wiredLimitBytes": 7516192768
+      },
+      "artifact": {
+        "repository": "SceneWorks/fixture",
+        "resolvedRevision": "cccccccccccccccccccccccccccccccccccccccc",
+        "variant": "packed-q4"
+      },
+      "target": {
+        "modelId": "fixture_model",
+        "provider": "fixture_provider",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "fixture": "fixture-seed42",
+      "strategy": {
+        "rung": "bounded_decode",
+        "engagedRungs": [
+          "resident",
+          "bounded_decode"
+        ],
+        "parameters": {
+          "decodeTileEdge": 512,
+          "decodeOverlap": 128
+        }
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            },
+            "result": "passed"
+          },
+          {
+            "parameters": {
+              "decodeTileEdge": 256,
+              "decodeOverlap": 32
+            },
+            "result": "failed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "result": "passed",
+          "predictedBytes": 5368709120,
+          "effectiveBudgetBytes": 5368709120
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "result": "passed",
+          "cleanupVerified": true,
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "error",
+          "result": "passed",
+          "cleanupVerified": true,
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "result": "not_applicable",
+          "reason": "no overlay"
+        }
+      ],
+      "predictedPeakBytes": {
+        "conditioning": 2147483648,
+        "denoise": 5368709120,
+        "decode": 4294967296,
+        "overall": 5368709120
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1073741824,
+          "allocatorBytes": 1610612736,
+          "deviceBytes": 1610612736,
+          "wiredBytes": 1610612736,
+          "reclaimableBytes": 536870912
+        },
+        "denoise": {
+          "activeBytes": 3221225472,
+          "allocatorBytes": 4294967296,
+          "deviceBytes": 4294967296,
+          "wiredBytes": 4294967296,
+          "reclaimableBytes": 536870912
+        },
+        "decode": {
+          "activeBytes": 2147483648,
+          "allocatorBytes": 3221225472,
+          "deviceBytes": 3221225472,
+          "wiredBytes": 3221225472,
+          "reclaimableBytes": 536870912
+        },
+        "overall": {
+          "activeBytes": 3221225472,
+          "allocatorBytes": 4831838208,
+          "deviceBytes": 4831838208,
+          "wiredBytes": 4831838208,
+          "reclaimableBytes": 536870912
+        }
+      },
+      "quality": {
+        "contract": "tolerance",
+        "identicalLatents": true,
+        "result": "passed",
+        "maximumError": 0.01,
+        "meanError": 0.001,
+        "maximumErrorThreshold": 0.08,
+        "meanErrorThreshold": 0.01
+      },
+      "negativeMutation": {
+        "parameters": {
+          "decodeTileEdge": 256,
+          "decodeOverlap": 32
+        },
+        "measured": true,
+        "result": "failed_as_expected",
+        "maximumError": 0.09,
+        "meanError": 0.02
+      },
+      "loadability": {
+        "result": "passed",
+        "resolvedPathFingerprint": "SceneWorks/fixture@cccccccccccccccccccccccccccccccccccccccc:packed-q4"
+      },
+      "diagnostics": {
+        "adapter": "fixture",
+        "execution": "executed",
+        "blockers": [],
+        "measurements": [
+          {
+            "name": "peak",
+            "unit": "bytes",
+            "value": 5368709120
+          }
+        ]
+      },
+      "calibrationFingerprint": "fixture-formula-v2",
+      "capturedAt": "2026-07-28T12:00:00Z",
+      "harnessVersion": "sceneworks-memory-v5",
+      "loadShape": "eager_materialization"
+    },
+    {
+      "id": "imc-bbbbbbbbbbbbbbbbbbbb",
+      "logicalCaseId": "implan-bbbbbbbbbbbbbbbbbbbb",
+      "status": "complete",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "repositories": {
+        "sceneWorks": {
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:1111111"
+        },
+        "inference": {
+          "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "dirty": false,
+          "closureDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "hardware": {
+        "probe": "mlx-rs",
+        "memoryBytes": 8589934592,
+        "model": "Fixture Mac",
+        "chip": "Fixture Silicon",
+        "osVersion": "26.0",
+        "metalDevice": "Fixture GPU",
+        "mlxMemoryLimitBytes": 5368709120,
+        "wiredLimitBytes": 7516192768
+      },
+      "artifact": {
+        "repository": "SceneWorks/fixture",
+        "resolvedRevision": "cccccccccccccccccccccccccccccccccccccccc",
+        "variant": "packed-q4"
+      },
+      "target": {
+        "modelId": "fixture_model",
+        "provider": "fixture_provider",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "fixture": "fixture-seed42",
+      "strategy": {
+        "rung": "bounded_transformer_residency",
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "decodeTileEdge": 512,
+          "decodeOverlap": 128,
+          "attentionChunkSize": 65536,
+          "transformerWindowSize": 1
+        }
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 65536,
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          },
+          {
+            "parameters": {
+              "decodeTileEdge": 256,
+              "decodeOverlap": 32,
+              "attentionChunkSize": 1024,
+              "transformerWindowSize": 1
+            },
+            "result": "failed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "result": "passed",
+          "predictedBytes": 5368709120,
+          "effectiveBudgetBytes": 5368709120
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "result": "passed",
+          "cleanupVerified": true,
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "error",
+          "result": "passed",
+          "cleanupVerified": true,
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "result": "not_applicable",
+          "reason": "no overlay"
+        }
+      ],
+      "predictedPeakBytes": {
+        "conditioning": 2147483648,
+        "denoise": 5368709120,
+        "decode": 4294967296,
+        "overall": 5368709120
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1073741824,
+          "allocatorBytes": 1610612736,
+          "deviceBytes": 1610612736,
+          "wiredBytes": 1610612736,
+          "reclaimableBytes": 536870912
+        },
+        "denoise": {
+          "activeBytes": 3221225472,
+          "allocatorBytes": 4294967296,
+          "deviceBytes": 4294967296,
+          "wiredBytes": 4294967296,
+          "reclaimableBytes": 536870912
+        },
+        "decode": {
+          "activeBytes": 2147483648,
+          "allocatorBytes": 3221225472,
+          "deviceBytes": 3221225472,
+          "wiredBytes": 3221225472,
+          "reclaimableBytes": 536870912
+        },
+        "overall": {
+          "activeBytes": 3221225472,
+          "allocatorBytes": 4831838208,
+          "deviceBytes": 4831838208,
+          "wiredBytes": 4831838208,
+          "reclaimableBytes": 536870912
+        }
+      },
+      "quality": {
+        "contract": "tolerance",
+        "identicalLatents": true,
+        "result": "passed",
+        "maximumError": 0.01,
+        "meanError": 0.001,
+        "maximumErrorThreshold": 0.08,
+        "meanErrorThreshold": 0.01
+      },
+      "negativeMutation": {
+        "parameters": {
+          "decodeTileEdge": 256,
+          "decodeOverlap": 32,
+          "attentionChunkSize": 1024,
+          "transformerWindowSize": 1
+        },
+        "measured": true,
+        "result": "failed_as_expected",
+        "maximumError": 0.09,
+        "meanError": 0.02
+      },
+      "loadability": {
+        "result": "passed",
+        "resolvedPathFingerprint": "SceneWorks/fixture@cccccccccccccccccccccccccccccccccccccccc:packed-q4"
+      },
+      "diagnostics": {
+        "adapter": "fixture",
+        "execution": "executed",
+        "blockers": [],
+        "measurements": [
+          {
+            "name": "peak",
+            "unit": "bytes",
+            "value": 5368709120
+          }
+        ]
+      },
+      "calibrationFingerprint": "fixture-formula-v2",
+      "capturedAt": "2026-07-28T12:00:00Z",
+      "harnessVersion": "sceneworks-memory-v5",
+      "loadShape": "deferred_materialization"
+    },
+    {
+      "id": "imc-cccccccccccccccccccc",
+      "logicalCaseId": "implan-cccccccccccccccccccc",
+      "status": "complete",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "repositories": {
+        "sceneWorks": {
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:1111111"
+        },
+        "inference": {
+          "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "dirty": false,
+          "closureDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "hardware": {
+        "probe": "mlx-rs",
+        "memoryBytes": 8589934592,
+        "model": "Fixture Mac",
+        "chip": "Fixture Silicon",
+        "osVersion": "26.0",
+        "metalDevice": "Fixture GPU",
+        "mlxMemoryLimitBytes": 5368709120,
+        "wiredLimitBytes": 7516192768
+      },
+      "artifact": {
+        "repository": "SceneWorks/fixture",
+        "resolvedRevision": "cccccccccccccccccccccccccccccccccccccccc",
+        "variant": "packed-q4"
+      },
+      "target": {
+        "modelId": "fixture_model",
+        "provider": "fixture_provider",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "fixture": "fixture-seed42",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {}
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "result": "passed",
+          "predictedBytes": 5368709120,
+          "effectiveBudgetBytes": 5368709120
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "result": "passed",
+          "cleanupVerified": true,
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "error",
+          "result": "passed",
+          "cleanupVerified": true,
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "result": "not_applicable",
+          "reason": "no overlay"
+        }
+      ],
+      "predictedPeakBytes": {
+        "conditioning": 2147483648,
+        "denoise": 5368709120,
+        "decode": 4294967296,
+        "overall": 5368709120
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1073741824,
+          "allocatorBytes": 1610612736,
+          "deviceBytes": 1610612736,
+          "wiredBytes": 1610612736,
+          "reclaimableBytes": 536870912
+        },
+        "denoise": {
+          "activeBytes": 3221225472,
+          "allocatorBytes": 4294967296,
+          "deviceBytes": 4294967296,
+          "wiredBytes": 4294967296,
+          "reclaimableBytes": 536870912
+        },
+        "decode": {
+          "activeBytes": 2147483648,
+          "allocatorBytes": 3221225472,
+          "deviceBytes": 3221225472,
+          "wiredBytes": 3221225472,
+          "reclaimableBytes": 536870912
+        },
+        "overall": {
+          "activeBytes": 3221225472,
+          "allocatorBytes": 4831838208,
+          "deviceBytes": 4831838208,
+          "wiredBytes": 4831838208,
+          "reclaimableBytes": 536870912
+        }
+      },
+      "quality": {
+        "contract": "tolerance",
+        "identicalLatents": true,
+        "result": "passed",
+        "maximumError": 0.01,
+        "meanError": 0.001,
+        "maximumErrorThreshold": 0.08,
+        "meanErrorThreshold": 0.01
+      },
+      "negativeMutation": {
+        "parameters": {
+          "decodeTileEdge": 256,
+          "decodeOverlap": 32
+        },
+        "measured": true,
+        "result": "failed_as_expected",
+        "maximumError": 0.09,
+        "meanError": 0.02
+      },
+      "loadability": {
+        "result": "passed",
+        "resolvedPathFingerprint": "SceneWorks/fixture@cccccccccccccccccccccccccccccccccccccccc:packed-q4"
+      },
+      "diagnostics": {
+        "adapter": "fixture",
+        "execution": "executed",
+        "blockers": [],
+        "measurements": [
+          {
+            "name": "peak",
+            "unit": "bytes",
+            "value": 5368709120
+          }
+        ]
+      },
+      "calibrationFingerprint": "fixture-formula-v2",
+      "capturedAt": "2026-07-28T12:00:00Z",
+      "harnessVersion": "sceneworks-memory-v5",
+      "loadShape": "deferred_materialization"
+    }
+  ]
+}

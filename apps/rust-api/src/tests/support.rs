@@ -25,6 +25,7 @@ pub(crate) use crate::{
     sweep_stale_lora_uploads_before, sweep_stale_uploads, validate_model_id, Settings,
     WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST,
     EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    TEST_MAX_WORKFLOW_INSPECT_BYTES,
 };
 
 pub(crate) use axum::body::{to_bytes, Body};
@@ -136,6 +137,7 @@ pub(crate) fn readiness_worker(
         capabilities,
         loaded_models: Vec::new(),
         utilization: None,
+        status_reason: None,
         registered_at: "2026-05-21T00:00:00Z".to_owned(),
         last_seen_at: "2026-05-21T00:00:00Z".to_owned(),
         extra: Default::default(),
@@ -149,6 +151,11 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         port: 0,
         data_dir: temp_dir.path().join("data"),
         config_dir: temp_dir.path().join("config"),
+        // Pinned to the tempdir on purpose. Resolving this the way production does
+        // (`credentials::credentials_dir`) would hand tests the developer's REAL OS
+        // app-config dir, so a credential test would read — and `set`/`delete` would
+        // overwrite — their actual tokens (sc-16540).
+        credentials_dir: temp_dir.path().join("credentials"),
         access_token: String::new(),
         cors_origins: vec![
             "http://localhost:5173".to_owned(),
@@ -573,6 +580,10 @@ pub(crate) async fn submit_full_finetune_job(
     let mut config = target["defaults"].clone();
     config["triggerWord"] = json!("auroraStyle");
     config["advanced"]["networkType"] = json!("full");
+    if let Some(full_config) = target["defaults"]["advanced"]["fullFinetuneConfig"].as_object() {
+        config["advanced"]["mixedPrecision"] = full_config["mixedPrecision"].clone();
+        config["advanced"]["gradientCheckpointing"] = full_config["gradientCheckpointing"].clone();
+    }
     // The full-tune memory envelope scales with the training resolution; keep the submit gate
     // out of the way so this test is about registration, not about the gate (which sc-14056 pins).
     config["resolution"] = json!(256);

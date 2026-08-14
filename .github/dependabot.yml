@@ -1,6 +1,13 @@
 # Keeps the SHA-pinned GitHub Actions in .github/workflows/ fresh (sc-8801).
 # Dependabot rewrites the pinned commit SHA and its trailing `# vX.Y.Z` comment
 # when upstream publishes a new release.
+#
+# The npm and cargo lanes below are VERSION updates only. Dependabot security
+# updates are a separate repo-level setting and already cover every ecosystem in
+# the dependency graph; these lanes exist so Cargo.lock and the two npm lockfiles
+# drift forward deliberately instead of only when unrelated work happens to touch
+# them. Each lane is grouped into a single PR and capped at 2 open PRs to keep the
+# review queue bounded, and restricted to minor/patch so major bumps stay manual.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -11,3 +18,57 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      web-npm:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/desktop"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      desktop-npm:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # Root workspace Cargo.toml / Cargo.lock covers apps/* and crates/*. Majors are
+  # ignored here because engine pins (mlx-rs, candle, tauri) need the full
+  # rust:check + :neither + :candle sweep, which a bot PR cannot self-serve.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      cargo:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"

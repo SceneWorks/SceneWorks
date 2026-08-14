@@ -2120,6 +2120,7 @@
       "files": [
         "*.safetensors"
       ],
+      "memoryCalibrationProvenanceRequired": false,
       "modelId": "base-model",
       "modelName": "User Model",
       "provider": "huggingface",
@@ -2268,6 +2269,12 @@
       "missingRequiredFiles": [],
       "name": "Z-Image Turbo",
       "paths": {},
+      "preview": {
+        "byBackend": {
+          "candle": true,
+          "mlx": true
+        }
+      },
       "removable": false,
       "repairAvailable": false,
       "type": "image",

@@ -114,6 +114,20 @@ async fn mcp_client_lists_tools_and_calls_catalog_tools() {
             "missing tool {expected}: {names:?}"
         );
     }
+    for tool_name in ["generate_image", "get_job_result"] {
+        let description = tools
+            .tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .and_then(|tool| tool.description.as_deref())
+            .unwrap_or_else(|| panic!("missing description for {tool_name}"));
+        assert!(
+            description.contains("stripped")
+                && description.contains("default")
+                && description.contains("includeWorkflow=true"),
+            "{tool_name} must tell agents the privacy default and explicit opt-in: {description}"
+        );
+    }
 
     // list_projects → compact rows (id/name/createdAt only — no path).
     let result = client

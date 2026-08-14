@@ -53,12 +53,11 @@ exist (MLX families), so linking the candle providers + `backend_candle_enabled`
 
 ## T2I-only confinement
 
-Both families are multi-shape on MLX (Kolors: edit / IP-reference / pose-control; SenseNova: edit /
-VQA / interleave) but the candle providers are **pure T2I**. Confinement is router-enforced:
-`image_request_candle_eligible` rejects `edit_image` mode, any source/reference/mask asset, poses,
-and (for non-quant/LoRA families) loras/quant — so only base txt2img reaches the candle worker; every
-conditioning shape falls back to the Python torch worker. The MLX-only `KolorsControl` /
-`SensenovaEdit` dispatch routes never run on Windows.
+The original sc-5576 delivery exposed pure Candle T2I. That snapshot has since been superseded:
+Kolors edit, IP-reference, and strict control now have explicit native Candle lanes, and SenseNova
+edit/VQA/interleave run through the native off-Mac routes as well. Current production routing and the
+generated backend capability matrix are authoritative; these conditioned jobs no longer fall back to
+Python merely because they run on Windows/Linux.
 
 ## Safety
 

@@ -10,6 +10,7 @@
     "lint": "eslint src",
     "test": "vitest run --environment jsdom",
     "gen:styles": "node scripts/generate-styles.mjs",
+    "gen:preview-support": "node scripts/generate-preview-support.mjs",
     "gen:style-thumbnails": "node scripts/generate-style-thumbnails.mjs"
   },
   "dependencies": {
@@ -20,15 +21,15 @@
     "recharts": "^2.15.4"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.4",
-    "@vitejs/plugin-react": "4.7.0",
-    "eslint": "^9.39.4",
+    "@eslint/js": "^9.39.5",
+    "@vitejs/plugin-react": "6.0.5",
+    "eslint": "^9.39.5",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "globals": "^17.6.0",
-    "jsdom": "27.3.0",
+    "globals": "^17.9.0",
+    "jsdom": "27.4.0",
     "json5": "^2.2.3",
-    "vite": "6.4.2",
-    "vitest": "4.1.8"
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
   }
 }

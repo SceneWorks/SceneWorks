@@ -12,7 +12,17 @@ shared-GPU, or RunPod deployments (see
 [Server deployment](#server-deployment-docker)), but the primary target is a
 single-installer desktop app.
 
-![SceneWorks](screenshot.png)
+<p align="center">
+  <img src="screenshot-desktop-advanced.png" alt="SceneWorks Advanced workspace on the desktop app" width="760">
+</p>
+
+<p align="center">
+  <img src="screenshot-desktop-simple.png" alt="SceneWorks Simple shell on the desktop app" height="330">
+  &nbsp;&nbsp;
+  <img src="screenshot-phone-simple.png" alt="SceneWorks Simple shell at phone width" height="330">
+</p>
+
+<p align="center"><em>The Advanced workspace (top), and the Simple shell on desktop and at phone width.</em></p>
 
 ## Two ways to run it
 
@@ -163,15 +173,13 @@ For the full per-job-kind breakdown of which capability each build advertises an
 the routing rules that decide, see the
 [Worker Capability Matrix](crates/sceneworks-worker/ARCHITECTURE.md).
 
-Developer builds require read access to the private
-[`SceneWorks/inference`](https://github.com/SceneWorks/inference) repository. Authenticate the
-system Git client (for example with `gh auth login` followed by `gh auth setup-git`) before running
-Cargo. GitHub Actions Rust/package jobs use the repository secret
-`SCENEWORKS_INFERENCE_READ_TOKEN`, scoped to read that repository. The product repository remains
-public and the inference repository remains private; unauthenticated source builds therefore cannot
-fetch the runtime at this cutover boundary. Container builds additionally read that same environment
-variable through a BuildKit secret mount during `cargo fetch`; the value is not persisted in an
-image layer or exposed to Rust build scripts.
+Developer builds fetch the canonical runtime from
+[`SceneWorks/inference`](https://github.com/SceneWorks/inference). Both repositories are public, so
+Cargo resolves the pinned revision anonymously — no GitHub identity, credential helper, or CI secret
+is involved in any build lane, on the host or inside a container build. Fork pull requests therefore
+build the Rust lanes with nothing configured. (Two workflows still name a
+`SCENEWORKS_INFERENCE_READ_TOKEN` secret, but only on the dispatch-only memory-calibration
+`actions/checkout`, and it falls back to `github.token`.)
 
 ## LoRA training
 
@@ -308,13 +316,10 @@ error instead of waiting forever.
 To build a production API image that serves the React SPA, static assets, and
 `/api/v1/*` from the same process and origin, use the opt-in `rust-api-embed`
 target. The plain `rust-api` target remains the non-embedded image used by
-Compose. The build needs a read token for the private inference dependency; this
-PowerShell example reuses the authenticated GitHub CLI token without writing it
-to disk:
+Compose:
 
 ```powershell
-$env:SCENEWORKS_INFERENCE_READ_TOKEN = gh auth token
-docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
+docker build `
   --file docker/rust.Dockerfile `
   --target rust-api-embed `
   --build-arg BIN=sceneworks-rust-api `
@@ -339,7 +344,7 @@ exclusions, and measured large-response CPU tradeoff are documented in
 [API response compression](docs/api-response-compression.md).
 
 ```powershell
-docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
+docker build `
   --file docker/rust.Dockerfile `
   --target runpod `
   --tag sceneworks-runpod:local .
@@ -373,9 +378,12 @@ single `SCENEWORKS_VOLUME` base defaults there and gives the following layout:
 
 Set `SCENEWORKS_VOLUME=/runpod-volume` for a serverless network-volume mount, or
 another absolute container path for a custom mount. Explicit
-`SCENEWORKS_DATA_DIR`, `SCENEWORKS_CONFIG_DIR`, `SCENEWORKS_JOBS_DB_PATH`,
-`HF_HOME`, `HF_HUB_CACHE`, and `HUGGINGFACE_HUB_CACHE` values take precedence
-over derived defaults.
+`SCENEWORKS_DATA_DIR`, `SCENEWORKS_CONFIG_DIR`, `SCENEWORKS_CREDENTIALS_DIR`,
+`SCENEWORKS_JOBS_DB_PATH`, `HF_HOME`, `HF_HUB_CACHE`, and
+`HUGGINGFACE_HUB_CACHE` values take precedence over derived defaults.
+`SCENEWORKS_CREDENTIALS_DIR` defaults to `${SCENEWORKS_VOLUME}/credentials` — the
+download-credential store is kept out of the config dir (sc-16540) because that
+directory is a repo checkout in development and the store is plaintext tokens.
 
 The image intentionally runs as root, matching RunPod's default volume owner.
 At startup it creates and write-probes only the exact managed directories; it
@@ -565,7 +573,9 @@ npm run rust:test
 npm run rust:build
 ```
 
-Or run the full Rust verification sequence:
+Or run the full Rust verification sequence — which also verifies the generated
+docs derived from the Rust sources (`npm run check:rust-derived-docs`), since a
+Rust-only change can make those stale:
 
 ```powershell
 npm run rust:check

@@ -5,6 +5,7 @@ import { App } from "./main.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { qualityChoices, GPU_REQUIRED_JOB_TYPES, errorStatuses } from "./jobTypes.js";
 import { withAppContext, FakeEventSource, response, settle } from "./main.testSupport.jsx";
+import { isActiveWorker, isPlaceholderOnlyGpuWorker } from "./appHelpers.js";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -419,6 +420,204 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Waiting for model download Qwen Image Edit to finish.");
     expect(container.textContent).toContain("Waiting for dependency job-dependency to finish.");
     expect(container.textContent).toContain("Warm: z_image_turbo");
+  });
+
+  // Exactly what `with_candle_capabilities` leaves behind when the CUDA probe fails: the bare
+  // nvidia descriptor PLUS the `candle` lane marker. The marker is what keeps this worker out of
+  // `isPlaceholderOnlyGpuWorker`, so its card still renders.
+  const WITHHELD_CAPABILITIES = ["placeholder", "gpu", "nvidia", "candle"];
+
+  it("names the host-side remedy when the GPU worker withheld its capabilities (sc-16260)", async () => {
+    // The server/Docker lane's unusable-GPU state, end to end through the UI. The worker is
+    // registered and heartbeating, but its startup CUDA probe failed, so it advertises only the
+    // bare nvidia descriptor set and reports `unhealthy` with the host-side remedy attached.
+    //
+    // Before sc-16260 this exact shape rendered as a "Ready" GPU card next to
+    // "Blocked: no active worker supports image generate." — both true, neither useful. The
+    // remedy has to reach the screen, because on a headless/Docker host there is no setup screen
+    // and the operator's only other source is container logs.
+    const REMEDY =
+      "The NVIDIA kernel driver and the CUDA driver library on this machine are different " +
+      "versions, so SceneWorks can't use the GPU. Reboot, then reopen SceneWorks.";
+    const RAW_WORKERS = [
+      {
+        id: "gpu-0",
+        gpuId: "0",
+        gpuName: "Fixture GPU 0",
+        status: "unhealthy",
+        statusReason: REMEDY,
+        capabilities: WITHHELD_CAPABILITIES,
+        loadedModels: [],
+      },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [
+              {
+                id: "job-stalled",
+                type: "image_generate",
+                status: "queued",
+                stage: "queued",
+                progress: 0,
+                projectId: "project-1",
+                projectName: "Project 1",
+                requestedGpu: "auto",
+                payload: { prompt: "mist", model: "z_image_turbo" },
+                attempts: 1,
+              },
+            ],
+            gpuOptions: ["auto", "0"],
+            jobAction: () => {},
+            jobPrompt: "Placeholder generation",
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setJobPrompt: () => {},
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            // Piped through App.jsx's OWN `visibleWorkers` filter rather than injected raw.
+            // That filter is where this whole feature nearly died: it drops `!isActiveWorker`
+            // AND `isPlaceholderOnlyGpuWorker` workers, and an early version of sc-16260 tripped
+            // both — so every string asserted below was unreachable in the real app while a
+            // hand-injected `visibleWorkers` kept the test green.
+            visibleWorkers: RAW_WORKERS.filter(
+              (worker) => isActiveWorker(worker) && !isPlaceholderOnlyGpuWorker(worker),
+            ),
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    // The card must not claim the worker is ready, and must carry the remedy.
+    expect(container.textContent).toContain("GPU unavailable");
+    expect(container.textContent).not.toContain("Ready");
+    expect(container.textContent).toContain(REMEDY);
+    // The stalled job explains itself with the same remedy rather than the bare capability miss.
+    expect(container.textContent).toContain("this machine's GPU is unavailable");
+    expect(container.textContent).not.toContain("Blocked: no active worker supports image generate.");
+  });
+
+  it("scopes the unusable-GPU remedy to jobs and GPUs it actually explains (sc-16260)", async () => {
+    // A wrong remedy is worse than a vague one, so the branch is scoped twice:
+    //   * a queued `model_download` does not need the GPU — blaming the driver would send an
+    //     operator off to fix something unrelated to why it is stuck;
+    //   * a job pinned to gpu 1 is not explained by gpu 0 being unhealthy.
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [
+              {
+                id: "job-download",
+                type: "model_download",
+                status: "queued",
+                stage: "queued",
+                progress: 0,
+                projectId: null,
+                projectName: null,
+                requestedGpu: "auto",
+                payload: { modelId: "sdxl", modelName: "SDXL" },
+                attempts: 1,
+              },
+              {
+                id: "job-pinned-elsewhere",
+                type: "image_generate",
+                status: "queued",
+                stage: "queued",
+                progress: 0,
+                projectId: "project-1",
+                projectName: "Project 1",
+                requestedGpu: "1",
+                payload: { prompt: "mist", model: "z_image_turbo" },
+                attempts: 1,
+              },
+            ],
+            gpuOptions: ["auto", "0", "1"],
+            jobAction: () => {},
+            jobPrompt: "Placeholder generation",
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setJobPrompt: () => {},
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            visibleWorkers: [
+              {
+                id: "gpu-0",
+                gpuId: "0",
+                gpuName: "Fixture GPU 0",
+                status: "unhealthy",
+                statusReason: "REMEDY-FOR-GPU-ZERO",
+                capabilities: ["placeholder", "gpu", "nvidia"],
+                loadedModels: [],
+              },
+            ],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    // The remedy still renders on gpu 0's own card — it is true of that worker.
+    expect(container.textContent).toContain("REMEDY-FOR-GPU-ZERO");
+    // But neither queued job may be explained by it.
+    expect(container.textContent).toContain("Blocked: no active worker supports model download.");
+    expect(container.textContent).toContain("Blocked: no active worker can run image generate on GPU 1.");
+    expect(container.textContent).not.toContain("so model download cannot run");
+    expect(container.textContent).not.toContain("so image generate cannot run");
+  });
+
+  it("does not surface a stale remedy once the worker recovers (sc-16260)", async () => {
+    // The recovery direction. `statusReason` is cleared by the store on the first healthy
+    // heartbeat, but the UI must not depend on that: a reason left on a non-unhealthy worker is
+    // stale by definition and telling an operator to reboot an already-fixed host is worse than
+    // saying nothing.
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [],
+            gpuOptions: ["auto", "0"],
+            jobAction: () => {},
+            jobPrompt: "Placeholder generation",
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setJobPrompt: () => {},
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            visibleWorkers: [
+              {
+                id: "gpu-0",
+                gpuId: "0",
+                gpuName: "Fixture GPU 0",
+                status: "idle",
+                statusReason: "reboot onto the staged driver",
+                capabilities: ["placeholder", "gpu", "image_generate", "candle"],
+                loadedModels: [],
+              },
+            ],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    expect(container.textContent).toContain("Ready");
+    expect(container.textContent).not.toContain("reboot onto the staged driver");
+    expect(container.textContent).not.toContain("GPU unavailable");
   });
 
   it("clears completed queue items scoped to the active project filter (issue #1556)", async () => {

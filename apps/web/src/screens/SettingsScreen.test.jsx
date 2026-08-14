@@ -682,3 +682,90 @@ describe("SettingsScreen appearance settings", () => {
     expect(container.textContent).not.toContain("the sidebar switch overrides it");
   });
 });
+
+describe("SettingsScreen embedded-workflow toggle (sc-15953)", () => {
+  let container;
+  let root;
+  let SettingsScreen;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    delete window.__TAURI__;
+    vi.resetModules();
+    vi.doMock("../api.js", () => ({
+      apiFetch: vi.fn(async () => []),
+      isAbortError: () => false,
+      API_BASE_URL: "",
+      eventUrl: () => "",
+    }));
+    SettingsScreen = await loadScreen();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    vi.doUnmock("../api.js");
+    vi.restoreAllMocks();
+  });
+
+  async function openSharing(props) {
+    await renderScreen(root, SettingsScreen, props);
+    await openTab(container, "Settings");
+  }
+
+  const toggle = () =>
+    container.querySelector('[aria-label="Include the recipe in generated images"]');
+
+  it("is discoverable under Sharing and reflects the preference", async () => {
+    await openSharing({ embedWorkflow: true });
+    expect(container.textContent).toContain("Sharing");
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("forwards a change in both directions", async () => {
+    const onEmbedWorkflowChange = vi.fn();
+    await openSharing({ embedWorkflow: true, onEmbedWorkflowChange });
+    await click(toggle());
+    expect(onEmbedWorkflowChange).toHaveBeenCalledWith(false);
+
+    onEmbedWorkflowChange.mockClear();
+    await openSharing({ embedWorkflow: false, onEmbedWorkflowChange });
+    await click(toggle());
+    expect(onEmbedWorkflowChange).toHaveBeenCalledWith(true);
+  });
+
+  it("names every path-exempt prose field rather than summarizing them", async () => {
+    // The claim a user acts on before sharing. Rendered from the list that
+    // `the_settings_copy_names_exactly_the_path_exempt_prose_fields` (Rust) pins against the
+    // contract doc, so this asserts the UI actually shows what that list holds.
+    const { EMBEDDED_PROSE_FIELDS } = await import("../workflowEmbed.js");
+    await openSharing({ embedWorkflow: true });
+    for (const [, label] of EMBEDDED_PROSE_FIELDS) {
+      expect(container.textContent).toContain(label);
+    }
+  });
+
+  it("does not imply that turning it off cleans images already on disk", async () => {
+    await openSharing({ embedWorkflow: true });
+    const copy = container.textContent;
+    expect(copy).toContain("Turning this off applies from the next generation");
+    expect(copy).toContain("Images already on disk keep the block they were written with");
+    // The wording that would be a lie. Nothing rewrites an existing asset.
+    expect(copy).not.toContain("removes it from");
+    expect(copy).not.toMatch(/clean(s|ed)? (up )?(your )?existing/i);
+  });
+
+  it("links to the contract document", async () => {
+    await openSharing({ embedWorkflow: true });
+    const link = [...container.querySelectorAll("a")].find((anchor) =>
+      anchor.href.includes("workflow-share-envelope.md"),
+    );
+    expect(link).toBeTruthy();
+    expect(link.getAttribute("rel")).toContain("noopener");
+  });
+});

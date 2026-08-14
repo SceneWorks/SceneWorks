@@ -1,10 +1,13 @@
 use super::{
-    consume_gen_events, drive_gen_items_scored, ensure_depth_estimator_dir, parse_poses,
-    preprocess_control_entry, requested_control_kind, resolve_control_identity_source,
-    resolve_control_source, resolve_seed, resolve_user_control_map, stage_likeness,
-    start_gen_stream, validate_control_kind, ApiClient, CancelFlag, ControlKind, Image, ImagePlan,
-    JobSnapshot, JsonObject, Path, Progress, Settings, Value, WorkerResult,
+    admit_conditioning_overlay, consume_gen_events, drive_gen_items_scored,
+    ensure_depth_estimator_dir, parse_poses, preprocess_control_entry, requested_control_kind,
+    resolve_control_identity_source, resolve_control_source, resolve_seed,
+    resolve_user_control_map, stage_likeness, start_gen_stream, validate_control_kind, ApiClient,
+    CancelFlag, ControlKind, Image, ImagePlan, JobSnapshot, JsonObject, Path, Progress, Settings,
+    Value, WorkerResult,
 };
+
+use crate::conditioning_fit::ConditioningAdmission;
 
 // Shared candle (Windows/CUDA) strict-control driver (sc-8304, epic 8236). The candle siblings of the
 // MLX `strict_control.rs` driver: the three bespoke non-registry candle control providers
@@ -64,18 +67,50 @@ pub(super) trait CandleStrictControl: Send + 'static {
     fn out_width(&self) -> u32;
     fn out_height(&self) -> u32;
 
+    /// How this lane is admitted before it allocates (sc-16069): either the resident on-disk footprint
+    /// [`load`](Self::load) will hold — base weights plus the co-resident control overlay — for the shared
+    /// weights floor, or a declaration that the lane runs its own MEASURED gate, named.
+    ///
+    /// **Required on purpose — there is no default.** A strict-control lane is by definition a second
+    /// network overlaid on a base model, which is exactly the shape neither the `generate_candle_stream`
+    /// `vram_gate` nor the `generator_cache` `apply_residency_policy` can see (the route is diverted before
+    /// the first, and a bespoke `*Paths` load never produces the `LoadSpec` the second reads). Giving this
+    /// a default would let a NEW lane inherit the sc-16069 defect silently — the very regression this
+    /// method exists to make impossible — so choosing is part of the cost of adding a lane, enforced by
+    /// the compiler.
+    ///
+    /// Build the floor arm with [`ConditioningFootprint::from_paths`] from the paths the lane already
+    /// resolved. Unmeasurable weights are honest and safe: the gate treats them as no evidence and admits.
+    /// Reach for [`ConditioningAdmission::MeasuredElsewhere`] only when the lane genuinely owns a measured
+    /// gate — see that variant for why a measurement must REPLACE the floor rather than compose with it.
+    fn conditioning_admission(&self) -> ConditioningAdmission;
+
     /// Load the provider on the blocking thread (download already happened in the async preamble).
     fn load(&self) -> WorkerResult<Self::Model>;
 
     /// Generate one image conditioned on the already-preprocessed `control` map (pose skeleton, canny
     /// edges, or depth map — the driver picked which). Builds the bespoke request struct internally; the
-    /// driver supplies the shared seed + cancel + progress callback. Returns the output [`Image`].
+    /// driver supplies the shared seed + cancel + progress callback + preview sink. Returns the output
+    /// [`Image`].
+    ///
+    /// `preview` is the job's **live** per-image [`gen_core::PreviewSink`] (epic 16948, sc-16962), built by
+    /// [`preview_sink_for`](super::stream) and handed down by [`run_candle_strict_control`]. Every bespoke
+    /// candle provider is invoked BY NAME rather than through `dyn Generator`, so the registry cannot thread
+    /// the sink for it — this parameter is the only route a strict-control lane has to a live sink.
+    ///
+    /// **An impl whose request struct carries a `preview` field must set it from this argument.** Writing
+    /// `preview: Default::default()` compiles, ships, and produces no previews on that lane — a silent
+    /// narrowing that looks green. [`crate::candle_preview_wiring_tests`] reads these lanes' own source
+    /// and fails on exactly that, on every platform, because both candle CI lanes are dispatch-only. An
+    /// impl whose upstream request has no `preview` field yet binds `_preview`; its file is still swept,
+    /// so adding the field upstream without wiring it here is caught the same way.
     fn generate_one(
         &self,
         model: &Self::Model,
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image>;
 }
@@ -106,6 +141,35 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FIRST thing this driver does, so a
+    // host that cannot hold the base + control branch is refused with an actionable message before any
+    // allocation, rather than dying on a reactive CUDA OOM mid-render. This ONE call site covers all five
+    // in-house strict-control lanes (qwen / kolors / z-image / flux2 / flux1), and `conditioning_admission`
+    // is a REQUIRED trait method so a sixth cannot be added ungated.
+    //
+    // Placed before the depth-estimator provisioning below (a download, not an allocation) so the refusal
+    // costs the user nothing. It is a weights FLOOR and never blocks a host that can hold the weights —
+    // see `crate::conditioning_fit`.
+    match provider.conditioning_admission() {
+        crate::conditioning_fit::ConditioningAdmission::Floor(footprint) => {
+            admit_conditioning_overlay(settings, &footprint).await?;
+        }
+        // The lane ALREADY gated itself, earlier, in its own preamble — today only Krea pose-control,
+        // which runs the weights floor AND the measured `krea_control_fit` ladder there. It has to be
+        // earlier: its preamble records the admitted peak with `vram_gate::note_loaded_peak`, and a
+        // rejection arriving after that would leave a reclaimable high-water standing for a load that
+        // never allocated. Gating again here would only re-probe the GPU and risk a second eviction.
+        // See `ConditioningAdmission::GatedInPreamble`.
+        crate::conditioning_fit::ConditioningAdmission::GatedInPreamble { gate } => {
+            tracing::debug!(
+                engine = provider.engine_label(),
+                gate,
+                "candle conditioning admission: already decided in this lane's preamble (it must run \
+                 before its own note_loaded_peak), so the shared gate stands down (sc-16069)"
+            );
+        }
+    }
 
     // Shared strict-control driver: validate the requested ControlKind against the engine's
     // supported_kinds + resolve an optional user-supplied control-map passthrough. A pose job sets no
@@ -178,7 +242,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -194,11 +258,17 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                     stickwidth,
                     depth_weights_dir,
                 )?;
+                // The job's live per-image preview sink, handed straight to the provider's bespoke request
+                // (epic 16948, sc-16962). `drive_gen_items_scored` built it with `preview_sink_for`, so a
+                // frame emitted on the denoise thread lands as a `GenEvent::Preview` and reaches
+                // `WorkerProgressCard`. This closure used to bind `_preview` and drop it, which is why the
+                // Krea control lane shipped an inert `Default::default()` sink.
                 let out = match provider.generate_one(
                     &model,
                     &control,
                     seed as u64,
                     &cancel,
+                    &preview,
                     on_progress,
                 ) {
                     Ok(out) => out,

@@ -58,6 +58,46 @@ fn credential_for_host_matches_case_insensitively() {
     assert!(credential_for_host(&settings, "").is_none());
 }
 
+/// sc-16540 moved the store out of the config dir. The worker reads the new location
+/// but must still find a pre-migration file, because the rust-api owns the migration
+/// and a worker can start before it has run — without the fallback such a worker comes
+/// up credential-less until the next restart, and every gated download fails.
+#[test]
+fn worker_reads_the_new_store_and_falls_back_to_the_pre_migration_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("config");
+    let creds = temp.path().join("credentials");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::create_dir_all(&creds).expect("credentials dir");
+    let filename = sceneworks_core::credentials::CREDENTIALS_FILENAME;
+
+    // Neither present: no credentials, no panic.
+    assert!(super::load_worker_credentials(&creds, &config).is_empty());
+
+    // Legacy only (an install the API has not migrated yet) — must still be found.
+    std::fs::write(
+        config.join(filename),
+        r#"{ "huggingface.co": { "token": "legacy-hf", "scheme": "bearer" } }"#,
+    )
+    .expect("write legacy");
+    let legacy_only = super::load_worker_credentials(&creds, &config);
+    assert_eq!(legacy_only.len(), 1);
+    assert_eq!(legacy_only[0].token, "legacy-hf");
+
+    // Once migrated, the new location wins even while a stale legacy file lingers.
+    std::fs::write(
+        creds.join(filename),
+        r#"{ "huggingface.co": { "token": "migrated-hf", "scheme": "bearer" } }"#,
+    )
+    .expect("write current");
+    let migrated = super::load_worker_credentials(&creds, &config);
+    assert_eq!(migrated.len(), 1);
+    assert_eq!(
+        migrated[0].token, "migrated-hf",
+        "the resolved store must win over a leftover legacy file",
+    );
+}
+
 #[test]
 fn worker_credentials_env_overrides_file_per_host() {
     // Server reads the config-dir file store; an operator's SCENEWORKS_CREDENTIALS

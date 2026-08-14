@@ -29,6 +29,69 @@ const DEFAULT_MODEL: &str = "ltx_2_3";
 const DEFAULT_QUALITY: &str = "balanced";
 const DEFAULT_REPLACEMENT_MODE: &str = "face_only";
 
+/// Whether a selected LoRA stack contains the LTX in-context conditioning adapter required by
+/// extend, bridge, and native replacement. Routing and execution share this predicate so a job
+/// cannot be claimed and then rejected by a stricter worker-side spelling of the contract.
+pub fn loras_contain_ltx_ic_lora(loras: &[Value]) -> bool {
+    loras.iter().any(lora_looks_like_ltx_ic_lora)
+}
+
+/// Recognize the explicit metadata and canonical naming markers used by LTX IC-LoRA packages.
+pub fn lora_looks_like_ltx_ic_lora(lora: &Value) -> bool {
+    let Some(object) = lora.as_object() else {
+        return lora
+            .as_str()
+            .is_some_and(|value| ltx_ic_lora_marker(&value.to_lowercase().replace('_', "-")));
+    };
+    if object.get("icLora") == Some(&Value::Bool(true))
+        || object.get("isIcLora") == Some(&Value::Bool(true))
+    {
+        return true;
+    }
+    if object
+        .get("conditioningRole")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.trim().to_lowercase().replace('-', "_") == "ic_lora")
+    {
+        return true;
+    }
+    let source = object.get("source").and_then(Value::as_object);
+    let mut values = Vec::new();
+    for key in [
+        "id",
+        "loraId",
+        "name",
+        "displayName",
+        "installedPath",
+        "sourcePath",
+        "path",
+    ] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            values.push(value);
+        }
+    }
+    if let Some(source) = source {
+        for key in ["repo", "file", "path"] {
+            if let Some(value) = source.get(key).and_then(Value::as_str) {
+                values.push(value);
+            }
+        }
+    }
+    match source
+        .and_then(|value| value.get("files"))
+        .or_else(|| object.get("files"))
+    {
+        Some(Value::Array(files)) => values.extend(files.iter().filter_map(Value::as_str)),
+        Some(Value::String(file)) => values.push(file),
+        _ => {}
+    }
+    ltx_ic_lora_marker(&values.join(" ").to_lowercase().replace('_', "-"))
+}
+
+fn ltx_ic_lora_marker(value: &str) -> bool {
+    value.contains("ic-lora") || value.contains("ltx-2-3-ic-")
+}
+
 /// A typed video-generation request, parsed from a job payload. One job produces a
 /// single video asset (unlike images, which batch `count`).
 #[derive(Debug, Clone, PartialEq)]
@@ -758,6 +821,26 @@ mod tests {
     }
 
     #[test]
+    fn ltx_ic_lora_predicate_accepts_metadata_and_canonical_markers_only() {
+        for lora in [
+            json!({ "icLora": true }),
+            json!({ "conditioningRole": "ic-lora" }),
+            json!({ "source": { "file": "ltx-2-3-ic-camera.safetensors" } }),
+            json!("community_ic_lora_v2"),
+        ] {
+            assert!(lora_looks_like_ltx_ic_lora(&lora), "{lora}");
+        }
+        assert!(!loras_contain_ltx_ic_lora(&[json!({
+            "id": "ordinary-ltx-style",
+            "source": { "file": "cinematic.safetensors" }
+        })]));
+        assert!(loras_contain_ltx_ic_lora(&[
+            json!({ "id": "ordinary-ltx-style" }),
+            json!({ "isIcLora": true }),
+        ]));
+    }
+
+    #[test]
     fn defaults_when_payload_is_minimal() {
         let request = VideoRequest::from_payload(&payload(json!({ "projectId": "proj_1" })));
         assert_eq!(request.project_id, "proj_1");
@@ -1040,10 +1123,12 @@ mod tests {
     /// must NOT invent one.
     ///
     /// **The backends now agree** — sc-12308 reconciled them, so the table is simply each
-    /// engine's cap rather than the stricter of two answers. Both reject an over-cap request
-    /// (candle `wan14b.rs:645` / `model_vace.rs:298` / `candle-gen-bernini/src/config.rs:164` /
-    /// `candle-gen-scail2/src/pipeline.rs:294` / `lib.rs`'s new `MAX_AREA_5B` check; mlx
-    /// `validate_impl` → `reject_over_area`), at these values.
+    /// engine's cap rather than the stricter of two answers. Both measure the same rendered,
+    /// lattice-aligned geometry and reject it when it exceeds that cap. The relevant validation
+    /// paths are candle's Wan `validate` methods, Bernini's `validate_bernini_geometry`, and
+    /// SCAIL-2's `reject_over_area`; mlx validation reaches `reject_over_area`,
+    /// `validate_bernini_geometry`, or SCAIL-2's `reject_unrenderable_geometry` →
+    /// `reject_over_area_dims`.
     ///
     /// Before that they disagreed three ways on one manifest entry, and the table had to carry
     /// the strictest: mlx T2V/VACE/bernini/scail2 were **uncapped**, mlx I2V/5B **silently
@@ -1052,7 +1137,7 @@ mod tests {
     /// values themselves were wrong too: the whole 14B family carried the TI2V-5B's 901,120.
     /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — no `maxPixels`-expressible area cap in
     ///   either backend, so no cap is declared. Not literally "no checks": candle-LTX caps
-    ///   **latent tokens** (`candle-gen-ltx/src/lib.rs:454`: `t_lat·h_lat·w_lat > 131_072`), which
+    ///   **latent tokens** through `config::max_latent_tokens` (`t_lat·h_lat·w_lat > 131_072`), which
     ///   is proportional to `frames × w × h`. That is a frames×area constraint and therefore
     ///   outside `maxPixels`' scope — `maxPixels` is a pure per-frame area budget with no frame
     ///   term, so no value of it could express this cap without either under- or over-constraining

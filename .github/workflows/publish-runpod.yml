@@ -73,7 +73,7 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
 
       # Do the cheap repository invariants before spending runner time on nvcc.
       # The Dockerfile itself performs the web + embed-web/backend-candle release
@@ -81,16 +81,10 @@ jobs:
       - name: Validate scaffold and RunPod publication contracts
         run: |
           npm run check
-          npm run check:docker:runpod
-      - name: Fetch the private inference release
+          npm run check:runpod:image-contract
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          # The dedicated read token takes precedence if inference becomes
-          # private again. It is currently public, so GITHUB_TOKEN is a secure,
-          # always-nonempty fallback rather than an empty BuildKit secret.
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       - name: Guard against gen-core version skew (candle)
         run: |
@@ -98,7 +92,7 @@ jobs:
           bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
           bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
 
-      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -125,8 +119,6 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-          secrets: |
-            inference_token=${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           cache-from: type=gha,scope=runpod-amd64
           cache-to: type=gha,mode=max,scope=runpod-amd64
 

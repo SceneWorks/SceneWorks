@@ -5,6 +5,7 @@ import {
   failedJobNotice,
   generatedResultAssetCount,
   hasCapability,
+  canWorkerTakeWork,
   isActiveWorker,
   isAudioGenerationJob,
   isImageGenerationJob,
@@ -28,7 +29,37 @@ import { DEFAULT_ACCENT } from "./accents.js";
 describe("worker classification", () => {
   it("treats any non-offline worker as active", () => {
     expect(isActiveWorker({ status: "idle" })).toBe(true);
+    expect(isActiveWorker({ status: "busy" })).toBe(true);
     expect(isActiveWorker({ status: "offline" })).toBe(false);
+    // sc-16260: an UNHEALTHY worker is still active. This predicate drives what gets rendered, and
+    // that worker is registered, heartbeating, and carrying the only message explaining why the
+    // queue is stalled — filtering it here would delete its card and make the Queue screen claim
+    // "No GPU workers registered" about a worker that plainly is.
+    expect(isActiveWorker({ status: "unhealthy" })).toBe(true);
+  });
+
+  it("separates 'present' from 'can take work' (sc-16260)", () => {
+    // The readiness gates need the stricter question. An unhealthy worker is present but has
+    // withdrawn every capability it serves, so counting it would ungate a workflow on a machine
+    // whose GPU cannot be initialized. Mirrors the API's `person_readiness_from_workers`.
+    expect(canWorkerTakeWork({ status: "idle" })).toBe(true);
+    expect(canWorkerTakeWork({ status: "busy" })).toBe(true);
+    expect(canWorkerTakeWork({ status: "offline" })).toBe(false);
+    expect(canWorkerTakeWork({ status: "unhealthy" })).toBe(false);
+    // The two predicates must actually differ on the unhealthy case, or one of them is redundant
+    // and the split has silently collapsed.
+    expect(isActiveWorker({ status: "unhealthy" })).not.toBe(canWorkerTakeWork({ status: "unhealthy" }));
+  });
+
+  it("keeps an unhealthy candle worker out of the placeholder-only filter (sc-16260)", () => {
+    // The withheld set keeps the `candle` lane marker precisely so this returns false: App.jsx
+    // drops placeholder-only workers from `visibleWorkers`, so without the marker the unhealthy
+    // worker's card — and its remedy — would never render.
+    expect(
+      isPlaceholderOnlyGpuWorker({ capabilities: ["placeholder", "gpu", "nvidia", "candle"] }),
+    ).toBe(false);
+    // Without the marker it IS placeholder-only, which is what would have hidden it.
+    expect(isPlaceholderOnlyGpuWorker({ capabilities: ["placeholder", "gpu", "nvidia"] })).toBe(true);
   });
 
   it("checks capabilities defensively", () => {

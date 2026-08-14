@@ -1,4 +1,4 @@
-import { access, constants, readFile } from "node:fs/promises";
+import { access, constants, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { promptGuideRequiredForModel } from "../apps/web/src/promptGuideContract.js";
@@ -42,6 +42,8 @@ const requiredPaths = [
 const inferenceCargoWorkflows = [
   ".github/workflows/check.yml",
   ".github/workflows/desktop-linux.yml",
+  ".github/workflows/desktop-linux-check.yml",
+  ".github/workflows/desktop-macos-check.yml",
   ".github/workflows/desktop-windows.yml",
   ".github/workflows/macos-mlx.yml",
   ".github/workflows/release.yml",
@@ -166,12 +168,18 @@ async function assertDesktopLinuxReleaseWorkflow() {
   }
 }
 
+// Every config schema whose draft + `$id` conventions are pinned. `tier-integrity` is not a *manifest*
+// schema (its config lives at config/tier-integrity.jsonc, outside config/manifests/), but the
+// conventions asserted below are repo-wide, and leaving it off this list is exactly why it drifted to
+// draft-07 with a `sceneworks.dev` id while every sibling requires 2020-12 / `sceneworks.local`
+// (sc-15799 review). `scripts/check-tier-integrity.mjs` applies it to the ledger.
 const manifestSchemaPaths = [
   "packages/schemas/model-manifest.schema.json",
   "packages/schemas/lora-manifest.schema.json",
   "packages/schemas/recipe-preset.schema.json",
   "packages/schemas/styles.schema.json",
   "packages/schemas/control-overlays.schema.json",
+  "packages/schemas/tier-integrity.schema.json",
 ];
 
 const manifestPaths = [
@@ -214,6 +222,39 @@ async function assertContains(relativePath, expected) {
   const body = await readFile(path.join(root, relativePath), "utf8");
   if (!body.includes(expected)) {
     throw new Error(`${relativePath} does not contain ${expected}`);
+  }
+}
+
+// Every CI definition on disk: workflows plus composite actions. Used for the NEGATIVE assertions,
+// which must cover lanes nobody remembered to add to a list (sc-17879).
+async function discoverCiDefinitions() {
+  const found = [];
+  for (const entry of await readdir(path.join(root, ".github/workflows"), {
+    withFileTypes: true,
+  })) {
+    if (entry.isFile() && /\.ya?ml$/.test(entry.name)) {
+      found.push(`.github/workflows/${entry.name}`);
+    }
+  }
+  for (const entry of await readdir(path.join(root, ".github/actions"), {
+    withFileTypes: true,
+    recursive: true,
+  })) {
+    if (entry.isFile() && /^action\.ya?ml$/.test(entry.name)) {
+      const dir = path.relative(root, entry.parentPath ?? entry.path).replaceAll("\\", "/");
+      found.push(`${dir}/${entry.name}`);
+    }
+  }
+  if (found.length < 10) {
+    throw new Error(`CI definition scan found only ${found.length} files; the walk is broken`);
+  }
+  return found;
+}
+
+async function assertLacks(relativePath, forbidden, why) {
+  const body = await readFile(path.join(root, relativePath), "utf8");
+  if (body.includes(forbidden)) {
+    throw new Error(`${relativePath} must not contain ${forbidden} -- ${why}`);
   }
 }
 
@@ -541,19 +582,65 @@ await assertContains("docker-compose.yml", "dockerfile: docker/rust.Dockerfile")
 await assertContains("docker-compose.yml", "SCENEWORKS_RUST_WORKER_GPU_ID:-cpu");
 await assertContains("docker-compose.yml", "/sceneworks/data/cache/jobs.db");
 await assertContains("docker-compose.yml", "SCENEWORKS_ALLOW_OPEN_BIND");
-await assertContains("docker-compose.yml", "environment: SCENEWORKS_INFERENCE_READ_TOKEN");
 await assertContains(".env.example", "SCENEWORKS_RUST_WORKER_GPU_ID=cpu");
-await assertContains(".env.example", "SCENEWORKS_INFERENCE_READ_TOKEN=");
 await assertContains("docker/rust.Dockerfile", "sceneworks-rust-api");
-await assertContains("docker/rust.Dockerfile", "type=secret,id=inference_token,required=true");
 await assertContains("docker/rust.Dockerfile", "cargo build --offline");
 await assertEmbeddedApiDockerTarget();
 await assertContains(".cargo/config.toml", "git-fetch-with-cli = true");
-for (const workflowPath of inferenceCargoWorkflows) {
-  await assertContains(workflowPath, "SCENEWORKS_INFERENCE_READ_TOKEN");
-  await assertContains(workflowPath, 'CARGO_NET_OFFLINE: "true"');
-  await assertContains(workflowPath, "cargo fetch --locked");
+// sc-17879: `SceneWorks/inference` is public and always was, so nothing needs a credential to
+// fetch the pinned revision -- verified anonymously with no credential helper, GIT_CONFIG_NOSYSTEM=1
+// and HOME=/nonexistent. The `url.…insteadOf` rewrite these lanes carried bought nothing and
+// actively BROKE fork pull requests, where `secrets.*` expands to empty and the rewrite emits
+// `https://x-access-token:@github.com/...`. Guard both halves of that rewrite -- the injection
+// mechanism AND the rewritten URL -- because a copy-paste that swapped `x-access-token` for
+// `oauth2` would otherwise reintroduce it on a green build. Scanned over EVERY workflow and
+// composite action on disk, not a hand-maintained list, so a lane added later cannot regrow it.
+for (const ciPath of await discoverCiDefinitions()) {
+  await assertLacks(
+    ciPath,
+    "GIT_CONFIG_KEY_0",
+    "SceneWorks/inference is public; the credential rewrite is vestigial and breaks fork PRs (sc-17879)",
+  );
+  await assertLacks(
+    ciPath,
+    "x-access-token:",
+    "SceneWorks/inference is public; no credential belongs in a dependency URL (sc-17879)",
+  );
 }
+// The fetch step is the ONE place allowed online; every build and build.rs after it runs under the
+// job-level `CARGO_NET_OFFLINE: "true"`. Count rather than substring-match: release.yml has three
+// fetch steps, and a file-level `includes` would stay green with two of the three left offline --
+// which fails only at tag time, where nobody is watching (sc-17879).
+for (const workflowPath of [...inferenceCargoWorkflows, ".github/workflows/publish-runpod.yml"]) {
+  const body = await readFile(path.join(root, workflowPath), "utf8");
+  const fetches = body.match(/cargo fetch --locked/g)?.length ?? 0;
+  const online = body.match(/CARGO_NET_OFFLINE: "false"/g)?.length ?? 0;
+  if (fetches < 1) throw new Error(`${workflowPath} no longer fetches the pinned inference release`);
+  if (online !== fetches) {
+    throw new Error(
+      `${workflowPath} has ${fetches} \`cargo fetch --locked\` steps but ${online} carry ` +
+        `CARGO_NET_OFFLINE: "false" -- an unmarked fetch runs offline and fails (sc-17879)`,
+    );
+  }
+}
+for (const workflowPath of inferenceCargoWorkflows) {
+  await assertContains(workflowPath, 'CARGO_NET_OFFLINE: "true"');
+}
+await assertLacks(
+  "docker/rust.Dockerfile",
+  "x-access-token:",
+  "the container build fetches the public inference repo anonymously (sc-17879)",
+);
+await assertLacks(
+  "docker/rust.Dockerfile",
+  "GIT_CONFIG_KEY_0",
+  "the container build needs no credential rewrite for a public repo (sc-17879)",
+);
+await assertLacks(
+  "docker/rust.Dockerfile",
+  "id=inference_token",
+  "the BuildKit credential mount is vestigial; a required=true secret makes fork builds fail (sc-17879)",
+);
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 await assertManifestSchemasParse();
 await assertManifestSchemaReferences();

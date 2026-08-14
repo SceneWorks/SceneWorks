@@ -1,27 +1,28 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    consume_gen_events, curated_image_menu, dense_tier_subdir, drive_gen_items_scored,
-    load_reference_image, non_empty, normalize_sampling_knob, pid_effective_dims, pid_output_tier,
-    read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_character_image_likeness_source, resolve_pid_weights,
-    resolve_sdxl_components, resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream,
+    admit_conditioning_paths, consume_gen_events, curated_image_menu, dense_tier_subdir,
+    drive_gen_items_scored, load_reference_image, non_empty, normalize_sampling_knob,
+    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_character_image_likeness_source, resolve_pid_weights, resolve_sdxl_components,
+    resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream,
     uses_standard_tier_layout, ApiClient, Image, ImagePlan, ImageRequest, IpAdapterSdxl,
     IpAdapterSdxlPaths, IpAdapterSdxlRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
     Value, WorkerError, WorkerResult,
 };
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, DownloadContext};
 use serde_json::json;
 
-// Candle (Windows/CUDA) SDXL IP-Adapter-Plus reference route (sc-5488, epic 5480) — reference-image
+// Candle (Windows/CUDA) SDXL IP-Adapter-Plus reference route (sc-5488, epic 5480) â€” reference-image
 // (identity) conditioning on SDXL/RealVisXL off-Mac via `runtime_cuda::providers::sdxl::IpAdapterSdxl`. The
 // reference-conditioning sibling of the candle InstantID lane (instantid.rs), but plain SDXL: no face
-// stack, no IdentityNet/OpenPose ControlNet — just the CLIP ViT-H image tokens → pure-IP denoise.
+// stack, no IdentityNet/OpenPose ControlNet â€” just the CLIP ViT-H image tokens â†’ pure-IP denoise.
 //
 // **Candle-only.** macOS keeps the MLX SDXL IP path (the registry `SdxlSubMode::Ip` in sdxl.rs); there
 // is no MLX `IpAdapterSdxl`, so this whole file is gated to the Windows/CUDA candle build (the
 // the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so it
 // shares that module's imports (ImageRequest/Settings/WorkerResult/`advanced`/`load_reference_image`/
-// `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
+// `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/â€¦ all in scope unqualified).
 
 /// h94 IP-Adapter repo (the ViT-H encoder + the plus/plus-face SDXL weights), matching the MLX SDXL IP
 /// path's `SDXL_IP_ADAPTER_REPO`.
@@ -39,11 +40,11 @@ const SDXL_IPADAPTER_ENCODER_SRC: [&str; 2] = [
     "models/image_encoder/config.json",
     "models/image_encoder/model.safetensors",
 ];
-/// IP-Adapter scale default — torch plus parity (matches the MLX SDXL path's `SDXL_IP_SCALE`).
+/// IP-Adapter scale default â€” torch plus parity (matches the MLX SDXL path's `SDXL_IP_SCALE`).
 const SDXL_IPADAPTER_IP_SCALE: f32 = 0.7;
 /// Denoise steps default (SDXL production).
 const SDXL_IPADAPTER_DEFAULT_STEPS: u32 = 30;
-/// CFG default — the reference-conditioned envelope validated on GPU (sc-5488); base SDXL uses ~7.
+/// CFG default â€” the reference-conditioned envelope validated on GPU (sc-5488); base SDXL uses ~7.
 const SDXL_IPADAPTER_DEFAULT_GUIDANCE: f32 = 5.0;
 /// The adapter/engine id recorded on candle SDXL IP-Adapter assets + telemetry (distinct from the
 /// txt2img `candle_sdxl` and the `candle_instantid` lanes).
@@ -58,16 +59,16 @@ fn is_sdxl_ipadapter_model(model: &str) -> bool {
     )
 }
 
-/// Default SDXL base repo for a model id when the manifest omits `repo` — which, in production, is
+/// Default SDXL base repo for a model id when the manifest omits `repo` â€” which, in production, is
 /// ALWAYS (sc-14463).
 ///
 /// This reads `MODEL_TABLE` rather than carrying a private mapping, so it cannot drift from the
 /// txt2img lane (`base.rs::model_repo`) or InstantID (`INSTANTID_SDXL_REPO`) again. It previously
 /// hardcoded the flat upstream repos, and the comment here claimed "in practice the built-in SDXL
-/// family points `repo` at the SceneWorks turnkey" — that was false. The lanes read a TOP-LEVEL
+/// family points `repo` at the SceneWorks turnkey" â€” that was false. The lanes read a TOP-LEVEL
 /// `repo` key, and no built-in model declares one (the manifest carries `downloads[].repo` and
 /// `paths.model`, which are different keys; `resolve_model_manifest_entry` injects only `modelPath`).
-/// So this is not a fallback, it is the only branch — and after the Group-B cutover (sc-8746) it
+/// So this is not a fallback, it is the only branch â€” and after the Group-B cutover (sc-8746) it
 /// named repos the installer no longer stages, leaving every candle IP-Adapter job unserved.
 ///
 /// The tier descent still applies on top: sc-10813 serves the request's q4/q8 tier via
@@ -105,8 +106,8 @@ fn resolve_sdxl_ipadapter_base(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_ipadapter_default_repo(&request.model));
     // sc-10813: a standard-tier turnkey (`mlx.standardTierLayout`, e.g. `SceneWorks/sdxl-base-mlx`)
-    // descends into the request's packed q4/q8 tier (or bf16) via `standard_tier_subdir` — the SAME
-    // resolver the txt2img lane uses (base.rs `resolve_base_model_dir`) — now that `load_instantid_unet`
+    // descends into the request's packed q4/q8 tier (or bf16) via `standard_tier_subdir` â€” the SAME
+    // resolver the txt2img lane uses (base.rs `resolve_base_model_dir`) â€” now that `load_instantid_unet`
     // packed-detects the tier. A flat upstream diffusers snapshot (no q4/q8/bf16 subdirs) has no present
     // tier, so `standard_tier_subdir` returns its root untouched; a NON-standard tiered turnkey keeps the
     // dense `bf16/` descent (sc-10614). Both fall through `dense_tier_subdir` on the non-standard branch.
@@ -122,7 +123,7 @@ fn resolve_sdxl_ipadapter_base(
 }
 
 /// True when this is a candle-eligible SDXL IP-Adapter job: an sdxl-family model with a reference image
-/// (and NOT an img2img/inpaint/edit shape — those advanced SDXL modes are sc-5487) whose base resolves
+/// (and NOT an img2img/inpaint/edit shape â€” those advanced SDXL modes are sc-5487) whose base resolves
 /// locally. Mirrors `jobs_store::sdxl_ipadapter_candle_eligible` so the worker and router agree.
 pub(super) fn sdxl_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_sdxl_ipadapter_model(&request.model)
@@ -133,12 +134,12 @@ pub(super) fn sdxl_ipadapter_available(request: &ImageRequest, settings: &Settin
         && matches!(resolve_sdxl_ipadapter_base(request, settings), Ok(Some(_)))
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (30).
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) â†’ manifest `steps` â†’ default (30).
 fn sdxl_ipadapter_steps(request: &ImageRequest) -> u32 {
     resolve_advanced_or_manifest_u32(request, "steps", SDXL_IPADAPTER_DEFAULT_STEPS, 1..=80)
 }
 
-/// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the reference-tuned default
+/// Resolve guidance: `advanced.guidanceScale` â†’ manifest `guidanceScale` â†’ the reference-tuned default
 /// (5.0), clamped to a sane CFG range.
 fn sdxl_ipadapter_guidance(request: &ImageRequest) -> f32 {
     resolve_advanced_or_manifest_f32(
@@ -151,8 +152,8 @@ fn sdxl_ipadapter_guidance(request: &ImageRequest) -> f32 {
 
 /// Resolve the IP-Adapter bundle file + the CLIP ViT-H image-encoder dir, downloading from
 /// `h94/IP-Adapter` on first use. Resolution order: an env-pinned root (pre-staged, the validation
-/// path) → a whole-repo HF cache snapshot → download the bundle + encoder into the app cache. Returns
-/// `(bundle_file, image_encoder_dir)` — what [`IpAdapterSdxlPaths`] wants.
+/// path) â†’ a whole-repo HF cache snapshot â†’ download the bundle + encoder into the app cache. Returns
+/// `(bundle_file, image_encoder_dir)` â€” what [`IpAdapterSdxlPaths`] wants.
 async fn ensure_sdxl_ipadapter_weights(
     api: &ApiClient,
     settings: &Settings,
@@ -180,7 +181,7 @@ async fn ensure_sdxl_ipadapter_weights(
             return Ok((bundle, encoder));
         }
     }
-    // Download-on-first-use into the app cache (flat dest, nested source — the InstantID bundle pattern).
+    // Download-on-first-use into the app cache (flat dest, nested source â€” the InstantID bundle pattern).
     let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
@@ -239,7 +240,7 @@ fn sdxl_ipadapter_raw_settings(
 /// Real candle SDXL IP-Adapter generation: resolve the reference + weights on the async side, then load
 /// the `IpAdapterSdxl` provider once + generate each image on the blocking thread. `request.count`
 /// images, each its own seed; the engine `generate` takes the per-job `CancelFlag` + a `Progress`
-/// callback, so streaming is per-step and cancellation is honoured mid-denoise — same contract as the
+/// callback, so streaming is per-step and cancellation is honoured mid-denoise â€” same contract as the
 /// registry families + the InstantID lane. Reuses [`consume_gen_events`] for the asset writes.
 pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     api: &ApiClient,
@@ -251,6 +252,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let adapters = resolve_adapters(request, settings)?;
     let sdxl_base = resolve_sdxl_ipadapter_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("SDXL IP-Adapter base (SDXL/RealVisXL) not found".to_owned())
     })?;
@@ -271,16 +273,16 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     let (ip_bundle, image_encoder) = ensure_sdxl_ipadapter_weights(api, settings, job).await?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle SDXL IP-Adapter
-    // lane is the With-Character route for an SDXL-family model — score every output against the
+    // lane is the With-Character route for an SDXL-family model â€” score every output against the
     // reference face through the SHARED generator-agnostic seam. Eligibility goes through
     // `resolve_character_image_likeness_source` (the SAME gate the macOS lanes use), so the angle/pose/
-    // edit exclusion is explicit and self-contained here — NOT dependent on dispatch order (an angle/pose
+    // edit exclusion is explicit and self-contained here â€” NOT dependent on dispatch order (an angle/pose
     // job is excluded by the helper even if it ever reached this lane, so it can never be double-scored).
     // The helper's decode is ignored: the already-decoded `reference` (this lane's generation input, the
     // current job's `referenceAssetId`) is the scorer source, so there is no second decode. Stage the
     // antelopev2 SCRFD + ArcFace bundle (the scorer's candle leg loads it); the `!Send` scorer is built
-    // ONCE inside the load closure and reused across the N outputs (source embedded once — the caching
-    // AC). Staging is non-fatal (failure → no scorer → scores omitted, generation still renders).
+    // ONCE inside the load closure and reused across the N outputs (source embedded once â€” the caching
+    // AC). Staging is non-fatal (failure â†’ no scorer â†’ scores omitted, generation still renders).
     let score_likeness =
         resolve_character_image_likeness_source(request, settings, project_path).is_some();
     let face_stack_dir = stage_likeness(
@@ -305,8 +307,8 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     // Curated unified-sampler selection (epic 7114, sc-7432): the candle `IpAdapterSdxl` provider honors
     // a curated solver/scheduler via the shared `denoise_curated` primitive (#130). Read + N3-normalize
     // against the shared curated menu (an unknown name drops to the engine default + emits an event). N1:
-    // unset ⇒ `None` ⇒ the native ancestral default loop runs byte-exact. (`sdxl`/`realvisxl` are
-    // MODEL_TABLE rows already advertising the curated menu — guarded by the existing drift guard.)
+    // unset â‡’ `None` â‡’ the native ancestral default loop runs byte-exact. (`sdxl`/`realvisxl` are
+    // MODEL_TABLE rows already advertising the curated menu â€” guarded by the existing drift guard.)
     let (curated_samplers, curated_schedulers) = curated_image_menu();
     let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
     let sampler = normalize_sampling_knob(
@@ -334,7 +336,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
         .unwrap_or_else(|| sdxl_ipadapter_default_repo(&request.model))
         .to_owned();
     // Per-generation PiD decode (epic 7840, sc-8044): resolve the `sdxl` PiD student + Gemma when
-    // `advanced.usePid` is set and the snapshots are cached; else `None` → native VAE. The SDXL IP-Adapter
+    // `advanced.usePid` is set and the snapshots are cached; else `None` â†’ native VAE. The SDXL IP-Adapter
     // composes the SDXL VAE, so it shares the one `sdxl` student. `use_pid` and the engine's `with_pid`
     // load stay in lockstep (the engine rejects a mismatch).
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
@@ -345,8 +347,8 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     // whether PiD ACTUALLY ran (opted in AND snapshots cached), not merely whether it was requested.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
-    // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
-    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // Per-image work items: (seed, prompt) â€” `request.count` images at the reference identity.
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4Ã— lands on ~2048 (default
     // 4K/native leaves the requested dims untouched).
     let (width, height) = pid_effective_dims(
         request.width,
@@ -367,6 +369,24 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
         resolve_sdxl_components(&request.model_manifest_entry, settings)?;
 
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448). This lane loads through the UNcached
+    // `start_gen_stream` with a bespoke `IpAdapterSdxlPaths`, so it is diverted around BOTH the
+    // `generate_candle_stream` `vram_gate` and the `generator_cache` `apply_residency_policy` â€” before
+    // this it allocated with no pre-flight check at all and died on a reactive CUDA OOM. Gated here, once
+    // every resident path is resolved and before anything is moved into the load closure. The IP-Adapter
+    // bundle + its CLIP image encoder are the overlay; the fp16-fix VAE and an opted-in PiD pair are
+    // priced too, because they are held alongside the base (the tokenizers are JSON â€” no weights to sum).
+    {
+        let mut overlays = vec![
+            ip_bundle.as_path(),
+            image_encoder.as_path(),
+            crate::conditioning_fit::weights_source_path(&vae_fp16_fix),
+        ];
+        overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
+        overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
+        admit_conditioning_paths(settings, "SDXL", "IP-Adapter", &sdxl_base, &overlays).await?;
+    }
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "sdxl_ipadapter",
@@ -379,6 +399,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                 tokenizer_clip_l,
                 tokenizer_clip_bigg,
                 vae_fp16_fix,
+                adapters,
             };
             let model = IpAdapterSdxl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))
@@ -393,7 +414,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
             };
             // Per-job identity-likeness scorer built ONCE here (on the blocking thread where the `!Send`
             // face stack is allowed); source embedded once, reused across every output (sc-4411 caching
-            // AC). `None` ⇒ non-fatal staging / construction failure ⇒ scores omitted.
+            // AC). `None` â‡’ non-fatal staging / construction failure â‡’ scores omitted.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some(source)) => {
                     crate::face_likeness::build_face_likeness_scorer(dir, source)
@@ -406,56 +427,61 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
             // `IpAdapterSdxl::generate` takes `&mut self` (it sets the IP image tokens on the UNet before
             // the denoise), so the per-item closure mutates `model`.
             let mut model = model;
-            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = IpAdapterSdxlRequest {
-                    prompt,
-                    negative: negative_prompt.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    ip_adapter_scale: ip_scale,
-                    seed: seed as u64,
-                    sampler: sampler.clone(),
-                    scheduler: scheduler.clone(),
-                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
-                    use_pid,
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &reference, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "SDXL IP-Adapter generation failed: {error}"
-                        )));
+            drive_gen_items_scored(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                // Score this finished image against the cached source embedding (sc-4411). Image build +
-                // pixel clone paid ONLY when a scorer exists; non-frontal → honest detected:false N/A;
-                // `None` scorer ⇒ field omitted.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        Some(likeness_source_ref.as_str()),
-                    )
-                });
-                Ok(Some((
-                    seed,
-                    out.width,
-                    out.height,
-                    out.pixels,
-                    face_likeness,
-                )))
-            })
+                    let req = IpAdapterSdxlRequest {
+                        prompt,
+                        negative: negative_prompt.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        ip_adapter_scale: ip_scale,
+                        seed: seed as u64,
+                        sampler: sampler.clone(),
+                        scheduler: scheduler.clone(),
+                        // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                        use_pid,
+                        preview,
+                        cancel: cancel.clone(),
+                    };
+                    let out = match model.generate(&req, &reference, &mut *on_progress) {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "SDXL IP-Adapter generation failed: {error}"
+                            )));
+                        }
+                    };
+                    // Score this finished image against the cached source embedding (sc-4411). Image build +
+                    // pixel clone paid ONLY when a scorer exists; non-frontal â†’ honest detected:false N/A;
+                    // `None` scorer â‡’ field omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out.width,
+                                height: out.height,
+                                pixels: out.pixels.clone(),
+                            },
+                            Some(likeness_source_ref.as_str()),
+                        )
+                    });
+                    Ok(Some((
+                        seed,
+                        out.width,
+                        out.height,
+                        out.pixels,
+                        face_likeness,
+                    )))
+                },
+            )
         },
     );
 
@@ -520,7 +546,7 @@ mod sdxl_ipadapter_repo_tests {
         );
     }
 
-    /// Every id this lane admits must have a MODEL_TABLE row — otherwise it silently takes the
+    /// Every id this lane admits must have a MODEL_TABLE row â€” otherwise it silently takes the
     /// defensive `unwrap_or` floor and loads the WRONG model's weights instead of failing.
     #[test]
     fn every_admitted_model_has_a_model_table_row() {
@@ -536,7 +562,7 @@ mod sdxl_ipadapter_repo_tests {
             );
             assert!(
                 crate::engines::default_repo_for(model).is_some(),
-                "{model} is admitted but has no MODEL_TABLE row — it would silently take the floor"
+                "{model} is admitted but has no MODEL_TABLE row â€” it would silently take the floor"
             );
         }
     }

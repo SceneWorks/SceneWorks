@@ -123,6 +123,13 @@ async fn check_and_prompt(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
 /// valid non-UTF-8 Windows paths are not changed. NSIS requires `/D=` to be the
 /// final argument; the updater builder preserves insertion order and appends
 /// installer arguments last.
+///
+/// Its only non-test caller is `#[cfg(target_os = "windows")]` — NSIS is the Windows
+/// installer — but the tests below are unconditional, because the path logic they cover is
+/// platform-neutral. That combination makes this dead code in a non-Windows *bin* build
+/// while it stays live in the test target, so the carve-out is platform-scoped rather than
+/// blanket (sc-16269).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn nsis_install_dir_arg(current_exe: &Path) -> Option<OsString> {
     let install_dir = current_exe.parent()?;
     if install_dir.as_os_str().is_empty() {

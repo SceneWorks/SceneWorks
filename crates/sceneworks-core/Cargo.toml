@@ -25,6 +25,10 @@ imagesize = "0.13"
 # build. The union's `default-features = false` also keeps `avif` off, and with it the
 # nasm-dependent encoder chain that would break the Windows candle lane.
 image = { workspace = true }
+# sc-15947: the PNG iTXt workflow chunk. `image` has no text-chunk API, so `workflow_png` encodes
+# through `png` directly and reads back through its bounded text decompressor. Same crate `image`
+# already uses for PNG — inherited from the workspace so it cannot resolve to a second copy.
+png = { workspace = true }
 # sc-6531: SHA-256 of stored bytes = exact-duplicate key + the cache key for Tier-1
 # embeddings (epic 6529 §6.3). Pinned to the workspace's existing 0.10 line (worker + desktop)
 # so no new locked version appears.

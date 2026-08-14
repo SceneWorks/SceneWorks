@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 5,
+  "story": "SC-15833",
+  "capturedInferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+  "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+  "method": "compiled artifact identity for changed paths, git object identity for unchanged paths, and shipped-bundle resolved-feature identity, across the Candle FLUX.2 measurement binary's compile closure and its workspace build inputs",
+  "command": "node scripts/inference-artifact-audit.mjs --repo PATH --captured SHA40 --compatible SHA40",
+  "changedClosurePaths": [
+    "Cargo.lock",
+    "crates/media/candle-gen/candle-gen"
+  ],
+  "auditedObjects": [
+    {
+      "path": "Cargo.toml",
+      "capturedObject": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
+      "compatibleObject": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c"
+    },
+    {
+      "path": "Cargo.lock",
+      "capturedObject": "8ab01e00f01607a99845d875ed60275ae033450c",
+      "compatibleObject": "e5014b407797019597b3f0498424ee0d1938e41d"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "capturedObject": "ae829f875c68c03c367ce92cc05e041036a92d0a",
+      "compatibleObject": "ae829f875c68c03c367ce92cc05e041036a92d0a"
+    },
+    {
+      "path": ".cargo/config.toml",
+      "capturedObject": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
+      "compatibleObject": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45"
+    },
+    {
+      "path": "crates/contracts/gen-core",
+      "capturedObject": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
+      "compatibleObject": "9a7e86f5893e584a8d0d656147abc4ae93af6922"
+    },
+    {
+      "path": "crates/media/candle-gen/candle-gen",
+      "capturedObject": "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
+      "compatibleObject": "b7e8ac11f12ee754eb290082bfce2be8460f5504"
+    },
+    {
+      "path": "crates/media/candle-gen/candle-gen-pid",
+      "capturedObject": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
+      "compatibleObject": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa"
+    },
+    {
+      "path": "crates/media/candle-gen/candle-gen-flux2",
+      "capturedObject": "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
+      "compatibleObject": "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1"
+    },
+    {
+      "path": "crates/media/candle-gen/vendor/candle-kernels",
+      "capturedObject": "3b8327cf01d346c8068a5e9d096dcdddca440e99",
+      "compatibleObject": "3b8327cf01d346c8068a5e9d096dcdddca440e99"
+    }
+  ],
+  "featureWitness": {
+    "shippedPackage": "runtime-cuda",
+    "scopeRoot": "candle-gen-flux2",
+    "scopeFeatures": "cuda",
+    "target": "x86_64-pc-windows-msvc",
+    "edges": "normal,build",
+    "packages": 173,
+    "measurementDelta": [
+      "candle-gen v0.0.0 (crates/media/candle-gen/candle-gen): measured [cuda,default,testkit] shipped [cuda,default]",
+      "sceneworks-gen-core-testkit v0.1.0 (crates/contracts/gen-core-testkit): measured only"
+    ],
+    "capturedDigest": "sha256:321625ed01f837fd0682b2020d92cde068e8792db103d4e8ba3bf3ff8bff500b",
+    "compatibleDigest": "sha256:321625ed01f837fd0682b2020d92cde068e8792db103d4e8ba3bf3ff8bff500b"
+  },
+  "auditedArtifact": {
+    "package": "candle-gen-flux2",
+    "kind": "lib test binary",
+    "test": "tests::flux2_dev_probed_generate_for_offload_ab",
+    "profile": "release",
+    "closurePath": "crates/media/candle-gen/candle-gen-flux2",
+    "lane": "cuda",
+    "features": [
+      "cuda"
+    ],
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "cudaRelease": "12.9",
+    "adjudicates": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      ".cargo/config.toml",
+      "crates/contracts/gen-core",
+      "crates/media/candle-gen/candle-gen",
+      "crates/media/candle-gen/candle-gen-pid",
+      "crates/media/candle-gen/candle-gen-flux2",
+      "crates/media/candle-gen/vendor/candle-kernels"
+    ],
+    "capturedDigest": "sha256:d80844f24dcb95f957c1cd893f9238c9d753db8e1e40c5deefe9f6b6f740f9aa",
+    "compatibleDigest": "sha256:d80844f24dcb95f957c1cd893f9238c9d753db8e1e40c5deefe9f6b6f740f9aa"
+  }
+}

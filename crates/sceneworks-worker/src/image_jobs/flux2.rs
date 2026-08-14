@@ -96,24 +96,6 @@ fn plan_edit_batch(
     }
 }
 
-/// True when an Image-Edit *source* (`sourceAssetId`) should be pre-fitted to W×H: `edit_image`
-/// mode, a source asset, no character `referenceAssetId`, and a non-`stretch` fit mode. Used by the
-/// img2img-init edit resolvers (`zimage`/`kolors` `resolve_*_edit_init`) that fit only the edit
-/// source. The character-reference / multi-reference edit path is fitted by [`fit_edit_references`]
-/// instead — which, unlike this gate, does NOT exclude the character reference (sc-8253).
-fn should_fit_edit_source(request: &ImageRequest) -> bool {
-    let has_source = request
-        .source_asset_id
-        .as_deref()
-        .is_some_and(|id| !id.trim().is_empty());
-    // No character referenceAssetId (absent or empty).
-    let no_reference = !request
-        .reference_asset_id
-        .as_deref()
-        .is_some_and(|id| !id.trim().is_empty());
-    request.mode == "edit_image" && has_source && no_reference && request.fit_mode != "stretch"
-}
-
 /// Pre-fit every resolved edit reference — the character `referenceAssetId`, the multi-image
 /// `referenceAssetIds`, or the Image-Edit `sourceAssetId` alike — to the conditioning `width`×
 /// `height` before it reaches the engine, unless the fit mode is `stretch` (which keeps the legacy
@@ -146,9 +128,9 @@ fn fit_edit_references(
 // resolve on the candle lane too (video_jobs.rs + the candle edit handlers call `fit_engine_image`).
 
 // ---------------------------------------------------------------------------
-// FLUX.2-klein edit / reference (macOS, sc-3029): the `flux2_klein_9b_edit` and
-// `flux2_klein_9b_kv_edit` variants. FLUX.2-klein is MLX-only (no torch), so this
-// is where its edit/reference jobs run. One output per requested count, each
+// FLUX.2-klein edit / reference (macOS MLX, sc-3029): the `flux2_klein_9b_edit` and
+// `flux2_klein_9b_kv_edit` variants. This is the MLX implementation; the native Candle/CUDA sibling
+// runs off-Mac and there is no Python fallback. One output per requested count, each
 // conditioned on the shared reference image(s); the -kv variant auto-engages the
 // reference-K/V cache (~2.4× edit speedup).
 // ---------------------------------------------------------------------------
@@ -158,13 +140,20 @@ fn fit_edit_references(
 /// distill uses `flux2_klein_9b_kv_edit` (reference-K/V cache); dev uses the
 /// `flux2_dev_edit` variant (sc-5919) — the same dev snapshot, edit conditioning via
 /// the DiT token concat (Reference / MultiReference), embedded guidance, no -kv cache.
-fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
+pub(crate) fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "flux2_klein_9b" | "flux2_klein_9b_true_v2" => Some("flux2_klein_9b_edit"),
         "flux2_klein_9b_kv" => Some("flux2_klein_9b_kv_edit"),
         "flux2_dev" => Some("flux2_dev_edit"),
         _ => None,
     }
+}
+
+/// Whether the edit provider owns its request-time memory safety instead of flowing through the
+/// generic MLX estimate selector. FLUX.2 Dev has a calibrated multi-reference safety contract;
+/// the Klein edit variants do not use that provider-specific branch.
+pub(crate) fn flux2_edit_uses_provider_memory_safety(engine_id: &str) -> bool {
+    engine_id == "flux2_dev_edit"
 }
 
 // `MAX_EDIT_REFERENCES` / `edit_reference_ids` moved to base.rs (sc-8946, F-144): shared by the
@@ -232,63 +221,124 @@ fn flux2_edit_image_guidance(request: &ImageRequest) -> Option<f32> {
     (scale > 1.0).then_some(scale)
 }
 
-/// Estimated peak unified-memory footprint (GB) of a FLUX.2-dev edit at `width`×`height` with
-/// `reference_count` reference images — the input to the multi-reference memory guard. The dev edit is
-/// activation-bound: the DiT attends over the target latent plus every reference latent, each
-/// ≈⌈W/16⌉·⌈H/16⌉ tokens (VAE ×8, patch ×2), so the peak scales with the total sequence length.
-/// Re-anchored for sc-6211 on the **chunked** worker-layer measurements (Q4 packed, `/usr/bin/time
-/// -l` peak on a 128 GB Mac, with the sc-6266 engine sequence-gated activation chunking ON): a
-/// two-reference 1024² edit ~81 GB and a four-reference 1024² edit ~93 GB — a linear-in-tokens fit
-/// over those two chunked edit points (`BASE + PER_TOKEN·(1 + refs)·tokens_per_image`). The chunked
-/// slope (~0.0015 GB/token) is ~3.8× gentler than the pre-chunking sc-5923 fit (0.005615), which is
-/// why the two-reference edit now fits under 96. Only used on the multi-reference branch
-/// (`reference_count >= 2`); txt2img and single-reference are covered directly by the declared
-/// `minMemoryGb`.
-fn flux2_dev_edit_peak_gb(reference_count: usize, width: u32, height: u32) -> f64 {
-    const BASE_GB: f64 = 62.9;
-    const PER_TOKEN_GB: f64 = 0.001_489; // (93 − 81) GB / (20480 − 12288) tokens, sc-6211 (chunked).
-    let tokens_per_image = (f64::from(width) / 16.0).ceil() * (f64::from(height) / 16.0).ceil();
-    let total_tokens = (1.0 + reference_count as f64) * tokens_per_image;
-    BASE_GB + PER_TOKEN_GB * total_tokens
+/// Effective text guidance for FLUX.2 reference/edit paths. Character/Image Studio's variation
+/// slider emits `trueCfgScale`; `guidanceScale` remains the direct-request/legacy fallback.
+fn flux2_edit_text_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
+    if !model.supports_guidance() {
+        return None;
+    }
+    request
+        .advanced
+        .get("trueCfgScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .or_else(|| resolve_guidance(request, model))
 }
 
-/// Prevent a silent OOM on a FLUX.2-dev **multi-reference** edit. With the sc-6266 engine activation
-/// chunking a two-reference 1024² edit now peaks ~81 GB (sc-6211) and fits the declared `minMemoryGb`
-/// (96); but the edit stays activation-bound, so more references / higher resolution still grow the
-/// footprint (three-reference 1024² ~87 GB, four ~93 GB, five+ over 96). When the estimated peak plus
-/// a fixed runtime/OS headroom exceeds the machine's unified memory, reject with an actionable message
-/// instead of being SIGKILL'd mid-render. `reference_count < 2` and a failed RAM probe (`available_gb
-/// == None`) short-circuit to `Ok`, so the guard never touches txt2img / single-reference and never
-/// blocks a machine that can actually fit the edit. (Pre-sc-6266 this rejected the two-reference edit
-/// outright on a 96 GB Mac — the ~104 GB un-chunked peak; the re-anchored estimate now passes it.)
-fn flux2_dev_edit_memory_guard(
+/// Resolve the numeric tier the FLUX.2 edit provider will actually load. Standard tier resolution
+/// may fall through q4 → q8 → bf16 when the requested directory is absent, so the request-derived
+/// tier must be reconciled against the resolved directory before it enters either `LoadSpec` or the
+/// provider safety context. Keeping those two identities equal but wrong would bypass tier-sensitive
+/// memory admission.
+fn flux2_edit_resolved_quant(
+    request: &ImageRequest,
+    weights_dir: &Path,
+    model_id: &str,
+    job_id: &str,
+    backend: &str,
+) -> (Option<Quant>, Option<i64>) {
+    let requested = resolve_quant(request, Some(weights_dir));
+    let dense_text_encoder = is_dense_te_tier(request);
+    let requested_for_reconcile = if dense_text_encoder {
+        (None, dense_te_requested_tier_bits(request))
+    } else {
+        requested
+    };
+    reconcile_resolved_tier_quant(
+        requested_for_reconcile,
+        weights_dir,
+        !dense_text_encoder,
+        model_id,
+        job_id,
+        backend,
+    )
+}
+
+/// Measured activation/transient allowance on top of the sc-6211 chunked request peak. This is NOT the
+/// shared-pool OS/foreign reserve: it is submitted as the provider context's typed reserved headroom,
+/// keeping the two quantities separate while preserving the original 12 GiB fit boundary exactly.
+const FLUX2_DEV_EDIT_ACTIVATION_TRANSIENT_GB: f64 = 12.0;
+/// Build the calibrated request context consumed by the FLUX.2 provider's `safety_check`. The worker
+/// owns the live unified-memory reading and request facts; the provider owns the calibrated formula,
+/// numeric-tier enforcement, and final accept/reject decision. Single-reference requests and
+/// unavailable probes retain the prior fail-open behavior and therefore return no context.
+fn flux2_dev_edit_memory_context(
+    contract: &gen_core::MemoryProviderContract,
+    quant: Option<gen_core::Quant>,
     reference_count: usize,
     width: u32,
     height: u32,
-    available_gb: Option<f64>,
-) -> WorkerResult<()> {
+    total_gb: Option<f64>,
+) -> WorkerResult<Option<gen_core::MemoryRunContext>> {
     if reference_count < 2 {
-        return Ok(());
+        return Ok(None);
     }
-    let Some(available_gb) = available_gb else {
-        return Ok(());
+    let Some(total_gb) = total_gb else {
+        return Ok(None);
     };
-    // Headroom for the OS + other apps + MLX Metal transient allocations on top of the (accurate,
-    // chunked) estimate. 12 GB passes the canonical two-reference 1024² edit (~81 GB) on a 96 GB Mac
-    // while rejecting the genuinely-too-tight three+/high-resolution combinations.
-    const HEADROOM_GB: f64 = 12.0;
-    let needed_gb = flux2_dev_edit_peak_gb(reference_count, width, height);
-    if available_gb + f64::EPSILON < needed_gb + HEADROOM_GB {
-        return Err(WorkerError::InvalidPayload(format!(
-            "FLUX.2-dev multi-reference edit at {width}×{height} with {reference_count} reference \
-             images needs ~{needed} GB of unified memory (with headroom) but this machine has \
-             ~{available} GB. Lower the output resolution, use a single reference image, or run on \
-             a Mac with more memory.",
-            needed = needed_gb.round() as i64,
-            available = available_gb.round() as i64,
-        )));
-    }
-    Ok(())
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        WorkerError::Engine("FLUX.2-dev edit provider has no memory calibration identity".to_owned())
+    })?;
+    let bytes = |gb: f64| {
+        (gb * 1024.0 * 1024.0 * 1024.0)
+            .round()
+            .clamp(0.0, u64::MAX as f64) as u64
+    };
+    Ok(Some(gen_core::MemoryRunContext {
+        // The provider's resident request path itself auto-engages the long-sequence activation
+        // bound. This context admits that real path; it does not invent a separately selectable rung.
+        selection: gen_core::MemorySelection {
+            strategy: gen_core::MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier: gen_core::MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant,
+                component_precision_floors: &[],
+            },
+        },
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
+        mode: gen_core::MemoryMode::Edit,
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
+        },
+        // Multi-reference is request geometry, not a distinct overlay identity. Encoding the count
+        // here would violate the provider's opaque identity-axis contract; the provider reads the
+        // exact count from `geometry.reference_count`.
+        overlay: None,
+        budget: gen_core::MemoryBudget {
+            total_bytes: bytes(total_gb),
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: bytes(FLUX2_DEV_EDIT_ACTIVATION_TRANSIENT_GB),
+        },
+        // The provider recomputes this from geometry/reference count/tier and ignores caller input.
+        predicted_peak_bytes: 0,
+        cache_state: gen_core::MemoryCacheState::Cold,
+        evidence_revision: "provider-owned-flux2-dev-edit-fit".to_owned(),
+    }))
 }
 
 /// Generate one FLUX.2 edit image conditioned on `conditioning` (the reference set).
@@ -296,6 +346,9 @@ fn flux2_dev_edit_memory_guard(
 #[allow(clippy::too_many_arguments)]
 fn flux2_edit_generate_one(
     generator: &dyn Generator,
+    use_provider_memory_safety: bool,
+    total_unified_memory_gb: Option<f64>,
+    quant: Option<gen_core::Quant>,
     prompt: &str,
     width: u32,
     height: u32,
@@ -305,9 +358,19 @@ fn flux2_edit_generate_one(
     image_guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
     enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let reference_count = conditioning
+        .iter()
+        .map(|conditioning| match conditioning {
+            Conditioning::Reference { .. } => 1,
+            Conditioning::MultiReference { images } => images.len(),
+            _ => 0,
+        })
+        .sum();
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -318,13 +381,40 @@ fn flux2_edit_generate_one(
         guidance,
         image_guidance,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    enhance.apply(&mut request);
-    let output = generator
-        .generate(&request, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("edit generation failed: {error}")))?;
+    enhance.apply(&mut request, prompt_enhancement);
+    let memory_context = if use_provider_memory_safety {
+        let contract = generator.memory_strategy_contract().ok_or_else(|| {
+            WorkerError::Engine(
+                "FLUX.2-dev edit provider did not expose its memory-safety contract".to_owned(),
+            )
+        })?;
+        flux2_dev_edit_memory_context(
+            contract,
+            quant,
+            reference_count,
+            width,
+            height,
+            total_unified_memory_gb,
+        )?
+    } else {
+        None
+    };
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_context.as_ref(),
+        on_progress,
+    )
+    .map_err(|error| match error {
+        gen_core::Error::Unsupported(reason) if memory_context.is_some() => {
+            WorkerError::InvalidPayload(reason)
+        }
+        error => WorkerError::Engine(format!("edit generation failed: {error}")),
+    })?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
@@ -383,9 +473,15 @@ async fn generate_flux2_edit_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not a FLUX.2 edit model".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 weights not found".to_owned()))?;
-    let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
+    let (quant, quant_bits) = flux2_edit_resolved_quant(
+        request,
+        &weights_dir,
+        &request.model,
+        &job.id,
+        backend,
+    );
     let steps = resolve_steps(request, &model);
-    let guidance = resolve_guidance(request, &model);
+    let guidance = flux2_edit_text_guidance(request, &model);
     // Identity strength (sc-8278): map the UI `referenceStrength` slider onto the engine's
     // image-guidance CFG so a strong prompt doesn't drop the reference identity (sc-8234).
     let image_guidance = flux2_edit_image_guidance(request);
@@ -414,19 +510,15 @@ async fn generate_flux2_edit_stream(
     // off-aspect reference isn't squished into the square latent. `stretch` keeps the legacy resize.
     references = fit_edit_references(references, request, request.width, request.height)?;
 
-    // sc-6124: guard the activation-bound FLUX.2-dev *multi-reference* edit against a silent OOM on
-    // machines below its real requirement. The reachable surface (txt2img + single-reference edit)
-    // fits the declared `minMemoryGb` (96); a second reference adds ~4096 latent tokens to the DiT
-    // stream and pushes the 1024² peak to ~104 GB (sc-5923), over the floor. Single-reference and
-    // txt2img short-circuit, so this is inert until a multi-image edit picker feeds ≥2 references.
-    if engine_id == "flux2_dev_edit" {
-        flux2_dev_edit_memory_guard(
-            references.len(),
-            request.width,
-            request.height,
-            crate::gpu::total_unified_memory_gb().await,
-        )?;
-    }
+    // The provider owns the final multi-reference memory-safety decision. Resolve the worker-owned
+    // live total once on the async side; each concrete conditioning set below supplies its actual
+    // reference count (including the pose skeleton + identity-reference pair).
+    let use_provider_memory_safety = flux2_edit_uses_provider_memory_safety(engine_id);
+    let total_unified_memory_gb = if use_provider_memory_safety {
+        crate::gpu::total_unified_memory_gb().await
+    } else {
+        None
+    };
 
     // sc-3030 per-iteration grouping: a Character-Studio angle set (11 shared-seed,
     // per-angle prompt) / best-effort pose tier (one per pose, shared seed, each a
@@ -482,7 +574,7 @@ async fn generate_flux2_edit_stream(
     let adapter_count = adapters.len();
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
-    let enhance = PromptEnhance::from_advanced(&request.advanced);
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     let spec = load_spec(weights_dir, quant, adapters, None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -501,10 +593,10 @@ async fn generate_flux2_edit_stream(
                 }
                 _ => None,
             };
-            drive_gen_items_scored(
+            drive_gen_items_scored_reported(
                 tx,
                 seeds.into_iter().zip(prompts),
-                move |index, (seed, prompt), on_progress| {
+                move |index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     // Pose tier: pair this pose's DWPose whole-body skeleton (body + hands
                     // 21x2 + face 68 when the pose carries them — sc-6702) with the reference
                     // as a `[skeleton, reference]` multi-image set; else the plain reference
@@ -538,6 +630,9 @@ async fn generate_flux2_edit_stream(
                     };
                     let (out_w, out_h, pixels) = flux2_edit_generate_one(
                         generator,
+                        use_provider_memory_safety,
+                        total_unified_memory_gb,
+                        quant,
                         &prompt,
                         width,
                         height,
@@ -547,6 +642,8 @@ async fn generate_flux2_edit_stream(
                         image_guidance,
                         conditioning,
                         &enhance,
+                        prompt_enhancement.for_prompt(&prompt),
+                        preview,
                         &cancel,
                         on_progress,
                     )?;
@@ -595,9 +692,9 @@ async fn generate_flux2_edit_stream(
 // the `flux2_dev_control` registry generator — a VACE ControlNet on the dev base.
 // One image per library pose, each conditioned on a DWPose skeleton fed to the
 // `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` branch (TRUE pose lock, not the
-// best-effort `[skeleton, reference]` tier above). FLUX.2 is MLX-only, so this is
-// the only strict-pose path for dev (no candle sibling). Mirrors the Z-Image MLX
-// control path (`generate_zimage_control_stream`).
+// best-effort `[skeleton, reference]` tier above). This is the MLX strict-pose implementation;
+// Candle/CUDA owns the corresponding off-Mac `Flux2Control` lane. Mirrors the Z-Image MLX control
+// path (`generate_zimage_control_stream`).
 // ---------------------------------------------------------------------------
 
 /// The engine registry id for the FLUX.2-dev Fun-Controlnet-Union variant (sc-2292).
@@ -623,7 +720,7 @@ const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
 /// presence is NOT part of the gate: they are fetched on first use in the stream (a missing checkpoint
 /// downloads, then errors loudly only on a real failure — never silently drops the poses).
 fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model == "flux2_dev"
+    mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX2_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -729,6 +826,7 @@ fn flux2_control_generate_one(
     steps: u32,
     guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -741,6 +839,7 @@ fn flux2_control_generate_one(
         steps: Some(steps),
         guidance,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -932,7 +1031,7 @@ async fn generate_flux2_dev_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -958,6 +1057,7 @@ async fn generate_flux2_dev_control_stream(
                     steps,
                     guidance,
                     conditioning,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

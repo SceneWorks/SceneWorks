@@ -4,12 +4,13 @@ use super::{
     safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use super::{
-    pose_entries, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, QwenFunControl, QwenFunControlPaths, QwenFunControlRequest, Settings, Value,
-    WorkerError, WorkerResult,
+    pose_entries, resolve_adapters, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
+    ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, PathBuf, Progress, QwenFunControl, QwenFunControlPaths,
+    QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
 };
+use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
@@ -336,6 +337,7 @@ pub(super) struct QwenStrictControl {
     steps: u32,
     guidance: f32,
     control_scale: f32,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -350,6 +352,39 @@ pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictContr
         steps: 30,
         guidance: 4.0,
         control_scale: 1.0,
+        adapters: Vec::new(),
+    }
+}
+
+impl QwenStrictControl {
+    /// Build this lane's bespoke request. Split out of [`CandleStrictControl::generate_one`] so the
+    /// preview wiring is reachable without a loaded provider — see
+    /// `candle_strict_control_requests_carry_the_live_preview_sink` in `image_jobs::tests`, which
+    /// calls this and asserts an emitted frame reaches the sink the driver supplied.
+    ///
+    /// `preview` is the job's live sink and is **cloned onto the request**, never defaulted (epic 16948,
+    /// sc-16962). At inference `5b6d6aa`, Qwen-Image emits per-step latent previews from t2i, edit
+    /// and `control_fun` (introduced by sc-16952). Frames are of the developing target only — the
+    /// control hint's
+    /// VACE latents never reach the sampler's running latent.
+    pub(super) fn control_request(
+        &self,
+        seed: u64,
+        cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
+    ) -> QwenFunControlRequest {
+        QwenFunControlRequest {
+            prompt: self.prompt.clone(),
+            negative: self.negative.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            guidance: self.guidance,
+            control_scale: self.control_scale,
+            seed,
+            cancel: cancel.clone(),
+            preview: preview.clone(),
+        }
     }
 }
 
@@ -376,10 +411,24 @@ impl CandleStrictControl for QwenStrictControl {
         self.height
     }
 
+    /// The Qwen-Image-2512 base tier dir + the packed 2512-Fun-Controlnet-Union overlay file, exactly
+    /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069).
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        let mut overlays = vec![self.controlnet.as_path()];
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
+        ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+            "Qwen-Image",
+            "strict-pose ControlNet branch",
+            &self.qwen_base,
+            &overlays,
+        ))
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = QwenFunControlPaths {
             qwen_base: self.qwen_base.clone(),
             controlnet: self.controlnet.clone(),
+            adapters: self.adapters.clone(),
         };
         QwenFunControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))
@@ -392,19 +441,10 @@ impl CandleStrictControl for QwenStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
-        let req = QwenFunControlRequest {
-            prompt: self.prompt.clone(),
-            negative: self.negative.clone(),
-            width: self.width,
-            height: self.height,
-            steps: self.steps as usize,
-            guidance: self.guidance,
-            control_scale: self.control_scale,
-            seed,
-            cancel: cancel.clone(),
-        };
+        let req = self.control_request(seed, cancel, preview);
         model.generate(&req, control, on_progress).map_err(|error| {
             WorkerError::Engine(format!(
                 "Qwen 2512-Fun strict-control generation failed: {error}"
@@ -457,6 +497,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
     let raw_settings =
         qwen_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
 
+    let adapters = resolve_adapters(request, settings)?;
     let provider = QwenStrictControl {
         qwen_base,
         controlnet,
@@ -467,6 +508,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         steps,
         guidance,
         control_scale,
+        adapters,
     };
 
     run_candle_strict_control(

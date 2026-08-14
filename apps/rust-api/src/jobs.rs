@@ -76,7 +76,7 @@ pub(crate) async fn list_metrics(
 
 pub(crate) async fn create_job(
     State(state): State<AppState>,
-    ApiJson(payload): ApiJson<JobCreateRequest>,
+    ApiJson(mut payload): ApiJson<JobCreateRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     if matches!(payload.job_type, JobType::CatalogAnalysis) {
         return Err(ApiError::bad_request(
@@ -98,6 +98,7 @@ pub(crate) async fn create_job(
         )));
     }
     validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
+    canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,
@@ -428,29 +429,186 @@ async fn validate_and_canonicalize_merged_generation_payload(
     } else {
         validate_raw_job_payload(state, &job_type, &merged)?;
     }
+    canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
+            validate_image_pose_count(advanced)?;
+        }
         crate::control_overlays::resolve_control_overlay_selection(
             state,
             project_id.as_deref(),
             &mut merged,
         )
         .await?;
+        validate_prompt_enhancement_payload(&merged)?;
     }
     Ok(merged)
 }
 
+/// Resolve and stamp the authoritative catalog entry at every image-job creation boundary.
+///
+/// The typed image route, raw Batch Detail route, retry, and duplicate all reach this seam. That is
+/// security-sensitive for imported/custom models: scheduling uses the entry's family and installed
+/// path hints, and the native workers then confine the resulting path before opening it. A caller may
+/// choose the catalog model id, but may never replace the server-owned entry that proves what that id
+/// means. Keeping this post-merge also prevents `payloadChanges` from reopening that trust boundary.
+///
+/// Historical raw `image_detail` jobs without an explicit model remain untouched. They predate model
+/// metadata hydration and are used by the public queue/claim contract; stamping an empty entry and a
+/// tier selector into that shape neither helps the worker nor preserves the contract. The shipped
+/// Batch Detail request names `realvisxl`, so a real request resolves a non-empty entry below.
+pub(crate) async fn canonicalize_image_model_payload(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<Option<Value>, ApiError> {
+    if !matches!(
+        job_type,
+        JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+    ) {
+        return Ok(None);
+    }
+
+    let Some(model_id) = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+    else {
+        if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+            return Err(ApiError::bad_request("model is required"));
+        }
+        reject_image_detail_packed_tier(payload)?;
+        // Never forward metadata that cannot be tied to an explicit catalog id. Removing a forged
+        // entry is the only safe no-model behavior and leaves the established `{}` contract exact.
+        payload.remove("modelManifestEntry");
+        return Ok(None);
+    };
+    validate_model_id(&model_id)?;
+
+    let model_manifest_entry =
+        crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    if matches!(job_type, JobType::ImageDetail)
+        && !model_manifest_entry
+            .as_object()
+            .is_some_and(|entry| !entry.is_empty())
+    {
+        return Err(ApiError::bad_request(format!(
+            "image_detail model '{model_id}' was not found in the model catalog"
+        )));
+    }
+
+    // Overwrite rather than merge. The selected id was path-confined above; imported/custom
+    // workers independently confine the authoritative entry's `modelPath` / `paths.model` before
+    // opening it, preserving the established two-boundary defense.
+    payload.insert(
+        "modelManifestEntry".to_owned(),
+        model_manifest_entry.clone(),
+    );
+    if matches!(job_type, JobType::ImageDetail) {
+        canonicalize_image_detail_dense_tier(payload)?;
+    }
+    Ok(Some(model_manifest_entry))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn canonicalize_image_detail_dense_tier(payload: &mut JsonObject) -> Result<(), ApiError> {
+    // Candle's SDXL detail provider supports only the dense bf16 base. Batch Detail does not expose
+    // a tier picker, so the API owns this selector. Reject all three packed carriers the image
+    // product surface can emit instead of silently converting a caller's explicit request.
+    reject_image_detail_packed_tier(payload)?;
+    let advanced = payload
+        .entry("advanced".to_owned())
+        .or_insert_with(|| json!({}));
+    let advanced = advanced
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("image_detail advanced must be an object"))?;
+
+    advanced.remove("convRot");
+    advanced.remove("quantTier");
+    advanced.remove("mlxQuantizeExplicit");
+    advanced.insert("mlxQuantize".to_owned(), Value::from(0));
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reject_image_detail_packed_tier(payload: &JsonObject) -> Result<(), ApiError> {
+    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if let Some(value) = advanced.get("mlxQuantize") {
+        let bits = if value.is_null() {
+            0
+        } else {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+                .ok_or_else(|| {
+                    ApiError::bad_request("image_detail advanced.mlxQuantize must be an integer")
+                })?
+        };
+        if bits > 0 {
+            return Err(dense_image_detail_error());
+        }
+    }
+    if let Some(value) = advanced.get("convRot") {
+        match value {
+            Value::Bool(false) | Value::Null => {}
+            Value::Bool(true) => return Err(dense_image_detail_error()),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "image_detail advanced.convRot must be a boolean",
+                ))
+            }
+        }
+    }
+    if let Some(value) = advanced.get("quantTier") {
+        let dense = value.is_null()
+            || value.as_str().is_some_and(|tier| {
+                tier.trim().is_empty() || tier.trim().eq_ignore_ascii_case("bf16")
+            });
+        if !dense {
+            return Err(dense_image_detail_error());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn canonicalize_image_detail_dense_tier(_payload: &mut JsonObject) -> Result<(), ApiError> {
+    // Batch Detail's MLX route retains its established platform-specific quant semantics.
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reject_image_detail_packed_tier(_payload: &JsonObject) -> Result<(), ApiError> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dense_image_detail_error() -> ApiError {
+    ApiError::bad_request(
+        "Candle image_detail requires the dense bf16 model tier; packed quant selectors are unsupported",
+    )
+}
+
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
 /// inventory aligned with worker payload fields that reach filesystem model resolution:
-/// `image_upscale` and `prompt_refine` consume `model`; the model-management jobs consume
-/// `modelId`, and `model_convert.outputDir` selects its final install location. Other raw job
-/// payloads may contain descriptive model metadata, but are deliberately absent unless that field
-/// selects a filesystem path.
+/// `image_upscale`, `image_detail`, and `prompt_refine` consume `model`; the model-management jobs
+/// consume `modelId`, and `model_convert.outputDir` selects its final install location. Other raw
+/// job payloads may contain descriptive model metadata, but are deliberately absent unless that
+/// field selects a filesystem path.
 fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
-    if matches!(job_type, JobType::ImageUpscale | JobType::PromptRefine) {
+    if matches!(
+        job_type,
+        JobType::ImageUpscale | JobType::ImageDetail | JobType::PromptRefine
+    ) {
         validate_payload_model(payload)?;
     }
     if matches!(
@@ -847,14 +1005,34 @@ async fn process_pending_terminal_progress_side_effects(
         .map(Some)
 }
 
-/// Drain one bounded batch of durable terminal handoffs. Per-job failures are
-/// isolated and remain pending for the next cadence; a DB enumeration failure
-/// is returned so the lifecycle loop can report it without exiting.
+/// Drain the batch that is due *now* — the production entry point, called on
+/// startup and on the background cadence. Resolving the instant here rather
+/// than inside the scan is what lets the drain below be driven from a fixed
+/// instant; see it for the behavior and for why.
 pub(crate) async fn recover_pending_terminal_progress_side_effects_once(
     state: &AppState,
 ) -> Result<usize, ApiError> {
+    recover_pending_terminal_progress_side_effects_as_of(state, now_unix_seconds()).await
+}
+
+/// Drain one bounded batch of durable terminal handoffs, taking those due as of
+/// `as_of` (Unix seconds) rather than at the wall clock. Per-job failures are
+/// isolated and remain pending for the next cadence; a DB enumeration failure
+/// is returned so the lifecycle loop can report it without exiting.
+///
+/// Production passes `now` via the wrapper above; tests freeze the instant so an
+/// assertion about the durable backoff cannot be decided by how long the test
+/// took (sc-17640). Only this read side honors `as_of` — a failed attempt is
+/// still deferred against real time by the store.
+pub(crate) async fn recover_pending_terminal_progress_side_effects_as_of(
+    state: &AppState,
+    as_of: i64,
+) -> Result<usize, ApiError> {
     let ids = store_call(state.clone(), move |store, _timeout| {
-        store.pending_terminal_progress_side_effect_job_ids(PROGRESS_SIDE_EFFECT_RECOVERY_BATCH)
+        store.pending_terminal_progress_side_effect_job_ids_as_of(
+            as_of,
+            PROGRESS_SIDE_EFFECT_RECOVERY_BATCH,
+        )
     })
     .await?;
     let mut recovered = 0;
@@ -1336,10 +1514,16 @@ pub(crate) async fn register_trained_base_checkpoint(
     // family token alone, which is right for an imported sibling of a builtin but wrong here: the
     // fine-tuned lane refuses adapters on every backend (`mlx_gen_mage::load_finetuned`, and the
     // `!has_loras` term in `imported_image_request_family_eligible`). Left advertised, the API
-    // accepted the job and NO worker could claim it — it queued forever with no error, the exact
-    // failure this story exists to remove, one lane over. Withdrawing the advertisement makes
-    // `validate_lora_specs_for_model` reject at submit with "has no declared LoRA families", so the
-    // combination is refused LOUDLY and terminally instead of hanging.
+    // accepted the job and NO worker could claim it — it queued forever with no error.
+    //
+    // 🔴 This removal does NOT by itself produce the rejection sc-15328 claimed for it, and for two
+    // years it did not: `families_from_value_chain` (lib.rs) falls back to the top-level `family`
+    // key — which this entry still carries, and must, for routing — so `model_lora_families` kept
+    // returning `["mage-flow"]`, the "has no declared LoRA families" branch was never taken, and the
+    // lane went on hanging. Removing the key here is kept only so the STORED entry carries no false
+    // promise; the enforcement is `models::apply_imported_lora_advertisement`, which withdraws the
+    // advertisement on the catalog projection every read goes through (an explicit EMPTY families
+    // array, which is non-null and so actually defeats that fallback).
     //
     // Whether a fine-tune SHOULD accept adapters is a separate product question (sc-15334) — this
     // only guarantees that what is advertised is what can actually run.

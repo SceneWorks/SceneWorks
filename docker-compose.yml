@@ -10,8 +10,6 @@ services:
       context: .
       dockerfile: docker/rust.Dockerfile
       target: rust-api
-      secrets:
-        - inference_token
       args:
         BIN: sceneworks-rust-api
     environment:
@@ -19,6 +17,12 @@ services:
       SCENEWORKS_API_PORT: ${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
+      # Download-credential store (sc-16540). Deliberately NOT under /sceneworks/config:
+      # that path is bind-mounted from the repo checkout by default, and a plaintext
+      # token must not live in a git working tree. Its own mount below defaults OUTSIDE
+      # the repo. Must be set explicitly here — the app's OS-default config dir is not a
+      # mounted path, so the store would not survive a container restart.
+      SCENEWORKS_CREDENTIALS_DIR: /sceneworks/credentials
       SCENEWORKS_JOBS_DB_PATH: /sceneworks/data/cache/jobs.db
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       SCENEWORKS_ALLOW_OPEN_BIND: ${SCENEWORKS_ALLOW_OPEN_BIND:-}
@@ -39,6 +43,7 @@ services:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
       - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
+      - ${SCENEWORKS_CREDENTIALS_BIND:-${USERPROFILE:-$HOME}/.sceneworks/credentials}:/sceneworks/credentials
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${SCENEWORKS_API_PORT:-8010}/api/v1/health\" >/dev/null"]
       interval: 20s
@@ -60,20 +65,21 @@ services:
       context: .
       dockerfile: docker/rust.Dockerfile
       target: rust-worker-candle
-      secrets:
-        - inference_token
     restart: unless-stopped
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
+      # Download-credential store — see the api service for why it is not under
+      # /sceneworks/config (sc-16540).
+      SCENEWORKS_CREDENTIALS_DIR: /sceneworks/credentials
       SCENEWORKS_WORKER_ID: candle-inference-worker-0
       # Real CUDA device index (not the macOS `mlx` sentinel). `auto` picks the first
       # visible GPU; override to pin a device (e.g. on a multi-GPU host).
       SCENEWORKS_GPU_ID: ${SCENEWORKS_CANDLE_GPU_ID:-auto}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       # Download credentials (same contract as rust-worker): `credentials.json` from the
-      # mounted config volume, with HF_TOKEN / SCENEWORKS_CREDENTIALS as host overrides.
+      # mounted credentials volume, with HF_TOKEN / SCENEWORKS_CREDENTIALS as host overrides.
       HF_TOKEN: ${HF_TOKEN:-}
       SCENEWORKS_CREDENTIALS: ${SCENEWORKS_CREDENTIALS:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
@@ -88,6 +94,7 @@ services:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
       - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
+      - ${SCENEWORKS_CREDENTIALS_BIND:-${USERPROFILE:-$HOME}/.sceneworks/credentials}:/sceneworks/credentials
     depends_on:
       api:
         condition: service_healthy
@@ -106,8 +113,6 @@ services:
       context: .
       dockerfile: docker/rust.Dockerfile
       target: rust-worker
-      secrets:
-        - inference_token
       args:
         BIN: sceneworks-rust-worker
     restart: unless-stopped
@@ -115,6 +120,9 @@ services:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
+      # Download-credential store — see the api service for why it is not under
+      # /sceneworks/config (sc-16540).
+      SCENEWORKS_CREDENTIALS_DIR: /sceneworks/credentials
       SCENEWORKS_WORKER_ID: rust-utility-worker-0
       SCENEWORKS_GPU_ID: ${SCENEWORKS_RUST_WORKER_GPU_ID:-cpu}
       # Utility jobs (downloads, imports, frame extract, exports) are I/O-bound and
@@ -123,9 +131,9 @@ services:
       SCENEWORKS_UTILITY_WORKERS: ${SCENEWORKS_UTILITY_WORKERS:-4}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       # Download credentials. The rust-worker reads `credentials.json` (written by
-      # the API's Settings -> Service credentials screen) from the mounted config
-      # volume below. HF_TOKEN and SCENEWORKS_CREDENTIALS are optional overrides
-      # for headless deployments and win per host over that file.
+      # the API's Settings -> Service credentials screen) from the mounted
+      # credentials volume below. HF_TOKEN and SCENEWORKS_CREDENTIALS are optional
+      # overrides for headless deployments and win per host over that file.
       HF_TOKEN: ${HF_TOKEN:-}
       SCENEWORKS_CREDENTIALS: ${SCENEWORKS_CREDENTIALS:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
@@ -135,6 +143,7 @@ services:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
       - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
+      - ${SCENEWORKS_CREDENTIALS_BIND:-${USERPROFILE:-$HOME}/.sceneworks/credentials}:/sceneworks/credentials
     depends_on:
       api:
         condition: service_healthy
@@ -162,9 +171,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-
-secrets:
-  # Build-only credential for Cargo's private canonical runtime dependency. BuildKit mounts it for
-  # `cargo fetch` and does not persist it in an image layer or expose it to build scripts.
-  inference_token:
-    environment: SCENEWORKS_INFERENCE_READ_TOKEN

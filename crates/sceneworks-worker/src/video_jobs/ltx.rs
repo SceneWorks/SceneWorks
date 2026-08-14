@@ -4,7 +4,10 @@ use super::prelude::*;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use super::vace::FRAME_PAD_COLOR;
+use super::vace::{
+    build_vace_conditioning, load_source_video_frames, replacement_mode_from,
+    replacement_status_value, resolve_character_references, FRAME_PAD_COLOR,
+};
 #[cfg(target_os = "macos")]
 use super::wan::{generate_video, VideoGenInput};
 
@@ -655,8 +658,31 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
 /// video degrades to noise — see [`resolve_ltx_distill_adapter`]. Every user LoRA applies at a
 /// uniform per-pass strength (`pass_scales` left `None` → the engine uses `scale` on every distilled
 /// stage). peft LoKr allowed (engine residual), LyCORIS rejected.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_ltx_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    let mut specs = Vec::with_capacity(request.loras.len() + 1);
+    // The auto distill LoRA is the model's base recipe (per-pass 1.0/0.4); user LoRAs stack on top.
+    if let Some(distill) = resolve_ltx_distill_adapter(settings, request)? {
+        specs.push(distill);
+    }
+    specs.extend(resolve_ltx_user_adapters(settings, request)?);
+    Ok(specs)
+}
+
+/// Resolve user-selected LTX video LoRAs for both native providers. MLX and Candle consume the same
+/// PEFT attention-projection files and strengths. Candle has one distilled denoise pass, so this
+/// shared resolver deliberately excludes the MLX-only two-pass 10Eros distill recipe above.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn resolve_ltx_user_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
@@ -665,11 +691,7 @@ pub(super) fn resolve_ltx_adapters(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
         )));
     }
-    let mut specs = Vec::with_capacity(request.loras.len() + 1);
-    // The auto distill LoRA is the model's base recipe (per-pass 1.0/0.4); user LoRAs stack on top.
-    if let Some(distill) = resolve_ltx_distill_adapter(settings, request)? {
-        specs.push(distill);
-    }
+    let mut specs = Vec::with_capacity(request.loras.len());
     for lora in &request.loras {
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
@@ -700,16 +722,24 @@ pub(super) fn resolve_ltx_adapters(
 ///
 /// Ported from the deleted Python `MlxVideoAdapter` (b821d74e): the injection was lost when video
 /// generation moved to the Rust worker in the sc-3037 cutover, which is why 10Eros regressed to noise.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_ltx_distill_adapter(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Option<AdapterSpec>> {
     let Some(auto) = request
         .model_manifest_entry
-        .get("mlx")
-        .and_then(Value::as_object)
-        .and_then(|mlx| mlx.get("autoDistillLora"))
+        .get("autoDistillLora")
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("mlx")
+                .and_then(Value::as_object)
+                .and_then(|mlx| mlx.get("autoDistillLora"))
+        })
         .and_then(Value::as_object)
     else {
         return Ok(None);
@@ -777,14 +807,27 @@ pub(super) fn resolve_ltx_distill_adapter(
 /// Optional I2V conditioning for LTX: a `source_asset_id` → a single `Reference` image
 /// (image→video); absent → pure text→video. `first_last_frame` → two `Keyframe`s (sc-3055).
 /// (Audio is produced either way.)
-#[cfg(target_os = "macos")]
-fn resolve_ltx_conditioning(
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn resolve_ltx_conditioning(
     settings: &Settings,
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
     if request.mode == "first_last_frame" {
         return resolve_keyframe_conditioning(settings, request, project_path);
+    }
+    if request.mode != "image_to_video" {
+        return if request.source_asset_id.is_some() {
+            Err(WorkerError::InvalidPayload(format!(
+                "{} does not accept sourceAssetId on the {} mode.",
+                request.model, request.mode
+            )))
+        } else {
+            Ok(Vec::new())
+        };
     }
     match request.source_asset_id.as_deref() {
         Some(asset_id) => {
@@ -809,7 +852,9 @@ fn resolve_ltx_conditioning(
                 strength: None,
             }])
         }
-        None => Ok(Vec::new()),
+        None => Err(WorkerError::InvalidPayload(
+            "image_to_video requires a source image (sourceAssetId).".to_owned(),
+        )),
     }
 }
 
@@ -822,7 +867,10 @@ fn resolve_ltx_conditioning(
 /// pinned). Shared by LTX (`ltx_2_3`) and Wan TI2V-5B (`wan_2_2`), the engines whose providers
 /// advertise `Keyframe`. `imageFrameIndex` (default 0) is forwarded as the first keyframe's latent
 /// index — for the universal FLF case (0) latent 0 == output 0.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_keyframe_conditioning(
     settings: &Settings,
     request: &VideoRequest,
@@ -886,78 +934,23 @@ pub(super) fn resolve_keyframe_conditioning(
 /// "ic-lora" / "ltx-2-3-ic-" marker anywhere in the id / name / path / file list. The IC-LoRA is a
 /// user-installed LoRA flowing through `request.loras` (not an auto-provisioned fixed repo), so it
 /// rides the existing [`resolve_ltx_adapters`] seam with no new adapter-loading code.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn loras_contain_ic_lora(loras: &[Value]) -> bool {
     loras.iter().any(lora_looks_like_ic_lora)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn lora_looks_like_ic_lora(lora: &Value) -> bool {
-    let Some(obj) = lora.as_object() else {
-        // A bare string lora id: sniff the string itself.
-        return lora
-            .as_str()
-            .map(|id| ic_lora_marker(&id.to_lowercase().replace('_', "-")))
-            .unwrap_or(false);
-    };
-    if obj.get("icLora") == Some(&Value::Bool(true))
-        || obj.get("isIcLora") == Some(&Value::Bool(true))
-    {
-        return true;
-    }
-    if let Some(role) = obj.get("conditioningRole").and_then(Value::as_str) {
-        if role.trim().to_lowercase().replace('-', "_") == "ic_lora" {
-            return true;
-        }
-    }
-    let source = obj.get("source").and_then(Value::as_object);
-    // Gather every id/name/path/file string the torch heuristic inspects.
-    let mut haystacks: Vec<String> = Vec::new();
-    for key in [
-        "id",
-        "loraId",
-        "name",
-        "displayName",
-        "installedPath",
-        "sourcePath",
-        "path",
-    ] {
-        if let Some(value) = obj.get(key).and_then(Value::as_str) {
-            haystacks.push(value.to_owned());
-        }
-    }
-    if let Some(source) = source {
-        for key in ["repo", "file", "path"] {
-            if let Some(value) = source.get(key).and_then(Value::as_str) {
-                haystacks.push(value.to_owned());
-            }
-        }
-    }
-    // `files` (or `source.files`) may be a list or a single string.
-    let files = source
-        .and_then(|s| s.get("files"))
-        .or_else(|| obj.get("files"));
-    match files {
-        Some(Value::Array(items)) => {
-            for item in items {
-                if let Some(value) = item.as_str() {
-                    haystacks.push(value.to_owned());
-                }
-            }
-        }
-        Some(Value::String(value)) => haystacks.push(value.clone()),
-        _ => {}
-    }
-    let text = haystacks.join(" ").to_lowercase().replace('_', "-");
-    ic_lora_marker(&text)
+    sceneworks_core::video_request::lora_looks_like_ltx_ic_lora(lora)
 }
 
 /// The torch `lora_looks_like_ic_lora` text test (already `_`→`-` normalised + lowercased).
-#[cfg(target_os = "macos")]
-fn ic_lora_marker(text: &str) -> bool {
-    text.contains("ic-lora") || text.contains("ltx-2-3-ic-")
-}
-
 /// Build the in-context [`Conditioning::VideoClip`] set for extend_clip / video_bridge (sc-3522).
 /// Source-of-truth = torch `_ltx_video_conditioning` (video_adapters.py) + the engine consumer
 /// `runtime_macos::providers::ltx::build_clips`: each source clip's frames are appended as IC-LoRA in-context tokens
@@ -968,7 +961,10 @@ fn ic_lora_marker(text: &str) -> bool {
 ///   latent-frame math), strength `bridgeRightVideoConditioningStrength`.
 ///
 /// Both strengths default to `1.0` (fully pinned), mirroring the torch `_advanced_float` defaults.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn build_video_clip_conditioning(
     request: &VideoRequest,
     left_frames: Vec<Image>,
@@ -1155,7 +1151,10 @@ pub(super) async fn extract_clip_frames(
 /// since without it the appended clip tokens are inert. Then decodes each source clip's first
 /// `num_frames` frames and builds the clips. `num_frames` is the generation's snapped frame count,
 /// the same value [`generate_ltx`] passes to the engine.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) async fn resolve_video_clip_conditioning(
     api: &ApiClient,
     settings: &Settings,
@@ -1219,6 +1218,72 @@ pub(super) async fn resolve_video_clip_conditioning(
     build_video_clip_conditioning(request, left_frames, right_frames)
 }
 
+/// Resolve native LTX/Eros person replacement into the provider's `ControlClip` plus character
+/// references. The selected IC-LoRA is mandatory because it teaches the keyframe-append tokens used
+/// by this mode; without it the source clip would be accepted but its replacement conditioning would
+/// be inert. This helper is backend-neutral and preserves the selected LTX model instead of silently
+/// substituting the unrelated Wan-VACE checkpoint.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) async fn resolve_ltx_replace_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    adapter: &'static str,
+) -> WorkerResult<(Vec<Conditioning>, Value)> {
+    if !loras_contain_ic_lora(&request.loras) {
+        return Err(WorkerError::InvalidPayload(
+            "LTX replace person requires a selected LTX IC-LoRA; without it the native control-clip conditioning is inert."
+                .to_owned(),
+        ));
+    }
+    let track_id = request.person_track_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "replace_person requires a person track (personTrackId).".to_owned(),
+        )
+    })?;
+    let track = ProjectStore::new(settings.data_dir.clone(), "worker")
+        .get_person_track(&request.project_id, track_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("person track {track_id}: {error}"))
+        })?;
+    let frame_count = ltx_frame_count(request.raw_frame_count()) as usize;
+    let frames =
+        load_source_video_frames(api, settings, job, request, project_path, frame_count).await?;
+    let (masks, mask_mode) = crate::person_replace::person_track_masks(
+        project_path,
+        &track,
+        request.width,
+        request.height,
+        frames.len(),
+    )?;
+    let references = resolve_character_references(settings, request, project_path)?;
+    let reference_count = references.len();
+    let frame_total = frames.len();
+    let masking_strength = advanced::f32(&request.advanced, "maskingStrength", 1.0);
+    let conditioning = build_vace_conditioning(
+        frames,
+        masks,
+        references,
+        masking_strength,
+        replacement_mode_from(&request.replacement_mode),
+    )?;
+    let status = replacement_status_value(
+        &track,
+        track_id,
+        mask_mode,
+        masking_strength,
+        reference_count,
+        frame_total,
+        adapter,
+    );
+    Ok((conditioning, status))
+}
+
 /// Raw-settings recorded on a real MLX LTX asset (`advanced` knobs + real-inference markers).
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_raw_settings(request: &VideoRequest) -> Value {
@@ -1243,7 +1308,7 @@ pub(super) async fn generate_ltx(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<DecodedVideo> {
+) -> WorkerResult<(DecodedVideo, Option<Value>)> {
     // Validate and resolve an explicit encoder choice before any clip decoding, model download, or
     // engine setup. A bad request must remain a cheap, actionable InvalidPayload.
     let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_selected_ltx_text_encoder(
@@ -1265,11 +1330,27 @@ pub(super) async fn generate_ltx(
     // extend_clip / video_bridge build in-context VideoClip conditioning from decoded source
     // clips (async ffmpeg extraction); every other mode resolves keyframe/reference conditioning
     // synchronously from images.
-    let conditioning = match request.mode.as_str() {
-        "extend_clip" | "video_bridge" => {
-            resolve_video_clip_conditioning(api, settings, job, request, project_path).await?
+    let (conditioning, replacement_status) = match request.mode.as_str() {
+        "extend_clip" | "video_bridge" => (
+            resolve_video_clip_conditioning(api, settings, job, request, project_path).await?,
+            None,
+        ),
+        "replace_person" => {
+            let (conditioning, status) = resolve_ltx_replace_conditioning(
+                api,
+                settings,
+                job,
+                request,
+                project_path,
+                LTX_ADAPTER,
+            )
+            .await?;
+            (conditioning, Some(status))
         }
-        _ => resolve_ltx_conditioning(settings, request, project_path)?,
+        _ => (
+            resolve_ltx_conditioning(settings, request, project_path)?,
+            None,
+        ),
     };
     // The macOS default download is lean (q4 + gemma); a Q8 / bf16 job fetches the bundle's q8/ or
     // bf16/ on demand before resolving (sc-5679 / sc-8513). No-op unless that tier is requested and
@@ -1316,5 +1397,6 @@ pub(super) async fn generate_ltx(
         uncensored_enhancer_dir,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, &request.advanced, input).await
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    Ok((decoded, replacement_status))
 }

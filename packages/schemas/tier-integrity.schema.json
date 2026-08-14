@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/tier-integrity.schema.json",
+  "title": "Tier-integrity exception ledger",
+  "description": "Schema for config/tier-integrity.jsonc — the declared, measured above-tier residency exceptions to the invariant 'no component is resident above the user's selected quant tier unless a declared, measured exception says otherwise'. The normative statement lives in docs/memory-strategy-contract.md ('Tier integrity'); the executable rule is gen_core::tier_integrity. scripts/check-tier-integrity.mjs applies this schema and cross-checks catalog entries, hosted tiers, backend lanes, row uniqueness, exact per-tier measurement coverage, isolation method, eliminate-vs-measure triage, and cause review. sc-16015 removed the temporary sc-15799 unmeasured amnesty. additionalProperties:false keeps misspelled evidence and lane keys from being silently ignored.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["exceptions"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Relative path to this schema."
+    },
+    "exceptions": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Every above-tier residency in the catalog that meets the declaration threshold stated in the ledger's own header. An EMPTY array is not the same as a conformant catalog — it means the audit was lost, and the checker rejects it.",
+      "items": { "$ref": "#/$defs/exception" }
+    }
+  },
+  "$defs": {
+    "exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "component", "residentTier", "appliesToTiers", "backends", "cause", "reason", "evidence"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Catalog entry id in config/manifests/builtin.models.jsonc. The checker rejects an id that has no entry."
+        },
+        "component": {
+          "type": "string",
+          "enum": ["textEncoder", "vae", "visionTower", "controlBranch", "identityAdapters", "transformerHead"],
+          "description": "Which component is resident above tier. The row uniqueness key is (model, component, BACKEND LANE) — a component whose residency genuinely differs per lane is split into one row per lane, and the checker rejects two rows that claim the same lane for the same pair."
+        },
+        "residentTier": {
+          "type": "string",
+          "enum": ["f32", "bf16", "f16", "q8"],
+          "description": "The precision the component is ACTUALLY resident at. Must be strictly above every tier in appliesToTiers on the fidelity ladder f32 > bf16 = f16 > q8 > q4 = nvfp4 (int8-convrot ranks with q8) — an 'exception' at or below the selected tier is a mistake, not an exception, and the checker says so."
+        },
+        "appliesToTiers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["q4", "q8", "bf16", "nvfp4", "int8-convrot"] },
+          "description": "The SELECTED tiers on which this component is above tier. Never includes a tier at or below residentTier, and — where the entry publishes per-tier download variants — never a tier the entry does not host, since an exception for a tier nobody can select is dead."
+        },
+        "backends": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["mlx", "candle"] },
+          "description": "Which lanes carry this residency — REQUIRED (sc-17395), never defaulted. THE SAME DECLARED TIER CAN YIELD DIFFERENT RESIDENCY PER BACKEND, so residentTier is a per-lane fact: sensenova_u1_8b's vision conv kernels and fm_head are bf16 under mlx-gen-sensenova but f32 under candle-gen-sensenova, which widens every dense leaf it multiplies against an f32 activation (candle-gen-sensenova/src/quant.rs::get_f32, sc-14249); chroma's T5-XXL is bf16 under mlx-gen but f32 under candle-gen-chroma, whose load_t5 reads the bf16 checkpoint into F32 containers. Such a component is declared as ONE ROW PER LANE. This key was optional until sc-17395, with omission meaning 'both' — and the lane cross-check ran only when it was present, so the default claim went unvalidated and 42 rows asserted cross-lane equality nobody had checked. Enforced, not advisory: the checker validates the lane names, requires each declared lane to be one the ROUTER serves the model on (routing/catalog.rs ModelCaps + VideoModelCaps + the bespoke CANDLE_IMAGE_ROUTES — NOT the manifest's optional per-backend tuning block, which is not a lane declaration), keys row uniqueness on it, and publishes it as a column in docs/generated/tier-integrity.md."
+        },
+        "cause": {
+          "type": "string",
+          "enum": ["packing-exception", "backend-capability", "structural"],
+          "description": "packing-exception: a deliberate quality DECISION — the component is not packed because packing it measurably hurts. backend-capability: the backend cannot serve the on-disk format and upcasts; packing cannot fix it, so it needs a compute path or a re-host. structural: there is nothing quantizable at all (all-conv stacks, leaves the loader folds away). The distinction is load-bearing, not cosmetic: a `structural` row is written out of what a measurement story could ever fix, so labelling a choice `structural` hides it."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 20,
+          "description": "One sentence, in the terms the provider itself uses."
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "source"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["measured"],
+          "description": "Every declared above-tier exception must be measured. sc-16015 removed the temporary unmeasured amnesty; the checker rejects unmeasured evidence unconditionally."
+        },
+        "costGb": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The isolated cost of holding this component above tier, in GB. Required (and positive) when state is measured — an exception whose cost nobody knows is undeclared in the only way that matters."
+        },
+        "costBytes": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Alternative to costGb when the in-tree number is a byte count."
+        },
+        "costBytesByTier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "q4": { "type": "number", "exclusiveMinimum": 0 },
+            "q8": { "type": "number", "exclusiveMinimum": 0 },
+            "bf16": { "type": "number", "exclusiveMinimum": 0 },
+            "nvfp4": { "type": "number", "exclusiveMinimum": 0 },
+            "int8-convrot": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "description": "Exact isolated resident bytes by selected tier. The checker requires exactly one positive entry for every appliesToTiers value and no others."
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "file:line (or file plus a quoted phrase) where the FACT is recorded in-tree — and the number too, when measured. Required on every row, measured or not: an undeclared cost is tolerable while it is owed, an uncited fact is not."
+        },
+        "isolation": {
+          "type": "string",
+          "minLength": 20,
+          "description": "How the component cost was isolated. Required with costBytesByTier so a bundled total cannot masquerade as a component measurement. The source must also cite an immutable artifact revision that matches a pinned catalog download."
+        },
+        "vaeScope": {
+          "type": "string",
+          "enum": ["decoder-only", "full-autoencoder"],
+          "description": "Required by the checker on every VAE row. Bound to the numeric receipt: decoder-only excludes encoder tensors; full-autoencoder includes encoder and decoder residency."
+        },
+        "triageDecision": {
+          "type": "string",
+          "enum": ["measure", "eliminate"],
+          "description": "The eliminate-vs-measure triage result recorded before measurement. A measured row may remain temporarily while an explicit elimination story owns the repack."
+        },
+        "eliminationStory": {
+          "type": "string",
+          "pattern": "^sc-[1-9][0-9]*$",
+          "description": "Required when triageDecision is eliminate; the Shortcut story that owns the repack and eventual removal of this row."
+        },
+        "reviewedCause": {
+          "type": "string",
+          "enum": ["packing-exception", "backend-capability", "structural"],
+          "description": "Cause re-checked while measuring. The checker requires this to equal the row's cause."
+        },
+        "triageNote": {
+          "type": "string",
+          "minLength": 20,
+          "description": "Why the surviving exception was measured rather than eliminated."
+        },
+        "note": {
+          "type": "string",
+          "description": "Anything a future reader needs that the one-sentence reason cannot hold: why a number was NOT borrowed from a nearby total, what a re-cause changed and why, which sibling finding would let the row move to another cause."
+        }
+      }
+    }
+  }
+}

@@ -597,15 +597,18 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "sw-linux-provision-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("create scratch");
-        root
+    /// A fresh scratch runtime root, removed when the guard drops.
+    ///
+    /// The `temp_dir()/sw-linux-provision-{tag}-{pid}-{thread}` path this replaces was
+    /// removed by a trailing `fs::remove_dir_all` in each test — skipped by a panicking
+    /// test, which is exactly the one whose leftovers matter — and repeated across runs,
+    /// so a recycled PID inherited an unrelated run's stale layout (sc-17707). Callers
+    /// hold the guard and read `.path()`.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("sw-linux-provision-{tag}-"))
+            .tempdir()
+            .expect("create scratch")
     }
 
     fn touch_runtime(root: &Path) {
@@ -676,7 +679,8 @@ mod tests {
 
     #[test]
     fn extraction_filters_shared_objects_and_rejects_traversal() {
-        let root = scratch("extract");
+        let root_guard = scratch("extract");
+        let root = root_guard.path();
         let wheel = root.join("fixture.whl");
         fs::write(
             &wheel,
@@ -700,100 +704,97 @@ mod tests {
         assert!(dest.join("libonnxruntime_providers_cuda.so").is_file());
         assert!(!dest.join("pybind_state.so").exists());
         assert!(!root.join("escape.so").exists());
-        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
     fn marker_reuse_requires_current_version_and_all_sentinels() {
-        let root = scratch("marker");
-        touch_runtime(&root);
-        write_marker(&root).expect("write current marker");
-        assert!(already_provisioned(&root));
+        let root_guard = scratch("marker");
+        let root = root_guard.path();
+        touch_runtime(root);
+        write_marker(root).expect("write current marker");
+        assert!(already_provisioned(root));
         fs::remove_file(root.join("cudnn/lib/libcudnn.so.fixture")).expect("remove sentinel");
-        assert!(!already_provisioned(&root));
-        fs::remove_dir_all(root).expect("remove fixture");
+        assert!(!already_provisioned(root));
     }
 
     #[test]
     fn staged_override_copies_complete_layout_and_rejects_partial() {
-        let source = scratch("staged-source");
-        touch_runtime(&source);
-        write_marker(&source).expect("mark pinned source");
-        let target = scratch("staged-target");
-        install_from_staged(&source, &target).expect("install complete stage");
-        assert!(runtime_complete(&target));
-        assert!(all_component_markers_current(&target));
+        let source_guard = scratch("staged-source");
+        let source = source_guard.path();
+        touch_runtime(source);
+        write_marker(source).expect("mark pinned source");
+        let target_guard = scratch("staged-target");
+        let target = target_guard.path();
+        install_from_staged(source, target).expect("install complete stage");
+        assert!(runtime_complete(target));
+        assert!(all_component_markers_current(target));
 
-        let partial = scratch("staged-partial");
-        touch_runtime(&partial);
-        write_marker(&partial).expect("mark pinned partial source");
+        let partial_guard = scratch("staged-partial");
+        let partial = partial_guard.path();
+        touch_runtime(partial);
+        write_marker(partial).expect("mark pinned partial source");
         fs::remove_file(partial.join("cufft/lib/libcufft.so.fixture"))
             .expect("remove fixture sentinel");
-        let rejected = scratch("staged-rejected");
-        let error = install_from_staged(&partial, &rejected).expect_err("reject partial stage");
+        let rejected_guard = scratch("staged-rejected");
+        let error =
+            install_from_staged(partial, rejected_guard.path()).expect_err("reject partial stage");
         assert!(error.contains("missing required"));
-        for root in [source, target, partial, rejected] {
-            fs::remove_dir_all(root).expect("remove fixture");
-        }
     }
 
     #[test]
     fn staged_override_rejects_markerless_stale_and_mixed_runtimes() {
-        let markerless = scratch("staged-markerless");
-        touch_runtime(&markerless);
-        let target = scratch("staged-markerless-target");
+        let markerless_guard = scratch("staged-markerless");
+        let markerless = markerless_guard.path();
+        touch_runtime(markerless);
+        let target_guard = scratch("staged-markerless-target");
+        let target = target_guard.path();
         let error =
-            install_from_staged(&markerless, &target).expect_err("markerless stage is unpinned");
+            install_from_staged(markerless, target).expect_err("markerless stage is unpinned");
         assert!(error.contains("marker evidence"));
 
         fs::write(markerless.join(".redist-marker"), "old-runtime-version")
             .expect("write stale marker");
-        let error = install_from_staged(&markerless, &target).expect_err("stale stage is unpinned");
+        let error = install_from_staged(markerless, target).expect_err("stale stage is unpinned");
         assert!(error.contains(REDIST_VERSION));
 
         // Per-component evidence is an allowed recovery path only when every marker
         // and sentinel belongs to the current manifest.
-        mark_components(&markerless);
+        mark_components(markerless);
         fs::write(
             markerless.join(".component-cudnn.ok"),
             "old-runtime-version",
         )
         .expect("make one component stale");
-        let error = install_from_staged(&markerless, &target).expect_err("mixed stage is unpinned");
+        let error = install_from_staged(markerless, target).expect_err("mixed stage is unpinned");
         assert!(error.contains("marker evidence"));
-
-        for root in [markerless, target] {
-            fs::remove_dir_all(root).expect("remove fixture");
-        }
     }
 
     #[test]
     fn interrupted_staged_replacement_invalidates_all_live_markers() {
-        let source = scratch("staged-interrupted-source");
-        touch_runtime(&source);
-        write_marker(&source).expect("mark pinned source");
+        let source_guard = scratch("staged-interrupted-source");
+        let source = source_guard.path();
+        touch_runtime(source);
+        write_marker(source).expect("mark pinned source");
         // The first component can promote, then the second component fails.
         fs::remove_dir_all(source.join(COMPONENTS[1].dest)).expect("remove later staged component");
 
-        let target = scratch("staged-interrupted-target");
-        touch_runtime(&target);
-        mark_components(&target);
-        write_marker(&target).expect("mark prior live runtime");
-        assert!(already_provisioned(&target));
+        let target_guard = scratch("staged-interrupted-target");
+        let target = target_guard.path();
+        touch_runtime(target);
+        mark_components(target);
+        write_marker(target).expect("mark prior live runtime");
+        assert!(already_provisioned(target));
 
-        install_from_staged(&source, &target).expect_err("staged install must fail partway");
-        assert!(!top_marker_current(&target));
-        assert!(!all_component_markers_current(&target));
-        assert!(!already_provisioned(&target));
-
-        for root in [source, target] {
-            fs::remove_dir_all(root).expect("remove fixture");
-        }
+        install_from_staged(source, target).expect_err("staged install must fail partway");
+        assert!(!top_marker_current(target));
+        assert!(!all_component_markers_current(target));
+        assert!(!already_provisioned(target));
     }
 
     #[test]
     fn promotion_removes_obsolete_versioned_libraries() {
-        let root = scratch("promote");
+        let root_guard = scratch("promote");
+        let root = root_guard.path();
         let stage = root.join("stage");
         let dest = root.join("runtime/cudnn/lib");
         fs::create_dir_all(&stage).expect("create stage");
@@ -803,7 +804,6 @@ mod tests {
         promote_component(&stage, &dest).expect("replace component directory");
         assert!(dest.join("libcudnn.so.9").is_file());
         assert!(!dest.join("libcudnn.so.8").exists());
-        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
@@ -817,7 +817,8 @@ mod tests {
 
     #[test]
     fn dependency_probe_covers_main_ort_provider_and_cudnn_lazy_engines() {
-        let root = scratch("dependency-targets");
+        let root_guard = scratch("dependency-targets");
+        let root = root_guard.path();
         let capi = root.join("onnxruntime/capi");
         let cudnn = root.join("cudnn/lib");
         fs::create_dir_all(&capi).expect("create capi");
@@ -830,7 +831,7 @@ mod tests {
         ] {
             fs::write(path, b"fixture").expect("write dependency target");
         }
-        let targets = dependency_probe_targets(&root).expect("resolve dependency targets");
+        let targets = dependency_probe_targets(root).expect("resolve dependency targets");
         assert_eq!(targets.len(), 4);
         assert!(targets
             .iter()
@@ -841,21 +842,20 @@ mod tests {
         assert!(targets
             .iter()
             .any(|path| path.ends_with("libcudnn_engines_precompiled.so.9")));
-        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
     fn component_marker_does_not_accept_partial_layout() {
-        let root = scratch("partial");
+        let root_guard = scratch("partial");
+        let root = root_guard.path();
         let component = &COMPONENTS[1];
         let dest = root.join(component.dest);
         fs::create_dir_all(&dest).expect("create component dest");
         fs::write(dest.join("libcublas.so.12"), b"fixture").expect("write first sentinel");
-        write_component_marker(&root, component.slug, REDIST_VERSION).expect("write marker");
-        assert!(!component_complete(&root, component));
+        write_component_marker(root, component.slug, REDIST_VERSION).expect("write marker");
+        assert!(!component_complete(root, component));
         fs::write(dest.join("libcublasLt.so.12"), b"fixture").expect("write second sentinel");
-        assert!(component_complete(&root, component));
-        fs::remove_dir_all(root).expect("remove fixture");
+        assert!(component_complete(root, component));
     }
 
     /// Opt-in CI/manual seam for the real pinned transport without downloading the
@@ -863,16 +863,16 @@ mod tests {
     #[test]
     #[ignore = "network: downloads the ~3 MB pinned Linux CUDA runtime wheel"]
     fn linux_downloader_smoke() {
-        let root = scratch("network-smoke");
+        let root_guard = scratch("network-smoke");
+        let root = root_guard.path();
         let component = &COMPONENTS[0];
         let client = reqwest::Client::builder().build().expect("HTTP client");
-        tauri::async_runtime::block_on(fetch_component(&client, &root, component))
+        tauri::async_runtime::block_on(fetch_component(&client, root, component))
             .expect("download, hash, and extract pinned Linux wheel");
-        assert!(component_complete(&root, component));
+        assert!(component_complete(root, component));
         assert!(dir_has_shared_object(
             &root.join("cuda/lib64"),
             "libcudart.so"
         ));
-        fs::remove_dir_all(root).expect("remove network smoke runtime");
     }
 }

@@ -1,16 +1,71 @@
 #[cfg(test)]
 use super::standard_tier_subdir_gated;
 use super::{
-    consume_gen_events, drive_gen_items, gate_tier_key, gate_with_evict_reclaim,
-    installed_tier_keys, load_reference_image, non_empty, nvfp4_host_eligible, nvfp4_selected,
+    apply_candle_qwen_load_shape, apply_request_scoped_candle_residency,
+    candle_conditioned_edit_work, consume_gen_events, drive_gen_items, gate_tier_key,
+    gate_with_evict_reclaim, installed_tier_keys, load_reference_image, load_spec,
+    nvfp4_host_eligible, nvfp4_selected, parse_poses, read_safetensors_header,
     requested_receipt_variant, resolve_adapters, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32_with, resolve_seed, standard_tier_subdir, start_gen_stream,
     tier_key_from_resolved_dir, vram_reject_tail_for_tier, AdapterKind, AdapterSpec, ApiClient,
-    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, QwenEdit,
+    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PoseInput, QwenEdit,
     QwenEditPaths, QwenEditRequest, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use serde_json::json;
+
+/// User-adapter residency for the pinned Qwen Edit provider. Packed tiers always use deferred
+/// residuals. Dense tiers do so for plain LoRA and PEFT-stamped LoKr, but fold LoHa and untagged
+/// LyCORIS LoKr; mirror the provider's header-only router so fit and load cannot disagree.
+fn qwen_user_adapter_resident_bytes(adapters: &[AdapterSpec], tier: &str) -> WorkerResult<u64> {
+    let mode = if tier != "bf16" {
+        gen_core::AdapterResidencyMode::Additive
+    } else {
+        let mut additive = true;
+        for adapter in adapters {
+            let header = read_safetensors_header(&adapter.path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "Qwen Edit adapter header {}: {error}",
+                    adapter.path.display()
+                ))
+            })?;
+            let object = header.as_object().ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "Qwen Edit adapter header is not an object: {}",
+                    adapter.path.display()
+                ))
+            })?;
+            let network_type = object
+                .get("__metadata__")
+                .and_then(|meta| meta.get("networkType"))
+                .and_then(Value::as_str);
+            let keys = || {
+                object
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|key| *key != "__metadata__")
+            };
+            let contains_loha = gen_core::weightsmeta::keys_contain_loha(keys());
+            let contains_lokr = gen_core::weightsmeta::keys_contain_lokr(keys());
+            let declares_lokr = gen_core::weightsmeta::is_lokr_network_type(network_type);
+            if contains_loha || (contains_lokr && !declares_lokr) {
+                additive = false;
+                break;
+            }
+        }
+        if additive {
+            gen_core::AdapterResidencyMode::Additive
+        } else {
+            gen_core::AdapterResidencyMode::Folded
+        }
+    };
+    gen_core::adapter_stack_resident_bytes(adapters, mode).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Qwen Edit cannot determine the resident size of the requested adapter stack."
+                .to_owned(),
+        )
+    })
+}
 
 // Candle (Windows/CUDA) Qwen-Image-Edit route (sc-5487, epic 5480) — reference-conditioned image
 // editing on the Qwen-Image-Edit family off-Mac via `runtime_cuda::providers::qwen_image::QwenEdit`. The reference
@@ -25,11 +80,11 @@ use serde_json::json;
 // `resolve_app_managed_model_dir`/`resolve_seed`/`start_gen_stream`/`drive_gen_items`/
 // `consume_gen_events`/`non_empty`/`gen_core`/… all in scope).
 //
-// Qwen-Image-Edit is a dual-latent reference concat (NOT strength-img2img + mask): the source is the
-// reference, the prompt is the instruction. So this lane handles `edit_image` + `sourceAssetId` (no
-// sub-modes / inpaint / outpaint — that masked shape is the SDXL edit lane's). The provider
-// condition-resizes the reference internally (~384²), so — unlike the FLUX.2 lane — the source is NOT
-// pre-fit to the render size.
+// Qwen-Image-Edit is a dual-latent reference concat (NOT strength-img2img + mask): the images are
+// references and the prompt is the instruction. This lane handles instruction/character edits and
+// Character Studio pose sets as `[identity, skeleton]`. Inpaint/outpaint remain the SDXL edit lane's
+// masked shape. The provider condition-resizes references internally (~384²), so — unlike the FLUX.2
+// lane — they are not pre-fit to the render size.
 
 /// Qwen-Image-Edit denoise steps default (the production, non-distilled variants).
 const QWEN_EDIT_CANDLE_DEFAULT_STEPS: u32 = 30;
@@ -39,6 +94,11 @@ const QWEN_EDIT_CANDLE_LIGHTNING_STEPS: u32 = 4;
 const QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle Qwen-Image-Edit assets + telemetry.
 pub(super) const QWEN_EDIT_CANDLE_ENGINE: &str = "candle_qwen_edit";
+/// Current catalog ids whose bespoke Candle Qwen-Edit lane carries the live [`PreviewSink`] below.
+/// Stage 2 of the checked-in preview catalog parses this declaration from the same source that wires
+/// the sink, because this bespoke provider does not appear in the generic media registry dump.
+pub(super) const QWEN_EDIT_CANDLE_PREVIEW_MODELS: &[&str] =
+    &["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"];
 /// The SceneWorks pre-packed Qwen-Image-Edit-2511 quant-matrix turnkey (sc-8669, epic 8506): self-
 /// contained `q4/` (manifest default) + `q8/` + `bf16/` subdirs, only the transformer packed (the
 /// Qwen2.5-VL TE + VAE stay dense bf16 in every tier). Shared by all four edit ids + the Lightning
@@ -65,13 +125,8 @@ pub(super) const QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION: &str =
 /// from `transformer/config.json`). The `-2511_lightning` distill is the same `-2511` base with the
 /// lightx2v 4-step LoRA folded into the MMDiT at load + the CFG-off static-shift lightning schedule (sc-6220).
 fn is_qwen_edit_candle_model(model: &str) -> bool {
-    matches!(
-        model,
-        "qwen_image_edit"
-            | "qwen_image_edit_2509"
-            | "qwen_image_edit_2511"
-            | "qwen_image_edit_2511_lightning"
-    )
+    QWEN_EDIT_CANDLE_PREVIEW_MODELS.contains(&model)
+        || matches!(model, "qwen_image_edit" | "qwen_image_edit_2509")
 }
 
 /// The Qwen-Image-Edit-2511-Lightning few-step distill variant (sc-6220): `QwenEdit` folds the lightx2v
@@ -80,10 +135,102 @@ fn is_qwen_edit_lightning(model: &str) -> bool {
     model == "qwen_image_edit_2511_lightning"
 }
 
-/// True when this is a candle-eligible Qwen edit job: a Qwen-Image-Edit `edit_image` job with a source
-/// image. Mirrors `jobs_store::qwen_edit_candle_eligible` so the worker and router agree on the lane.
-fn qwen_edit_candle_mode(request: &ImageRequest) -> bool {
-    request.mode == "edit_image" && non_empty(&request.source_asset_id)
+/// True when this is a candle-eligible Qwen edit/reference job with at least one ordered reference.
+pub(super) fn qwen_edit_candle_mode(request: &ImageRequest) -> bool {
+    if !matches!(request.mode.as_str(), "edit_image" | "character_image") {
+        return false;
+    }
+    let references = qwen_edit_candle_reference_ids(request);
+    let Some(pose_count) = qwen_edit_candle_pose_count(request) else {
+        return false;
+    };
+    !references.is_empty()
+        && (pose_count == 0 || (request.mode == "character_image" && references.len() == 1))
+}
+
+/// Strict mirror of the scheduler's optional Qwen Edit pose carrier. Missing/null/empty selects the
+/// ordinary edit path; a supplied set is object-only and bounded by the shared request contract.
+pub(super) fn qwen_edit_candle_pose_count(request: &ImageRequest) -> Option<usize> {
+    match request.advanced.get("poses") {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Array(poses))
+            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.iter().all(Value::is_object) =>
+        {
+            Some(poses.len())
+        }
+        Some(_) => None,
+    }
+}
+
+/// Work contract for Qwen Edit. Pose sets render once per pose at one shared seed, matching the
+/// established MLX Character Studio recipe; ordinary edits retain angle-set/count behavior.
+fn qwen_edit_candle_work(request: &ImageRequest) -> Vec<(i64, String)> {
+    match qwen_edit_candle_pose_count(request) {
+        Some(count) if count > 0 => {
+            let seed = resolve_seed(request, 0);
+            (0..count).map(|_| (seed, request.prompt.clone())).collect()
+        }
+        _ => candle_conditioned_edit_work(request),
+    }
+}
+
+/// Build the exact ordered pose conditioning set consumed by Qwen Edit: identity first (the VL
+/// prompt reference), skeleton second (the dual-latent geometry reference).
+fn qwen_edit_candle_pose_references(
+    identity: &Image,
+    pose: &PoseInput,
+    width: u32,
+    height: u32,
+) -> Vec<Image> {
+    let skeleton = crate::openpose_skeleton::draw_wholebody(
+        width,
+        height,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        crate::openpose_skeleton::body_stickwidth(width, height),
+    );
+    vec![
+        identity.clone(),
+        Image {
+            width,
+            height,
+            pixels: skeleton.into_raw(),
+        },
+    ]
+}
+
+const QWEN_EDIT_CANDLE_MAX_REFERENCES: usize = 5;
+
+fn qwen_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
+    let singular = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let source = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let plural_supplied = !request.reference_asset_ids.is_empty();
+    let active = usize::from(plural_supplied)
+        + usize::from(singular.is_some())
+        + usize::from(source.is_some());
+    if active != 1 || request.reference_asset_ids.len() > QWEN_EDIT_CANDLE_MAX_REFERENCES {
+        return Vec::new();
+    }
+    if plural_supplied {
+        return request.reference_asset_ids.clone();
+    }
+    if let Some(id) = singular {
+        return vec![id.to_owned()];
+    }
+    if request.mode == "edit_image" {
+        return source.map(|id| vec![id.to_owned()]).unwrap_or_default();
+    }
+    Vec::new()
 }
 
 /// The Qwen-Image-Edit base repo for this request: the manifest `repo` override, else this id's
@@ -244,8 +391,21 @@ fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
     )
 }
 
-/// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0), clamped.
+/// Resolve the true-CFG guidance. Character Studio sends `advanced.trueCfgScale`; legacy edit
+/// payloads keep their `guidanceScale`/manifest fallback.
 fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
+    if let Some(value) = request
+        .advanced
+        .get("trueCfgScale")
+        .or_else(|| request.advanced.get("imageGuidanceScale"))
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+    {
+        return (value as f32).clamp(1.0, 10.0);
+    }
     resolve_advanced_or_manifest_f32(
         request,
         "guidanceScale",
@@ -263,13 +423,14 @@ fn qwen_edit_candle_raw_settings(
     base_dir: &Path,
     steps: u32,
     guidance: f32,
+    reference_count: usize,
 ) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("guidanceScale".to_owned(), json!(guidance));
-    raw.insert("referenceCount".to_owned(), json!(1));
+    raw.insert("referenceCount".to_owned(), json!(reference_count));
     raw.insert(
         "editEngine".to_owned(),
         Value::String(QWEN_EDIT_CANDLE_ENGINE.to_owned()),
@@ -287,26 +448,21 @@ fn qwen_edit_candle_raw_settings(
     raw
 }
 
-/// Load the Qwen edit source asset (the `sourceAssetId` is required) as an engine [`Image`].
-fn load_qwen_edit_source(
+/// Load the ordered Qwen edit reference set.
+fn load_qwen_edit_references(
     request: &ImageRequest,
     project_path: &Path,
     settings: &Settings,
-) -> WorkerResult<Image> {
-    let source_id = request
-        .source_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload("Qwen edit requires a source image".to_owned())
-        })?;
-    load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        source_id,
-        project_path,
-    )
+) -> WorkerResult<Vec<Image>> {
+    let ids = qwen_edit_candle_reference_ids(request);
+    if ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Qwen edit requires at least one reference image".to_owned(),
+        ));
+    }
+    ids.iter()
+        .map(|id| load_reference_image(&settings.data_dir, &request.project_id, id, project_path))
+        .collect()
 }
 
 /// Ensure the lightx2v distill LoRA (`file` from HuggingFace `repo`) is materialized in the shared HF
@@ -417,7 +573,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         ));
     }
     let (width, height) = (request.width, request.height);
-    let reference = load_qwen_edit_source(request, project_path, settings)?;
+    let references = load_qwen_edit_references(request, project_path, settings)?;
 
     let lightning = is_qwen_edit_lightning(&request.model);
     let steps = qwen_edit_candle_steps(request);
@@ -444,14 +600,23 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     } else {
         Vec::new()
     };
-    // User style/subject LoRAs (sc-10271): folded in alongside any built-in distill LoRA,
-    // mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at load.
-    // This closes the candle edit-LoRA gap for the Qwen-Image-Edit family; the SDXL / FLUX.2 /
-    // Z-Image candle edit engines still need an `adapters` field in candle-gen (tracked).
-    adapters.extend(resolve_adapters(request, settings)?);
+    // User LoRA/LoKr-family adapters (sc-10271/sc-18477): installed alongside any built-in
+    // distill LoRA, mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at
+    // load. The SDXL, FLUX.2, and Z-Image candle edit lanes now resolve and install their request
+    // adapter stacks too; each lane retains its own strict family/shape validation.
+    let user_adapters = resolve_adapters(request, settings)?;
+    adapters.extend(user_adapters.iter().cloned());
     let adapter_count = adapters.len();
+    let pose_inputs = qwen_edit_candle_pose_count(request)
+        .filter(|count| *count > 0)
+        .map(|_| parse_poses(request));
+    let reference_count = if pose_inputs.is_some() {
+        2
+    } else {
+        references.len()
+    };
     let mut raw_settings =
-        qwen_edit_candle_raw_settings(request, &repo, &qwen_base, steps, guidance);
+        qwen_edit_candle_raw_settings(request, &repo, &qwen_base, steps, guidance, reference_count);
     // Record the Lightning recipe for telemetry / A-B parity (matches the MLX `distillLora` key format).
     if lightning {
         raw_settings.insert("sampler".to_owned(), Value::String("lightning".to_owned()));
@@ -463,10 +628,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         );
     }
 
-    // Per-image work items: (seed, prompt) — `request.count` edits of the same source.
-    let work: Vec<(i64, String)> = (0..request.count as usize)
-        .map(|index| (resolve_seed(request, index), request.prompt.clone()))
-        .collect();
+    // Per-image work items: ordinary count/angle edits or one shared-seed edit per pose.
+    let work = qwen_edit_candle_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
 
@@ -496,6 +659,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     // warm-swap false-reject / needless sequential downtier; base.rs already gets it for free via the
     // evicting cache. Same treatment as `krea_control_candle.rs` (the other `start_gen_stream` lane).
     // The reclaimable high-water is still recorded after an admit (`note_loaded_peak` below).
+    let mut generation_memory: Option<gen_core::GenerationMemory> = None;
     let use_sequential = {
         // sc-13534: key the budget off the tier `resolve_qwen_edit_candle_base` ACTUALLY landed on, not
         // the bits the request asked for — this lane now grows the tier layout the old `nvfp4 = false`
@@ -520,15 +684,78 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             &request.model_manifest_entry,
             nvfp4_selected(request, nvfp4_host_eligible(), Some(&qwen_base)),
         );
-        let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        // The manifest's Lightning rows already include the built-in distill LoRA. Charge only user
+        // adapters, and only when the provider keeps them independently resident for this tier.
+        let user_adapter_bytes = qwen_user_adapter_resident_bytes(&user_adapters, tier)?;
+        let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            user_adapter_bytes,
+        );
         // Second-stage gate input (sc-10856): the tier's MEASURED sequential peak (the largest single
         // working set once the VL encoder is dropped). `None` for an unmeasured tier ⇒ best-effort stage.
-        let sequential_needed =
-            crate::vram_gate::predicted_sequential_peak_gb(&request.model_manifest_entry, tier);
+        let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            user_adapter_bytes,
+        );
         let raw_budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
             crate::vram_gate::cuda_vram_cap_gb(),
         );
+        let quant = match tier {
+            "q4" => Some(gen_core::Quant::Q4),
+            "q8" => Some(gen_core::Quant::Q8),
+            _ => None,
+        };
+        let strategy_spec = apply_candle_qwen_load_shape(
+            QWEN_EDIT_CANDLE_ENGINE,
+            load_spec(qwen_base.clone(), quant, adapters.clone(), None),
+        );
+        if let Some(evaluation) = crate::candle_memory_strategy::evaluate_shared_image(
+            QWEN_EDIT_CANDLE_ENGINE,
+            &request.model,
+            &strategy_spec,
+            // `artifact_is_certified` (sc-17054). The z-image caller passes a real check that the
+            // weights ARE the pinned turnkey snapshot (`zimage_certified_artifact_path`, base.rs).
+            // This route has no equivalent: there is a `QWEN_EDIT_CANDLE_TURNKEY_REPO` but no
+            // pinned `_REVISION`, so there is no artifact identity to verify against. Passing
+            // `true` would assert a certification nothing checked — exactly the unsound claim this
+            // parameter was added to stop — so declare it uncertified. The cost is that this route
+            // consults no packaged evidence and falls back to the resident selection, which can
+            // over-reserve but never under-reserve. Restoring optimized candidates here needs a
+            // pinned qwen-edit certified artifact first.
+            false,
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: reference_count as u32,
+            },
+            true,
+            false,
+            false,
+            raw_budget,
+            needed,
+            // `runtime_overlay_bytes` (sc-17054). Calibration records describe the certified overlay
+            // fixture; a user's LoRAs can be larger, so every optimized candidate must reserve the
+            // bytes this request actually needs before the fit check. `user_adapter_bytes` is the
+            // same quantity already charged to `needed` above, and is this route's analogue of the
+            // `adapter_resident_bytes` the z-image caller passes.
+            user_adapter_bytes,
+            gen_core::MemoryCacheState::Cold,
+        )? {
+            generation_memory = evaluation.memory;
+            raw_settings.insert(
+                "memoryStrategy".to_owned(),
+                Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+            );
+        }
         // sc-13960 two-pass: resolve the plan against raw free, then — only if reclaiming the pool would
         // change (improve) it — evict the resident generator and act on the reclaimed plan. The edit lane
         // is always sequential-capable (sc-10968 wired `QwenEdit::generate_sequential`).
@@ -612,6 +839,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             }
         }
     };
+    apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -621,46 +849,68 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             let model = QwenEdit::load(&QwenEditPaths {
                 root: qwen_base,
                 adapters,
-                // sc-10968: the fit-gate above picks sequential residency when the resident peak won't
-                // fit; the provider then loads→encodes→drops the VL encoder before the DiT.
-                offload_policy: if use_sequential {
-                    gen_core::OffloadPolicy::Sequential
-                } else {
-                    gen_core::OffloadPolicy::Resident
-                },
+                // Compatibility-only load field. The fit gate's lifecycle decision is carried by
+                // each request below so one loaded provider can serve both residency modes.
+                offload_policy: gen_core::OffloadPolicy::Resident,
             })
             .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
-            Ok((model, reference))
+            Ok((model, references))
         },
-        move |(model, reference), tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = QwenEditRequest {
-                    prompt,
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    seed: seed as u64,
-                    lightning,
-                    cancel: cancel.clone(),
-                };
-                let result =
-                    model.generate(&req, std::slice::from_ref(&reference), &mut *on_progress);
-                let out = match result {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Qwen edit generation failed: {error}"
-                        )));
+        move |(model, references), tx, cancel| {
+            drive_gen_items(
+                tx,
+                work,
+                move |index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
-            })
+                    let req = QwenEditRequest {
+                        prompt,
+                        negative: negative.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        seed: seed as u64,
+                        lightning,
+                        stage_residency: use_sequential,
+                        memory: generation_memory,
+                        cancel: cancel.clone(),
+                        // The job's LIVE per-image preview sink (epic 16948, sc-16962), built by
+                        // `preview_sink_for` and handed in by `drive_gen_items`. Qwen-Image-Edit emits
+                        // per-step latent previews at inference `5b6d6aa` (introduced by sc-16952);
+                        // the frames are of the TARGET only — the reference latents are concatenated
+                        // onto the DiT sequence inside the predict closure and narrowed straight back
+                        // off, so the sampler's running latent never carries a reference token.
+                        //
+                        // This closure used to bind `_preview` and drop it. `Default::default()` — or
+                        // `..Default::default()`, which reads more innocent and does the same thing —
+                        // would compile and ship an inert sink: green, and no previews on this lane.
+                        // `crate::candle_preview_wiring_tests` reads this source and fails on both.
+                        preview,
+                    };
+                    let pose_references = pose_inputs.as_ref().map(|poses| {
+                        qwen_edit_candle_pose_references(
+                            &references[0],
+                            &poses[index],
+                            width,
+                            height,
+                        )
+                    });
+                    let active_references = pose_references.as_deref().unwrap_or(&references);
+                    let result = model.generate(&req, active_references, &mut *on_progress);
+                    let out = match result {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Qwen edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                },
+            )
         },
     );
 
@@ -699,6 +949,181 @@ pub(super) async fn generate_candle_qwen_edit_stream(
 mod qwen_edit_tier_reconcile_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ordered_plural_references_and_true_cfg_are_contractual() {
+        let value = json!({
+            "projectId": "p", "model": "qwen_image_edit_2511", "mode": "character_image",
+            "referenceAssetIds": ["first", "second"],
+            "advanced": { "trueCfgScale": 6.0, "imageGuidanceScale": 2.0 }
+        });
+        let request = ImageRequest::from_payload(value.as_object().expect("image request object"));
+        assert_eq!(
+            qwen_edit_candle_reference_ids(&request),
+            vec!["first".to_owned(), "second".to_owned()]
+        );
+        assert_eq!(qwen_edit_candle_guidance(&request), 6.0);
+    }
+
+    #[test]
+    fn pose_recipe_is_strict_shared_seed_and_identity_then_skeleton() {
+        let value = json!({
+            "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+            "mode": "character_image", "referenceAssetId": "identity", "seed": 42,
+            "width": 64, "height": 64, "prompt": "keep the person",
+            "advanced": {
+                "poses": [
+                    { "keypoints": [[0.5, 0.2, 1.0], [0.5, 0.35, 1.0]] },
+                    { "keypoints": [[0.2, 0.5, 1.0], [0.8, 0.5, 1.0]] }
+                ]
+            }
+        });
+        let request = ImageRequest::from_payload(value.as_object().expect("image request object"));
+        assert_eq!(qwen_edit_candle_pose_count(&request), Some(2));
+        assert!(qwen_edit_candle_mode(&request));
+        assert_eq!(
+            qwen_edit_candle_work(&request),
+            vec![
+                (42, "keep the person".to_owned()),
+                (42, "keep the person".to_owned())
+            ],
+            "one output per pose must share the identity seed"
+        );
+
+        let poses = parse_poses(&request);
+        let identity = Image {
+            width: 64,
+            height: 64,
+            pixels: vec![7; 64 * 64 * 3],
+        };
+        let references = qwen_edit_candle_pose_references(&identity, &poses[0], 64, 64);
+        assert_eq!(references.len(), 2);
+        assert_eq!(
+            references[0].pixels, identity.pixels,
+            "identity stays first"
+        );
+        assert_eq!((references[1].width, references[1].height), (64, 64));
+        assert_ne!(
+            references[1].pixels, identity.pixels,
+            "the rendered skeleton must be the second, distinct reference"
+        );
+    }
+
+    #[test]
+    fn pose_recipe_rejects_malformed_oversize_and_ambiguous_shapes() {
+        let make = |mode: &str, references: Value, poses: Value| {
+            let value = json!({
+                "projectId": "p", "model": "qwen_image_edit_2511_lightning", "mode": mode,
+                "advanced": { "poses": poses }
+            });
+            let mut payload = value.as_object().expect("image request object").clone();
+            payload.extend(references.as_object().expect("reference object").clone());
+            ImageRequest::from_payload(&payload)
+        };
+        for poses in [Value::Null, json!([])] {
+            let request = make(
+                "character_image",
+                json!({ "referenceAssetId": "identity" }),
+                poses,
+            );
+            assert_eq!(qwen_edit_candle_pose_count(&request), Some(0));
+            assert!(qwen_edit_candle_mode(&request));
+        }
+        for poses in [json!({}), json!(false), json!([{}, null])] {
+            let request = make(
+                "character_image",
+                json!({ "referenceAssetId": "identity" }),
+                poses,
+            );
+            assert_eq!(qwen_edit_candle_pose_count(&request), None);
+            assert!(!qwen_edit_candle_mode(&request));
+        }
+        let oversize = make(
+            "character_image",
+            json!({ "referenceAssetId": "identity" }),
+            Value::Array(
+                (0..=sceneworks_core::image_request::MAX_JOB_POSES)
+                    .map(|_| json!({}))
+                    .collect(),
+            ),
+        );
+        assert_eq!(qwen_edit_candle_pose_count(&oversize), None);
+        assert!(!qwen_edit_candle_mode(&oversize));
+
+        let plural = make(
+            "character_image",
+            json!({ "referenceAssetIds": ["identity", "extra"] }),
+            json!([{}]),
+        );
+        assert!(!qwen_edit_candle_mode(&plural));
+        let conflicting = make(
+            "character_image",
+            json!({
+                "referenceAssetIds": ["identity"],
+                "referenceAssetId": "other"
+            }),
+            json!([{}]),
+        );
+        assert!(qwen_edit_candle_reference_ids(&conflicting).is_empty());
+        assert!(!qwen_edit_candle_mode(&conflicting));
+        let edit = make(
+            "edit_image",
+            json!({ "sourceAssetId": "source" }),
+            json!([{}]),
+        );
+        assert!(!qwen_edit_candle_mode(&edit));
+    }
+
+    fn write_adapter(path: &Path, key: &str, network_type: Option<&str>) {
+        let mut header = serde_json::Map::new();
+        header.insert(
+            key.to_owned(),
+            json!({ "dtype": "U8", "shape": [1], "data_offsets": [0, 1] }),
+        );
+        if let Some(network_type) = network_type {
+            header.insert(
+                "__metadata__".to_owned(),
+                json!({ "networkType": network_type }),
+            );
+        }
+        let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut file = Vec::with_capacity(8 + encoded.len() + 1);
+        file.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+        file.extend_from_slice(&encoded);
+        file.push(0);
+        std::fs::write(path, file).unwrap();
+    }
+
+    #[test]
+    fn user_adapter_residency_matches_qwen_dense_and_packed_routes() {
+        let root = tempfile::tempdir().unwrap();
+        let lora = root.path().join("lora.safetensors");
+        write_adapter(&lora, "transformer.block.lora_A.weight", None);
+        let lora_spec = AdapterSpec::new(lora, 1.0, AdapterKind::Lora);
+        let packed = qwen_user_adapter_resident_bytes(std::slice::from_ref(&lora_spec), "q4")
+            .expect("packed LoRA bytes");
+        assert!(packed > 0);
+        assert_eq!(
+            qwen_user_adapter_resident_bytes(std::slice::from_ref(&lora_spec), "bf16")
+                .expect("dense plain LoRA remains additive"),
+            packed
+        );
+
+        let loha = root.path().join("loha.safetensors");
+        write_adapter(&loha, "transformer.block.hada_w1_a", None);
+        let loha_spec = AdapterSpec::new(loha, 1.0, AdapterKind::Lora);
+        assert_eq!(
+            qwen_user_adapter_resident_bytes(&[loha_spec], "bf16").expect("dense LoHa folds"),
+            0
+        );
+
+        let missing = AdapterSpec::new(
+            root.path().join("missing.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        assert!(qwen_user_adapter_resident_bytes(&[missing], "q4").is_err());
+    }
 
     /// The upstream repos this lane used to default to. No download flow ever fetches either — they are
     /// named here ONLY so the tests can assert we never resolve them again.
@@ -1028,8 +1453,10 @@ mod qwen_edit_tier_reconcile_tests {
             &root.path().join("q4"),
             40,
             4.0,
+            2,
         );
         assert_eq!(q4.get("quantTier").and_then(Value::as_str), Some("q4"));
+        assert_eq!(q4.get("referenceCount").and_then(Value::as_u64), Some(2));
 
         // A different tier from the SAME repo must record differently — the point of the field.
         let q8 = qwen_edit_candle_raw_settings(
@@ -1038,6 +1465,7 @@ mod qwen_edit_tier_reconcile_tests {
             &root.path().join("q8"),
             40,
             4.0,
+            2,
         );
         assert_eq!(q8.get("quantTier").and_then(Value::as_str), Some("q8"));
         assert_eq!(
@@ -1054,6 +1482,7 @@ mod qwen_edit_tier_reconcile_tests {
             opaque.path(),
             40,
             4.0,
+            2,
         );
         assert!(unknown.get("quantTier").is_none());
     }

@@ -735,7 +735,13 @@ pub struct GpuInfo {
     platform: String,
     devices: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    memory_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     unified_memory_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_memory_mb: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wired_limit_mb: Option<u64>,
 }
@@ -1043,6 +1049,30 @@ fn sanitized_export_filename(value: &str) -> String {
         .to_owned()
 }
 
+/// The largest export payload the shell will accept from the webview.
+///
+/// Hoisted out of [`save_image_export`]'s body (sc-15954) so the web half can be pinned against
+/// it. It stopped being unreachable when the Image Editor's untouched download became a byte-exact
+/// passthrough of the source file: every editor export used to be a canvas raster bounded by
+/// `EDITOR_CANVAS_MAX_SIDE`, and a 300 MB source now arrives here whole. The editor keeps its own
+/// mirror (`MAX_DESKTOP_EXPORT_BYTES` in `apps/web/src/screens/ImageEditor.jsx`) and falls back to
+/// the raster BEFORE the invoke, so the user reads a sentence rather than catching this error —
+/// which is why the two numbers have to stay equal, and why a test says so.
+const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
+
+/// Write an export payload to disk EXACTLY as the webview handed it over.
+///
+/// Split out of [`save_image_export`] so the one property that matters about this path is
+/// testable without a native dialog (sc-15954): the desktop shell must not re-encode, re-frame or
+/// otherwise touch the bytes. The Image Editor's untouched-document download hands
+/// `exportEditorFile` the source PNG itself — chunk, colour profile and all — and the browser
+/// half of that function writes it through an object URL, which is verbatim by construction. This
+/// is the desktop half, and "verbatim" has to mean the same thing on both or the two paths
+/// disagree about what a download contains.
+fn write_export_bytes(destination: &std::path::Path, image_bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(destination, image_bytes).map_err(|error| error.to_string())
+}
+
 /// Save a browser-generated image through the native dialog. WebKitGTK and
 /// WKWebView have inconsistent `<a download>` behavior for blob URLs, while this
 /// path gives every desktop platform the intended filename and a real save
@@ -1054,7 +1084,6 @@ pub async fn save_image_export(
     image_bytes: Vec<u8>,
     suggested_filename: String,
 ) -> Result<Option<String>, String> {
-    const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
     if image_bytes.is_empty() {
         return Err("The exported image was empty.".to_owned());
     }
@@ -1071,7 +1100,7 @@ pub async fn save_image_export(
     let Some(destination) = destination else {
         return Ok(None);
     };
-    std::fs::write(&destination, image_bytes).map_err(|error| error.to_string())?;
+    write_export_bytes(&destination, &image_bytes)?;
     Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
@@ -1084,12 +1113,20 @@ pub async fn save_image_export(
 /// user returns to their last-used save location (sc-8737); an empty/missing/non-existent
 /// hint is ignored. Returns `Ok(None)` when the user cancels the dialog and `Ok(Some(dest))`
 /// with the absolute destination path on success.
+///
+/// `without_workflow` (sc-15953) writes the copy with any embedded `sceneworks:workflow` chunk
+/// excised, for a user who wants to share the image but not the recipe that made it. It is a
+/// byte-level removal, not a re-encode — `copy_without_workflow_chunk` copies IHDR, every IDAT and
+/// IEND through unchanged — so the saved file has the same pixels as the same compressed data, and
+/// a source with nothing to strip goes through the same `std::fs::copy` the plain save uses. The
+/// SOURCE asset is never touched: this is one copy written differently, not a cleanup pass.
 #[tauri::command]
 pub async fn save_asset_as(
     app: AppHandle,
     source_path: String,
     suggested_filename: String,
     start_dir: Option<String>,
+    without_workflow: Option<bool>,
 ) -> Result<Option<String>, String> {
     // Guard the SOURCE before opening any dialog: only files inside the SceneWorks data
     // dir / HF cache may be copied out.
@@ -1111,7 +1148,12 @@ pub async fn save_asset_as(
         return Ok(None);
     };
 
-    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+    if without_workflow.unwrap_or(false) {
+        sceneworks_core::workflow_png::copy_without_workflow_chunk(&source, &destination)
+            .map_err(|error| error.to_string())?;
+    } else {
+        std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+    }
     Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
@@ -1238,13 +1280,17 @@ pub fn get_gpu_info() -> GpuInfo {
         GpuInfo {
             platform: "macos".to_owned(),
             devices,
+            memory_kind: unified_memory_mb.map(|_| "unified"),
+            memory_mb: unified_memory_mb,
             unified_memory_mb,
+            gpu_memory_mb: None,
             wired_limit_mb,
         }
     }
     #[cfg(target_os = "windows")]
     {
         let mut devices = Vec::new();
+        let mut gpu_memory_mb = None;
         if let Some(output) = run_capture(
             "nvidia-smi",
             &[
@@ -1255,7 +1301,14 @@ pub fn get_gpu_info() -> GpuInfo {
             for line in output.lines() {
                 let parts: Vec<&str> = line.split(',').map(str::trim).collect();
                 match parts.as_slice() {
-                    [name, memory, ..] => devices.push(format!("{name} ({memory} MB)")),
+                    [name, memory, ..] => {
+                        devices.push(format!("{name} ({memory} MB)"));
+                        if let Ok(value) = memory.parse::<u64>() {
+                            gpu_memory_mb = Some(
+                                gpu_memory_mb.map_or(value, |current: u64| current.max(value)),
+                            );
+                        }
+                    }
                     [name] => devices.push((*name).to_owned()),
                     _ => {}
                 }
@@ -1264,19 +1317,42 @@ pub fn get_gpu_info() -> GpuInfo {
         GpuInfo {
             platform: "windows".to_owned(),
             devices,
+            memory_kind: gpu_memory_mb.map(|_| "dedicated"),
+            memory_mb: gpu_memory_mb,
             unified_memory_mb: None,
+            gpu_memory_mb,
             wired_limit_mb: None,
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let devices = run_capture("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"])
-            .map(|output| output.lines().map(str::to_owned).collect())
-            .unwrap_or_default();
+        let mut devices = Vec::new();
+        let mut gpu_memory_mb = None;
+        if let Some(output) = run_capture(
+            "nvidia-smi",
+            &[
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+        ) {
+            for line in output.lines() {
+                let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+                if let [name, memory, ..] = parts.as_slice() {
+                    devices.push(format!("{name} ({memory} MB)"));
+                    if let Ok(value) = memory.parse::<u64>() {
+                        gpu_memory_mb =
+                            Some(gpu_memory_mb.map_or(value, |current: u64| current.max(value)));
+                    }
+                }
+            }
+        }
         GpuInfo {
             platform: "linux".to_owned(),
             devices,
+            memory_kind: gpu_memory_mb.map(|_| "dedicated"),
+            memory_mb: gpu_memory_mb,
             unified_memory_mb: None,
+            gpu_memory_mb,
             wired_limit_mb: None,
         }
     }
@@ -1349,20 +1425,113 @@ mod tests {
         assert_eq!(non_linux.hf_home.as_deref(), Some("./huggingface"));
     }
 
-    /// A unique scratch directory under the system temp dir, so the path-resolution
-    /// tests below don't need a `tempfile` dependency. Cleaned up by the caller.
-    fn scratch_dir(tag: &str) -> PathBuf {
-        let unique = format!(
-            "sceneworks-desktop-test-{tag}-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+    /// Frame one PNG chunk: `length | type | data | CRC`.
+    ///
+    /// The CRC is left as zeroes on purpose. This fixture exists to be walked by
+    /// `workflow_chunk_spans`, which is a framing walk over lengths and types and never checks a
+    /// CRC — computing real ones here would add a CRC-32 table to a test that would not be any
+    /// stronger for it.
+    fn framed_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::with_capacity(data.len() + 12);
+        chunk.extend_from_slice(
+            &u32::try_from(data.len())
+                .expect("chunk fits u32")
+                .to_be_bytes(),
         );
-        let dir = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        dir
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(data);
+        chunk.extend_from_slice(&[0, 0, 0, 0]);
+        chunk
+    }
+
+    /// A PNG carrying exactly one `sceneworks:workflow` `iTXt` chunk between IHDR and IEND.
+    fn png_with_workflow_chunk() -> Vec<u8> {
+        let mut itxt = sceneworks_core::workflow_png::WORKFLOW_CHUNK_KEYWORD
+            .as_bytes()
+            .to_vec();
+        // keyword NUL | compression flag | compression method | language NUL | translated NUL
+        itxt.extend_from_slice(&[0, 0, 0, 0, 0]);
+        itxt.extend_from_slice(br#"{"sceneworksWorkflow":"image"}"#);
+
+        let mut bytes = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        bytes.extend_from_slice(&framed_chunk(b"IHDR", &[0u8; 13]));
+        bytes.extend_from_slice(&framed_chunk(b"iTXt", &itxt));
+        bytes.extend_from_slice(&framed_chunk(b"IEND", &[]));
+        bytes
+    }
+
+    /// sc-15954: the desktop save path writes the webview's bytes VERBATIM.
+    ///
+    /// The Image Editor's untouched-document download hands `exportEditorFile` the source PNG
+    /// itself rather than a `canvas.toBlob` re-encode, so whatever the browser half writes
+    /// through an object URL, this half has to write identically — that is the AC's "desktop path
+    /// and browser object-URL path behave identically". Proven on a payload that actually carries
+    /// a workflow chunk, and checked twice: byte equality (nothing was re-encoded, re-framed or
+    /// truncated) and that the same walker the "Save a copy without the workflow" path uses still
+    /// finds exactly one chunk in the file on disk.
+    #[test]
+    fn the_desktop_export_write_preserves_an_embedded_workflow_chunk() {
+        use sceneworks_core::workflow_png::workflow_chunk_spans;
+
+        let root_guard = scratch_dir("export");
+        let root = root_guard.path();
+        let destination = root.join("shot.png");
+        let bytes = png_with_workflow_chunk();
+
+        write_export_bytes(&destination, &bytes).expect("write export bytes");
+
+        let written = std::fs::read(&destination).expect("read back the export");
+        assert_eq!(
+            written, bytes,
+            "the desktop shell must not re-encode an export"
+        );
+        assert_eq!(
+            workflow_chunk_spans(&written)
+                .expect("the written PNG is still walkable")
+                .len(),
+            1,
+            "the embedded workflow chunk must survive the desktop save path"
+        );
+    }
+
+    /// sc-15954: the editor's mirror of [`MAX_EXPORT_BYTES`] is the same number.
+    ///
+    /// The mirror is what makes the ceiling a sentence instead of an error. The editor's untouched
+    /// download hands this command the SOURCE FILE rather than a bounded canvas raster, so a large
+    /// original can exceed it — and the editor decides that before the invoke, falling back to the
+    /// raster and saying so in the pill beside the button. If the two numbers drift, the fallback
+    /// fires at the wrong size in one direction or a user gets the raw "exceeds the 256 MB desktop
+    /// limit" on a file that used to download fine in the other.
+    #[test]
+    fn the_desktop_export_ceiling_matches_the_editors_mirror_of_it() {
+        let editor = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/web/src/screens/ImageEditor.jsx");
+        let source = std::fs::read_to_string(&editor)
+            .unwrap_or_else(|error| panic!("read {}: {error}", editor.display()));
+        let declared = format!(
+            "MAX_DESKTOP_EXPORT_BYTES = {} * 1024 * 1024;",
+            MAX_EXPORT_BYTES / (1024 * 1024)
+        );
+        assert!(
+            source.contains(&declared),
+            "apps/web/src/screens/ImageEditor.jsx must declare `export const {declared}` to match \
+             this crate's MAX_EXPORT_BYTES; the editor decides BEFORE the invoke whether the \
+             passthrough fits, so a drift is either a hard error on a file that used to download \
+             or a needless fallback to the raster"
+        );
+    }
+
+    /// A unique scratch directory that removes itself when the guard drops.
+    ///
+    /// This used to be hand-rolled off `temp_dir()` to avoid a `tempfile` dependency and
+    /// was cleaned up by a trailing line in each test — which a panicking test skips,
+    /// leaving exactly the failure's evidence behind forever (sc-17707). Callers hold the
+    /// guard and read `.path()`.
+    fn scratch_dir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("sceneworks-desktop-test-{tag}-"))
+            .tempdir()
+            .expect("create scratch dir")
     }
 
     /// sc-8726: the source-path guard's containment core accepts a file inside an
@@ -1371,7 +1540,8 @@ mod tests {
     /// around it), so a save/reveal can never be pointed at an arbitrary file.
     #[test]
     fn path_within_roots_accepts_inside_and_rejects_outside() {
-        let root = scratch_dir("guard");
+        let root_guard = scratch_dir("guard");
+        let root = root_guard.path();
         let data_root = root.join("data");
         std::fs::create_dir_all(data_root.join("projects")).expect("data root");
         // Canonicalize both sides exactly as the guard does.
@@ -1389,8 +1559,6 @@ mod tests {
         assert!(!path_within_roots(&outside, &roots));
         // A root the target is not under is not sufficient.
         assert!(!path_within_roots(&inside, &[]));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-8726: `resolve_asset_path` turns a (projectId, project-relative file.path)
@@ -1402,7 +1570,8 @@ mod tests {
     fn project_store_resolves_relative_asset_to_absolute_disk_path() {
         use sceneworks_core::project_store::ProjectStore;
 
-        let root = scratch_dir("resolve");
+        let root_guard = scratch_dir("resolve");
+        let root = root_guard.path();
         let data_dir = root.join("data");
         let store = ProjectStore::new(&data_dir, "test-version");
         let project = store.create_project("Resolver").expect("project creates");
@@ -1426,8 +1595,6 @@ mod tests {
             .expect("resolve asset");
         let expected = std::fs::canonicalize(&asset_path).expect("canonical asset");
         assert_eq!(resolved.path, expected);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-8753: the asset Save As / Reveal commands are invoked from the API-served UI
@@ -1499,7 +1666,8 @@ mod tests {
         assert_eq!(sanitized_start_dir(Some("")), None);
         assert_eq!(sanitized_start_dir(Some("   ")), None);
 
-        let root = scratch_dir("startdir");
+        let root_guard = scratch_dir("startdir");
+        let root = root_guard.path();
         // A path that doesn't exist → skipped.
         let missing = root.join("does-not-exist");
         assert_eq!(sanitized_start_dir(Some(&missing.to_string_lossy())), None);
@@ -1514,8 +1682,6 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create dir");
         let padded = format!("  {}  ", dir.to_string_lossy());
         assert_eq!(sanitized_start_dir(Some(&padded)), Some(dir.clone()));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1533,7 +1699,8 @@ mod tests {
     /// and no `.json.tmp` scratch file is left behind on success.
     #[test]
     fn atomic_write_replaces_file_and_leaves_no_temp() {
-        let root = scratch_dir("atomic");
+        let root_guard = scratch_dir("atomic");
+        let root = root_guard.path();
         let path = root.join("settings.json");
 
         // Seed an existing file so we prove replace-in-place (not append/truncate).
@@ -1558,8 +1725,6 @@ mod tests {
         let back: AppSettings =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("parse back");
         assert_eq!(back.data_dir.as_deref(), Some("/tmp/data"));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1845,9 +2010,13 @@ mod tests {
                 .expect("system clock")
                 .as_nanos()
         );
-        let token = "sc-10378-secret-service-round-trip";
+        // Derived from the per-run account rather than spelled out as a literal:
+        // a string literal handed to `set_password` reads as a checked-in
+        // credential to secret scanners, and this payload only ever gets written
+        // to the local Secret Service and read back.
+        let token = format!("round-trip-payload-for-{account}");
         let entry = keyring::Entry::new(KEYRING_SERVICE, &account).expect("create entry");
-        entry.set_password(token).expect("save to Secret Service");
+        entry.set_password(&token).expect("save to Secret Service");
 
         // A newly constructed Entry mirrors a later app process resolving the same
         // service/account pair instead of reading an in-memory value.

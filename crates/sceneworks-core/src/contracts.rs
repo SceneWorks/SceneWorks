@@ -243,15 +243,15 @@ string_enum! {
         // upscale engines that previously only ran as a generation post-step.
         ImageUpscale => "image_upscale",
         // Standalone tile-ControlNet detail refine of an existing image asset (Image
-        // Editor, epic 2427; spike sc-2437). Native MLX SDXL/RealVisXL img2img + a
+        // Editor, epic 2427; spike sc-2437). Native MLX and Candle SDXL img2img + a
         // tile ControlNet run over feathered tiles to add micro-texture; GPU-required
         // like generation. Composes after image_upscale (creative upscale).
         ImageDetail => "image_detail",
         // Smart-select segmentation of an existing image asset (Image Editor, epic 6087
         // / sc-6105): a box prompt → a binary inpaint mask asset (white-on-black PNG at
-        // source dims) the editor loads into the sc-2436 mask layer. Native-MLX SAM3 on
-        // the macOS Rust worker (zero-Python, the box-PVS path of the sc-4926 SAM3 stack);
-        // GPU-required like generation, mac-only (no off-Mac standalone image-segment lane).
+        // source dims) the editor loads into the sc-2436 mask layer. Native SAM3 runs
+        // through MLX on macOS and Candle/CUDA off-Mac (zero-Python, the box-PVS path of
+        // the sc-4926 SAM3 stack); GPU-required like generation.
         ImageSegment => "image_segment",
         // Standalone upscale of an existing VIDEO asset (Video Studio, epic 4811 /
         // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
@@ -374,10 +374,21 @@ string_enum! {
 }
 
 string_enum! {
+    /// `idle` / `busy` / `offline` are the ordinary lifecycle: ready, running a job, gone.
+    ///
+    /// `unhealthy` (sc-16260) is different in kind — the worker process is alive and
+    /// heartbeating, but its accelerator is unusable, so it has withdrawn the capabilities it
+    /// would otherwise serve and can run nothing. The server/Docker lane has no setup screen to
+    /// refuse startup on, so this is the only place an operator can see WHY a queue is stalled;
+    /// [`WorkerSnapshot::status_reason`] carries the host-side remedy. Distinct from `offline`
+    /// on purpose: `offline` means "stopped heartbeating, may already be gone", and treating an
+    /// unusable-GPU worker as offline would hide a running container behind a message that says
+    /// the opposite of what is true.
     pub enum WorkerStatus {
         Idle => "idle",
         Busy => "busy",
         Offline => "offline",
+        Unhealthy => "unhealthy",
     }
 }
 
@@ -434,10 +445,9 @@ string_enum! {
         // backend is linked; the Rust CPU utility worker never emits it.
         // See jobs_store::job_requires_gpu.
         ImageDetail => "image_detail",
-        // Smart-select segmentation (Image Editor, epic 6087 / sc-6105). Advertised
-        // ONLY by the macOS MLX worker (native SAM3, `gpu.rs mlx_gpu`); no torch/candle
-        // worker emits it, so a box-prompt segment job routes to the Mac worker by
-        // construction. See jobs_store::job_requires_gpu / mac_rust_supported.
+        // Smart-select segmentation (Image Editor, epic 6087 / sc-6105). Advertised by the native
+        // SAM3 MLX worker on macOS and the native SAM3 Candle worker on CUDA hosts. See
+        // jobs_store::job_requires_gpu and the backend routing predicates.
         ImageSegment => "image_segment",
         // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
         // the macOS Rust/MLX worker and the off-Mac candle/CUDA worker (native
@@ -742,6 +752,78 @@ pub fn default_image_upscale_engine() -> String {
     "real-esrgan".to_owned()
 }
 
+/// Optional A1111-style Hires.fix pass for text-to-image generation.
+///
+/// The first pass renders at the requested job dimensions. The worker then resizes that image to
+/// `upscale_by` times the original dimensions and uses it as the img2img initialization for a second
+/// pass. `steps == 0` and `cfg_scale == None` mean "inherit the first-pass value".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiresFixRequest {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub steps: u32,
+    #[serde(default = "default_hires_denoising_strength")]
+    pub denoising_strength: f64,
+    #[serde(default = "default_hires_upscale_by")]
+    pub upscale_by: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_scale: Option<f64>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl Default for HiresFixRequest {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            steps: 0,
+            denoising_strength: default_hires_denoising_strength(),
+            upscale_by: default_hires_upscale_by(),
+            cfg_scale: None,
+            extra: ExtraFields::default(),
+        }
+    }
+}
+
+impl HiresFixRequest {
+    pub fn is_disabled(&self) -> bool {
+        !self.enabled
+    }
+
+    pub fn effective_steps(&self, first_pass_steps: u32) -> u32 {
+        if self.steps == 0 {
+            first_pass_steps
+        } else {
+            self.steps.clamp(1, 150)
+        }
+    }
+
+    pub fn effective_denoising_strength(&self) -> f32 {
+        self.denoising_strength.clamp(0.0, 1.0) as f32
+    }
+
+    pub fn effective_upscale_by(&self) -> f32 {
+        self.upscale_by.clamp(1.0, 4.0) as f32
+    }
+
+    pub fn effective_cfg_scale(&self, first_pass_cfg: Option<f32>) -> Option<f32> {
+        self.cfg_scale
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 60.0) as f32)
+            .or(first_pass_cfg)
+    }
+}
+
+pub const fn default_hires_denoising_strength() -> f64 {
+    0.7
+}
+
+pub const fn default_hires_upscale_by() -> f64 {
+    2.0
+}
+
 /// Payload for a standalone `video_upscale` job (epic 4811 / sc-4816). Upscales an existing video
 /// asset with the native-MLX SeedVR2 engine. The target size is `factor × source` unless
 /// `target_width`/`target_height` override it; either way the worker snaps both dims to a multiple of
@@ -838,6 +920,11 @@ pub struct WorkerHeartbeatRequest {
     pub loaded_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utilization: Option<WorkerUtilizationSnapshot>,
+    /// Why the worker is in [`WorkerStatus::Unhealthy`], as user-facing text (sc-16260).
+    /// `None` for every other status; the store clears the stored reason whenever a
+    /// heartbeat arrives without one, so a recovered worker doesn't keep a stale remedy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -1092,6 +1179,11 @@ pub struct WorkerSnapshot {
     pub loaded_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utilization: Option<WorkerUtilizationSnapshot>,
+    /// User-facing reason for a [`WorkerStatus::Unhealthy`] worker (sc-16260) — the host-side
+    /// remedy, so the Queue screen can explain a stalled queue without an operator reading
+    /// container logs. `None` for every healthy worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
     pub registered_at: String,
     pub last_seen_at: String,
     #[serde(flatten)]
@@ -1831,6 +1923,35 @@ mod tests {
         assert!(request.is_disabled());
         assert_eq!(request.factor, 2);
         assert_eq!(request.engine, "real-esrgan");
+    }
+
+    #[test]
+    fn hires_fix_request_round_trips_and_inherits_unspecified_values() {
+        let value = json!({
+            "enabled": true,
+            "steps": 0,
+            "denoisingStrength": 0.55,
+            "upscaleBy": 1.75,
+            "cfgScale": 6.5
+        });
+        let request: HiresFixRequest =
+            serde_json::from_value(value.clone()).expect("hires fix request parses");
+
+        assert!(request.enabled);
+        assert_eq!(request.effective_steps(28), 28);
+        assert_eq!(request.effective_cfg_scale(Some(4.0)), Some(6.5));
+        assert_eq!(
+            serde_json::to_value(request).expect("hires fix request serializes"),
+            value
+        );
+
+        let defaults: HiresFixRequest =
+            serde_json::from_value(json!({})).expect("empty hires fix request parses");
+        assert!(defaults.is_disabled());
+        assert_eq!(defaults.effective_steps(24), 24);
+        assert_eq!(defaults.effective_denoising_strength(), 0.7);
+        assert_eq!(defaults.effective_upscale_by(), 2.0);
+        assert_eq!(defaults.effective_cfg_scale(Some(7.0)), Some(7.0));
     }
 
     #[test]

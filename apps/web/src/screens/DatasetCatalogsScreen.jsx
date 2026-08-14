@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { API_BASE_URL, apiFetch, isAbortError, withMediaTicket } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { RequiredModelsNotice } from "../components/RequiredModelsNotice.jsx";
+import { PERSON_DETECT_MODEL_ID, POSE_DETECT_MODEL_ID } from "../constants.js";
+import { missingRequiredModels } from "../modelEligibility.js";
 import { useAppStatic } from "../context/AppContext.js";
 import { formatBytes } from "../formatting.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
@@ -720,7 +723,16 @@ function CatalogCuration({ catalogId, token }) {
 }
 
 export function DatasetCatalogsScreen() {
-  const { token = "" } = useAppStatic();
+  // useAppStatic, NOT useAppContext: this screen polls its own catalog list and must not also
+  // re-render on every SSE job tick (sc-8855). That is why the required-model notice below is
+  // given no `downloadJobs` — it falls back to its local "Queued" state, which needs no live jobs.
+  const { token = "", models = [], createModelDownloadJob, setActiveView } = useAppStatic();
+  // The two cache-only preprocessors structured analysis resolves before it can run
+  // (catalog_semantic_jobs.rs). Declaration order is display order.
+  const missingStructuredModels = useMemo(
+    () => missingRequiredModels(models, [PERSON_DETECT_MODEL_ID, POSE_DETECT_MODEL_ID]),
+    [models],
+  );
   const [catalogs, setCatalogs] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1235,6 +1247,21 @@ export function DatasetCatalogsScreen() {
                       </label>
                     ))}
                   </div>
+                  {/* Structured analysis is the only analyzer with weight prerequisites, and both of
+                      its resolvers went cache-only in epic 17625 (`require_detector_weights`,
+                      `require_dwpose_weights`) — so an analysis run on a machine without them dies
+                      at the worker with an install error this screen otherwise gives no way to act
+                      on. The face stack is NOT listed: `ensure_face_stack_dir` still provisions
+                      itself, so it is not a prerequisite the user has to satisfy first. */}
+                  {analyzerDraft.structuredAnalysisEnabled ? (
+                    <RequiredModelsNotice
+                      detail="Structured analysis runs locally on the native worker; the other analyzers are unaffected."
+                      feature="Structured person, face, and pose analysis"
+                      models={missingStructuredModels}
+                      onDownload={createModelDownloadJob}
+                      onOpenModels={setActiveView ? () => setActiveView("Models") : undefined}
+                    />
+                  ) : null}
                   <div className="catalog-analyzer-thresholds">
                     {ANALYZER_THRESHOLD_FIELDS.map(([field, label, max]) => (
                       <label className="settings-field" key={field}>

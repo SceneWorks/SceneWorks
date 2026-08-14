@@ -1,12 +1,26 @@
 use super::{
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
-    model_repo, non_empty, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
-    resolve_weights_dir, start_gen_stream, ApiClient, Flux2Edit, Flux2EditPaths, Flux2EditRequest,
-    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value,
+    admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
+    candle_conditioned_edit_work, consume_gen_events, drive_gen_items_reported, fit_engine_image,
+    load_reference_image, mlx_model, model_repo, pid_effective_dims, pid_output_tier,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_pid_weights, resolve_quant, resolve_weights_dir, start_gen_stream, ApiClient,
+    CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PromptEnhance, Settings, Value,
     WorkerError, WorkerResult,
 };
 use serde_json::json;
+
+pub(super) fn flux2_edit_adapter_source_bytes(
+    adapters: &[gen_core::AdapterSpec],
+) -> WorkerResult<u64> {
+    gen_core::adapter_stack_resident_bytes(adapters, gen_core::AdapterResidencyMode::Additive)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.2 edit cannot determine the resident size of the requested adapter stack."
+                    .to_owned(),
+            )
+        })
+}
 
 // Candle (Windows/CUDA) FLUX.2 image-edit route (sc-5487 klein, epic 5480; sc-7736 dev, epic 6564) —
 // Kontext-style reference-conditioned editing off-Mac via `runtime_cuda::providers::flux2::Flux2Edit`. FLUX.2-klein has
@@ -51,21 +65,49 @@ fn is_flux2_edit_candle_dev(model: &str) -> bool {
     model == "flux2_dev"
 }
 
-/// FLUX.2 model ids the candle edit route accepts: the klein base 9b + true_v2 (which share the edit
-/// variant) and the dev 32B flagship (sc-7736). The klein `-kv` distill needs the reference-K/V cache
-/// port and is refused by candle for now.
-fn is_flux2_edit_candle_model(model: &str) -> bool {
+/// True for the Klein catalog family that shares the provider implementation. Keeping this
+/// separate from `flux2_dev` keeps family-specific loading behavior explicit.
+fn is_flux2_edit_candle_klein(model: &str) -> bool {
     matches!(
         model,
-        "flux2_klein_9b" | "flux2_klein_9b_true_v2" | "flux2_dev"
+        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2"
     )
 }
 
-/// True when this is a candle-eligible FLUX.2 edit job: a klein/dev `edit_image` job with a source
-/// image. Mirrors `jobs_store::flux2_edit_candle_eligible` so the worker and router agree on the lane
-/// boundary.
-fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
-    request.mode == "edit_image" && non_empty(&request.source_asset_id)
+/// FLUX.2 model ids the candle edit route accepts. The three Klein catalog entries resolve to the
+/// same Candle provider implementation; artifact/evidence admission remains entry-specific, so
+/// sharing this execution route cannot promote KV or True V2 calibration cells.
+pub(super) fn is_flux2_edit_candle_model(model: &str) -> bool {
+    matches!(
+        model,
+        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev"
+    )
+}
+
+/// True when this is a reference-bearing FLUX.2 request. Every admitted mode must resolve at least
+/// one concrete reference; otherwise it stays off the bespoke route and the generic Klein guard
+/// fails closed instead of silently rendering reference-free text-to-image.
+pub(super) fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
+    let supported_mode = (is_flux2_edit_candle_klein(&request.model)
+        || is_flux2_edit_candle_dev(&request.model))
+        && matches!(
+            request.mode.as_str(),
+            "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
+        );
+    supported_mode
+        && flux2_edit_candle_pose_carrier_is_absent_or_empty(request)
+        && !flux2_edit_candle_reference_ids(request).is_empty()
+}
+
+/// The FLUX.2 edit provider consumes references but no pose controls. Missing/null/empty preserves
+/// ordinary character/reference edits; any non-empty or malformed pose carrier must stay off this
+/// lane so the control route can consume it or the worker can reject it explicitly.
+fn flux2_edit_candle_pose_carrier_is_absent_or_empty(request: &ImageRequest) -> bool {
+    match request.advanced.get("poses") {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(poses)) => poses.is_empty(),
+        Some(_) => false,
+    }
 }
 
 /// Resolve the FLUX.2 base snapshot through the **shared** [`resolve_weights_dir`] — the same resolver
@@ -110,9 +152,7 @@ pub(super) fn flux2_edit_candle_repo(request: &ImageRequest) -> String {
     }
 }
 
-/// True when this is a candle-eligible FLUX.2 edit job (a klein/dev `edit_image` job with a source)
-/// whose base resolves locally. Mirrors `jobs_store::flux2_edit_candle_eligible` (minus the weight-
-/// resolve check).
+/// True when this is a candle-eligible reference-bearing FLUX.2 job whose base resolves locally.
 pub(super) fn flux2_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_flux2_edit_candle_model(&request.model)
         && flux2_edit_candle_mode(request)
@@ -131,14 +171,21 @@ fn flux2_edit_candle_steps(request: &ImageRequest, default: u32) -> u32 {
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the family default
 /// (klein 1.0 / dev 4.0), clamped.
 fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
+    if let Some(value) = request.advanced.get("trueCfgScale").and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    }) {
+        return (value as f32).clamp(0.0, 30.0);
+    }
     resolve_advanced_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
 }
 
 /// Reference asset ids for a FLUX.2 edit, in order. The multi-image picker (sc-6211) sends the plural
 /// `referenceAssetIds` — take all of them, capped at [`FLUX2_EDIT_CANDLE_MAX_REFERENCES`]; with no plural
-/// list it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors the MLX
-/// `edit_reference_ids` (multi) + `boogu_edit_reference_ids`.
-fn flux2_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
+/// list it falls back to the character/reference `referenceAssetId`, then the Image-Edit
+/// `sourceAssetId`. Mirrors the MLX `edit_reference_ids` order.
+pub(super) fn flux2_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !request.reference_asset_ids.is_empty() {
         // The parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
         return request
@@ -147,6 +194,14 @@ fn flux2_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
             .take(FLUX2_EDIT_CANDLE_MAX_REFERENCES)
             .cloned()
             .collect();
+    }
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
     }
     if let Some(id) = request
         .source_asset_id
@@ -241,8 +296,36 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 base not found".to_owned()))?;
     if !flux2_edit_candle_mode(request) {
         return Err(WorkerError::InvalidPayload(
-            "FLUX.2 edit requires edit_image mode + a source image".to_owned(),
+            "FLUX.2 reference-bearing mode requires a reference image".to_owned(),
         ));
+    }
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_source_bytes = flux2_edit_adapter_source_bytes(&adapters)?;
+    // The canonical Klein base is admitted exclusively by the exact shared selector below. The
+    // legacy resident-only gate cannot model its bounded rungs and would reject constrained
+    // requests before sequential offload/decode/attention/block choices are evaluated. Siblings
+    // remain executable through the resident legacy path, but use `Ungateable` evidence so code
+    // sharing cannot falsely certify entry-specific CUDA calibration.
+    if request.model != "flux2_klein_9b" {
+        let evidence = match request.model.as_str() {
+            "flux2_klein_9b_kv" => CandleBaseEvidence::Ungateable(
+                "the KV catalog entry has no entry-specific CUDA peak or calibration row",
+            ),
+            "flux2_klein_9b_true_v2" => CandleBaseEvidence::Ungateable(
+                "the local True V2 converted fine-tune has no CUDA calibration row",
+            ),
+            _ => CandleBaseEvidence::Catalog,
+        };
+        admit_candle_base(
+            request,
+            settings,
+            &flux2_base,
+            "FLUX.2 edit",
+            evidence,
+            adapter_source_bytes,
+            false,
+        )
+        .await?;
     }
     let is_dev = is_flux2_edit_candle_dev(&request.model);
     // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
@@ -263,7 +346,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     // `.scales` sibling. dev still resolves a `Quant` (it is the value `resolve_quant` records on the
     // recipe, and it drives the dense CPU-stage → quantize-onto-GPU fallback when the resolved dir is a
     // dense/`modelPath` tree rather than a packed turnkey). klein keeps a hardcoded `(None, None)`: it is
-    // a DENSE-TE turnkey (`DENSE_TE_TIER_MODELS`) whose bf16 Qwen3 text encoder must never be
+    // a DENSE-TE turnkey (`mlx.denseTextEncoderTier`) whose bf16 Qwen3 text encoder must never be
     // re-quantized — `resolve_quant`'s `is_dense_te_tier` carve-out returns exactly this for
     // `flux2_klein_9b`, and the hardcode additionally keeps `_true_v2` (a convert-at-install dense dir,
     // NOT in that list) on the dense load it has always used.
@@ -276,6 +359,67 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     } else {
         (None, None)
     };
+    let mut strategy_spec =
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux2_base.clone()))
+            .with_adapters(adapters.clone())
+            .with_offload_policy(gen_core::OffloadPolicy::Sequential);
+    strategy_spec.quantize = quant;
+    let memory_provider = if is_dev {
+        "flux2_dev"
+    } else {
+        "flux2_klein_9b"
+    };
+    let strategy_spec = apply_candle_image_load_shape(memory_provider, strategy_spec);
+    let mut generation_memory = gen_core::GenerationMemory::default();
+    let tier = match flux2_base.file_name().and_then(|name| name.to_str()) {
+        Some("q4") => "q4",
+        Some("q8") => "q8",
+        _ => "bf16",
+    };
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        adapter_source_bytes,
+    );
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+        memory_provider,
+        &request.model,
+        &strategy_spec,
+        candle_certified_artifact_path(memory_provider, settings, &flux2_base, tier),
+        &request.model_manifest_entry,
+        tier,
+        &request.mode,
+        None,
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: references.len() as u32,
+        },
+        true,
+        use_pid,
+        false,
+        raw_budget,
+        predicted_peak,
+        adapter_source_bytes,
+        gen_core::MemoryCacheState::Cold,
+    )?;
+    if request.model == "flux2_klein_9b" && memory_evaluation.is_none() {
+        return Err(WorkerError::InvalidPayload(
+            "no exact verified memory strategy fits this FLUX.2 Klein reference request".to_owned(),
+        ));
+    }
+    if let Some(evaluation) = &memory_evaluation {
+        generation_memory = evaluation.memory.unwrap_or_default();
+    }
+    let memory_context = memory_evaluation
+        .as_ref()
+        .map(|evaluation| evaluation.context.clone());
     let steps = flux2_edit_candle_steps(
         request,
         if is_dev {
@@ -305,24 +449,44 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     );
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
+    if let Some(evaluation) = &memory_evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+    }
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
-    let work: Vec<(i64, String)> = (0..request.count as usize)
-        .map(|index| (resolve_seed(request, index), request.prompt.clone()))
-        .collect();
+    let work = candle_conditioned_edit_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
-
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "flux2_edit",
         0,
         move || {
-            let paths = Flux2EditPaths { root: flux2_base };
+            let paths = Flux2EditPaths {
+                root: flux2_base,
+                adapters,
+            };
             let model = if is_dev {
-                Flux2Edit::load_dev(&paths, quant)
+                match &memory_context {
+                    Some(context) => Flux2Edit::load_dev_with_memory_context(
+                        &paths,
+                        quant,
+                        &strategy_spec,
+                        context,
+                    ),
+                    None => Flux2Edit::load_dev_with_memory(&paths, quant, generation_memory),
+                }
             } else {
-                Flux2Edit::load(&paths)
+                match &memory_context {
+                    Some(context) => {
+                        Flux2Edit::load_klein_with_memory_context(&paths, &strategy_spec, context)
+                    }
+                    None => Flux2Edit::load(&paths),
+                }
             }
             .map_err(|error| WorkerError::Engine(format!("FLUX.2 edit load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
@@ -332,37 +496,58 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                 })?,
                 None => model,
             };
-            Ok((model, references))
+            Ok((model, references, memory_context))
         },
-        move |(model, references), tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = Flux2EditRequest {
-                    prompt,
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    seed: seed as u64,
-                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
-                    use_pid,
-                    cancel: cancel.clone(),
-                };
-                let result = model.generate(&req, &references, &mut *on_progress);
-                let out = match result {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "FLUX.2 edit generation failed: {error}"
-                        )));
+        move |(model, references, memory_context), tx, cancel| {
+            drive_gen_items_reported(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
-            })
+                    let req = Flux2EditRequest {
+                        prompt: prompt.clone(),
+                        negative: negative.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        seed: seed as u64,
+                        // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                        use_pid,
+                        enhance_prompt: enhance.enabled,
+                        enhance_max_tokens: enhance.max_tokens,
+                        enhance_temperature: enhance.temperature,
+                        prompt_enhancement: if enhance.enabled {
+                            prompt_enhancement.for_prompt(&prompt)
+                        } else {
+                            gen_core::PromptEnhancementSink::default()
+                        },
+                        preview: preview.clone(),
+                        cancel: cancel.clone(),
+                    };
+                    let result = match memory_context.as_ref() {
+                        Some(context) => model.generate_with_memory_context(
+                            context,
+                            &req,
+                            &references,
+                            &mut *on_progress,
+                        ),
+                        None => model.generate(&req, &references, &mut *on_progress),
+                    };
+                    let out = match result {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "FLUX.2 edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                },
+            )
         },
     );
 
@@ -382,4 +567,50 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(advanced: Value, manifest_guidance: Option<f64>) -> ImageRequest {
+        let mut value = json!({
+            "projectId": "p", "model": "flux2_dev", "mode": "character_image",
+            "prompt": "portrait", "referenceAssetId": "ref", "advanced": advanced
+        });
+        if let Some(guidance) = manifest_guidance {
+            value.as_object_mut().unwrap().insert(
+                "modelManifestEntry".to_owned(),
+                json!({ "guidanceScale": guidance }),
+            );
+        }
+        ImageRequest::from_payload(value.as_object().expect("image request object"))
+    }
+
+    #[test]
+    fn guidance_prefers_true_cfg_then_guidance_manifest_and_default() {
+        assert_eq!(
+            flux2_edit_candle_guidance(
+                &request(
+                    json!({ "trueCfgScale": 7.0, "guidanceScale": 2.0 }),
+                    Some(3.0)
+                ),
+                4.0,
+            ),
+            7.0
+        );
+        assert_eq!(
+            flux2_edit_candle_guidance(&request(json!({ "guidanceScale": 2.0 }), Some(3.0)), 4.0),
+            2.0
+        );
+        assert_eq!(
+            flux2_edit_candle_guidance(&request(json!({}), Some(3.0)), 4.0),
+            3.0
+        );
+        assert_eq!(
+            flux2_edit_candle_guidance(&request(json!({}), None), 4.0),
+            4.0
+        );
+    }
 }

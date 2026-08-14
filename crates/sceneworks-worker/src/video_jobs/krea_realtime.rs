@@ -16,8 +16,9 @@ use super::wan::{generate_video_using, local_mlx_dir, VideoGenInput};
 // Surface (descriptor `pipeline::descriptor`, sc-8440 S7 + sc-15203 S19): CFG-OFF video (no
 // negative-prompt / guidance / true-cfg axis — the AR few-step denoise runs a single batch-1 forward
 // per step), sampler `self_forcing`, `supported_quants = [Q4, Q8]` (bf16 = their absence),
-// `supports_lora = false`, `mac_only = true`. It advertises two conditioning shapes the worker maps its
-// own reference inputs onto here:
+// `supports_lora`/`supports_lokr = true` (sc-15015 S14 wired the dense forward-time residual path;
+// this module's S15 passthrough is what fills it), `mac_only = true`. It advertises two conditioning
+// shapes the worker maps its own reference inputs onto here:
 //   * i2v — a `Reference` still VAE-encoded to WARM the AR KV cache from clean context. The engine's
 //     `run` reads only the reference IMAGE (`Conditioning::Reference { image, .. }`), never its
 //     `strength` — the cache-warm has no strength analog — so **i2v `strength` is a NO-OP**, faithful
@@ -30,7 +31,7 @@ use super::wan::{generate_video_using, local_mlx_dir, VideoGenInput};
 // This is the non-gated worker DISPATCH wiring (routing + VideoRequest→GenerationRequest mapping +
 // heartbeat-funnel routing). The real-weight watchable-clip e2e needs the real ~28 GB DiT and is the
 // GATED S13 validation; the MLX rehost of the turnkey snapshot is the gated S2 remainder (sc-8435).
-// LoRA passthrough is the S15 seam (see `generate_krea_realtime`). Mac-only: the off-Mac (candle) lane
+// LoRA passthrough landed in S15 ([`resolve_krea_realtime_adapters`]). Mac-only: the off-Mac (candle) lane
 // has NO Krea Realtime engine, so a non-mac job fails loud in `run_video_generate_job` (mirroring the
 // `wan_2_2_vace_fun_14b` mac-only guard) rather than silently routing to a different backend / the stub.
 // ---------------------------------------------------------------------------
@@ -435,6 +436,156 @@ pub(super) fn resolve_krea_realtime_model_dir(settings: &Settings) -> WorkerResu
     )))
 }
 
+// ---------------------------------------------------------------------------
+// Wan-family LoRA passthrough (sc-15017, S15)
+// ---------------------------------------------------------------------------
+
+/// Build the adapter specs for a Krea Realtime generation. Krea Realtime is a **single dense**
+/// transformer — no Lightning distill pair, no MoE high/low experts — so every user LoRA/LoKr is
+/// applied shared (`moe_expert: None`) through the same [`resolve_dense_adapters`] the Wan-VACE and
+/// SCAIL-2 arms use (sc-8830). Verbatim reuse: the confinement of the payload path to an app-managed
+/// root, the directory→`.safetensors` resolve, the `classify_adapter` LoKr tag and the
+/// [`MAX_JOB_LORAS`] cap are all that lane's, not a second copy.
+///
+/// The engine installs each file as a **forward-time residual** over the built DiT
+/// (`t2v::load_transformer` → `apply_adapters_strict_with_diff_patch`), *after* any quantization.
+/// Low-rank residuals remain additive on packed tiers, while the real lightx2v diff-patch surface
+/// lands through dense bias/norm parameters on Q4, Q8, and bf16 (sc-15326). The checkpoint IS Wan
+/// 2.1 T2V 14B weight-for-weight, so a Wan-family file's
+/// `blocks.{i}.self_attn/cross_attn/ffn` stems resolve against the Krea DiT's own module names.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_krea_realtime_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
+}
+
+/// Actual Krea adapter coverage reported by the engine after generation — one entry per file with
+/// skipped targets, as `(file name, unapplied target count, total reported target count)`.
+///
+/// This deliberately consumes [`Generator::adapter_apply_reports`] through the decoded-video funnel;
+/// it never predicts from safetensors headers. That distinction matters after sc-15326: all 647 real
+/// lightx2v diff-patch keys land on every Krea tier, while a genuinely out-of-surface target remains
+/// visible in `skipped`.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct KreaRealtimeLoraCoverage {
+    pub(super) partial: Vec<(String, usize, usize)>,
+}
+
+#[cfg(target_os = "macos")]
+impl KreaRealtimeLoraCoverage {
+    /// The `kreaRealtimeLoraPartial` value for the asset stamp, or `None` when every selected LoRA
+    /// applies in full (the common case — the key is then absent rather than an empty array, so the
+    /// sidecar of an ordinary render is byte-identical to what it was before this existed).
+    fn stamp(&self) -> Option<Value> {
+        if self.partial.is_empty() {
+            return None;
+        }
+        Some(Value::Array(
+            self.partial
+                .iter()
+                .map(|(file, dropped, total)| {
+                    json!({ "file": file, "unappliedKeys": dropped, "totalKeys": total })
+                })
+                .collect(),
+        ))
+    }
+
+    /// Emit the `warn` event for each genuinely partially-applied file, after the engine returns its
+    /// report.
+    pub(super) fn warn(&self) {
+        for (file, unapplied, total) in &self.partial {
+            tracing::warn!(
+                event = "krea_realtime_lora_partially_applied",
+                model = KREA_REALTIME_MODEL_ID,
+                lora = %file,
+                unapplied_keys = *unapplied,
+                total_keys = *total,
+                "Krea Realtime's engine reports {unapplied} of {total} adapter target(s) in {file} \
+                 were not applied. The clip reflects a PARTIAL application of this LoRA."
+            );
+        }
+    }
+}
+
+/// Convert the engine's actual per-adapter results into the worker's warning/stamp shape.
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_lora_coverage(
+    reports: &[gen_core::AdapterApplyReport],
+) -> KreaRealtimeLoraCoverage {
+    let partial = reports
+        .iter()
+        .filter(|report| !report.skipped.is_empty())
+        .map(|report| {
+            (
+                adapter_file_label(&report.adapter_path),
+                report.skipped.len(),
+                report.applied + report.skipped.len(),
+            )
+        })
+        .collect();
+    KreaRealtimeLoraCoverage { partial }
+}
+
+/// The adapter's file name for user-facing text. Deliberately the last path component, not the full
+/// path: the resolved path points inside the app-managed LoRA root, which is noise in a log line and
+/// on an asset sidecar.
+#[cfg(target_os = "macos")]
+fn adapter_file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Rewrite an engine load failure caused by the strict adapter installer into something a user can
+/// act on, naming the LoRAs that were selected. Any other failure — and every non-`Msg` variant,
+/// notably the typed `Canceled` the funnel matches on — passes through untouched.
+///
+/// The engine is correct to hard-error: `apply_adapters_strict` refuses to install a file whose
+/// targets do not all exist, because the alternative is a render that silently omits part of the
+/// adapter and still reports success. But the raw text is an engine-internal module list behind a
+/// generic "video load failed", which tells a user nothing about what to do.
+///
+/// Two classes reach real users, and they need different answers:
+///
+/// 1. An **I2V-family** Wan LoRA (`cross_attn.k_img` / `v_img`). Those modules do not exist on a
+///    T2V backbone at any surface width, so no widening fixes it. Detected from the engine's own
+///    unmatched-target list, which is direct evidence rather than inference.
+/// 2. Anything else — a genuinely foreign architecture.
+///
+/// The former wholly-diff-patch format branch is intentionally gone: sc-15326 made those files a
+/// supported engine input, so a header-derived "nothing applies" diagnosis is now false.
+#[cfg(target_os = "macos")]
+pub(super) fn annotate_krea_realtime_lora_error(
+    error: gen_core::Error,
+    loras: &[String],
+) -> gen_core::Error {
+    let gen_core::Error::Msg(message) = &error else {
+        return error;
+    };
+    if loras.is_empty() || !message.contains("adapters:") {
+        return error;
+    }
+    let selected = loras.join(", ");
+    let hint = if message.contains("k_img") || message.contains("v_img") {
+        "This looks like an image-to-video (I2V) Wan LoRA: it targets the image cross-attention \
+         projections (`cross_attn.k_img` / `v_img`), which a text-to-video backbone like Krea \
+         Realtime 14B does not have. Pick a Wan T2V style / motion LoRA instead, or deselect it."
+            .to_owned()
+    } else {
+        "Krea Realtime 14B accepts Wan-family (Wan 2.1 T2V 14B) LoRAs — its DiT is that model \
+         weight-for-weight. A LoRA trained for a different architecture has targets this model does \
+         not have, so it is refused rather than half-applied. Deselect it, or pick a Wan T2V LoRA."
+            .to_owned()
+    };
+    gen_core::Error::Msg(format!(
+        "Krea Realtime 14B could not apply the selected LoRA(s) ({selected}). {hint}\n\nEngine \
+         detail: {message}"
+    ))
+}
+
 /// The Krea Realtime video task a request resolves to, from its supplied media: a source clip → `v2v`,
 /// else a reference still → `i2v`, else `t2v`. Routed on the MEDIA (matching how the engine's own `run`
 /// routes on the conditioning it is handed), not the SceneWorks `mode` string, so the mapping is faithful
@@ -458,8 +609,16 @@ pub(super) fn krea_realtime_video_task(request: &VideoRequest) -> &'static str {
 /// `bf16/` installed loads bf16 dense. Without this stamp the sidecar would still carry the request's
 /// verbatim `advanced.mlxQuantize`, so an asset could claim `8` for a clip rendered at q4 — provenance
 /// drift on a field a user reads to reproduce a result.
+///
+/// `kreaRealtimeLoraPartial` (sc-15017) is present ONLY when a selected LoRA was partially applied —
+/// see [`KreaRealtimeLoraCoverage`]. Absent for every ordinary render, so the sidecar of a clip with
+/// no LoRA (or a fully-applied one) is unchanged.
 #[cfg(target_os = "macos")]
-pub(super) fn krea_realtime_raw_settings(request: &VideoRequest, tier: &str) -> Value {
+pub(super) fn krea_realtime_raw_settings(
+    request: &VideoRequest,
+    tier: &str,
+    coverage: &KreaRealtimeLoraCoverage,
+) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
@@ -474,6 +633,10 @@ pub(super) fn krea_realtime_raw_settings(request: &VideoRequest, tier: &str) -> 
         "kreaRealtimeTier".to_owned(),
         Value::String(tier.to_owned()),
     );
+    // Only when something was actually dropped — a clean render's sidecar gains no key.
+    if let Some(partial) = coverage.stamp() {
+        raw.insert("kreaRealtimeLoraPartial".to_owned(), partial);
+    }
     Value::Object(raw)
 }
 
@@ -569,19 +732,22 @@ pub(super) async fn resolve_krea_realtime_conditioning(
 /// Wan 1-mod-4 stride coercion — the DiT + z16 VAE ARE stock Wan 2.1, so the Wan stride is exactly
 /// right.
 ///
-/// Returns the decoded clip plus the tier that actually LOADED, so the caller records it on the asset
-/// without re-resolving (the `generate_scail2` → `lightning` shape).
+/// Returns the decoded clip plus the `rawSettings` to record on the asset (the `generate_mochi` shape):
+/// the arm owns them because two of the fields — the tier that actually LOADED and any partial LoRA
+/// application reported by the engine — are only knowable inside it.
 ///
 /// Runs through the `generate_video` → `generate_video_using` funnel so a long/multi-minute AR job
 /// drives `heartbeat(...)` and is NOT marked `interrupted` by the ~90 s API stale-sweep, and so the
 /// funnel's per-step cancel poll trips the engine's `CancelFlag` promptly (the S8 half of this story's
 /// DoD).
 ///
-/// **LoRA passthrough is the S15 seam.** The engine advertises `supports_lora = false`, so no adapter
-/// is wired (`adapters` left empty): forwarding a LoRA to an engine whose load path ignores it would
-/// violate capability honesty. A LoRA-bearing request is NOT rejected — it runs the base DiT — so the
-/// worker never breaks on one; the full dense-LoRA integration (via the shared `resolve_dense_adapters`)
-/// lands in sc-8443's S15.
+/// **LoRA passthrough (sc-15017, S15).** User-selected LoRAs ride `LoadSpec::adapters` via
+/// [`resolve_krea_realtime_adapters`] — the same shared dense resolver the Wan-VACE / SCAIL-2 arms
+/// use — and the engine installs low-rank factors plus its supported diff-patch surface. Two honesty
+/// seams travel with it: a file the engine cannot match hard-errors, rewritten here into an
+/// actionable I2V/foreign-architecture message ([`annotate_krea_realtime_lora_error`]); and any
+/// genuinely skipped target returned by the engine is warned about and stamped
+/// ([`KreaRealtimeLoraCoverage`]).
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_krea_realtime(
@@ -592,7 +758,7 @@ pub(super) async fn generate_krea_realtime(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<(DecodedVideo, &'static str)> {
+) -> WorkerResult<(DecodedVideo, Value)> {
     generate_krea_realtime_using(
         api,
         settings,
@@ -623,9 +789,17 @@ pub(super) async fn generate_krea_realtime_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-) -> WorkerResult<(DecodedVideo, &'static str)> {
+) -> WorkerResult<(DecodedVideo, Value)> {
     let conditioning =
         resolve_krea_realtime_conditioning(api, settings, job, request, project_path).await?;
+    // Wan-family LoRA passthrough (sc-15017). Resolved BEFORE the tier fetch so a bad selection (an
+    // over-cap count, a path outside the app-managed root, a missing file) fails immediately instead
+    // of after a multi-GB download.
+    let adapters = resolve_krea_realtime_adapters(settings, request)?;
+    let lora_labels: Vec<String> = adapters
+        .iter()
+        .map(|adapter| adapter_file_label(&adapter.path))
+        .collect();
     // Krea Realtime quant matrix (sc-15258, epic 8506 shape): an explicitly picked q8/bf16 tier is
     // fetched on demand before resolving (no-op for a default job or an already-present tier), then the
     // tier subdir AND the load-time quant come out of ONE decision — a resolved tier loads exactly as
@@ -633,6 +807,13 @@ pub(super) async fn generate_krea_realtime_using(
     ensure_krea_realtime_tier_present(api, settings, job, request).await?;
     let load = resolve_krea_realtime_tier_dir_and_quant(settings, request)?;
     let tier = load.tier;
+    // Wrap the caller's loader so a strict-adapter refusal reaches the user as guidance instead of an
+    // engine-internal module list behind "video load failed". Non-adapter failures — and the typed
+    // `Canceled` the funnel matches on — pass through untouched.
+    let load_generator = move |engine: &str, spec: &LoadSpec| {
+        load_generator(engine, spec)
+            .map_err(|error| annotate_krea_realtime_lora_error(error, &lora_labels))
+    };
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -650,7 +831,8 @@ pub(super) async fn generate_krea_realtime_using(
         steps: super::wan::advanced_opt_u32(request, "steps"),
         seed: resolve_video_seed(request) as u64,
         // No `video_mode`: the engine routes purely on the supplied conditioning, not a task string.
-        // No adapters: `supports_lora = false` (LoRA is the S15 seam — see the doc comment).
+        // User LoRAs ride here → `video_load_spec` → `LoadSpec::adapters` (sc-15017).
+        adapters,
         ..VideoGenInput::default()
     };
     let decoded = generate_video_using(
@@ -663,5 +845,10 @@ pub(super) async fn generate_krea_realtime_using(
         load_generator,
     )
     .await?;
-    Ok((decoded, tier))
+    let coverage = krea_realtime_lora_coverage(&decoded.adapter_apply_reports);
+    coverage.warn();
+    Ok((
+        decoded,
+        krea_realtime_raw_settings(request, tier, &coverage),
+    ))
 }

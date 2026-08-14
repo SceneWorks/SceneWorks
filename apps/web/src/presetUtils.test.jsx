@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
+import { fallbackModels } from "./constants.js";
 import {
+  EXTRA_COMPATIBLE_LORA_FAMILIES,
+  acceptedLoraFamilies,
   applyPresetDefault,
   buildStudioPresetPayload,
   cleanPresetDefaults,
@@ -93,6 +100,47 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel(familylessLora, noFamilyModel)).toBe(true);
   });
 
+  it("fails CLOSED when the API withdrew the model's LoRA advertisement", () => {
+    // The API emits this shape for an imported/fine-tuned model no backend lane on this deployment
+    // can serve adapters for — currently a Mage-Flow full fine-tune. Imported Krea routes adapters
+    // on both native backends. Submitting the withdrawn shape 400s, so offering it is a dead end.
+    //
+    // The empty family list ALONE is not enough: it lands in the permissive "cannot gate" branch
+    // asserted above (`noFamilyModel`), which is why the explicit `supported: false` signal exists.
+    // These two cases differ only by that flag, so a regression that drops it is caught here.
+    const withdrawn = {
+      id: "user_mage_flow_finetune",
+      family: "mage-flow",
+      loraCompatibility: { families: [], supported: false },
+    };
+    expect(loraMatchesModel({ id: "l", family: "mage-flow" }, withdrawn)).toBe(false);
+    expect(loraMatchesModel(familylessLora, withdrawn)).toBe(false);
+    // ...while a model that genuinely serves adapters is untouched.
+    expect(loraMatchesModel(sdxlLora, { ...sdxlModel, loraCompatibility: { families: ["sdxl"], supported: true } })).toBe(true);
+  });
+
+  it("offers no LoRA for SenseNova when its schema-valid catalog rows omit the advertisement", () => {
+    const seededSenseNova = fallbackModels.filter((model) => model.id.startsWith("sensenova_u1_"));
+    expect(seededSenseNova.map((model) => model.id)).toEqual([
+      "sensenova_u1_8b",
+      "sensenova_u1_8b_fast",
+    ]);
+    for (const model of seededSenseNova) {
+      expect(model.loraCompatibility).toBeUndefined();
+      expect(loraMatchesModel(sdxlLora, model)).toBe(false);
+      expect(loraMatchesModel(familylessLora, model)).toBe(false);
+    }
+
+    // Live catalog rows include the family even when the pre-catalog seed does not. Keep that
+    // representation equally fail-closed, including future variants that share the same engine.
+    expect(
+      loraMatchesModel(sdxlLora, {
+        id: "sensenova_u1_8b_infographic_v3",
+        family: "sensenova-u1",
+      }),
+    ).toBe(false);
+  });
+
   it("normalizes separators/underscores on both sides before comparing", () => {
     expect(loraMatchesModel({ id: "l", family: "Z_Image" }, { id: "z", loraCompatibility: { families: ["z-image"] } })).toBe(true);
   });
@@ -109,6 +157,118 @@ describe("loraMatchesModel", () => {
     };
     const kreaRaw = { id: "krea_2_raw", loraCompatibility: { families: ["krea_2"], types: ["character", "style", "acceleration"] } };
     expect(loraMatchesModel(turboAccel, kreaRaw)).toBe(true);
+  });
+
+  // sc-15017 — the extra-compatible registry, mirrored from `lora_family.rs`. Each case asserts
+  // BOTH directions: the model that declares the extra accepts the base family's LoRA, and the base
+  // model does NOT thereby accept the variant's. A blind two-way table would pass the first
+  // assertion of every pair and fail the second.
+  describe("extra-compatible families are honored one-directionally", () => {
+    // Transcribed from config/manifests/builtin.models.jsonc: Krea Realtime declares its OWN
+    // family, precisely so `wan-video` membership is not inherited by every other family-keyed gate.
+    const kreaRealtime = {
+      id: "krea_realtime_14b",
+      family: "krea-realtime",
+      loraCompatibility: { families: ["krea-realtime"], types: ["style", "motion", "character", "enhance"] },
+    };
+    const wanModel = { id: "wan_2_2_t2v_14b", family: "wan-video", loraCompatibility: { families: ["wan-video"] } };
+    const wanLora = { id: "origami", name: "Origami_WanLora", family: "wan-video" };
+    const kreaRealtimeLora = { id: "kr", family: "krea-realtime" };
+
+    it("offers a Wan-family LoRA on Krea Realtime 14B (its DiT IS Wan 2.1 T2V 14B)", () => {
+      expect(loraMatchesModel(wanLora, kreaRealtime)).toBe(true);
+      // …and its own family still matches, so the extra is additive, not a replacement.
+      expect(loraMatchesModel(kreaRealtimeLora, kreaRealtime)).toBe(true);
+    });
+
+    it("does NOT offer a Krea-Realtime LoRA on a Wan model (the relation is one-directional)", () => {
+      expect(loraMatchesModel(kreaRealtimeLora, wanModel)).toBe(false);
+      // Control: the Wan model does accept its OWN family, so the `false` above is the direction
+      // and not a broken fixture.
+      expect(loraMatchesModel(wanLora, wanModel)).toBe(true);
+    });
+
+    it("does not leak the relation to an unrelated video family", () => {
+      const ltx = { id: "ltx_2_3", family: "ltx-video", loraCompatibility: { families: ["ltx-video"] } };
+      expect(loraMatchesModel(wanLora, ltx)).toBe(false);
+      expect(loraMatchesModel(kreaRealtimeLora, ltx)).toBe(false);
+    });
+
+    it("keeps the pre-existing image-side entries working in the same one direction", () => {
+      const chroma = { id: "chroma", family: "chroma", loraCompatibility: { families: ["chroma"] } };
+      const fluxModel = { id: "flux", family: "flux", loraCompatibility: { families: ["flux"] } };
+      expect(loraMatchesModel({ id: "l", family: "flux" }, chroma)).toBe(true);
+      expect(loraMatchesModel({ id: "l", family: "chroma" }, fluxModel)).toBe(false);
+      const klein = { id: "flux2_klein", family: "flux2-klein", loraCompatibility: { families: ["flux2-klein"] } };
+      expect(loraMatchesModel({ id: "l", family: "flux2" }, klein)).toBe(true);
+    });
+  });
+});
+
+describe("acceptedLoraFamilies", () => {
+  it("is the declared families plus the extra-compatible ones, de-duplicated", () => {
+    expect(acceptedLoraFamilies({ loraCompatibility: { families: ["krea-realtime"] } })).toEqual([
+      "krea-realtime",
+      "wan-video",
+    ]);
+    // A model with no extras is unchanged — the expansion is not applied blindly.
+    expect(acceptedLoraFamilies({ loraCompatibility: { families: ["wan-video"] } })).toEqual([
+      "wan-video",
+    ]);
+    // The underscore spelling normalizes first, so the registry lookup still hits.
+    expect(acceptedLoraFamilies({ loraCompatibility: { families: ["krea_realtime"] } })).toEqual([
+      "krea-realtime",
+      "wan-video",
+    ]);
+    // Already-present extras are not duplicated.
+    expect(
+      acceptedLoraFamilies({ loraCompatibility: { families: ["krea-realtime", "wan-video"] } }),
+    ).toEqual(["krea-realtime", "wan-video"]);
+  });
+
+  it("is empty for a model that declares nothing (callers treat that as 'cannot gate')", () => {
+    expect(acceptedLoraFamilies(null)).toEqual([]);
+    expect(acceptedLoraFamilies({ id: "m", loraCompatibility: { families: [] } })).toEqual([]);
+  });
+
+  // sc-15017: the web table is a MIRROR of the Rust registry, and a mirror that is only kept in
+  // sync by a comment drifts. Parse the shipped `extra_compatible_lora_families` match arms and
+  // require set equality — an entry added on either side alone is red here.
+  it("mirrors the Rust extra_compatible_lora_families registry exactly", () => {
+    const source = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../../../crates/sceneworks-core/src/lora_family.rs"),
+      "utf8",
+    );
+    const body = source.match(
+      /fn extra_compatible_lora_families\([^)]*\)[^{]*\{\s*match normalized_family \{([\s\S]*?)\n {4}\}/,
+    );
+    expect(body, "the Rust registry fn must still be findable — update this parser if it moved").toBeTruthy();
+    const arms = body[1];
+    // 🔴 Match across newlines, not line-by-line. `cargo fmt` wraps a long arm, and a line-anchored
+    // regex would SKIP the wrapped arm silently — then, if the JS table happened to be missing the
+    // same entry, the equality below would pass VACUOUSLY on both sides. A non-empty-parse guard
+    // does not cover a per-arm drop, so the parsed-arm count is reconciled against the `=>` count:
+    // any arm shape this parser cannot read fails loudly and names itself as the thing to update.
+    const rust = {};
+    let parsedArms = 0;
+    for (const arm of arms.matchAll(/((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*&\[([\s\S]*?)\]\s*,/g)) {
+      parsedArms += 1;
+      const extras = [...arm[2].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+      for (const [, key] of arm[1].matchAll(/"([^"]+)"/g)) {
+        rust[key] = extras;
+      }
+    }
+    // The `_ => &[],` catch-all carries no families and is deliberately not a table entry, but it
+    // still consumes one `=>`, so it is counted here or the reconciliation is off by one.
+    const catchAll = /(^|\n)\s*_\s*=>\s*&\[\s*\]\s*,/.test(arms) ? 1 : 0;
+    const totalArrows = (arms.match(/=>/g) ?? []).length;
+    expect(
+      parsedArms + catchAll,
+      `parsed ${parsedArms} literal arm(s) + ${catchAll} catch-all, but the registry body has ${totalArrows} \`=>\`. An arm shape this parser cannot read (a wrapped/reformatted arm?) would be dropped silently — update the parser in this test.`,
+    ).toBe(totalArrows);
+    expect(parsedArms).toBeGreaterThan(0);
+    expect(rust["krea-realtime"]).toEqual(["wan-video"]);
+    expect(rust).toEqual(EXTRA_COMPATIBLE_LORA_FAMILIES);
   });
 });
 

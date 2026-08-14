@@ -4,13 +4,27 @@ rem use-real-rust-toolchain.cmd  (sc-13166)
 rem
 rem Prepend the REAL rustup toolchain bin to PATH so local Windows builds resolve
 rem cargo/rustc/clippy directly, BYPASSING the fragile %USERPROFILE%\.cargo\bin
-rem rustup proxies. On the self-hosted CUDA box those 13 proxies are 0-byte
-rem symlinks to rustup.exe; a `rustup` self-update recreates them and Defender
-rem then deletes rustup.exe, leaving every proxy dangling -- so `cargo` dies with
+rem rustup proxies. On the self-hosted CUDA box those 13 proxies were observed as
+rem 0-byte symlinks to rustup.exe (rustup prefers symlinks but falls back to
+rem hardlinks where symlinks are unavailable, so that shape is not guaranteed);
+rem when rustup.exe itself goes missing the proxies resolve to nothing and `cargo`
+rem dies with
 rem   "failed to run `cargo metadata` ... The system cannot find the file
 rem    specified. (os error 2)"
+rem
+rem WHO DELETES rustup.exe -- corrected. This comment used to blame Defender; that
+rem was wrong, and so was the self-update story that replaced it. It is
+rem `Swatinem/rust-cache`'s POST step (inference PR #467). Not a Windows problem
+rem and not an antivirus problem -- it was diagnosed on a Mac.
+rem CANONICAL WRITEUP + the invariant that now enforces it (run by `npm run check`):
+rem   scripts/lib/rust-cache-bin.mjs
+rem Read that before re-deriving any of this; it is deliberately not filed under a
+rem Windows-only path, because the bug is not Windows-specific.
+rem
 rem CI already dodges this via .github/actions/prepare-rust-runner (it prepends
 rem the real toolchain bin to $GITHUB_PATH); this is the local-build equivalent.
+rem Both remain worth keeping: they bypass %USERPROFILE%\.cargo\bin entirely, so
+rem they are immune no matter what prunes that directory.
 rem
 rem CALL it (do NOT run in a child shell) so the PATH change reaches the caller:
 rem     call "%~dp0scripts\win\use-real-rust-toolchain.cmd"

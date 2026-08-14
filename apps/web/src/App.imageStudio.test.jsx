@@ -5,6 +5,7 @@ import { App } from "./main.jsx";
 import { withImageStudioContext, FakeEventSource, response, settle } from "./main.testSupport.jsx";
 import { styleTextForId } from "./data/styleCatalog.js";
 import { composeStyledPrompt } from "./styleComposer.js";
+import { writeWorkflowEmbedNoticeSeen } from "./workflowEmbed.js";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -17,6 +18,9 @@ describe("SceneWorks app shell", () => {
     FakeEventSource.instances = [];
     window.EventSource = FakeEventSource;
     window.localStorage.clear();
+    // These are image-studio behavior tests, not first-run decision tests. Treat the fixture as an
+    // established install so generation reaches the job/event assertions below.
+    writeWorkflowEmbedNoticeSeen(true);
     global.fetch = vi.fn((url) => {
       const path = new URL(url).pathname;
       if (path.endsWith("/health")) {

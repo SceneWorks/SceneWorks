@@ -28,7 +28,7 @@
 //!
 //! These are `#[ignore]`d real-weight smokes — run by hand on an Apple-Silicon Mac with the tier's
 //! turnkey cached (same convention as the *_mlx_smoke tests). Each prints a single machine-parseable
-//! `[[FOOTPRINT]] {json}` line (model, tier, diskSizeBytes, residentMemoryBytes, peakMemoryBytes) so
+//! `[[FOOTPRINT]] {json}` line (model, tier, residentMemoryBytes, peakMemoryBytes, measuredPixels) so
 //! a run over the measurable set can be scraped straight into builtin.models.jsonc.
 //!
 //! ```text
@@ -176,6 +176,11 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
     let generator = crate::inference_runtime::load(engine_id, &spec)
         .unwrap_or_else(|e| panic!("load {engine_id} ({tier}): {e:?}"));
 
+    // Geometry is part of the measurement contract (sc-16020). Capture it from the actual request —
+    // FP_W/FP_H are overridable, so hard-coding the historical 1024² default in the output would make
+    // the first non-default probe silently poison resolution-aware consumers.
+    let measured_pixels = u64::from(req.width) * u64::from(req.height);
+
     // 3. One generation, then the load+gen peak high-water mark (reset in step 1, never since).
     let mut last = String::new();
     let output = generator
@@ -208,7 +213,7 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
 
     // Machine-parseable line — scrape `[[FOOTPRINT]]` to backfill builtin.models.jsonc.
     println!(
-        "[[FOOTPRINT]] {{\"model\":\"{model}\",\"tier\":\"{tier}\",\"residentMemoryBytes\":{resident},\"peakMemoryBytes\":{peak}}}"
+        "[[FOOTPRINT]] {{\"model\":\"{model}\",\"tier\":\"{tier}\",\"residentMemoryBytes\":{resident},\"peakMemoryBytes\":{peak},\"measuredPixels\":{measured_pixels}}}"
     );
     println!(
         "[footprint] {model} {tier}: resident {:.2} GiB (active {:.2}, baseline {:.2}) | peak {:.2} GiB | transient (peak−resident) {:.2} GiB | render std {:.1}",

@@ -29,6 +29,10 @@ pub(crate) async fn create_image_job(
     // no-op for a web request (which sends the already-composed prompt + presetPromptResolvedClientSide
     // and no top-level styleId), so a web-composed prompt is never double-folded.
     crate::styles::apply_style_to_image_payload(&state, &payload, &mut job_payload).await?;
+    // Prompt enhancement is route-specific, so validate the canonical post-preset model rather
+    // than trusting the DTO's pre-expansion model. This is also where client attempts to forge the
+    // worker-owned report block are refused.
+    validate_prompt_enhancement_payload(&job_payload)?;
     // Ideogram 4 headless/API parity (sc-6519, fully async per sc-9120): a plain-text Ideogram 4 job
     // needs its prompt expanded into a rich JSON caption via the magic-prompt utility model — the same
     // separate prompt_refine job the web runs (sc-6501) — or it stochastically renders the safety-filter
@@ -39,16 +43,16 @@ pub(crate) async fn create_image_job(
     // edit. The worker's format-guard + reseed net remains the fallback if the expansion is unavailable.
     let caption_request = crate::ideogram::caption_request_for_ideogram(&job_payload);
     // Keyed off the POST-preset job_payload["model"], NOT the DTO's payload.model — see the
-    // matching note in create_video_job (sc-12300). apply_recipe_preset_to_image_payload above
-    // may have replaced the model with the preset's own when the caller omitted one, which
-    // leaves payload.model stale and would resolve the DEFAULT model's entry.
-    let model_id = job_payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(payload.model.as_str())
-        .to_owned();
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
-    // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
+    // matching note in create_video_job (sc-12300). The shared canonicalizer reads the final
+    // payload and also owns retry/duplicate, so no alternate image boundary can retain
+    // caller-supplied manifest metadata.
+    let model_manifest_entry =
+        crate::jobs::canonicalize_image_model_payload(&state, &job_type, &mut job_payload)
+            .await?
+            .ok_or_else(|| {
+                ApiError::internal("image model canonicalization returned no catalog entry")
+            })?;
+    // The model's declared `defaults.resolution`, keyed off the canonical post-preset entry for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
     // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
     // size rendered a blanket 1024x1024 — HALF the declared 2048x2048 on the four sensenova_u1_8b
@@ -76,7 +80,6 @@ pub(crate) async fn create_image_job(
             job_payload.insert("count".to_owned(), Value::from(count));
         }
     }
-    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,
         Some(&payload.project_id),

@@ -34,7 +34,13 @@ use sceneworks_core::lora_family::{
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use sceneworks_core::lora_family::{read_safetensors_header, resolve_adapter_in_dir};
+use sceneworks_core::lora_family::read_safetensors_header;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
     validate_lora_url_host, validate_public_ip,
@@ -75,10 +81,13 @@ mod asset_media;
 mod image_sampling;
 // Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
 // Keep the include site on the callers' superset so the neither-backend lane does not
-// compile an otherwise dead helper.
+// compile an otherwise dead helper — plus `test`, because this seam is where the standalone
+// upscale's embedded workflow is written (sc-15948) and that contract should be asserted on every
+// lane rather than only where an upscaler backend compiles. The non-test build is unchanged.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
 ))]
 mod single_child_asset;
 // Lazy, on-demand download-credential pull from the macOS desktop credential socket
@@ -123,9 +132,24 @@ use api_client::*;
 // person_replace pattern); the stub test still exercises it on every target.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod engines;
+// Stage 1 of the engine-capability pipeline (sc-16965, epic 16948): the weights-free dumper that
+// turns the LINKED provider registry into checked-in, per-backend facts files that stage 2's
+// generator + vitest drift guard read on every PR. `pub` because `src/bin/dump-engine-capabilities`
+// is a separate crate and can only reach the public surface. All-targets on purpose: the
+// empty-registry refusal is the whole point of the module, so it must compile — and be unit-tested —
+// on the lanes that link no engines at all.
+pub mod engine_capability_facts;
 mod gpu;
 use gpu::*;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_memory_strategy;
 mod fit_gate;
+// Margin constants derived from repeat-capture variance in the calibration evidence (sc-18094,
+// epic 18093). Consumed by the stale-closure widening (sc-18095) and estimate-backed admission
+// (sc-18096/18097) follow-ups; pinned to `scripts/derive-ladder-margins.mjs` by
+// `scripts/derive-ladder-margins.test.mjs`.
+pub mod ladder_margin_policy;
+pub mod memory_strategy;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
 // The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
@@ -145,10 +169,22 @@ mod vram_gate;
 // aren't dead code under `-D warnings` on the non-candle / macOS builds.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod krea_control_fit;
+// Candle conditioning-overlay admission gate (sc-16069, epic 15448). Every candle route that overlays a
+// second network on the base — ControlNet / IP-Adapter / identity encoder — is diverted around BOTH the
+// `generate_candle_stream` `vram_gate` and the `generator_cache` `apply_residency_policy`, so before this
+// eleven of them allocated with no pre-flight check at all. Same candle cfg as `vram_gate` (its consumers,
+// the `image_jobs` conditioning lanes, are under that cfg) so its pub(crate) helpers aren't dead code
+// under `-D warnings` on the non-candle / macOS builds.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod conditioning_fit;
 use supervisor::*;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;
+// The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
+// requested against a still-downloading source is refused at the request boundary instead of failing
+// in the worker (see `convert_source_state`).
 use model_jobs::*;
+pub use model_jobs::{convert_source_state, ConvertSourceState};
 mod media_jobs;
 use media_jobs::*;
 // Image-decode backstop (sc-6143): transcodes a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/
@@ -273,6 +309,12 @@ mod smoke_support;
     )
 ))]
 mod pinned_engine_geometry;
+// sc-17607: the COMPOSITION half of the SC-15833 FLUX.2 audit — is `flux2_dev` still registered by
+// `candle-gen-flux2` in the bundle the worker links? A codegen digest cannot answer that, because
+// the measurement binary links neither `runtime-cuda` nor `candle-gen-catalog`. Test-only and
+// candle-only: the composition under test IS the CUDA bundle, so there is no neutral version.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod flux2_composition_audit;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
 // in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -312,11 +354,19 @@ mod sensenova_gpu_smoke;
 // hardware evidence backing `macOnly: false` / `candle_routed = true`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sana_candle_gpu_smoke;
+// Hardware-gated evidence that a FAILED `cuda_preflight` does not poison the process (sc-16260 AC 4).
+// Test-only + candle-only; hides the devices with `CUDA_VISIBLE_DEVICES=-1`, probes (must fail),
+// restores visibility and probes again in the SAME process — the exact move `recheck_gpu_health`
+// makes. Without that property the recovery re-check would be dead code however correct its Rust.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod cuda_preflight_gpu_smoke;
 // Real-weight GPU smoke for the candle Qwen-Image-Edit lane (sc-13534). Test-only + candle-only; drives
 // the WORKER's `resolve_qwen_edit_candle_base` (the tier/gate reconciliation this story landed) + a
 // bespoke `runtime_cuda::providers::qwen_image::QwenEdit` load + render, proving the resolver lands on the
 // packed q4 tier subdir of the `SceneWorks/qwen-image-edit-2511-mlx` turnkey (NOT the upstream snapshot
 // the pre-fix code reached) and that q4 packed-loads + renders a coherent edit on real CUDA.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod conditioned_image_gpu_smoke;
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_edit_candle_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
@@ -336,6 +386,13 @@ mod zimage_pid_gpu_smoke;
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_turbo_mlx_smoke;
+// Real-weight MLX smoke for the SenseNova-U1 `_fast` worker lane (sc-17396). Test-only + macOS-only;
+// drives `crate::inference_runtime::load("sensenova_u1_8b_fast")` with a packed-tier Q8 `LoadSpec`
+// against the HF CACHE. Distinct from the `sensenova_jobs` packed-tier smokes, which build the model
+// via `load_sensenova_model` (`load_raw` + `from_weights`, the dense VQA/interleave shape) and so
+// never reach the engine's own `load_fast` — the gap that let the pinned-artifact regression ship.
+#[cfg(all(test, target_os = "macos"))]
+mod sensenova_fast_q8_mlx_smoke;
 // Real-weight MLX smoke for the Krea 2 Turbo pose-ControlNet worker lane on a PACKED Q8 base (sc-11796).
 // Test-only + macOS-only; drives `gen_core::load("krea_2_turbo_control")` with the exact packed-q8
 // `LoadSpec` `krea_control_spec` builds and asserts the pose steers the render vs a base passthrough —
@@ -438,6 +495,26 @@ mod voiceclone_smoke;
 // manifest footprint fields.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
+// On-device RESOLUTION sweep of the MLX activation transient (sc-16195, epic 15448). Test-only +
+// macOS-only; the sibling of footprint_measure with the axis rotated — that one measures ONE
+// resolution across tiers, this one measures ONE tier across resolutions, sampling the same
+// process-global MLX counters. Supplies the shape the mlx_fit_gate request estimator's headroom term
+// is fitted to, replacing the linear-in-megapixels scaling of a 1024²-only calibration.
+#[cfg(all(test, target_os = "macos"))]
+mod resolution_sweep;
+// On-device end-to-end validation of the epic 18093 memory-ladder apparatus (sc-18101). Test-only +
+// macOS-only; four `#[ignore]`d scenarios that drive the real `mlx_fit_gate::evaluate_request` seam
+// against live loaded providers under `SCENEWORKS_MLX_MEMORY_CAP_GB` — an unmeasured cell engaging a
+// deep rung and rendering, a measured-current cell whose selection is diffed against a pre-epic
+// checkout, a stale-closure lane admitting at the widened peak, and an oversized request refusing.
+#[cfg(all(test, target_os = "macos"))]
+mod ladder_e2e_sc18101;
+// On-device validation of z_image_turbo's DeferredMaterialization Sequential cold load (sc-18409).
+// Test-only + macOS-only; one `#[ignore]`d scenario proving PR #2215's `apply_residency_policy`
+// coupling (Sequential branch ⇒ deferred load shape for z_image_turbo) on real bf16 weights, with
+// a real render and an observed-peak-vs-admitted-ceiling comparison.
+#[cfg(all(test, target_os = "macos"))]
+mod ladder_e2e_sc18409;
 // On-device build helper for the Wan2.2 T2V-A14B quant matrix (sc-9942, epic 8506). Test-only +
 // macOS-only; an #[ignore]d helper that drives `runtime_macos::providers::wan::convert::convert_t2v_14b` once per tier
 // (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier subdirs, then
@@ -614,11 +691,12 @@ mod person_segment;
 // sibling is `person_segment_sam3_candle` below.
 #[cfg(target_os = "macos")]
 mod person_segment_sam3;
-// Smart-select image segmentation (epic 6087, sc-6105): the `image_segment` job runs SAM3
-// box-prompt segmentation in-process to produce an inpaint mask asset for the Image Editor.
-// macOS-only like its `person_segment_sam3` (SAM3) dependency; there is no off-Mac standalone
-// image-segment lane.
-#[cfg(target_os = "macos")]
+// Smart-select image segmentation: native SAM3 box-PVS on both registered runtimes. Candle's
+// pinned SAM3 surface has no point-prompt API, so segment_jobs rejects points before any I/O.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod segment_jobs;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
 // Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
@@ -914,6 +992,209 @@ pub async fn run() -> WorkerResult<()> {
     run_worker_loop(settings).await
 }
 
+/// Which worker loops should run the startup CUDA probe: only a GPU worker on a candle-enabled
+/// build. Pure so the gate is testable without a GPU — every one of these three conditions is
+/// load-bearing, and inverting any of them is silent. `cpu` covers both the standalone utility
+/// pool and the API's in-process loops (`spawn_inprocess_utility_worker`); those must never build
+/// a CUDA context. `mlx` is the macOS GPU worker, which has its own Metal probe. And with the
+/// candle backend off there is nothing to probe for.
+fn should_run_cuda_preflight(settings: &Settings) -> bool {
+    settings.backend_candle_enabled && settings.gpu_id != "cpu" && settings.gpu_id != "mlx"
+}
+
+/// Server/Docker-lane CUDA preflight (sc-16247, GH #1966).
+///
+/// The desktop gets a real setup screen: `run_startup` runs `cuda_device_preflight` and refuses to
+/// start on an unusable GPU. The server/Docker lane has no such screen and, before this, no GPU
+/// preflight of ANY kind — `run_worker()` goes straight into the worker loop, so a driver-stack
+/// mismatch there surfaces exactly as GH #1966 described: first at the first model load, as a job
+/// failure, per job, forever.
+///
+/// This runs the same probe and logs the actionable reason ONCE at startup, loudly, at `error`
+/// level — so the container's logs name the host-side fix rather than leaving an operator to infer
+/// it from a stream of failed jobs.
+///
+/// **sc-16260 acts on the verdict instead of only logging it.** The returned [`GpuHealth`] is
+/// threaded into `discover_gpu`, which withholds every candle capability when the GPU is unusable,
+/// and into the worker loop, which reports `WorkerStatus::Unhealthy` carrying the same reason.
+/// Together those mean a driver-mismatch host leaves generation QUEUED with a visible explanation
+/// instead of claiming and failing every routed job forever.
+///
+/// It deliberately does **not** abort the process. Tearing the process down here would turn a
+/// diagnosable, recoverable state into a crash loop with its own message, and the worker still has
+/// a job to do while degraded: hold its registration, report why, and re-probe (see
+/// [`GPU_HEALTH_RECHECK`]) so a host fixed without restarting the container recovers on its own.
+///
+/// Gated to the GPU worker by [`should_run_cuda_preflight`]: the CPU utility loops never touch
+/// CUDA, and probing from each of them would build a throwaway CUDA context per utility process.
+/// A no-op on every build without the candle lane linked, and on macOS.
+///
+/// The probe acquires device 0, which is faithful for the deployments that set
+/// `CUDA_VISIBLE_DEVICES`: under the `auto` supervisor each per-GPU child is spawned with
+/// `CUDA_VISIBLE_DEVICES=<its gpu id>` (`supervisor::child_environment`), so device 0 IS that
+/// child's own GPU. A server deployment that pins `SCENEWORKS_CANDLE_GPU_ID` without also setting
+/// `CUDA_VISIBLE_DEVICES` gets physical device 0 instead — but so does its generation, because
+/// `runtime_cuda::media::default_device()` is itself a hardcoded `new_cuda(0)`. The probe is
+/// therefore still testing the device that lane will use; it does not fix, and must not be read as
+/// endorsing, that pinning gap.
+///
+/// Runs on the blocking pool: `cuInit` plus the first kernel launch is ~0.25-0.5 s of synchronous
+/// driver work, and `run_worker_loop` is also called IN-PROCESS by the API's utility pool
+/// (`spawn_inprocess_utility_worker`). That pool is `cpu` by default and so skips the probe
+/// entirely, but `SCENEWORKS_RUST_WORKER_GPU_ID` can override it — and a GPU-id override there
+/// would otherwise stall the API's runtime thread during startup.
+async fn cuda_startup_health(settings: &Settings) -> GpuHealth {
+    let health = probe_cuda_health(settings).await;
+    if let Some(reason) = health.reason() {
+        tracing::error!(
+            event = "cuda_preflight_failed",
+            gpuId = %settings.gpu_id,
+            reason = %reason,
+            "SceneWorks GPU worker cannot acquire a CUDA device; generation capabilities withheld"
+        );
+    }
+    health
+}
+
+/// Run the probe and classify the outcome, with no logging of its own — so the startup call
+/// ([`cuda_startup_health`]) can be loud exactly once while the recovery re-check
+/// ([`recheck_gpu_health`]) stays quiet about a failure it has already reported.
+///
+/// A lane that does not probe ([`should_run_cuda_preflight`]) reports [`GpuHealth::Usable`]: the
+/// CPU utility loops and the macOS `mlx` worker must behave precisely as they did before this
+/// existed, so "no probe ran" is deliberately indistinguishable from "the probe passed".
+///
+/// **Only a BLOCKING failure makes the worker unhealthy** — the severity split
+/// [`cuda_failure_is_blocking`] already draws for the desktop setup screen, applied here to the
+/// worker's own advertisement. That split exists because the two directions cost wildly different
+/// amounts, and this path is no different: over-reporting is the expensive one. A transient CUDA
+/// OOM — another process, or an orphaned worker from a crashed session, currently holding the GPU
+/// — is a real probe failure that says nothing about the driver stack. Treating it as unhealthy
+/// would strip every capability, hand the operator the GENERIC "check that nvidia-smi lists a
+/// supported GPU" text (no `CUDA_ERROR_*` token matches, so there is no specific remedy to give),
+/// and — with `SCENEWORKS_CANDLE_REQUIRED=1` — fail queued work over a condition that clears by
+/// itself. The desktop deliberately starts the app in that state; the worker must likewise stay
+/// advertising. A transient failure is logged and stepped over, and if a job does then run, the
+/// classified message from [`crate::classify_engine_error`] explains what happened.
+async fn probe_cuda_health(settings: &Settings) -> GpuHealth {
+    if !should_run_cuda_preflight(settings) {
+        return GpuHealth::Usable;
+    }
+    let probe = tokio::task::spawn_blocking(cuda_preflight).await;
+    // A JoinError can only be a panic inside `cuda_preflight`, which already catches its own
+    // (see `preflight::cuda_preflight`) — report rather than propagate either way. It is NOT
+    // evidence of a driver-class fault, so it is folded into the same `Err` the classifier then
+    // routes down the advisory path.
+    let outcome = match probe {
+        Ok(result) => result,
+        Err(error) => Err(format!(
+            "the CUDA preflight probe did not complete: {error}"
+        )),
+    };
+    classify_probe_outcome(outcome, &settings.gpu_id)
+}
+
+/// The probe outcome → health verdict decision, sync and GPU-free so the severity split is
+/// unit-testable on any machine (see `only_a_driver_class_probe_failure_makes_the_worker_unhealthy`).
+///
+/// Kept apart from [`probe_cuda_health`] deliberately: that function's only other job is running
+/// the probe, which needs real CUDA, and a rule this consequential — it decides whether a worker
+/// withdraws every capability it serves — must not be reachable only from hardware.
+fn classify_probe_outcome(probe: Result<(), String>, gpu_id: &str) -> GpuHealth {
+    let reason = match probe {
+        Ok(()) => return GpuHealth::Usable,
+        Err(reason) => reason,
+    };
+    if !cuda_failure_is_blocking(&reason) {
+        tracing::warn!(
+            event = "cuda_preflight_transient",
+            gpuId = %gpu_id,
+            reason = %reason,
+            "SceneWorks GPU probe failed for a reason that may clear on its own; keeping the \
+             worker's capabilities advertised"
+        );
+        return GpuHealth::Usable;
+    }
+    GpuHealth::Unusable { reason }
+}
+
+/// How often an UNHEALTHY worker re-runs the CUDA probe (sc-16260 AC 4).
+///
+/// The startup probe is a single sample, so without this a host repaired underneath a running
+/// container would stay stranded with its capabilities withheld until someone restarted it. Only
+/// an unhealthy worker re-probes; once the GPU is usable the loop stops entirely, so a healthy
+/// worker never pays for this and never builds a second CUDA context behind a running job.
+///
+/// **The transition is therefore ONE-WAY: unhealthy → healthy only.** A worker that starts healthy
+/// is never re-probed, so a driver that dies mid-life (an Xid, a device falling off the bus) leaves
+/// it reporting `idle` and claiming jobs, which then fail individually with the classified
+/// driver-error text from [`crate::classify_engine_error`] — i.e. exactly the pre-sc-16260
+/// behaviour, for that case only. Detecting mid-life GPU death is a different problem (it wants a
+/// signal from the failing job, not a poll) and is deliberately out of this story's scope.
+///
+/// A minute is chosen against what actually gets fixed on the other side. The dominant failure
+/// (`CUDA_ERROR_SYSTEM_DRIVER_MISMATCH`, GH #1966) needs a host reboot, which restarts the
+/// container anyway — the re-check cannot help there and is not meant to. What it does cover is
+/// the genuinely transient family: `CUDA_ERROR_SYSTEM_NOT_READY` while the driver/fabric is still
+/// initializing, a GPU briefly held by another process, or a device hot-attached to the container.
+/// Those clear on the order of seconds-to-minutes, so a minute recovers promptly without spinning
+/// `cuInit` against a wedged driver every poll turn.
+const GPU_HEALTH_RECHECK: Duration = Duration::from_secs(60);
+
+/// Re-run the CUDA probe for a worker that is currently unhealthy, and act on any change
+/// (sc-16260 AC 4).
+///
+/// On recovery this RE-REGISTERS. That is the load-bearing half: the capability set is what the
+/// API routes on, and it was frozen at the withheld set when the worker started, so simply
+/// flipping the status back to `idle` would leave a healthy worker advertising nothing and the
+/// queue still stalled. `register_worker` is an upsert on `worker_id`, so this restores the full
+/// candle set on the existing row and clears the stored reason; the next heartbeat reports `idle`.
+///
+/// Logging is asymmetric on purpose. Recovery is an event worth an `info` line. A failure
+/// IDENTICAL to the one already reported at startup is not — repeating it every minute would bury
+/// the loud line it was meant to make findable. A failure whose reason CHANGED is new information
+/// (`SYSTEM_NOT_READY` resolving into `NO_DEVICE` says the driver came up but the GPU did not),
+/// so that gets its own `warn`.
+async fn recheck_gpu_health(
+    api: &ApiClient,
+    settings: &Settings,
+    health: &mut GpuHealth,
+) -> WorkerResult<()> {
+    let previous = health.reason().map(str::to_owned);
+    let next = probe_cuda_health(settings).await;
+    let reason = next.reason().map(str::to_owned);
+    *health = next;
+    match reason {
+        None => {
+            tracing::info!(
+                event = "cuda_preflight_recovered",
+                gpuId = %settings.gpu_id,
+                "SceneWorks GPU worker re-acquired a CUDA device; re-advertising generation capabilities"
+            );
+            let gpu = discover_gpu(settings, health).await;
+            // A `Canceled` here means shutdown arrived during the re-registration backoff, not a
+            // recovery failure. Swallow it: propagating would exit `run_worker_loop` with `Err`,
+            // skipping the terminal `Offline` heartbeat that both other shutdown paths post and
+            // leaving the row reading `unhealthy` for the full 90 s stale window. The loop's own
+            // `shutdown_signal()` arm handles it one turn later, cleanly.
+            match register_worker_with_retry(api, settings, &gpu).await {
+                Ok(()) | Err(WorkerError::Canceled(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Some(reason) if previous.as_deref() != Some(reason.as_str()) => {
+            tracing::warn!(
+                event = "cuda_preflight_changed",
+                gpuId = %settings.gpu_id,
+                reason = %reason,
+                "SceneWorks GPU worker still cannot acquire a CUDA device; the reason changed"
+            );
+        }
+        Some(_) => {}
+    }
+    Ok(())
+}
+
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
@@ -936,13 +1217,26 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     if settings.gpu_id == "mlx" {
         generator_cache::spawn_gpu_telemetry(settings.config_dir.clone());
     }
-    let gpu = discover_gpu(&settings).await;
+    // sc-16247 / sc-16260: probe the CUDA device ONCE before advertising anything, and let the
+    // verdict shape what this worker claims to be able to do. `discover_gpu` withholds the whole
+    // candle capability block on an unusable GPU, so the registration below advertises only the
+    // placeholder set and no generation job can route here.
+    let mut health = cuda_startup_health(&settings).await;
+    let gpu = discover_gpu(&settings, &health).await;
     let api = ApiClient::new(&settings);
     let http_client = crate::downloads::streaming_download_client();
     register_worker_with_retry(&api, &settings, &gpu).await?;
     let mut lock_failures = 0_u32;
     let mut idle_heartbeat = IdleHeartbeat::new(progress_report_interval(&settings));
+    // sc-16260 AC 4: the startup probe is one sample, so an unhealthy worker re-probes on an
+    // interval and re-advertises if the host is repaired underneath it. Seeded a full interval
+    // out — the startup probe just ran, and re-running it immediately would say nothing new.
+    let mut next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
     loop {
+        if !health.is_usable() && Instant::now() >= next_gpu_recheck {
+            next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
+            recheck_gpu_health(&api, &settings, &mut health).await?;
+        }
         // sc-8845 (F-043): shutdown is observed ONLY here, around the claim / idle-sleep phase —
         // NOT around full job execution. `poll_once` does no long GPU work (memory-sync, idle
         // heartbeat, the transactional claim POST, and the idle sleep), so racing it against
@@ -954,7 +1248,7 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         // work mid-write. Now a mid-job shutdown trips the job's cancel and posts a prompt terminal
         // `Canceled` (see `run_job_with_shutdown`).
         let claim = tokio::select! {
-            result = poll_once(&api, &settings, &mut idle_heartbeat) => result,
+            result = poll_once(&api, &settings, &mut idle_heartbeat, &health) => result,
             _ = shutdown_signal() => {
                 // Clean-idle shutdown: no job in flight, so the pre-existing Offline heartbeat +
                 // return is preserved exactly.
@@ -1149,6 +1443,7 @@ async fn poll_once(
     api: &ApiClient,
     settings: &Settings,
     idle_heartbeat: &mut IdleHeartbeat,
+    health: &GpuHealth,
 ) -> WorkerResult<Option<JobSnapshot>> {
     // sc-7824 (epic 7819): pick up a live GPU-memory-limit change here, before claiming the next
     // job, so a Settings slider move applies between jobs (not mid-flight) with no worker restart.
@@ -1157,9 +1452,31 @@ async fn poll_once(
         generator_cache::sync_gpu_memory_limit(&settings.config_dir);
     }
     if idle_heartbeat.should_send() {
-        heartbeat(api, settings, WorkerStatus::Idle, None).await?;
+        // sc-16260: an unusable GPU reports `unhealthy` + the host-side remedy here instead of
+        // `idle`. It keeps heartbeating on the same cadence — the process IS alive, it must stay
+        // out of the API's stale sweep, and it has to be able to recover — but `idle` on a worker
+        // that has withdrawn every capability it serves is the misleading state this story exists
+        // to remove: an operator would read "Ready" off a worker that will never claim anything.
+        match health.reason() {
+            None => heartbeat(api, settings, WorkerStatus::Idle, None).await?,
+            Some(reason) => {
+                heartbeat_with_reason(
+                    api,
+                    settings,
+                    WorkerStatus::Unhealthy,
+                    None,
+                    Some(reason.to_owned()),
+                )
+                .await?;
+            }
+        }
         idle_heartbeat.mark_sent();
     }
+    // The claim POST still goes out while unhealthy, deliberately. The store refuses it twice
+    // over (no advertised capability, plus the `Unhealthy` backstop in `worker_supports_job`), so
+    // this costs one cheap request per poll and keeps the loop shape identical — which is what
+    // makes recovery instant: the moment the re-probe passes and re-registration lands, the very
+    // next claim is served with no extra transition to get right.
     let claim: ClaimResponse = api
         .post_json(
             "/api/v1/jobs/claim",
@@ -1234,6 +1551,22 @@ pub(crate) async fn heartbeat(
     status: WorkerStatus,
     current_job_id: Option<&str>,
 ) -> WorkerResult<()> {
+    heartbeat_with_reason(api, settings, status, current_job_id, None).await
+}
+
+/// [`heartbeat`] plus the `status_reason` a [`WorkerStatus::Unhealthy`] worker carries
+/// (sc-16260) — the host-side remedy, so the Queue screen can explain a stalled queue.
+///
+/// Separate from [`heartbeat`] rather than an extra parameter on it: `heartbeat` has ~50 call
+/// sites, every one of which reports `Idle`/`Busy`/`Offline` and would have to pass `None`.
+/// Only the idle-poll path in [`poll_once`] ever has a reason to send.
+pub(crate) async fn heartbeat_with_reason(
+    api: &ApiClient,
+    settings: &Settings,
+    status: WorkerStatus,
+    current_job_id: Option<&str>,
+    status_reason: Option<String>,
+) -> WorkerResult<()> {
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
     let outcome: WorkerResult<WorkerSnapshot> = api
@@ -1244,6 +1577,7 @@ pub(crate) async fn heartbeat(
                 current_job_id: current_job_id.map(str::to_owned),
                 loaded_models: Vec::new(),
                 utilization: gpu_utilization(&settings.gpu_id).await,
+                status_reason,
                 extra: BTreeMap::new(),
             },
         )
@@ -1306,7 +1640,7 @@ async fn run_utility_job(
             // Native MLX image generation, served in-process by the linked mlx-gen
             // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
             // capability is never advertised, so this arm is unreachable there.
-            JobType::ImageGenerate => run_image_generate_job(api, settings, http_client, &job)
+            JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image generation failed.", error)),
             // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
@@ -1314,7 +1648,7 @@ async fn run_utility_job(
             // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
             // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
             // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
-            JobType::ImageEdit => run_image_generate_job(api, settings, http_client, &job)
+            JobType::ImageEdit => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image edit failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
@@ -1383,7 +1717,7 @@ async fn run_utility_job(
             // routing gate keeps it on a candle worker (or the linked mlx build), the stub fails loudly
             // elsewhere.
             JobType::ControlTraining => {
-                control_training_jobs::run_control_training_job(api, settings, http_client, &job)
+                control_training_jobs::run_control_training_job(api, settings, &job)
                     .await
                     .map_err(|error| ("ControlNet training failed.", error))
             }
@@ -1396,9 +1730,8 @@ async fn run_utility_job(
             JobType::DatasetParquetImport => run_dataset_parquet_import_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Parquet dataset import failed.", error)),
-            // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
-            // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
-            // precise unsupported error (no candle CLIP embedder yet).
+            // Dataset Doctor CLIP-embedding analysis (sc-6535): the native MLX or Candle worker embeds
+            // every dataset image (clip_vit_l14) and POSTs the content-hash sidecar.
             JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset analysis failed.", error)),
@@ -1448,7 +1781,7 @@ async fn run_utility_job(
             JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Timeline export failed.", error)),
-            JobType::PersonDetect => run_person_detect_job(api, settings, http_client, &job)
+            JobType::PersonDetect => run_person_detect_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person detection failed.", error)),
             // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
@@ -1460,7 +1793,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
+            JobType::PoseDetect => run_pose_detect_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Pose detection failed.", error)),
             // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle
@@ -1484,7 +1817,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
+            JobType::ImageUpscale => run_image_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image upscale failed.", error)),
             // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
@@ -1493,19 +1826,20 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, http_client, &job)
+            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset upscale failed.", error)),
             // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
             // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
-            // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
-            // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
-            #[cfg(target_os = "macos")]
-            JobType::ImageSegment => {
-                segment_jobs::run_image_segment_job(api, settings, http_client, &job)
-                    .await
-                    .map_err(|error| ("Smart-select segmentation failed.", error))
-            }
+            // inpaint mask asset for the Image Editor. Advertised by both native workers; Candle
+            // point prompts fail closed because the pinned provider exposes box PVS only.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Smart-select segmentation failed.", error)),
             // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
             // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
             // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
@@ -1520,7 +1854,7 @@ async fn run_utility_job(
                     .await
                     .map_err(|error| ("Video upscale failed.", error))
             }
-            JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
+            JobType::PersonTrack => run_person_track_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person tracking failed.", error)),
             _ => {
@@ -1546,7 +1880,14 @@ async fn run_utility_job(
         match error {
             WorkerError::Canceled(_) => {}
             error => {
-                let _ = fail_job(api, &job.id, message, Some(error.to_string())).await;
+                // sc-16247: this detail is what `QueueScreen` renders as `job.error`, so it is the
+                // last point before a raw `DriverError(...)` reaches the user. `classify_engine_error`
+                // already annotates the lanes that route through it (the reported krea_2_turbo path),
+                // but ~35 other load seams build `WorkerError::Engine` directly — a host driver
+                // problem hits all of them identically. Annotating here catches every one, and is a
+                // no-op when the guidance is already present.
+                let detail = annotate_cuda_driver_failure(&error.to_string());
+                let _ = fail_job(api, &job.id, message, Some(detail)).await;
                 tracing::error!(
                     event = "utility_job_failed",
                     jobId = %job.id,
@@ -1681,6 +2022,22 @@ mod manifest_pins;
 
 #[cfg(test)]
 mod architecture_tests;
+
+// Source-level drift guard for the bespoke candle preview wiring (epic 16948, sc-16962). Deliberately
+// NOT cfg-gated to `backend-candle`: the lanes it guards are, and both candle CI lanes are
+// dispatch-only, so a compiled test over them would never run on an ordinary PR — exactly when the
+// "make it compile with `preview: Default::default()`" regression lands.
+#[cfg(test)]
+mod candle_preview_wiring_tests;
+
+// The epic-17625 regression gate (sc-17637, AC9): no new job-time download, no new
+// `<data_dir>/cache` weight destination. Deliberately NOT cfg-gated for the same reason as the guard
+// above, only more so — every download helper and all of its call sites are gated
+// `macos || backend-candle`, so on the required ubuntu/default-features `parity` lane none of that
+// code is compiled at all and a gate inheriting those cfgs would never run. This one reads source
+// text, so it fires on every platform and every PR.
+#[cfg(test)]
+mod job_time_download_guard;
 
 // Pinned-snapshot provisioning helpers + the install-layout smokes (sc-13797/sc-13810). Compiled on
 // EVERY platform — the download/layout code is platform-agnostic; only the live-network smoke inside

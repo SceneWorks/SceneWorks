@@ -29,6 +29,17 @@ import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
+import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
+import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
+import { WorkflowEmbedDecisionModal } from "./components/WorkflowEmbedNotice.jsx";
+import {
+  persistWorkflowEmbedPreference,
+  readEmbedWorkflowInImages,
+  readWorkflowEmbedNoticeSeen,
+  subscribeWorkflowEmbedFlags,
+  writeEmbedWorkflowInImages,
+  writeWorkflowEmbedNoticeSeen,
+} from "./workflowEmbed.js";
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
@@ -65,6 +76,7 @@ import {
 } from "./simple/uiMode.js";
 import {
   buildLocalJobStack,
+  canWorkerTakeWork,
   isActiveWorker,
   isAudioGenerationJob,
   isImageGenerationJob,
@@ -683,9 +695,9 @@ export function App() {
     saveToken,
     lockRemote,
   } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
-  // Stop a file dropped outside a real dropzone from navigating the webview to
-  // the image and replacing the whole UI (issue #1308).
-  useDropNavigationGuard();
+  // The drop guard that stops a stray file from navigating the webview (issue #1308) is
+  // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
+  // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
@@ -728,6 +740,132 @@ export function App() {
     setSimpleUiDefault(next);
     writeStoredSimpleDefault(next);
     putUiPreferences({ simpleUi: next }).catch(() => {});
+  }, []);
+  // Embedded workflow (sc-15953, epic 15945). `embedWorkflow` is the durable
+  // `embedWorkflowInImages` preference; the WORKER reads it off ui-preferences.json at the PNG
+  // write seam on every job, so a flip here lands on the next generation with no restart. Same
+  // durable contract as theme/accent, and for a sharper reason: the desktop shell's per-launch
+  // origin wipes localStorage, so a preference stored only there would silently revert to the ON
+  // default on the next launch — turning a deliberate privacy opt-out back on.
+  const [embedWorkflow, setEmbedWorkflow] = useState(readEmbedWorkflowInImages);
+  // `workflowEmbedNoticeSeen` is the legacy persisted key, now used as the durable "choice made"
+  // marker. Keeping the key preserves every prior decision across upgrades.
+  const [workflowEmbedNoticeSeen, setWorkflowEmbedNoticeSeen] = useState(
+    readWorkflowEmbedNoticeSeen,
+  );
+  const [workflowEmbedNoticeOpen, setWorkflowEmbedNoticeOpen] = useState(false);
+  const [workflowEmbedDecisionSaving, setWorkflowEmbedDecisionSaving] = useState(false);
+  const [workflowEmbedDecisionError, setWorkflowEmbedDecisionError] = useState("");
+  const [settingsSharingFocusRequest, setSettingsSharingFocusRequest] = useState(0);
+  const pendingWorkflowGenerationRef = useRef(null);
+  const workflowEmbedHydrationWaitersRef = useRef([]);
+  const workflowEmbedDecisionSavingRef = useRef(false);
+  // Read by the generation gate below, which is memoized and would otherwise close over stale
+  // values. The gate waits for durable hydration before it decides whether the modal is needed.
+  const workflowEmbedRef = useRef({ hydrated: false, embed: true, seen: false });
+  workflowEmbedRef.current.embed = embedWorkflow;
+  workflowEmbedRef.current.seen = workflowEmbedNoticeSeen;
+  // Both writes go through `persistWorkflowEmbedPreference`, which retries and then REPORTS. A
+  // swallowed `.catch(() => {})` is wrong for this pair specifically: localStorage is only an
+  // instant-paint mirror, and on the desktop shell it is wiped by the per-launch origin — so a
+  // dropped PUT is not "saved locally", it is a privacy opt-out that reverts to ON at the next
+  // launch, or a disclosure that fires again as though it had never been dismissed. Both are
+  // things the user should be told about rather than discover.
+  const changeEmbedWorkflow = useCallback(
+    (next) => {
+      setEmbedWorkflow(next);
+      writeEmbedWorkflowInImages(next);
+      persistWorkflowEmbedPreference({ embedWorkflowInImages: next }).catch(() => {
+        pushNotice(
+          "workflow-embed",
+          "Could not save whether generated images include their recipe. The setting is active now but may revert when SceneWorks restarts.",
+        );
+      });
+    },
+    [pushNotice],
+  );
+  const settlePendingWorkflowGeneration = useCallback((allow) => {
+    const pending = pendingWorkflowGenerationRef.current;
+    if (!pending) return;
+    pendingWorkflowGenerationRef.current = null;
+    pending(Boolean(allow));
+  }, []);
+
+  const chooseWorkflowEmbedding = useCallback(
+    async (next) => {
+      if (workflowEmbedDecisionSavingRef.current) return;
+      workflowEmbedDecisionSavingRef.current = true;
+      setWorkflowEmbedDecisionSaving(true);
+      setWorkflowEmbedDecisionError("");
+      try {
+        await persistWorkflowEmbedPreference({
+          embedWorkflowInImages: Boolean(next),
+          workflowEmbedNoticeSeen: true,
+        });
+        workflowEmbedRef.current.embed = Boolean(next);
+        workflowEmbedRef.current.seen = true;
+        setEmbedWorkflow(Boolean(next));
+        setWorkflowEmbedNoticeSeen(true);
+        writeEmbedWorkflowInImages(Boolean(next));
+        writeWorkflowEmbedNoticeSeen(true);
+        setWorkflowEmbedNoticeOpen(false);
+        settlePendingWorkflowGeneration(true);
+      } catch {
+        setWorkflowEmbedDecisionError(
+          "SceneWorks could not save your choice. Check the connection and try again.",
+        );
+      } finally {
+        workflowEmbedDecisionSavingRef.current = false;
+        setWorkflowEmbedDecisionSaving(false);
+      }
+    },
+    [settlePendingWorkflowGeneration],
+  );
+
+  const openWorkflowSharingSettings = useCallback(() => {
+    setWorkflowEmbedNoticeOpen(false);
+    setWorkflowEmbedDecisionError("");
+    settlePendingWorkflowGeneration(false);
+    setSettingsSharingFocusRequest((request) => request + 1);
+    setSimpleActiveScreen("settings");
+    setActiveView("Settings");
+  }, [settlePendingWorkflowGeneration]);
+  // A completed choice is mirrored to other mounted tabs so they cannot ask independently.
+  useEffect(
+    () =>
+      subscribeWorkflowEmbedFlags(({ embed, seen }) => {
+        setEmbedWorkflow(embed);
+        // One-way: see `subscribeWorkflowEmbedFlags`. `seen` is a record that something was said,
+        // and another tab clearing its storage is not evidence it never was.
+        if (seen) {
+          workflowEmbedRef.current.seen = true;
+          setWorkflowEmbedNoticeSeen(true);
+          setWorkflowEmbedNoticeOpen(false);
+          settlePendingWorkflowGeneration(true);
+        }
+      }),
+    [settlePendingWorkflowGeneration],
+  );
+  // The first undecided generation is held before its POST. A choice resumes that one request;
+  // Settings cancels it so no image can be written with an unresolved preference.
+  const confirmWorkflowEmbeddingBeforeGeneration = useCallback(async () => {
+    if (!workflowEmbedRef.current.hydrated) {
+      await new Promise((resolve) => {
+        workflowEmbedHydrationWaitersRef.current.push(resolve);
+      });
+    }
+    const state = workflowEmbedRef.current;
+    if (state.seen) {
+      return true;
+    }
+    if (pendingWorkflowGenerationRef.current) {
+      return false;
+    }
+    setWorkflowEmbedDecisionError("");
+    setWorkflowEmbedNoticeOpen(true);
+    return new Promise((resolve) => {
+      pendingWorkflowGenerationRef.current = resolve;
+    });
   }, []);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
@@ -1236,7 +1374,11 @@ export function App() {
   // server's GET /api/v1/capabilities/person (person_readiness_from_workers); the
   // worker SSE handlers keep `workers` current, so this never goes stale.
   const personReadiness = useMemo(() => {
-    const live = workers.filter((worker) => worker.status !== "offline");
+    // sc-16260: `canWorkerTakeWork`, not a bare non-offline check — an unhealthy worker is alive
+    // but cannot run anything, and counting it here would ungate Replace Person on a host whose
+    // GPU failed its startup probe. Keeps this in step with the server's
+    // `person_readiness_from_workers`, which the comment above promises it mirrors.
+    const live = workers.filter(canWorkerTakeWork);
     const ready = (capability) => live.some((worker) => (worker.capabilities ?? []).includes(capability));
     return {
       detect: { capability: "person_detect", ready: ready("person_detect") },
@@ -1379,6 +1521,32 @@ export function App() {
           // doesn't throw away what they typed while the GET was in flight.
           setStudioRestoreEpoch((epoch) => epoch + 1);
         }
+        // The embedded-workflow preference and its disclosure flag (sc-15953). Both ABSENT
+        // states are meaningful and both are the permissive one: absent embedding means ON (the
+        // worker's own reader agrees), and an absent notice flag means the user has never been
+        // told — which is exactly the state an install upgrading into this build is in, so the
+        // disclosure fires once for them rather than only for fresh installs.
+        // A choice may finish while this launch GET is still in flight. Once `seen` has moved
+        // true locally, an older response must not roll either half of that atomic choice back.
+        if (
+          !workflowEmbedRef.current.seen &&
+          typeof prefs?.embedWorkflowInImages === "boolean"
+        ) {
+          setEmbedWorkflow(prefs.embedWorkflowInImages);
+          writeEmbedWorkflowInImages(prefs.embedWorkflowInImages);
+        }
+        if (
+          !workflowEmbedRef.current.seen &&
+          typeof prefs?.workflowEmbedNoticeSeen === "boolean"
+        ) {
+          setWorkflowEmbedNoticeSeen(prefs.workflowEmbedNoticeSeen);
+          writeWorkflowEmbedNoticeSeen(prefs.workflowEmbedNoticeSeen);
+          if (prefs.workflowEmbedNoticeSeen) {
+            workflowEmbedRef.current.seen = true;
+            setWorkflowEmbedNoticeOpen(false);
+            settlePendingWorkflowGeneration(true);
+          }
+        }
         const persistedView = prefs?.activeView;
         if (navSections.some((section) => section.items.some((item) => item.id === persistedView))) {
           setActiveView(persistedView);
@@ -1386,12 +1554,20 @@ export function App() {
       })
       .catch(() => {})
       .finally(() => {
-        if (!cancelled) setNavigationHydrated(true);
+        if (!cancelled) {
+          // Only now may the disclosure fire: before this, `seen` is whatever localStorage said,
+          // which on the desktop shell is a fresh empty store every launch.
+          workflowEmbedRef.current.hydrated = true;
+          for (const resolve of workflowEmbedHydrationWaitersRef.current.splice(0)) {
+            resolve();
+          }
+          setNavigationHydrated(true);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settlePendingWorkflowGeneration]);
 
   const refreshHealth = useCallback(() => {
     healthRequestRef.current?.abort();
@@ -2141,8 +2317,11 @@ export function App() {
         requestedGpu,
         setJobs,
         setError,
+        // Every image-producing studio shares this preflight. The first undecided request waits
+        // here, before the POST, until the recipe-sharing choice is durably saved.
+        beforeCreate: confirmWorkflowEmbeddingBeforeGeneration,
       }),
-    [token, activeProject, requestedGpu, setError],
+    [token, activeProject, requestedGpu, setError, confirmWorkflowEmbeddingBeforeGeneration],
   );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
@@ -2393,6 +2572,62 @@ export function App() {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
+  // THE prefill path into Image Studio (sc-15951). Every caller that wants the studio's form
+  // populated from a recorded recipe goes through here — the viewer's "Use this recipe" below,
+  // and the dropped-image "Use this workflow" — so there is one launch shape, one hydration
+  // race guard, and one injection effect on the other side (`screens/ImageStudio.jsx`). A second
+  // parallel prefill would drift from this one the first time the recipe shape changed.
+  //
+  // `assetId` / `sourceAssetId` are null for a launch with no asset behind it, which is exactly
+  // the dropped-file case: the studio's edit branch then leaves its source picker empty rather
+  // than pointing at an image this install does not have.
+  //
+  // Returns `{ ok }`, plus a `reason` when it refused, because "the launch went nowhere" and "the
+  // launch cannot go anywhere from here" need different answers on the other side: the first is a
+  // race the caller should close its panel over, the second is a control the caller must not
+  // pretend worked.
+  async function launchImageRecipe({
+    recipe,
+    replaySeed = null,
+    assetId = null,
+    sourceAssetId = null,
+  }) {
+    if (!recipe) {
+      return { ok: false, reason: "no-recipe" };
+    }
+    // The Simple shell renders its OWN studios and consumes no `studioLaunch`, so from in there
+    // `setActiveView("Image")` alone points the workspace at a screen nobody is looking at: the
+    // panel dismisses, nothing visible happens, and the launch sits queued to fire unprompted the
+    // next time the user opens the Advanced studio. Flip the shell the way `SimpleShell`'s own
+    // `openInAdvanced` does — and refuse for the same reason it does when the viewport has Simple
+    // locked on, because there is no Advanced workspace to land in at that width.
+    if (uiMode === SIMPLE_MODE) {
+      if (uiModeLocked) {
+        return {
+          ok: false,
+          reason: "locked",
+          detail: "That opens in the Advanced workspace — switch on a larger screen.",
+        };
+      }
+      setUiModeOverride(ADVANCED_MODE);
+    }
+    const projectId = activeProjectRef.current?.id;
+    setActiveView("Image");
+    const hydration = await stableHydrateLaunchDomains("Image", projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
+      return { ok: false, reason: "raced" };
+    }
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view: "Image",
+      assetId,
+      sourceAssetId,
+      recipe,
+      replaySeed,
+    });
+    return { ok: true };
+  }
+
   async function sendAssetRecipeToImage(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
@@ -2404,21 +2639,13 @@ export function App() {
     // Null → Image Studio leaves the seed random (a close variation), the default.
     const seed = assetSeed(asset);
     const replaySeed = options.keepSeed && seed != null && seed !== "" ? seed : null;
-    const projectId = activeProjectRef.current?.id;
     setSelectedAssetId(asset.id);
     closePreview();
-    setActiveView("Image");
-    const hydration = await stableHydrateLaunchDomains("Image", projectId);
-    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
-      return;
-    }
-    setStudioLaunch({
-      id: crypto.randomUUID(),
-      view: "Image",
-      assetId: asset.id,
-      sourceAssetId: asset.lineage?.sourceAssetId ?? null,
+    await launchImageRecipe({
       recipe,
       replaySeed,
+      assetId: asset.id,
+      sourceAssetId: asset.lineage?.sourceAssetId ?? null,
     });
   }
 
@@ -2753,6 +2980,112 @@ export function App() {
       }
     },
     [activeProject, setError, token],
+  );
+
+  // Drop a shared image anywhere → "Workflow found" → prefill Image Studio (sc-15951).
+  //
+  // The guard below is the unchanged issue-#1308 fallback: it swallows any drag no in-app
+  // dropzone claimed so the webview cannot navigate to the file. The only addition is that an
+  // unclaimed drop of exactly one file is now also offered to the inspector, on that SAME
+  // "nothing else claimed it" branch — the five real dropzones (AssetPicker, the Image Editor
+  // canvas, DatasetAddDialog, DocumentStudio, PoseLibraryScreen) each preventDefault() as the
+  // event bubbles through them, so their drops never reach either behaviour.
+  //
+  // `launchRecipe` is `launchImageRecipe`, the same seam the viewer's "Use this recipe" uses.
+  // `importAsset` is the ordinary upload path, which is what records `extra.importedWorkflow`
+  // on the asset (sc-15949).
+  // The images the panel's input pickers may offer (sc-15952). The same filter Image Studio's own
+  // source/reference pickers use (`editImageAssets`), because a pick made here has to be selectable
+  // there — offering a trashed asset would seed a control whose list does not contain it.
+  const workflowInputAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          (asset.type === "image" || asset.type === "frame") &&
+          asset.projectId === activeProject?.id &&
+          !asset.status?.trashed &&
+          !asset.status?.rejected,
+      ),
+    [assets, activeProject?.id],
+  );
+  // What this install has ON DISK, as one string (sc-15952).
+  //
+  // The signal behind "install a missing model, and the open panel re-resolves without a reload".
+  // A completed `model_download` / `lora_download` makes `useJobEvents` refetch both catalogs, and
+  // this changes only when an install STATE does — so a routine catalog refetch that changed
+  // nothing does not send the panel back to the API, while a finished download always does.
+  const catalogRevision = useMemo(
+    () =>
+      [
+        ...models.map((model) => `m:${model.id}:${model.installState}`),
+        ...loras.map((lora) => `l:${lora.id}:${lora.scope ?? ""}:${lora.installState}`),
+      ].join("|"),
+    [models, loras],
+  );
+  // The downloads that FAILED (sc-15952). `catalogRevision` above deliberately cannot carry these:
+  // a failed download changes no install state, so the string it produces is identical to the one
+  // before the user pressed the button — which is exactly why the panel's "Queued" flag had no way
+  // back and its retry button stayed disabled forever. This is the other half of the same job
+  // stream, one hop away through the list `useJobEvents` already maintains.
+  const failedInstallJobIds = useMemo(
+    () =>
+      jobs
+        .filter(
+          (job) =>
+            (job.type === "model_download" || job.type === "lora_download") &&
+            // "canceled" and "interrupted" are failures for this purpose too: no catalog change,
+            // and the user's next move is the same. Only "completed" leaves the flag latched, and
+            // that one re-resolves through `catalogRevision` instead.
+            terminalStatuses.has(job.status) &&
+            job.status !== "completed",
+        )
+        .map((job) => job.id),
+    [jobs],
+  );
+  const workflowDrop = useWorkflowDrop({
+    // Inspecting needs a live, authenticated API. Before the gate opens every request 401s, and
+    // a drop on the login screen has nothing to prefill anyway.
+    enabled: gateStatus === "open",
+    projectId: activeProject?.id ?? null,
+    token,
+    importAsset,
+    launchRecipe: launchImageRecipe,
+    // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
+    // a row the picker would drop on the next render (sc-15952).
+    models: imageModels,
+    macCapabilities,
+    catalogRevision,
+    failedInstallJobIds,
+    installModel: createModelDownloadJob,
+    installLora: createLoraDownloadJob,
+  });
+  // The viewer's "Use this recipe" for an IMPORTED asset. The preview closes first, the way the
+  // recorded-recipe path does — the offer is a modal of its own, and stacking it over the viewer
+  // would trap focus between two dialogs.
+  const offerAssetWorkflow = workflowDrop.offerAssetWorkflow;
+  const useImportedAssetRecipe = useCallback(
+    (asset) => {
+      closePreview();
+      offerAssetWorkflow(asset);
+    },
+    // Depends on the CALLBACK, not the hook's return object, which is a fresh literal every render
+    // — an unstable prop here would defeat `FullscreenPreview`'s `React.memo` on every App render.
+    [closePreview, offerAssetWorkflow],
+  );
+  useDropNavigationGuard({ onUnclaimedFileDrop: workflowDrop.handleDroppedFile });
+  // Rendered from a single place even though the app has two shells: `Modal` portals to
+  // <body>, so this element does not have to sit inside whichever shell is on screen.
+  const workflowDropPanel = (
+    <WorkflowDropPanel
+      assets={workflowInputAssets}
+      canImport={Boolean(activeProject)}
+      importState={workflowDrop.importState}
+      missing={workflowDrop.missing}
+      offer={workflowDrop.offer}
+      onDismiss={workflowDrop.dismiss}
+      onImport={workflowDrop.importImage}
+      onUse={workflowDrop.useWorkflow}
+    />
   );
 
   const jobAction = useCallback(
@@ -3169,17 +3502,34 @@ export function App() {
         <AppLiveContext.Provider value={appLiveValue}>
           <SimpleShell
             accent={accent}
+            embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
+            onEmbedWorkflowChange={changeEmbedWorkflow}
             onModeChange={setUiModeOverride}
             onScreenChange={setSimpleActiveScreen}
             onSimpleDefaultChange={changeSimpleUiDefault}
+            requestedScreen={simpleActiveScreen}
+            settingsSharingFocusRequest={settingsSharingFocusRequest}
             /* The same flag that gates the durable `activeView` write: until the
                ui-preferences GET has landed, the Simple studios must neither restore from
                a possibly-empty cache nor write their catalog defaults over the stored copy. */
             preferencesHydrated={navigationHydrated}
             simpleDefault={simpleUiDefault}
           />
+          {workflowEmbedNoticeOpen ? (
+            <WorkflowEmbedDecisionModal
+              error={workflowEmbedDecisionError}
+              onChoose={chooseWorkflowEmbedding}
+              onOpenSettings={openWorkflowSharingSettings}
+              saving={workflowEmbedDecisionSaving}
+            />
+          ) : null}
+          {/* The dropped-workflow offer (sc-15951). The drop guard is installed at App level
+              and therefore runs in BOTH shells, so the panel it opens has to render in both
+              too — otherwise a Simple-UI user's drop would be inspected and then answered by
+              nothing. It portals to <body>, so it does not disturb this shell's layout. */}
+          {workflowDropPanel}
         </AppLiveContext.Provider>
       </AppStaticContext.Provider>
     );
@@ -3303,9 +3653,34 @@ export function App() {
           ) : null}
         </header>
 
+        {/* Every notice is dismissible. Most kinds clear themselves (a retry succeeds, the
+            next run completes), but a terminal one — a failed job's panic message — is
+            pushed once and never re-pushed, so without an X it sat above every screen for
+            the rest of the session. Dismissing removes only this kind; the same kind
+            failing again re-raises it. */}
         {notices.map((notice) => (
-          <p className="notice error" key={notice.kind}>{notice.message}</p>
+          <div className="notice error" key={notice.kind} role="alert">
+            <span className="notice-message">{notice.message}</span>
+            <button
+              aria-label="Dismiss this message"
+              className="notice-dismiss"
+              onClick={() => dismissNoticeKind(notice.kind)}
+              title="Dismiss"
+              type="button"
+            >
+              <Icon.Close size={15} />
+            </button>
+          </div>
         ))}
+
+        {workflowEmbedNoticeOpen ? (
+          <WorkflowEmbedDecisionModal
+            error={workflowEmbedDecisionError}
+            onChoose={chooseWorkflowEmbedding}
+            onOpenSettings={openWorkflowSharingSettings}
+            saving={workflowEmbedDecisionSaving}
+          />
+        ) : null}
 
         {showSetupWizard ? (
           <SetupWizard
@@ -3334,9 +3709,12 @@ export function App() {
         {activeView === "Settings" ? (
           <SettingsScreen
             accent={accent}
+            embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
+            onEmbedWorkflowChange={changeEmbedWorkflow}
             onSimpleDefaultChange={changeSimpleUiDefault}
+            sharingFocusRequest={settingsSharingFocusRequest}
             simpleDefault={simpleUiDefault}
           />
         ) : null}
@@ -3449,6 +3827,7 @@ export function App() {
           onEditImage={sendAssetToImageEditor}
           onEditInStudio={sendAssetToImageEdit}
           onPreviewAsset={previewAssetInDirection}
+          onUseImportedRecipe={useImportedAssetRecipe}
           onUseRecipe={sendAssetRecipeToStudio}
           previousAsset={previewNavigation.previous}
           sourceAsset={previewSourceAsset}
@@ -3462,6 +3841,11 @@ export function App() {
           navTo — resolve through a real React dialog instead of window.confirm (which
           silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
       <ConfirmHost />
+
+      {/* "Workflow found" (sc-15951) — opened by a drop no in-app dropzone claimed, and only
+          after the file turned out to carry a recipe. Renders nothing otherwise, which is the
+          common case for every image that did not come from SceneWorks. */}
+      {workflowDropPanel}
     </main>
     </AppLiveContext.Provider>
     </AppStaticContext.Provider>

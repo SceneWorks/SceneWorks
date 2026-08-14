@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { putUiPreferences } from "../uiPreferences.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -13,6 +13,7 @@ import {
 import { describeDevice } from "../deviceSummary.js";
 import { loadCredentials, saveCredential } from "../credentials.js";
 import { Chips } from "./studioParts.jsx";
+import { WorkflowEmbedDetails } from "../components/WorkflowEmbedNotice.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Simple Settings (design handoff): Appearance (theme + accent), Generation (default
@@ -23,7 +24,16 @@ import { useSimpleUi } from "./SimpleUiContext.js";
 // through the shared keychain/REST transport — so a change made here is the same change
 // made there. Nothing in this screen is Simple-only state.
 
-export function SimpleSettings({ accent, onAccentChange, simpleDefault, onSimpleDefaultChange, lockedToSimple }) {
+export function SimpleSettings({
+  accent,
+  onAccentChange,
+  simpleDefault,
+  onSimpleDefaultChange,
+  lockedToSimple,
+  embedWorkflow = true,
+  onEmbedWorkflowChange,
+  sharingFocusRequest = 0,
+}) {
   const { theme, changeTheme, visibleWorkers = [], macCapabilities } = useAppContext();
   const { toast } = useSimpleUi();
   const [quality, setQuality] = useState(readDefaultGenerationQuality);
@@ -31,6 +41,16 @@ export function SimpleSettings({ accent, onAccentChange, simpleDefault, onSimple
   const [host, setHost] = useState("");
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
+  const sharingHeadingRef = useRef(null);
+
+  useEffect(() => {
+    if (!sharingFocusRequest) return undefined;
+    const timer = setTimeout(() => {
+      sharingHeadingRef.current?.scrollIntoView?.({ block: "start" });
+      sharingHeadingRef.current?.focus();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [sharingFocusRequest]);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,6 +193,38 @@ export function SimpleSettings({ accent, onAccentChange, simpleDefault, onSimple
           >
             <span />
           </button>
+        </div>
+      </div>
+
+      {/* Sharing (sc-15953). The same durable preference the advanced Settings screen writes and
+          the worker re-reads at its PNG write seam — this shell is the DEFAULT on a phone, so
+          leaving the switch out of it would make "discoverable" untrue for most of the people
+          the disclosure is aimed at. */}
+      <div className="su-group">
+        <div className="su-group-title" ref={sharingHeadingRef} tabIndex={-1}>Sharing</div>
+        <div className="su-card su-card--split">
+          <div>
+            <div className="su-card-title">Include the recipe in generated images</div>
+            <div className="su-card-sub">
+              New PNGs carry a small block of JSON, so dropping one back into SceneWorks reloads the
+              recipe that made it.
+            </div>
+          </div>
+          <button
+            aria-checked={embedWorkflow}
+            aria-label="Include the recipe in generated images"
+            className={embedWorkflow ? "su-toggle on" : "su-toggle"}
+            onClick={() => onEmbedWorkflowChange?.(!embedWorkflow)}
+            role="switch"
+            type="button"
+          >
+            <span />
+          </button>
+        </div>
+        <div className="su-card">
+          <div className="su-card-body">
+            <WorkflowEmbedDetails />
+          </div>
         </div>
       </div>
 

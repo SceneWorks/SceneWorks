@@ -1083,7 +1083,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       .find((label) => label.textContent.trim().startsWith("Quantization"))
       ?.querySelector("select") ?? null;
 
-  it("shows ALL possible MLX tiers (disabling un-installed), stays q4-first (sc-12165)", async () => {
+  it("shows all possible MLX tiers and honors the shared generation-quality default", async () => {
     await render(
       baseContext({
         videoModels: [tieredVideoModel(["q4", "q8"])],
@@ -1105,7 +1105,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       [...tierPicker().options].map((option) => [option.value, option.disabled]),
     );
     expect(disabledByTier).toEqual({ q4: false, q8: false, bf16: true });
-    expect(tierPicker().value).toBe("q4");
+    expect(tierPicker().value).toBe("q8");
 
     // Even with a single installed tier the picker now shows (others disabled), and q4 still rides the payload.
     await unmountRoot(root, container);
@@ -1125,6 +1125,28 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(soloInstalled).toEqual({ q4: false, q8: true, bf16: true });
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("uses the native tier picker on Candle Wan and never emits Torch GGUF quantization", async () => {
+    const wan = {
+      ...tieredVideoModel(["q4", "q8"], {
+        variants: { "gguf-q4_k_m": { label: "Torch Q4" } },
+      }),
+      id: "wan_2_2",
+      name: "Wan2.2",
+      family: "wan-video",
+      adapter: "wan_video",
+    };
+    const context = baseContext({ videoModels: [wan], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeTruthy();
+    expect(quantizationPicker()).toBeNull();
+    setSelect(tierPicker(), "q4");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 4 });
+    expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
   it("keeps the candle-only NVFP4 tier out of the MLX video picker (sc-11042)", async () => {
@@ -1816,6 +1838,64 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(shipped.defaults).toEqual(KREA.defaults);
     expect(shipped.limits).toEqual(KREA.limits);
     expect(shipped.video).toEqual(KREA.video);
+    // sc-15017: the LoRA tests below ride this block, so hold it to the shipped entry too —
+    // otherwise they could pass against a fixture that had drifted away from the real catalog.
+    expect(shipped.loraCompatibility).toEqual(KREA.loraCompatibility);
+  });
+
+  // sc-15017 — Wan-family LoRA selection for Krea Realtime. No bespoke krea control: this is the
+  // generic `generationStudio` picker, and the only thing that lights it up is family
+  // compatibility. Krea declares its OWN `krea-realtime` family, so a Wan LoRA is offered only
+  // because `loraMatchesModel` mirrors the backend's one-directional extra-compatible registry.
+  describe("Wan-family LoRA selection", () => {
+    const ORIGAMI = {
+      id: "origami_wan",
+      name: "Origami Wan Style",
+      family: "wan-video",
+      scope: "global",
+      installState: "installed",
+    };
+    const KREA_NATIVE_LORA = {
+      id: "krea_native",
+      name: "Krea Native Style",
+      family: "krea-realtime",
+      scope: "global",
+      installState: "installed",
+    };
+    const loraPicker = () => container.querySelector(".lora-picker");
+    const openPicker = async () => {
+      const add = loraPicker().querySelector(".lora-add");
+      await act(async () => add.click());
+    };
+
+    it("offers a Wan-family LoRA when Krea Realtime is the selected model", async () => {
+      await render(
+        baseContext({
+          videoModels: [KREA],
+          macCapabilities: MAC_CAPS,
+          loras: [ORIGAMI, KREA_NATIVE_LORA],
+        }),
+      );
+      await openPicker();
+      expect(loraPicker().textContent).toContain("Origami Wan Style");
+      // Its own family is still offered — the extra is additive, not a swap.
+      expect(loraPicker().textContent).toContain("Krea Native Style");
+    });
+
+    it("does NOT offer a Krea-Realtime LoRA on a Wan model (the registry is one-directional)", async () => {
+      await render(
+        baseContext({
+          videoModels: [{ ...WAN_A14B, loraCompatibility: { families: ["wan-video"] } }],
+          macCapabilities: MAC_CAPS,
+          loras: [ORIGAMI, KREA_NATIVE_LORA],
+        }),
+      );
+      await openPicker();
+      // The control: the Wan model DOES offer its own family, so the absence below is the
+      // direction of the relation and not an empty / broken picker.
+      expect(loraPicker().textContent).toContain("Origami Wan Style");
+      expect(loraPicker().textContent).not.toContain("Krea Native Style");
+    });
   });
 
   it("offers Krea Realtime in the picker with exactly its three capability tabs enabled", async () => {

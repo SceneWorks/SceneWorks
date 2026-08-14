@@ -1783,7 +1783,13 @@ button:focus-visible {
   margin-bottom: 30px;
 }
 
+/* Flex so a dismiss button can sit at the top-right of a message that wraps to several
+   lines. Notices rendered as a bare <p> (the access gate, screen-level errors) have a
+   single anonymous text item and lay out exactly as they did as a block. */
 .notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   padding: 10px 14px;
   border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border));
   border-radius: var(--r-md);
@@ -1796,6 +1802,41 @@ button:focus-visible {
 .notice.error {
   background: var(--danger-soft);
   border-color: color-mix(in oklch, var(--danger) 45%, transparent);
+}
+
+/* Worker panics carry unbroken Windows paths with no spaces to wrap at; without this
+   the message forces the whole band wider than the workspace. */
+.notice-message {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.notice-dismiss {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  /* Pull into the band's padding so the glyph lines up with the first text line. */
+  margin: -2px -6px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.notice-dismiss:hover {
+  background: color-mix(in oklch, var(--danger) 18%, transparent);
+  color: var(--text);
+}
+
+.notice-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Remote-access blocker (sc-15102): the ONLY thing on screen until the host password
@@ -4530,6 +4571,20 @@ label {
   object-fit: contain;
   background: #000;
   border-radius: var(--r-sm);
+}
+
+.pose-thumb-placeholder {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  place-items: center;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: center;
 }
 
 .pose-thumb-label {
@@ -7354,6 +7409,44 @@ details[open] > summary.lora-scope-group-heading::before,
   background: transparent;
 }
 
+/* Inline required-model notice (RequiredModelsNotice): the compact sibling of the gate above,
+   for one option on an otherwise usable screen rather than a whole Studio body. Sits inside an
+   existing form/section, so it stays a bordered block instead of a centered card. */
+.required-models-notice {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2, var(--surface-2));
+}
+
+.required-models-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.required-models-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.required-models-row > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.required-models-row small {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 .lora-row > span:first-child {
   display: grid;
   gap: 3px;
@@ -9764,6 +9857,67 @@ details[open] > summary.lora-scope-group-heading::before,
   height: 6px;
   border-radius: 50%;
   background: var(--ie-warn, #d97706);
+}
+
+/* Whether Download will carry the embedded workflow (sc-15954, epic 15945). Sits immediately
+   before the Download button so it reads as a caption on that action, and it is only rendered
+   when the opened image carried a recipe at all. Muted rather than alarming in both states: this
+   is a statement of fact about the next click, not a warning. */
+.ie-recipe-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--ie-border);
+  background: transparent;
+  color: var(--ie-muted);
+  font: 600 11px var(--font-ui);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  cursor: help;
+}
+.ie-recipe-note::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.ie-recipe-note[data-tone="included"] {
+  border-color: color-mix(in srgb, var(--ie-accent) 40%, var(--ie-border));
+  color: color-mix(in srgb, var(--ie-accent) 78%, var(--ie-text));
+}
+.ie-recipe-note[data-tone="dropped"] {
+  border-color: color-mix(in srgb, var(--ie-warn, #d97706) 40%, var(--ie-border));
+  color: color-mix(in srgb, var(--ie-warn, #d97706) 78%, var(--ie-text));
+}
+/* "Recipe unknown" and the resolution note are neither good news nor a loss — the muted default
+   border is right for both, and only the dot distinguishes them from a filled state. */
+.ie-recipe-note[data-tone="pending"]::before {
+  opacity: 0.45;
+}
+/* sc-15954: the live region stays MOUNTED for the life of the document so a screen reader has
+   something to observe changing — a region inserted into the DOM already populated is not
+   reliably announced, because there was no change to observe.
+   Emptied, it is collapsed with the standard visually-hidden recipe and NOT with `display: none`
+   or `visibility: hidden`: both of those drop the element from the accessibility tree, which is
+   the very thing unmounting it did wrong. Taken out of flow so it contributes no flex gap to the
+   header row either. */
+.ie-recipe-note[data-empty] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.ie-recipe-note[data-empty]::before {
+  display: none;
 }
 
 /* Shared unsaved-work pill for the library screens (sc-11971): the Pose Library Create
@@ -13485,6 +13639,17 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--accent);
 }
 
+/* sc-16260: the host-side remedy on a worker whose GPU failed its startup probe. It is the only
+   place that machine's operator is told what to fix, so it reads as a warning rather than as one
+   more stat. `pre-wrap` is set inline alongside this (the reason is a two-part message whose
+   blank line must survive), matching the sc-16247 fix on the setup screen. */
+.worker-card-health {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .worker-stat-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -14541,6 +14706,79 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
 }
 
+/* The first-generation recipe choice (sc-16390). The exhaustive sharing envelope stays in
+   Settings; this modal is intentionally compact and only explains the immediate decision. */
+.workflow-embed-decision-modal {
+  display: grid;
+  gap: 18px;
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.workflow-embed-decision-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.workflow-embed-decision-copy h2,
+.workflow-embed-decision-copy p,
+.workflow-embed-decision-error {
+  margin: 0;
+}
+
+.workflow-embed-decision-copy h2 {
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.workflow-embed-decision-copy p {
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.workflow-embed-decision-error {
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
+.workflow-embed-decision-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 520px) {
+  .workflow-embed-decision-modal {
+    padding: 20px;
+  }
+
+  .workflow-embed-decision-actions {
+    display: grid;
+  }
+}
+
+/* The "also in the file" / "not in the file" bullets (sc-15953). A LIST rather than one long
+   comma-joined sentence: several of these phrases carry their own commas and dashes, so joined
+   into a paragraph a reader cannot tell where one claim ends and the next begins — on the surface
+   whose entire job is to be read before a file is sent to someone else. `-3px` pulls the list up
+   under its "Also in the file:" lead-in so the two read as one block. */
+.settings-note-list {
+  margin: -3px 0 0;
+  padding-left: 17px;
+  list-style: disc;
+}
+
+.settings-note-list > li {
+  margin: 2px 0;
+}
+
 /*
  * WorkerProgressCard (sc-2083) — unified worker/job progress component.
  * See docs/design/worker-progress-card.md. Replaces .local-job-card, .job-row,
@@ -14889,6 +15127,10 @@ details[open] > summary.lora-scope-group-heading::before,
   line-height: 1.45;
   color: var(--text-muted);
   overflow-wrap: anywhere;
+  /* A classified failure is an actionable remedy, a blank line, then the underlying engine
+     error (sc-16247). Without pre-wrap the paragraph break collapses and the remedy runs
+     straight into the raw `DriverError(...)` text. */
+  white-space: pre-wrap;
 }
 
 .worker-progress-card__message.error {
@@ -15004,6 +15246,36 @@ details[open] > summary.lora-scope-group-heading::before,
    while still showing what the run produced. Mirrors .review-card.rejected. */
 .worker-progress-card__thumb-cell.discarded .worker-progress-card__thumb-media {
   opacity: 0.5;
+}
+
+/* "Supports live preview, first frame has not arrived yet" (sc-16965, epic 16948). Occupies the
+   SAME interim slot the real frame will take, so the cell fills in rather than appearing from
+   nowhere. Only ever rendered for a model whose engine advertises Capabilities.supports_preview and
+   only while the job is still pre-denoise — a model that does not preview gets no cell at all, so
+   the majority of renders are visually unchanged. */
+.worker-progress-card__thumb-cell.preview-pending {
+  cursor: default;
+  position: relative;
+}
+
+.worker-progress-card__preview-pending-media {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--surface),
+    color-mix(in oklch, var(--accent) 18%, var(--surface)),
+    var(--surface)
+  );
+  background-size: 200% 100%;
+  animation: worker-progress-card-skeleton 1400ms ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .worker-progress-card__preview-pending-media {
+    animation: none;
+  }
 }
 
 .worker-progress-card__thumb-media {
@@ -15235,6 +15507,17 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 12px;
   min-height: 0;
 }
+/* The filter panel pins under the global topbar instead of scrolling away with
+   the tail (#1966). `.workspace` is the scroll container and `.topbar` is
+   already sticky at its top edge (z-index 5), so this sits just below it in
+   both offset and stacking order. `--logs-sticky-top` is set inline by
+   LogsScreen from the measured topbar height — the literal here is only the
+   fallback for a shell rendered without the app chrome. */
+.logs-screen > .logs-panel {
+  position: sticky;
+  top: var(--logs-sticky-top, 64px);
+  z-index: 4;
+}
 .logs-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -15330,9 +15613,35 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: pre-wrap;
   word-break: break-word;
 }
-.logs-detail {
+/* Expanded entry: a copy affordance above the structured event (#1966). Rows
+   without a parsed event still expand to the button so the raw line is
+   copyable. */
+.logs-detail-panel {
   flex: 1 1 100%;
-  margin: 6px 0 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.logs-copy {
+  align-self: flex-end;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  padding: 3px 10px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.logs-copy:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.logs-detail {
+  align-self: stretch;
+  margin: 0 0 2px;
   padding: 8px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -16118,11 +16427,15 @@ details[open] > summary.lora-scope-group-heading::before,
    (hue 25) lands on 298, a lavender. An advisory chip with a green border reads as
    success. Measured in the browser; oklch is right for perceptual lightness ramps and
    wrong for pulling a hue toward a near-neutral. */
+/* Chips carry stranger-written strings too — the workflow-replay chips interpolate the envelope's
+   raw `model.slug`, which survives the sanitizer at up to `LABEL_MAX_CHARS`. Without this an
+   unbroken slug is one un-wrappable word in a pill and the row scrolls the dialog sideways. */
 .validation-chip {
   padding: 5px 8px;
   border-radius: var(--r-pill);
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 /* A value the user broke. Blocks the CTA, so it reads at full danger weight. */
@@ -16981,4 +17294,283 @@ button.audio-wave {
 
 .asset-audio-stage__transport .audio-clock {
   font-size: 15px;
+}
+
+/* Dropped-workflow offer (sc-15951, epic 15945) — "Workflow found", opened by an image drop
+   no in-app dropzone claimed. The report block below it is shared with sc-15952. */
+.workflow-drop-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 560px;
+  max-width: calc(100% - 32px);
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.workflow-drop-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+.workflow-drop-lede {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.workflow-drop-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.workflow-drop-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.workflow-drop-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.workflow-drop-field-value {
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.workflow-drop-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.workflow-drop-prompt p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.workflow-drop-settings ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 4px 14px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-drop-settings li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.workflow-drop-settings li strong {
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+/* A knob that travelled in the file but reaches no Image Studio control. Struck through and
+   labelled rather than merely dimmed: a dimmed row still reads as "applied, quietly", which is
+   the misreading this mark exists to prevent (sc-15951). */
+.workflow-drop-settings li.not-restored strong {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.workflow-drop-setting-mark {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--warn);
+  white-space: nowrap;
+}
+.workflow-drop-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.workflow-drop-note.warn {
+  color: var(--warn);
+}
+.workflow-drop-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--danger);
+}
+.workflow-drop-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The resolution report (sc-15950's output). Shared presentation — sc-15952 renders the same
+   component for an already-imported asset, so nothing here may be drop-specific. */
+.workflow-req {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+}
+.workflow-req-empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.workflow-req-verdict {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.workflow-req-verdict.ok {
+  color: var(--success);
+}
+.workflow-req-verdict.warn {
+  color: var(--warn);
+}
+.workflow-req-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-req-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.workflow-req-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+/* Same stranger-string rule as `.workflow-fix-detail` below: this span renders the report's
+   sentences, which embed the envelope's raw `model.slug`. Its own `.workflow-req-head` sibling
+   already wraps; the detail line is the longer of the two. */
+.workflow-req-detail {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.workflow-req-chip {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.workflow-req-ok {
+  background: color-mix(in oklch, var(--success) 18%, transparent);
+  color: var(--success);
+}
+.workflow-req-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.workflow-req-bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* The missing-inputs surface (sc-15952). Sits under the report and is rendered ONLY when there is
+   something to do about the recipe — a fully-resolvable one shows none of this, so none of these
+   rules has an empty-state variant to style. */
+.workflow-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+}
+.workflow-fix-title {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+.workflow-fix-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-fix-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.workflow-fix-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.workflow-fix-head strong {
+  flex: 1 1 auto;
+}
+.workflow-fix-head select {
+  flex: 0 1 220px;
+  min-width: 0;
+}
+/* `overflow-wrap: anywhere` for the same reason `.workflow-fix-head` carries it: this text is
+   written by a STRANGER. `report.model.detail` embeds the envelope's raw slug and the sanitizer
+   DROPS an over-length label rather than truncating it, so a 200-char unbroken slug (the
+   `LABEL_MAX_CHARS` ceiling) arrives intact. The panel is a 560px modal with `overflow-y: auto`
+   and no `overflow-x`, so an unbreakable run pushes the whole dialog sideways. */
+.workflow-fix-detail {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.workflow-fix-substitute {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.workflow-fix-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.workflow-fix-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.workflow-fix-inputs > .workflow-fix-detail {
+  margin: 0;
 }

@@ -13,12 +13,23 @@
 //   2. Unknown host memory (`null`, the probe hasn't resolved / no signal) ⇒ everything fits. We never
 //      withhold a resolution on missing data — the worst case is offering a heavy one, which the
 //      worker's own load-time fit gate + runtime decode still backstop (mirrors tierFits).
-//   3. A model that declares NO memory floor (no `mlx.minMemoryGb` / `candle.minMemoryGb` — e.g.
-//      SenseNova, which already ships 2048² buckets) is left entirely unchanged: with no floor there
-//      is no basis to predict a peak, so the gate returns "fits". Only a model that BOTH declares a
-//      floor AND advertises >1536² buckets is affected — today that is exactly Krea 2 Raw / Turbo.
+//   3. A model that declares NO memory floor ON THE ACTIVE LANE (no `mlx.minMemoryGb` for MLX / no
+//      `candle.minMemoryGb` for candle) is left unchanged: with no floor there is no basis to predict a
+//      peak, so the gate returns "fits". Only a model that BOTH declares a floor on that lane AND
+//      advertises >1536² buckets is affected. That is 14 shipped models, and the split is heavily
+//      candle-side — worth stating precisely, because a per-lane gate is easy to reason about wrongly:
+//        - `krea_2_raw` / `krea_2_turbo` — the only two floored on BOTH lanes (mlx 48 / candle 32).
+//        - `mage_flow` ×6 (`candle.minMemoryGb` 17) and `sensenova_u1_8b` ×6 (16) — floored on CANDLE
+//          ONLY, with `mlx.minMemoryGb` absent. All 12 advertise 2048² buckets, so on a CUDA host this
+//          gate is live for them today and on a Mac it is a no-op. (SenseNova used to be cited here as
+//          the example of a FLOORLESS 2048² model; that is wrong — it declares a candle floor.)
+//
+// PER-TIER BASIS (sc-16020). Both studios pass the tier they will actually generate with. When that
+// installed tier carries the active lane's own peak AND its measurement geometry, `floorGb` normalizes
+// the peak to this module's 1536² baseline before using it. Missing/stale/cross-lane evidence falls back
+// to the lane blanket; it is never permission to borrow another backend's number.
 
-import { MEMORY_HEADROOM_FRACTION } from "./tierSuggestion.js";
+import { installedTierPeakEvidence, MEMORY_HEADROOM_FRACTION } from "./tierSuggestion.js";
 
 // The historical resolution ceiling (pixels). Every bucket at/below this was shipped before sc-13959
 // and stays unconditionally offered (SCOPE note 1). 1536×1536 = 2,359,296 px ≈ 2.36 MP.
@@ -33,6 +44,11 @@ export const BASELINE_PIXELS = 1536 * 1536;
 // that single-pass peak — deliberately conservative: over-estimating hides a borderline size (safe),
 // under-estimating would offer one that OOMs. When generate-lane tiled decode lands upstream this
 // coefficient can be relaxed toward the ~7 GB/MP tiled figure (qwen-image's tiled-VAE transient).
+//
+// GEOMETRY IS PART OF THE CONTRACT. Because this coefficient is applied to `pixels - BASELINE_PIXELS`,
+// whatever `floorGb` returns is asserted to be the peak AT 1536² — not at some other size. Any future
+// basis for `floorGb` has to be normalized to that geometry first; the per-tier measured footprints are
+// 1024² numbers and so are ~1.31 MP (≈17 GB) short of it. See `floorGb`.
 export const HIGHRES_TRANSIENT_GB_PER_MP = 13;
 
 // Parse a "WxH" bucket to its pixel count, or null when malformed.
@@ -47,22 +63,31 @@ function pixelsOf(resolution) {
   return width * height;
 }
 
-// The model's declared memory floor (GB) on the active backend, or null when it declares none. mlx =
-// unified-memory OS peak on a Mac; candle = discrete GPU VRAM. Both are the DEFAULT (lightest) tier's
-// ≤1536² peak — the value `useUnifiedMemoryGb` is budgeted against elsewhere for tier selection.
-function floorGb(model, backend) {
+// The model's 1536²-baseline memory floor (GB) on the active backend, or null when there is no basis to
+// predict one. Prefer the selected installed tier's lane-owned evidence, but only after lifting its raw
+// peak from the declared measurement geometry to BASELINE_PIXELS. This is the term the old held change
+// omitted: a 1024² peak needs ~17 GB added before it can enter the >1536² formula.
+function floorGb(model, backend, tier) {
+  const evidence = installedTierPeakEvidence(model, { backend, tier });
+  if (evidence !== null) {
+    const geometryDeltaMp = (BASELINE_PIXELS - evidence.measuredPixels) / 1_000_000;
+    const normalized = evidence.peakGb + HIGHRES_TRANSIENT_GB_PER_MP * geometryDeltaMp;
+    if (Number.isFinite(normalized) && normalized > 0) {
+      return normalized;
+    }
+  }
   const block = backend === "candle" ? model?.candle : model?.mlx;
   const gb = block?.minMemoryGb;
   return typeof gb === "number" && Number.isFinite(gb) && gb > 0 ? gb : null;
 }
 
 // Predicted PEAK memory (GB) a generation at `resolution` needs for `model` on `backend`, or null when
-// it can't be predicted (malformed resolution, or the model declares no memory floor). At/below the
-// baseline this is just the floor (already the calibrated ≤1536² peak); above it, the floor plus the
-// per-megapixel transient for the extra pixels.
-export function predictedResolutionPeakGb(model, resolution, backend) {
+// it can't be predicted (malformed resolution, or the model declares no memory floor on that lane).
+// At/below the baseline this is just the floor (already the calibrated ≤1536² peak); above it, the floor
+// plus the per-megapixel transient for the extra pixels.
+export function predictedResolutionPeakGb(model, resolution, backend, tier = null) {
   const pixels = pixelsOf(resolution);
-  const floor = floorGb(model, backend);
+  const floor = floorGb(model, backend, tier);
   if (pixels == null || floor == null) {
     return null;
   }
@@ -78,7 +103,7 @@ export function predictedResolutionPeakGb(model, resolution, backend) {
 // must fit under the same headroom fraction the quant-tier gate uses (0.9), leaving the remainder for
 // the OS + other apps.
 export function resolutionFitsMemory(model, resolution, unifiedMemoryGb, options = {}) {
-  const { backend } = options;
+  const { backend, tier = null } = options;
   const pixels = pixelsOf(resolution);
   // (1) The historical ≤1536² set is always offered.
   if (pixels == null || pixels <= BASELINE_PIXELS) {
@@ -88,12 +113,16 @@ export function resolutionFitsMemory(model, resolution, unifiedMemoryGb, options
   if (unifiedMemoryGb == null || !Number.isFinite(unifiedMemoryGb)) {
     return true;
   }
-  const required = predictedResolutionPeakGb(model, resolution, backend);
+  const required = predictedResolutionPeakGb(model, resolution, backend, tier);
   // (3) No declared floor ⇒ no prediction ⇒ leave the model's buckets unchanged.
   if (required == null) {
     return true;
   }
-  return required <= unifiedMemoryGb * MEMORY_HEADROOM_FRACTION;
+  // `candle.minMemoryGb` is already a dedicated-VRAM host requirement. Applying the MLX 0.9
+  // shared-pool budget to it would mix memory kinds and hide resolutions on CUDA hosts.
+  return backend === "candle"
+    ? required <= unifiedMemoryGb
+    : required <= unifiedMemoryGb * MEMORY_HEADROOM_FRACTION;
 }
 
 // Filter a list of "WxH" buckets to those that fit `unifiedMemoryGb`, preserving order. The studio's

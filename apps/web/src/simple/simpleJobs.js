@@ -23,13 +23,33 @@ import { readDefaultGenerationQuality } from "../generationQuality.js";
 // studios post — kept deliberately small and free of the mode-specific branches Simple
 // never reaches.
 
+// Mirrors the advanced studios' candle-only tier gates: a tier is only offered when a
+// live worker advertises the capability, so an MLX/pre-Ada host never resolves one.
+//
+// Lives here rather than in a studio because BOTH the tier resolver below and the Model
+// Manager's memory floor (sc-15400) need it — the floor must not size a host against a
+// tier that host will never be offered.
+export function workerAdvertises(workers, capability) {
+  return (workers ?? []).some(
+    (worker) =>
+      worker?.status !== "offline" &&
+      Array.isArray(worker?.capabilities) &&
+      worker.capabilities.includes(capability),
+  );
+}
+
 // Quant tier is the ONE "advanced" knob Simple still has to resolve, because omitting it
 // would silently ignore the app-wide "Default quality" setting the Simple Settings screen
 // writes. This mirrors the advanced studios' seed effect exactly: the per-(screen,model)
 // sticky first, then the global quality setting, then the capability-aware Auto suggestion —
 // all clamped to what's actually installed.
 export function resolveSimpleTier(model, screen, options = {}) {
-  const { convRotEligible = false, nvfp4Eligible = false, unifiedMemoryGb = null } = options;
+  const {
+    convRotEligible = false,
+    nvfp4Eligible = false,
+    unifiedMemoryGb = null,
+    backend = "mlx",
+  } = options;
   const tierOptions = { convRotEligible, nvfp4Eligible };
   const available = installedTiers(model, tierOptions);
   if (available.length === 0) {
@@ -40,7 +60,7 @@ export function resolveSimpleTier(model, screen, options = {}) {
     defaultTierSelection(model, sticky, {
       ...tierOptions,
       defaultQuality: readDefaultGenerationQuality(),
-      autoTier: suggestTier(model, unifiedMemoryGb),
+      autoTier: suggestTier(model, unifiedMemoryGb, { backend }),
     }) ?? "";
   return {
     quantTier,

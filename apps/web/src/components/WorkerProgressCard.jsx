@@ -4,7 +4,13 @@ import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
 // m:ss transport clock — shared with the Audio Studio's take deck (epic 14361) so both
 // transports read the same way.
 import { formatClock } from "../audioTakes.js";
-import { useAppLive } from "../context/AppContext.js";
+import { useAppLive, useAppStatic } from "../context/AppContext.js";
+import {
+  livePreviewPlaceholderAssets,
+  livePreviewState,
+  modelForJob,
+  previewBackendForWorker,
+} from "../previewSupport.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
@@ -240,6 +246,30 @@ function ProgressBar({ status, progress }) {
 // ships interimAssets is just empty.
 const THUMBNAIL_VARIANTS = new Set(["image-grid", "video-player", "audio-player", "small-row", "hidden"]);
 
+// Live denoise preview (epic 16624, sc-16905). Image workers stream a single latent-resolution
+// frame of the developing render as `result.previewFrame` (sc-16904: `{imageIndex, current,
+// total, dataUrl}`, single slot, replaced per progress POST and dropped when the image's final
+// asset lands). Shim it into the sc-2085 interim-thumbnail seam so every screen that renders this
+// card gets the live preview without threading a prop. The stable id keeps the grid cell in place
+// across frames (the <img> src just updates), and can never collide with a real asset id, so the
+// finals-supersede-interims dedupe in mergeThumbnails is untouched. Terminal jobs never show a
+// frame even if a stale one survived in the record (e.g. a failure between POSTs). Engines that
+// don't emit previews simply never produce the field — the card looks exactly as before.
+export function livePreviewInterimAssets(job) {
+  const frame = job?.result?.previewFrame;
+  if (!frame?.dataUrl || terminalStatuses.has(job.status)) {
+    return [];
+  }
+  return [
+    {
+      id: "live-denoise-preview",
+      type: "image",
+      url: frame.dataUrl,
+      __interim: true,
+    },
+  ];
+}
+
 function mergeThumbnails(finalAssets, interimAssets) {
   const finalArray = Array.isArray(finalAssets) ? finalAssets : [];
   const interimArray = Array.isArray(interimAssets) ? interimAssets : [];
@@ -266,6 +296,23 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
       aria-label="Job output"
     >
       {items.map((asset, index) => {
+        // The "supports live preview, no frame yet" placeholder (sc-16965) occupies a real interim
+        // cell so the slot does not jump when the first frame lands — it has no media to render, so
+        // it short-circuits the asset path entirely rather than handing AssetThumbnail a urlless
+        // asset.
+        if (asset.__previewPlaceholder === true) {
+          return (
+            <span
+              key={asset.id ?? `preview-placeholder-${index}`}
+              className={`${cellClass} interim preview-pending`}
+              data-testid="live-preview-placeholder"
+              title="Waiting for the first live preview frame"
+            >
+              <span className="worker-progress-card__preview-pending-media" aria-hidden="true" />
+              <small className="worker-progress-card__thumb-label">Preview starting…</small>
+            </span>
+          );
+        }
         const interactive = !!onThumbnailClick;
         const inner = (
           <>
@@ -586,6 +633,11 @@ export function WorkerProgressCard({
   onThumbnailClick,
 }) {
   const { workersById, visibleWorkers } = useAppLive();
+  // Catalog read (sc-16965). `models` is a low-churn static field, so reading it through
+  // useAppStatic() does not add a job/worker-tick subscription this card did not already have.
+  // Absent (a card rendered outside the app shell, or before the catalog loads) → no model → the
+  // preview state resolves to "unknown" and the card renders exactly as it did before this story.
+  const { models } = useAppStatic();
   const worker = useMemo(() => {
     if (job.workerId && workersById?.get) {
       const direct = workersById.get(job.workerId);
@@ -608,6 +660,23 @@ export function WorkerProgressCard({
   }, [worker, job.backend]);
   const meters = useMemo(() => pickMeters(job, worker), [job, worker]);
   const elapsedSeconds = useLiveJobElapsedSeconds(job);
+
+  // Live denoise preview state (sc-16965, epic 16948). Engine-KEYED: the same model id can preview
+  // on one backend and not the other, so the answer is looked up under the backend of the worker
+  // that actually claimed this job. Exposed as `data-preview-state` so the three states the story
+  // exists to separate — "does not support", "supports but no frame yet", "showing a frame" — are
+  // distinguishable in the DOM and to CSS, not only by whether a cell happens to be present.
+  const previewState = useMemo(() => {
+    const backend = previewBackendForWorker(worker, job);
+    return livePreviewState(job, modelForJob(job, models), backend);
+  }, [job, worker, models]);
+  // The placeholder shares the interim-thumbnail seam with the real frame, so it lands in the same
+  // grid cell the frame will occupy. Exactly one of the two is ever non-empty: `livePreviewState`
+  // returns "live" the moment a frame exists and "pending" only when one does not.
+  const derivedInterimAssets = useMemo(() => {
+    const frame = livePreviewInterimAssets(job);
+    return frame.length > 0 ? frame : livePreviewPlaceholderAssets(previewState);
+  }, [job, previewState]);
 
   const isTerminal = terminalStatuses.has(job.status);
   const attempts = job.attempts ?? 1;
@@ -634,7 +703,10 @@ export function WorkerProgressCard({
   const idShort = shortJobId(job.id);
 
   return (
-    <article className={`worker-progress-card ${job.status}${className ? ` ${className}` : ""}`}>
+    <article
+      className={`worker-progress-card ${job.status}${className ? ` ${className}` : ""}`}
+      data-preview-state={previewState}
+    >
       <header className="worker-progress-card__header">
         <span className={`worker-progress-card__type chip-${chipModifier(job.type)}`}>{chipLabel}</span>
         <div className="worker-progress-card__header-right">
@@ -737,7 +809,7 @@ export function WorkerProgressCard({
         variant={thumbnailsVariant}
         finalAssets={thumbnailAssets}
         thumbnailGroups={thumbnailGroups}
-        interimAssets={interimThumbnailAssets}
+        interimAssets={interimThumbnailAssets ?? derivedInterimAssets}
         onThumbnailClick={onThumbnailClick}
         isRunning={!isTerminal}
         expectedCount={expectedThumbnailCount}

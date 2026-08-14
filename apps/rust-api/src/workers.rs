@@ -25,10 +25,22 @@ pub(crate) async fn list_workers(
 /// dependency, whether real detection/tracking/segmentation/replacement (and the
 /// procedural previews) can actually run, so the UI can gate Replace Person and
 /// explain why an action is unavailable (sc-1484).
+///
+/// `Unhealthy` is excluded alongside `Offline` (sc-16260): such a worker is heartbeating, so it is
+/// not offline, but its accelerator is unusable and it will claim nothing. Counting it would
+/// report Replace Person as ready on a host whose GPU cannot be initialized — the same misleading
+/// state on the API side that `appHelpers::isActiveWorker` removes on the web side. In practice a
+/// candle worker also withholds these capabilities when it goes unhealthy, so this is the backstop
+/// for the case where it cannot.
 pub(crate) fn person_readiness_from_workers(workers: &[WorkerSnapshot]) -> Value {
     let live: Vec<&WorkerSnapshot> = workers
         .iter()
-        .filter(|worker| worker.status != WorkerStatus::Offline)
+        .filter(|worker| {
+            !matches!(
+                worker.status,
+                WorkerStatus::Offline | WorkerStatus::Unhealthy
+            )
+        })
         .collect();
     let entry = |capability: WorkerCapability| {
         let cap = capability.as_str();
@@ -110,8 +122,15 @@ pub(crate) async fn host_capabilities(
         })
         .max()
         .map(mb_to_gb);
+    let (memory_kind, memory_gb) = if std::env::consts::OS == "macos" {
+        (unified_memory_gb.map(|_| "unified"), unified_memory_gb)
+    } else {
+        (gpu_memory_gb.map(|_| "dedicated"), gpu_memory_gb)
+    };
     Ok(Json(HostCapabilitiesResponse {
         platform: std::env::consts::OS,
+        memory_kind,
+        memory_gb,
         unified_memory_gb,
         gpu_memory_gb,
     }))
@@ -169,6 +188,7 @@ pub(crate) async fn heartbeat_worker(
             current_job_id: payload.current_job_id,
             loaded_models: payload.loaded_models,
             utilization: payload.utilization,
+            status_reason: payload.status_reason,
         })
     })
     .await?;

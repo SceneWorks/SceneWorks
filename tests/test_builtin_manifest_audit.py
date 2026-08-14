@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -238,6 +239,45 @@ def _assert_mage_tier_layout(model, model_id, repo, revision):
     assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
 
 
+def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
+    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract."""
+    assert model["candle"] == {
+        "minMemoryGb": 17,
+        "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
+        "vramMeasuredPixels": 1024 * 1024,
+        "measured": False,
+        "supportsSequentialOffload": True,
+        "memoryStrategyCapabilities": {
+            "bounded_attention": {
+                "parameters": {"attentionChunkSize": 67_108_864},
+                "overlays": ["none"],
+            },
+            "bounded_transformer_residency": {
+                "parameters": {
+                    "transformerWindowSize": 1,
+                    "transformerWindowComponent": "Dit",
+                },
+                "overlays": ["none"],
+            },
+        },
+        "memoryStrategyStructuralExemptions": {
+            "bounded_decode": {
+                "overlays": ["none", "lora"],
+                "evidence": [
+                    {
+                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                        "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization.",
+                    },
+                    {
+                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                        "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field.",
+                    },
+                ],
+            },
+        },
+    }, model_id
+
+
 def test_mage_flow_generation_family_is_pinned_and_complete():
     """sc-14047 + sc-14980: the generation variants ship physical per-tier artifacts."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
@@ -250,11 +290,7 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         model = models[model_id]
         assert model["family"] == "mage-flow"
         assert model["macOnly"] is False
-        assert model["candle"] == {
-            "minMemoryGb": 17,
-            "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
-            "measured": True,
-        }
+        _assert_mage_candle_ladder(model, model_id)
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
         _assert_mage_tier_layout(model, model_id, repo, revision)
@@ -274,11 +310,7 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
         assert model["adapter"] == "mlx_mage"
         assert model["capabilities"] == ["edit_image"]
         assert model["macOnly"] is False
-        assert model["candle"] == {
-            "minMemoryGb": 17,
-            "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
-            "measured": True,
-        }
+        _assert_mage_candle_ladder(model, model_id)
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
         assert model["ui"]["sourceWithMultiReference"] is True
@@ -400,6 +432,7 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         "image_jobs/kolors_control.rs",
         "image_jobs/krea_control.rs",
         "image_jobs/krea_control_candle.rs",
+        "image_jobs/krea_imported.rs",
         "image_jobs/qwen.rs",
         "image_jobs/qwen_control.rs",
         "image_jobs/zimage.rs",
@@ -416,10 +449,27 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         f"added={sorted(actual_consumers - expected_consumers)}, "
         f"removed={sorted(expected_consumers - actual_consumers)}"
     )
+    # The invariant is that the centrally-authorized tuple resolves ONLY through
+    # `snapshots/<revision>`, never a mutable repo cache root. Two seams satisfy it, and a consumer
+    # must use one of them:
+    #
+    #   * `huggingface_pinned_snapshot_dir` directly — the download-on-first-use lanes;
+    #   * `resolve_hf_component_file` — the shared CACHE-ONLY resolver epic 17625 (AC9) requires of
+    #     any lane added since, which itself dispatches a pinned revision to
+    #     `huggingface_pinned_snapshot_dir`.
+    #
+    # Accepting the shared seam is not a loosening: membership in this inventory is defined by
+    # calling `trusted_control_weight_revision`, and that function returns either a shipped
+    # artifact's pinned revision or a catalog-authorized one it validates as 40 lowercase hex — the
+    # exact form `is_pinned_hf_revision` admits. So a consumer in this set always hands
+    # `resolve_hf_component_file` a pinned revision, and the mutable-root branch is unreachable
+    # from here.
+    pinned_resolution_seams = ("huggingface_pinned_snapshot_dir", "resolve_hf_component_file")
     for path in expected_consumers:
-        assert "huggingface_pinned_snapshot_dir" in sources[path], (
+        assert any(seam in sources[path] for seam in pinned_resolution_seams), (
             f"{path}: central tuple must resolve only through snapshots/<revision>, "
-            "never a mutable repo cache root"
+            "never a mutable repo cache root — use `huggingface_pinned_snapshot_dir` or the "
+            "shared cache-only `resolve_hf_component_file`"
         )
 
     strict_control = sources["image_jobs/strict_control.rs"]
@@ -504,9 +554,11 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
     """
     audited_lanes = {
         "image_jobs/base.rs": "model.default_repo()",
+        "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
         "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
         "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
         "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
+        "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/pulid.rs": "PULID_FLUX_REPO",
         "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
@@ -514,7 +566,6 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
         "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
         "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
         "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/zimage_identity_candle.rs": "default_repo_for(&request.model)",
         "sensenova_jobs.rs": "default_repo_for(&request.model)",
         "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
     }
@@ -563,10 +614,16 @@ def test_manifest_model_path_is_only_an_optional_override():
     is absent.
     """
     expected_readers = {
+        # sc-16426: gallery attribution reads the imported checkpoint only after the worker has
+        # selected an imported Krea/SDXL route, and declines attribution when every path source is
+        # absent. It does not affect generation's normal repo resolution.
+        "image_jobs.rs",
         "image_jobs/base.rs",
+        "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
         "image_jobs/kolors_ipadapter.rs",
+        "image_jobs/krea_control_candle.rs",
         "image_jobs/krea_imported.rs",
         # sc-15036: the fine-tuned Mage-Flow base lane. Audited — `modelPath` is an optional
         # FIRST preference here, falling through to the catalog entry's `paths.model` (which is
@@ -591,7 +648,31 @@ def test_manifest_model_path_is_only_an_optional_override():
             relative_path = path.relative_to(WORKER_SOURCE_PATH).as_posix()
             actual_readers.append(relative_path)
             prefix = source[max(0, match.start() - 500) : match.start()]
-            assert "if let Some(path) = request" in prefix or "let Some(raw_path) = request" in prefix, (
+            statement_start = source.rfind(
+                "let raw_path = request", max(0, match.start() - 500), match.start()
+            )
+            statement_end = source.find(";", match.end())
+            statement = (
+                source[statement_start : statement_end + 1]
+                if statement_start >= 0 and statement_end >= 0
+                else ""
+            )
+            compact_statement = re.sub(r"\s+", "", statement)
+            # sc-16426's attribution-only reader uses idiomatic `?`, which Clippy requires. Keep
+            # that exception exact: any new source, precedence change, panic/error conversion, or
+            # fallback change must fail this inventory audit and be reviewed explicitly.
+            question_mark_optional = relative_path == "image_jobs.rs" and compact_statement == (
+                'letraw_path=request.advanced.get("modelPath")'
+                '.or_else(||request.model_manifest_entry.get("modelPath"))'
+                '.or_else(||{request.model_manifest_entry.get("paths")'
+                '.and_then(|paths|paths.get("model"))})'
+                ".and_then(Value::as_str)?;"
+            )
+            assert (
+                "if let Some(path) = request" in prefix
+                or "let Some(raw_path) = request" in prefix
+                or question_mark_optional
+            ), (
                 f"{relative_path}: modelPath is no longer read through an "
                 "optional branch"
             )
@@ -618,6 +699,199 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
         f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
         for error in errors
     )
+
+
+def test_sensenova_models_do_not_advertise_lora_compatibility():
+    """sc-18476: SenseNova has no diffusion-LoRA merge path, so advertise none."""
+    manifest = _load_builtin_models_manifest()
+    sensenova = {
+        model["id"]: model
+        for model in manifest["models"]
+        if model.get("family") == "sensenova-u1"
+    }
+    assert set(sensenova) == {
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
+    }
+    for model_id, model in sensenova.items():
+        assert "loraCompatibility" not in model, (
+            f"{model_id} must omit the LoRA advertisement; the SenseNova worker accepts no "
+            "user adapters"
+        )
+
+
+def test_schema_accepts_mlx_sequential_offload_capability():
+    """SC-18377: MLX staged-residency declarations are part of the authoring contract."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    entry["mlx"] = {"supportsSequentialOffload": True}
+
+    errors = list(validator.iter_errors({"schemaVersion": 1, "models": [entry]}))
+
+    assert not errors, [
+        (error.validator, list(error.absolute_path), error.message) for error in errors
+    ]
+
+
+def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
+    """Static capabilities and exact provider contracts share one overlay vocabulary.
+
+    The matrix generator and Candle selector both recognize identity-conditioned cells. Keeping
+    the two authoring-schema locations exact prevents an identity-capable manifest from validating
+    in one memory-strategy declaration while being rejected in the other.
+    """
+    schema = _load_schema(SCHEMA_PATH)
+    expected = {"none", "lora", "identity", "control"}
+    static_overlays = schema["$defs"]["staticMemoryStrategyCapability"]["properties"][
+        "overlays"
+    ]["items"]["enum"]
+    contract_overlays = schema["properties"]["models"]["items"]["properties"]["mlx"][
+        "properties"
+    ]["memoryStrategyContract"]["properties"]["implementations"]["items"]["properties"][
+        "overlays"
+    ]["items"]["enum"]
+    assert set(static_overlays) == set(contract_overlays) == expected
+
+
+def test_measured_memory_rows_declare_their_workload_geometry():
+    """sc-16020: geometry is data, not a prose assumption.
+
+    The counts were derived from the live catalog when the field landed. Update them when
+    adding/removing rows; the universal assertions are what prevent a new row from silently
+    escaping the normalization contract or an unmeasured tier gate from presenting itself as a
+    calibrated measurement.
+    """
+    manifest = _load_builtin_models_manifest()
+    mlx_rows = []
+    candle_rows = []
+    for model in manifest["models"]:
+        for download in model.get("downloads", []):
+            footprint = download.get("footprint", {})
+            if footprint.get("peakMemoryBytes") is not None:
+                mlx_rows.append((model["id"], download.get("variant"), footprint))
+        candle = model.get("candle", {})
+        if "vramGbByTier" in candle:
+            candle_rows.append((model["id"], candle))
+
+    assert len(mlx_rows) == 16
+    assert len(candle_rows) == 36
+    assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
+    assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
+
+    measured_rows = [row for row in candle_rows if row[1]["measured"]]
+    unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
+    assert len(measured_rows) == 24
+    assert len(unmeasured_rows) == 12
+
+    measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
+    assert all(
+        row[1].get("vramMeasuredPixels") == 1024 * 1024
+        for row in measured_image_rows
+    ), measured_image_rows
+    scail = [row for row in measured_rows if row[0] == "scail2_14b"]
+    assert len(scail) == 1
+    assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
+
+    # Unmeasured rows still declare the geometry of their estimate or conservative gate, but they
+    # do not enter the calibrated 1024² set. FLUX.2-dev is deliberately the sole 256² gate: its
+    # durable runs establish a safe high-water, not a 1024² calibration.
+    non_calibration_geometry = [
+        (model_id, candle["vramMeasuredPixels"])
+        for model_id, candle in unmeasured_rows
+        if candle["vramMeasuredPixels"] != 1024 * 1024
+    ]
+    assert non_calibration_geometry == [("flux2_dev", 256 * 256)]
+    flux2_dev = next(
+        candle for model_id, candle in unmeasured_rows if model_id == "flux2_dev"
+    )
+    assert flux2_dev["measured"] is False
+    assert flux2_dev["vramGbByTier"] == {"q4": 42.7, "q8": 70.8}
+
+
+def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
+    """sc-18473: the installable shared package and its fail-closed gate share one exact row."""
+    manifest = _load_builtin_models_manifest()
+    scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
+    candle = scail["candle"]
+    assert candle == {
+        "minMemoryGb": 105,
+        "vramGbByTier": {"bf16": 102.115},
+        "vramMeasuredPixels": 832 * 480,
+        "measured": True,
+    }
+    assert candle["minMemoryGb"] == math.ceil(
+        candle["vramGbByTier"]["bf16"] + 2
+    )
+    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+
+    raw = MANIFEST_PATH.read_text(encoding="utf-8")
+    scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(
+        "// Krea Realtime 14B", 1
+    )[0]
+    for exact_evidence in [
+        "3174984b20334bb029170e367be234de0b3f8753",
+        "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+        "31455292141",
+        "93667700921",
+        "9089420126",
+        "de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9",
+        "overallPeakGb=102.115",
+    ]:
+        assert exact_evidence in scail_section
+
+
+def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
+    """Mutation guard for both lane-owned measurement shapes."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    mlx_entry = _model_entry_with_download(
+        {
+            "provider": "huggingface",
+            "repo": "namespace/model",
+            "files": [],
+            "footprint": {
+                "diskSizeBytes": 1,
+                "peakMemoryBytes": 2,
+            },
+        }
+    )
+    mlx_errors = list(
+        validator.iter_errors({"schemaVersion": 1, "models": [mlx_entry]})
+    )
+    assert any(
+        error.validator == "required"
+        and "measuredPixels" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["footprint"]
+        for error in mlx_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in mlx_errors]
+
+    candle_entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    candle_entry["candle"] = {"vramGbByTier": {"q4": 12.5}}
+    candle_errors = list(
+        validator.iter_errors({"schemaVersion": 1, "models": [candle_entry]})
+    )
+    assert any(
+        error.validator == "required"
+        and "vramMeasuredPixels" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["candle"]
+        for error in candle_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]
+    assert any(
+        error.validator == "required"
+        and "measured" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["candle"]
+        for error in candle_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]
 
 
 def test_builtin_schema_rejects_an_unknown_closed_model_key():
@@ -1324,7 +1598,7 @@ def test_z_image_turbo_manifest_has_mlx_block():
 
 
 def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
-    """sc-12126/sc-13108/sc-15206: pin resident peaks and every measured Turbo ladder tier."""
+    """sc-12126/sc-13108/sc-15206/sc-16211: pin peaks and composition-keyed Turbo evidence."""
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     measured_tiers = {
@@ -1337,6 +1611,82 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "bf16": 47.2,
     }
     turbo_fit = krea["candle"]["turboFit"]
+    assert {
+        key: turbo_fit[key]
+        for key in (
+            "calibrationAbi",
+            "loadShape",
+            "calibrationFingerprint",
+            "sceneWorksRevision",
+            "inferenceRevision",
+            "measured",
+        )
+    } == {
+        # sc-17097 re-measured every curve under gen_core::MEMORY_CALIBRATION_ABI 3 on the CUDA box.
+        # The stamp is only allowed to move as the RESULT of that measurement, never on its own.
+        "calibrationAbi": 3,
+        "loadShape": "deferred_materialization",
+        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+        "sceneWorksRevision": "sc-15449-contract-v1",
+        "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+        "measured": True,
+    }
+    assert turbo_fit["strategyParameters"] == {
+        "resident": {},
+        "threeStage": {},
+        "tiledVae": {"decodeTileEdge": 512, "decodeOverlap": 128},
+        "chunkedAttention": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+        },
+        "streamedBlocks": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1,
+        },
+    }
+    assert set(turbo_fit["verification"]) == {
+        "hardware",
+        "stories",
+        "method",
+        "numericPolicy",
+        "outputParity",
+    }
+    assert turbo_fit["verification"]["stories"] == [
+        "sc-15117",
+        "sc-15205",
+        "sc-15206",
+        "sc-17097",
+    ]
+    assert {
+        (record["tier"], record["width"], record["height"])
+        for record in turbo_fit["evidenceRecords"]
+    } == {
+        ("q4", 768, 768),
+        ("q4", 1024, 1024),
+        ("q8", 768, 768),
+        ("q8", 1024, 1024),
+        ("bf16", 768, 768),
+        ("bf16", 1024, 1024),
+    }
+    for record in turbo_fit["evidenceRecords"]:
+        assert set(record["predictedPeaksGb"]) == {
+            "threeStage",
+            "tiledVae",
+            "chunkedAttention",
+            "streamedBlocks",
+        }
+        assert set(record["observedPeaksGb"]) == set(record["predictedPeaksGb"])
+        if record["evidenceScope"] == "exact_request":
+            assert record["parity"]["result"] == "passed"
+        else:
+            assert record["evidenceScope"] == "phase_fit_only"
+            assert "parity" not in record
+            assert set(record["observedPhasesGb"]) == set(record["predictedPeaksGb"])
+        assert len(record["sceneWorksCommit"]) == 40
+        assert len(record["inferenceCommit"]) == 40
     assert turbo_fit["maxMeasuredPixels"] == 1024 * 1024
     assert set(turbo_fit["phaseCurvesByTier"]) == {"q4", "q8", "bf16"}
     for tier in ("q4", "q8", "bf16"):
@@ -1346,28 +1696,154 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
             "chunkedAttention",
             "streamedBlocks",
         }
+    # sc-17097 ABI-3 re-measurement. Two shape changes worth reading rather than skimming:
+    # the three-stage DECODE phase is now the dominant, strongly resolution-dependent term
+    # (26.51 + 9.75/MP, against the ABI-1 capture's near-flat 26.47 + 0.08/MP), and the
+    # streamed-block decode is no longer the 0.30 + 3.27/MP ramp - it measured flat at 4.48.
     assert turbo_fit["phaseCurvesByTier"]["bf16"] == {
         "threeStage": {
-            "text": {"fixedGb": 8.80, "perMpxGb": 0.00},
-            "denoise": {"fixedGb": 23.83, "perMpxGb": 7.90},
-            "decode": {"fixedGb": 26.55, "perMpxGb": 0.00},
+            "text": {"fixedGb": 7.90, "perMpxGb": 0.07},
+            "denoise": {"fixedGb": 22.19, "perMpxGb": 7.43},
+            "decode": {"fixedGb": 26.51, "perMpxGb": 9.75},
         },
         "tiledVae": {
-            "text": {"fixedGb": 8.80, "perMpxGb": 0.00},
-            "denoise": {"fixedGb": 23.83, "perMpxGb": 7.90},
-            "decode": {"fixedGb": 26.55, "perMpxGb": 0.00},
+            "text": {"fixedGb": 8.10, "perMpxGb": 0.00},
+            "denoise": {"fixedGb": 22.14, "perMpxGb": 7.36},
+            "decode": {"fixedGb": 24.56, "perMpxGb": 0.07},
         },
         "chunkedAttention": {
-            "text": {"fixedGb": 8.63, "perMpxGb": 0.00},
-            "denoise": {"fixedGb": 27.53, "perMpxGb": 0.22},
-            "decode": {"fixedGb": 26.52, "perMpxGb": 0.00},
+            "text": {"fixedGb": 8.10, "perMpxGb": 0.00},
+            "denoise": {"fixedGb": 25.54, "perMpxGb": 0.21},
+            "decode": {"fixedGb": 24.60, "perMpxGb": 0.00},
         },
         "streamedBlocks": {
-            "text": {"fixedGb": 8.64, "perMpxGb": 0.00},
-            "denoise": {"fixedGb": 8.64, "perMpxGb": 0.00},
-            "decode": {"fixedGb": 0.30, "perMpxGb": 3.27},
+            "text": {"fixedGb": 8.10, "perMpxGb": 0.00},
+            "denoise": {"fixedGb": 7.34, "perMpxGb": 1.03},
+            "decode": {"fixedGb": 4.48, "perMpxGb": 0.00},
         },
     }
+
+
+def test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points():
+    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them."""
+    manifest = _load_builtin_models_manifest()
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    curves = krea["candle"]["turboFit"]["phaseCurvesByTier"]
+    records = krea["candle"]["turboFit"]["evidenceRecords"]
+    measured = {
+        tier: {
+            rung: tuple(
+                next(
+                    record["observedPhasesGb"][rung]
+                    for record in records
+                    if record["tier"] == tier and record["width"] == edge
+                )
+                for edge in (768, 1024)
+            )
+            for rung in ("threeStage", "tiledVae", "chunkedAttention", "streamedBlocks")
+        }
+        for tier in ("q8", "bf16")
+    }
+    megapixel_delta = (1024**2 - 768**2) / 1_000_000
+
+    for tier, rungs in measured.items():
+        for rung, (lower, upper) in rungs.items():
+            for phase in ("text", "denoise", "decode"):
+                measured_slope = max(
+                    0.0,
+                    (upper[phase] - lower[phase]) / megapixel_delta,
+                )
+                fitted_slope = curves[tier][rung][phase]["perMpxGb"]
+                assert measured_slope <= fitted_slope + 1e-9
+                assert fitted_slope < measured_slope + 0.02, (
+                    f"{tier}.{rung}.{phase} slope {fitted_slope:.4f} must be the "
+                    f"conservative two-decimal fit of same-tier measured slope "
+                    f"{measured_slope:.4f}"
+                )
+
+
+def test_krea_turbo_fit_schema_rejects_stale_or_incomplete_contract_evidence():
+    """sc-15449: calibrated optimization evidence stays closed and revision-bound."""
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    krea_index = next(
+        index
+        for index, model in enumerate(manifest["models"])
+        if model["id"] == "krea_2_turbo"
+    )
+
+    def assert_rejected(label, mutate):
+        candidate = copy.deepcopy(manifest)
+        turbo_fit = candidate["models"][krea_index]["candle"]["turboFit"]
+        mutate(turbo_fit)
+        assert list(validator.iter_errors(candidate)), label
+
+    assert_rejected("unknown calibration ABI", lambda fit: fit.__setitem__("calibrationAbi", 2))
+    assert_rejected(
+        "superseded calibration ABI",
+        lambda fit: fit.__setitem__("calibrationAbi", 1),
+    )
+    assert_rejected("missing load shape", lambda fit: fit.pop("loadShape"))
+    assert_rejected(
+        "unknown load shape",
+        lambda fit: fit.__setitem__("loadShape", "lazy_materialization"),
+    )
+    assert_rejected(
+        "malformed calibration fingerprint",
+        lambda fit: fit.__setitem__("calibrationFingerprint", "Krea Turbo"),
+    )
+    assert_rejected(
+        "stale SceneWorks contract",
+        lambda fit: fit.__setitem__("sceneWorksRevision", "sc-15449-contract-v0"),
+    )
+    assert_rejected(
+        "mutable inference revision",
+        lambda fit: fit.__setitem__("inferenceRevision", "main"),
+    )
+    assert_rejected("estimated evidence", lambda fit: fit.__setitem__("measured", False))
+    assert_rejected(
+        "missing output parity evidence",
+        lambda fit: fit["verification"].pop("outputParity"),
+    )
+    assert_rejected(
+        "unknown verification evidence",
+        lambda fit: fit["verification"].__setitem__("notes", "unchecked"),
+    )
+    assert_rejected(
+        "incomplete cumulative parameters",
+        lambda fit: fit["strategyParameters"]["chunkedAttention"].pop("decodeOverlap"),
+    )
+    assert_rejected(
+        "resident optimization parameter",
+        lambda fit: fit["strategyParameters"]["resident"].__setitem__("window", 1),
+    )
+    assert_rejected(
+        "missing exact evidence records",
+        lambda fit: fit.pop("evidenceRecords"),
+    )
+    assert_rejected(
+        "evidence without observed peak",
+        lambda fit: fit["evidenceRecords"][0]["observedPeaksGb"].pop("streamedBlocks"),
+    )
+    assert_rejected(
+        "mutable artifact revision",
+        lambda fit: fit["evidenceRecords"][0].__setitem__("sceneWorksCommit", "main"),
+    )
+    assert_rejected(
+        "unexecuted parity",
+        lambda fit: fit["evidenceRecords"][0]["parity"].__setitem__("result", "not_run"),
+    )
+    assert_rejected(
+        "exact request without geometry-specific parity",
+        lambda fit: fit["evidenceRecords"][0].pop("parity"),
+    )
+    assert_rejected(
+        "phase-fit record pretending tier parity is geometry-specific",
+        lambda fit: fit["evidenceRecords"][2].__setitem__(
+            "parity", copy.deepcopy(fit["evidenceRecords"][3]["parity"])
+        ),
+    )
 
 
 def test_boogu_candle_vram_tiers_cover_and_pin_the_default_q8_tier():
@@ -1441,11 +1917,25 @@ def test_wan_a14b_candle_all_tiers_measured_q8_admits_32gb():
     completes them:
       * q8's live peak is ~28 GiB, but its nvidia-smi pool high-water (~34-36, which cudarc never frees)
         left it unproven whether a <=32 GB card packs down to the live peak. A GPU-memory-balloon
-        emulation (64 GiB balloon -> ~31 GiB free) reproduced the SAME ~28 live peak at full GPU util with
-        no spill, so q8 is gated at its live peak and now ADMITS a 32 GB RTX 5090 -- the epic goal.
+        emulation (64 GiB balloon -> ~31 GiB free) reproduced the SAME ~28 live peak with no apparent
+        spill, so q8 is gated at its live peak and ADMITS a 32 GB RTX 5090 -- the epic goal.
       * bf16 was staged (dense fp32 diffusers, after downloading the missing transformer_2 shards) and
         measured at ~39 GiB (one bf16 expert + activations), REPLACING the old conservative derived 56
         bound: the real number admits a 48 GB card but stays refused on 32.
+
+    WARNING -- the q8/bf16 <=32/<=48 admissions are UNPROVEN (sc-16091 -> sc-16118). The balloon argument
+    behind them is circular: `balloon(64) + live(28) = 92 < 96` substitutes the LIVE figure for the pool
+    high-water, which is only valid if the pool trimmed -- the very claim under test. Under the competing
+    hypothesis it reads 64 + 34.4 = 98.4 > 95.6, a ~2.8 GiB overcommit. And "a spill would inflate wall
+    time" is measured FALSE on that host (sc-15791): a 1.48 GiB overcommit completed at 1.07x, faster in a
+    sibling run. Both hypotheses predict what was observed, since USED_MEM_HIGH reports LIVE bytes either
+    way. bf16 has no independent evidence at all -- it was granted 48 on the same q8 inference.
+
+    The values below are therefore pinned as SHIPPED, not as VERIFIED. This test guards against silent
+    drift; it does not certify the small-card fit. sc-16118 re-validates both under an ENFORCED pool cap
+    (`CUmemPoolProps.maxSize` + `cuDeviceSetMemPool`) instead of a balloon, which is not a ceiling on that
+    hardware. If a tier fails there, these numbers change and this docstring's premise goes with them.
+
     Pinning the exact values (not just measured:true) mutation-checks the flip -- ripping a tier out or
     regressing q8 back to its pool bound goes RED here. This is the inverse of the sc-12631
     `..._q4_measured_admits_32gb_q8_bf16_deferred` tripwire it replaces.
@@ -1886,3 +2376,166 @@ def test_recipe_preset_schema_rejects_a_bad_id_pattern():
         error.validator == "pattern" and list(error.absolute_path) == ["presets", 0, "id"]
         for error in errors
     )
+
+
+# --------------------------------------------------------------------------------------
+# sc-15299 — the `image` capability sub-block (Guidance / Negative prompt axes).
+#
+# The image-lane sibling of the `video` block sc-8445 shipped for Krea Realtime. Image Studio
+# reads `image.supportsGuidance` / `image.supportsNegativePrompt` with ABSENT-MEANS-TRUE polarity
+# (the opposite of `audio`), so these audits pin BOTH directions: the declarations that must be
+# present, and the entries that must stay silent so the change is behaviour-neutral for them.
+#
+# Ground truth is the engine descriptor each model resolves to through
+# `crates/sceneworks-worker/src/engines.rs` MODEL_TABLE, which is exactly what the worker's
+# `resolve_guidance` / `resolve_negative_prompt` / `resolve_true_cfg` gate on.
+# --------------------------------------------------------------------------------------
+
+# Both axes absent: the engine descriptor is supports_guidance=false AND
+# supports_negative_prompt=false, so `resolve_guidance`, `resolve_true_cfg` and
+# `resolve_negative_prompt` ALL return None. Every one is a guidance-distilled student.
+IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
+    {
+        "z_image_turbo",
+        "z_image_edit",  # runs on the z_image_turbo ENGINE
+        "flux_schnell",
+        "ideogram_4_turbo",
+        "boogu_image_turbo",
+        "krea_2_turbo",
+        "sd3_5_large_turbo",
+        "anima_turbo",
+        "mage_flow_turbo",
+        "mage_flow_edit_turbo",
+    }
+)
+
+# Guidance is real (embedded/distilled scale, or a bespoke lane that forwards one) but there is no
+# unconditional branch for a negative prompt to steer, so `resolve_negative_prompt` returns None.
+IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
+    {
+        "flux_dev",
+        "ideogram_4",
+        "boogu_image",
+        "boogu_image_edit",
+        "flux2_dev",
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
+        "sana_sprint_1600m",
+        "pulid_flux_dev",  # image_jobs/pulid.rs hard-sets negative_prompt: None
+    }
+)
+
+
+def _image_models_by_id() -> dict:
+    return {
+        model["id"]: model
+        for model in _load_builtin_models_manifest()["models"]
+        if model.get("type") == "image"
+    }
+
+
+def test_cfg_free_image_models_declare_both_axes_absent():
+    """sc-15299: a guidance-distilled image engine declares BOTH axes false so Image Studio
+    hides Guidance and Negative prompt instead of offering knobs the worker discards."""
+    models = _image_models_by_id()
+    missing = sorted(IMAGE_MODELS_WITHOUT_EITHER_AXIS - set(models))
+    assert not missing, f"CFG-free ids no longer in the catalog: {missing}"
+    for model_id in sorted(IMAGE_MODELS_WITHOUT_EITHER_AXIS):
+        block = models[model_id].get("image")
+        assert block is not None, f"{model_id} is CFG-free but declares no `image` block"
+        assert block.get("supportsGuidance") is False, (
+            f"{model_id} is CFG-free — its engine descriptor advertises supports_guidance=false "
+            "and it is not a true-CFG family, so no guidance scale reaches the engine"
+        )
+        assert block.get("supportsNegativePrompt") is False, (
+            f"{model_id} is CFG-free — resolve_negative_prompt returns None for it"
+        )
+
+
+def test_negative_only_image_models_keep_their_guidance_axis():
+    """sc-15299: the two keys are INDEPENDENT. An embedded-guidance engine (FLUX dev, Ideogram 4,
+    SenseNova, SANA-Sprint, …) takes a real guidance scale and no negative prompt, so it must
+    declare ONLY `supportsNegativePrompt: false` — declaring guidance false too would hide a live
+    control."""
+    models = _image_models_by_id()
+    missing = sorted(IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY - set(models))
+    assert not missing, f"negative-free ids no longer in the catalog: {missing}"
+    for model_id in sorted(IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY):
+        block = models[model_id].get("image")
+        assert block is not None, f"{model_id} takes no negative prompt but declares no `image` block"
+        assert block.get("supportsNegativePrompt") is False, f"{model_id} must declare the negative axis absent"
+        assert "supportsGuidance" not in block, (
+            f"{model_id} DOES take a guidance scale — declaring supportsGuidance would hide a live control"
+        )
+
+
+def test_guidance_taking_image_models_declare_nothing():
+    """sc-15299 polarity guard: absent means TRUE, so every image entry that genuinely takes both
+    axes must stay silent. Includes the true-CFG Chroma family, whose descriptor reads
+    supports_guidance=false but whose Guidance control IS live — the worker forwards
+    `advanced.guidanceScale` as `true_cfg` (base.rs `uses_true_cfg`/`resolve_true_cfg`). Declaring
+    an `image` block for Chroma would break a working knob."""
+    models = _image_models_by_id()
+    declared = {model_id for model_id, model in models.items() if model.get("image") is not None}
+    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY
+    assert declared == expected, (
+        "unexpected `image` declarations — every other image entry must stay silent so it keeps "
+        f"both controls: unexpected={sorted(declared - expected)}, missing={sorted(expected - declared)}"
+    )
+    for model_id in ("chroma1_hd", "chroma1_base", "chroma1_flash", "sana_1600m", "krea_2_raw", "sdxl"):
+        assert models[model_id].get("image") is None, (
+            f"{model_id} takes both axes (Chroma via true_cfg) and must declare no `image` block"
+        )
+
+
+def test_cfg_free_image_models_carry_no_default_negative_prompt():
+    """sc-15299: a model with no negative axis must not seed one — the box is hidden and the value
+    is never sent, so `ui.defaultNegativePrompt` would plant a ghost. Mirrors the krea_2_turbo rule
+    already pinned in crates/sceneworks-core/src/builtin_manifests.rs."""
+    models = _image_models_by_id()
+    for model_id in sorted(IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY):
+        assert not models[model_id].get("ui", {}).get("defaultNegativePrompt"), (
+            f"{model_id} declares no negative-prompt axis, so it must not declare a default negative"
+        )
+
+
+def test_schema_rejects_an_unknown_key_inside_the_image_block():
+    """The `image` object is additionalProperties:false like its `video` sibling."""
+    manifest = _load_builtin_models_manifest()
+    target = next(model for model in manifest["models"] if model["id"] == "z_image_turbo")
+    target["image"]["supportsGuidnce"] = False
+    schema = _load_schema(SCHEMA_PATH)
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    assert any("supportsGuidnce" in error.message for error in errors)
+
+
+# --------------------------------------------------------------------------------------
+# sc-15299 audio half — `audio.supportsGuidance` / `audio.supportsNegativePrompt` were READ by
+# AudioStudio.jsx but never PRODUCIBLE: the `audio` object is additionalProperties:false and the
+# schema listed neither key, so the Music tab's Guidance/Negative controls were hidden by accident
+# rather than by declaration. The schema now lists them and ACE-Step declares them.
+# --------------------------------------------------------------------------------------
+
+
+def test_audio_block_can_declare_the_guidance_axes():
+    """Mutation guard: drop either property from the schema and the shipped manifest stops
+    validating — which is exactly the state this story fixed."""
+    schema = _load_schema(SCHEMA_PATH)
+    audio_properties = schema["properties"]["models"]["items"]["properties"]["audio"]["properties"]
+    for key in ("supportsGuidance", "supportsNegativePrompt"):
+        assert audio_properties[key]["type"] == "boolean", f"audio.{key} must be declarable"
+
+
+def test_acestep_declares_its_distilled_guidance_axes_explicitly():
+    """ACE-Step v1.5 Turbo is guidance-distilled (candle-audio-acestep's descriptor is
+    supports_guidance=false / supports_negative_prompt=false, and its generate path never reads
+    either). AUDIO polarity is absent-means-FALSE, so this is UI-neutral — it makes the hiding
+    intentional and lets a future non-distilled music model turn the controls on."""
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    audio_block = models["acestep_v15_turbo"]["audio"]
+    assert audio_block["supportsGuidance"] is False
+    assert audio_block["supportsNegativePrompt"] is False

@@ -364,8 +364,9 @@ pub fn apply_model_manifest_defaults(
 /// 15-bucket ÷16-aligned ≤2048² resolution list, the 1024² default, `mlx.minMemoryGb` 48 (the ≤1536²
 /// visibility floor + the >1536² memory-gate anchor, sc-13959 — an empty `mlx` block would offer 2048²
 /// unconditionally on any Mac), the `ui.img2img` toggle + `img2imgStrength` slider (reference-guided
-/// latent-init, resolved by the worker's `resolve_img2img_init_generic`), and — for the MLX Kontext
-/// edit surface (sc-14119) — the `ui.editReferences` optional-second-image slot the Edit tab renders
+/// latent-init, resolved by the worker's `resolve_img2img_init_generic`), and — for the native
+/// Kontext-style edit surface on MLX and Candle (sc-14119) — the `ui.editReferences`
+/// optional-second-image slot the Edit tab renders
 /// (the `edit_image` capability is stamped by `model_capabilities_for_type_and_family`). The
 /// `editReferences` copy mirrors the builtin Turbo entry (image 1 required + image 2 optional, fixed
 /// order).
@@ -559,10 +560,9 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "chroma" => Some("chroma_diffusers"),
         "kolors" => Some("kolors_diffusers"),
         "sdxl" => Some("sdxl_diffusers"),
-        // Mage-Flow is macOS-only native MLX (epic 14034): there is no Torch/diffusers adapter.
-        // Like bernini / sd3 this label is recorded in recipe/lineage only — the job is MLX-routed
-        // by engine id (builtins) or by family (a full base fine-tune, sc-15036), never
-        // instantiated through a Torch adapter. Matches the builtin entries' `"adapter"`.
+        // Mage-Flow uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
+        // Torch/diffusers adapter. This family label records recipe/lineage and selects the native
+        // routes; it is never instantiated through the generic Torch adapter.
         "mage-flow" => Some("mlx_mage"),
         // SD3 / SD3.5 is the native-MLX port (epic 7841); there is no Torch/diffusers
         // adapter wired in SceneWorks. This label is recorded in recipe/lineage only —
@@ -573,21 +573,21 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
         "svd" => Some("svd_video"),
-        // Bernini is macOS-only native MLX (epic 4699): there is no Torch/diffusers
-        // adapter. This label is recorded in recipe/lineage only; on Mac the job is
-        // MLX-routed by engine id, never instantiated through a Torch adapter.
+        // Bernini uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
+        // Torch/diffusers adapter. This label is recorded in recipe/lineage and selects native
+        // routes, never the generic Torch adapter.
         "bernini" => Some("bernini"),
-        // SCAIL-2 (epic 5439) is likewise macOS-only native MLX (engine id
+        // SCAIL-2 (epic 5439) uses native MLX on macOS and native Candle off-Mac (engine id
         // "scail2_14b"); no Torch/diffusers adapter. Lineage label only.
         "scail2" => Some("scail2"),
-        // Anima (epic 10512) is macOS-only native MLX (Cosmos-Predict2 DiT + AnimaTextConditioner);
-        // there is no Torch/diffusers adapter — the job is MLX-routed by engine id (`anima_base` /
-        // `anima_aesthetic` / `anima_turbo`), never instantiated through a Torch adapter. Lineage
-        // label only (mirrors sd3 / bernini / scail2).
+        // Anima (epic 10512) uses native MLX on Mac and Candle/CUDA off-Mac; there is no Python
+        // diffusers adapter. This lineage label names the MLX dispatch path while Candle routing owns
+        // the sibling native engine (mirrors sd3 / bernini / scail2).
         "anima" => Some("anima"),
-        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints reuse the same MLX Krea
-        // adapter the builtin krea_2 catalog entries declare (`mlx_krea`), routed to the Krea MLX
-        // engine by family (sc-14108). The match scrutinee is the normalized family, so the arm keys
+        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints retain the historical
+        // `mlx_krea` lineage token used by the builtin catalog. Both native MLX and Candle dispatch
+        // this family through their imported Krea routes (sc-14108). The match scrutinee is the
+        // normalized family, so the arm keys
         // on the hyphen form `krea-2` (`normalize_model_family("krea_2")`). Builtin krea_2 entries
         // (`krea_2_turbo` / `krea_2_raw`) declare `adapter` explicitly, so
         // `apply_model_manifest_defaults` (`or_insert_with`) never overrides them — this default only
@@ -606,48 +606,56 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // code, and no Z-Image IP-Adapter exists upstream
         // (sc-2005). Custom z-image models that override capabilities can still
         // re-declare it, but the family default shouldn't claim what it can't do.
-        ("image", "z-image") => vec!["text_to_image", "style_variations"],
-        ("image", "qwen-image") => vec!["text_to_image", "style_variations"],
-        ("image", "lens") => vec!["text_to_image", "style_variations"],
+        ("image", "z-image") => vec!["text_to_image"],
+        ("image", "qwen-image") => vec!["text_to_image"],
+        // Qwen Image, Lens, Chroma, imported SDXL, and imported Mage-Flow have no distinct
+        // style-variation execution mode. Their builtin entries and imported-family defaults must
+        // agree where both exist so an imported checkpoint cannot restore the hidden no-op removed
+        // by sc-18481. Imported SDXL also has no model-specific edit route: only the exact builtin
+        // ids are admitted by the native SDXL edit/IP-Adapter route tables.
+        //
+        // Lens and Chroma have no distinct style-variation execution mode. Their builtin entries
+        // and imported-family defaults must agree so an imported checkpoint cannot restore the
+        // hidden no-op removed by sc-18481.
+        ("image", "lens") => vec!["text_to_image"],
         ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa", "interleave"],
-        ("image", "flux") => vec!["text_to_image", "style_variations"],
-        ("image", "chroma") => vec!["text_to_image", "style_variations"],
-        ("image", "kolors") => vec!["text_to_image", "character_image", "style_variations"],
-        ("image", "sdxl") => vec!["text_to_image", "edit_image", "style_variations"],
-        // SD3 / SD3.5 (epic 7841, native MLX). Text-to-image flow-matching MMDiT;
+        ("image", "flux") => vec!["text_to_image"],
+        ("image", "chroma") => vec!["text_to_image"],
+        ("image", "kolors") => vec!["text_to_image", "character_image"],
+        ("image", "sdxl") => vec!["text_to_image"],
+        // SD3 / SD3.5 (epic 7841, native MLX and Candle). Text-to-image flow-matching MMDiT;
         // img2img/inpaint are exposed by the diffusers pipelines but are not wired in
-        // SceneWorks yet, so the family default advertises only what the native port
-        // serves today (sc-7874 declares the LoRA-compatibility family).
-        ("image", "sd3") => vec!["text_to_image", "style_variations"],
-        // Anima (epic 10512, native MLX) is an anime text-to-image DiT. LoRA-capable
-        // (`supports_lora`/`supports_lokr`, sc-10521); no edit/inpaint or reference/IP-Adapter
-        // surface, so the family default advertises only t2i + style variations (like z-image /
-        // qwen-image / lens / flux).
-        ("image", "anima") => vec!["text_to_image", "style_variations"],
-        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The KreaImported lane serves
-        // text-to-image (sc-14018), img2img (sc-14071 — reference-guided latent-init, exposed via the
+        // SceneWorks yet, so the family default advertises only what the shared native
+        // backend routes serve today (sc-7874 declares the LoRA-compatibility family).
+        ("image", "sd3") => vec!["text_to_image"],
+        // Anima (epic 10512) is an anime text-to-image DiT served by native MLX and Candle.
+        // LoRA-capable (`supports_lora`/`supports_lokr`, sc-10521); no edit/inpaint,
+        // reference/IP-Adapter, or distinct style surface, so the family default is t2i-only.
+        ("image", "anima") => vec!["text_to_image"],
+        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The native MLX and Candle
+        // KreaImported lanes serve text-to-image (sc-14018), img2img (sc-14071 — reference-guided latent-init, exposed via the
         // `ui.img2img` toggle stamped by `apply_family_studio_surface_defaults`, NOT a capabilities
         // value: z-image owns "image_to_image" for its edit-mode img2img), AND the Kontext instruction
-        // `edit_image` surface on the MLX backend (sc-14119 — the source rides as in-context tokens +
+        // `edit_image` surface on both backends (sc-14119 — the source rides as in-context tokens +
         // grounds the Qwen3-VL vision tower, driven by the `krea2_identity_edit` LoRA). `edit_image`
         // pairs with the `ui.editReferences` slot `apply_family_studio_surface_defaults` also stamps.
         // Still NOT `character_image` (no IP-Adapter/identity surface on the bare transformer). The
         // match keys on the normalized hyphen form `krea-2` (`normalize_model_family("krea_2")`). This
         // default only affects imported/user krea_2 models; the builtin krea_2 entries declare their
         // own `capabilities` explicitly, so `apply_model_manifest_defaults` never changes them.
-        ("image", "krea-2") => vec!["text_to_image", "edit_image", "style_variations"],
+        ("image", "krea-2") => vec!["text_to_image", "edit_image"],
         // Mage-Flow (epic 14034). The non-edit variants — the only ones that are a training target,
         // and therefore the only ones a full base fine-tune (sc-15036) can be derived from —
         // advertise NO conditioning on their descriptor: no reference, no multi-reference, no edit.
-        // So text-to-image plus style variations, and deliberately not `edit_image` (that needs an
-        // `mage_flow_edit*` checkpoint) nor `character_image` (no identity surface).
-        ("image", "mage-flow") => vec!["text_to_image", "style_variations"],
+        // So text-to-image only: there is no separate style-variation route, `edit_image` needs a
+        // `mage_flow_edit*` checkpoint, and there is no `character_image` identity surface.
+        ("image", "mage-flow") => vec!["text_to_image"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
         // (`edit_image`, the source-image edit via `Conditioning::Reference`). No
-        // `character_image`/`style_variations` (no IP-Adapter/style surface) and no LoRA
-        // (the descriptor reports `supports_lora: false`).
+        // `character_image` or distinct style mode (no IP-Adapter/style surface). The MLX descriptor has
+        // no adapter slot; Candle supports LoRA/LoKr and is represented as Candle-only matrix cells.
         ("image", "bernini") => vec!["text_to_image", "edit_image"],
         ("video", "ltx-video") => vec![
             "image_to_video",
@@ -2182,6 +2190,97 @@ fn is_base_model_gated_family(family: &str) -> bool {
     family == "wan-video"
 }
 
+/// Whether a model id names a **14B-class** Wan-family backbone, by the catalog's own id
+/// convention: the 14B entries carry a `_14b` suffix (`wan_2_2_t2v_14b`, `wan_2_2_i2v_14b`,
+/// `wan_2_2_vace_fun_14b`, `scail2_14b`, `krea_realtime_14b`) and the 5B TI2V entry — the other
+/// side of the split [`is_base_model_gated_family`] exists for — does not (`wan_2_2`).
+///
+/// A convention rather than an enumerated list on purpose: a new Wan 14B entry must not have to be
+/// added here to keep working, and a hard-coded list would silently exclude it.
+fn is_wan_14b_class_id(id: &str) -> bool {
+    normalize_model_family(id).ends_with("-14b")
+}
+
+/// Whether a model id names an **image-to-video** Wan entry (`wan_2_2_i2v_14b`), by the same id
+/// convention — an `i2v` path SEGMENT, not a substring, so a hypothetical `…si2vx…` id cannot match
+/// by accident.
+///
+/// This is a size-class peer of the 14B T2V entries, so [`is_wan_14b_class_id`] alone admits it.
+/// It must not ride the extra-compatible arm: an I2V LoRA targets `cross_attn.k_img`/`v_img`, which
+/// a text-to-video backbone does not have at any surface width, and the product ALREADY treats the
+/// two as non-interchangeable — `wan_2_2_i2v_14b` is refused on `wan_2_2_t2v_14b` by exact equality.
+/// Admitting it on Krea Realtime (also a T2V backbone) would be the one place that inconsistency
+/// existed, and it would surface as a hard engine error only AFTER a multi-GB tier fetch instead of
+/// a 400 at submit.
+fn is_wan_i2v_id(id: &str) -> bool {
+    normalize_model_family(id)
+        .split('-')
+        .any(|segment| segment == "i2v")
+}
+
+/// Whether a LoRA recording trained base model `base` may load on `model_id`, for a model whose own
+/// declared family is `model_family`. This is the base-model half of the compatibility gate; the
+/// family half is [`accepted_lora_families`].
+///
+/// **Exact id equality is the ordinary answer** and the only one for a genuine Wan model: `wan_2_2`
+/// (TI2V-5B) and the `*_14b` entries both declare `wan-video`, and cross-applying a LoRA between
+/// them garbles the output, so a LoRA that records its base pins to that base.
+///
+/// The second arm exists because of the extra-compatible relation (sc-15017). Krea Realtime 14B
+/// declares its OWN `krea-realtime` family and accepts `wan-video` LoRAs because its DiT is Wan 2.1
+/// T2V 14B weight-for-weight — but a Wan LoRA's recorded base is a Wan id, so it can NEVER equal
+/// `krea_realtime_14b`. Under exact equality alone, every base-model-stamped Wan LoRA would be
+/// refused on Krea and the relation would be dead on arrival for exactly the LoRAs the app itself
+/// stamps at import. So for a model that accepts `wan-video` through the registry, the gate is
+/// preserved rather than dropped, on TWO axes:
+///
+/// * the **size class** (`is_wan_14b_class_id`) — the 5B-vs-14B split the gate was written for;
+/// * the **conditioning class** (`is_wan_i2v_id`) — an I2V base is refused, because Krea Realtime is
+///   a text-to-video backbone and `wan_2_2_i2v_14b` is already refused on the sibling
+///   `wan_2_2_t2v_14b` by exact equality. Without this the arm would be the one place in the product
+///   where an I2V stamp is admitted onto a T2V model, and the mismatch would surface as a hard
+///   engine error after a multi-GB tier fetch rather than a 400 at submit.
+///
+/// A LoRA that records NO base model is not this function's concern — the callers fall back to
+/// family gating for those, exactly as before.
+pub fn base_model_satisfies_gate(model_family: &str, model_id: &str, base: &str) -> bool {
+    if base == model_id {
+        return true;
+    }
+    let normalized_family = normalize_model_family(model_family);
+    extra_compatible_lora_families(&normalized_family).contains(&"wan-video")
+        && is_wan_14b_class_id(model_id)
+        && is_wan_14b_class_id(base)
+        && (extra_compatible_backbone_is_image_conditioned(&normalized_family)
+            || !is_wan_i2v_id(base))
+}
+
+/// Whether a model riding the `wan-video` extra-compatible arm has an **image-conditioned** (I2V)
+/// backbone, i.e. one that actually carries the `cross_attn.k_img`/`v_img` projections an I2V LoRA
+/// targets.
+///
+/// This exists because the I2V exclusion in [`base_model_satisfies_gate`] is not a property of Wan
+/// LoRAs — it is a property of the *host*. sc-15017 introduced it for Krea Realtime, whose DiT is Wan
+/// 2.1 **T2V** 14B: it has no `k_img`/`v_img` at any width, so an I2V-stamped LoRA cannot apply and
+/// the exclusion is right. Applying that same rule to every extra-compatible family inverts it for an
+/// image-conditioned host — SCAIL-2's DiT IS Wan2.1-**I2V**-14B-derived and does carry `k_img`/`v_img`
+/// (they are adaptable targets, and the bundled `scail2_lightning` adapter patches them), so an I2V
+/// base is the *exact* architectural match while a T2V base is the lossy one. Without this split,
+/// forward-porting sc-18200 to a tree containing sc-15017 would refuse precisely the right LoRAs on
+/// SCAIL-2 and admit the weaker ones (sc-18200 forward-port).
+///
+/// Both size classes still gate: `is_wan_14b_class_id` keeps the 5B TI2V base out either way, which
+/// is the split the base-model gate was written for.
+fn extra_compatible_backbone_is_image_conditioned(normalized_family: &str) -> bool {
+    match normalized_family {
+        // Wan2.1-I2V-14B-derived: 40 blocks × dim 5120 with the I2V cross-attention stack intact.
+        "scail2" => true,
+        // Wan 2.1 T2V 14B weight-for-weight — no image cross-attention at any width.
+        "krea-realtime" => false,
+        _ => false,
+    }
+}
+
 /// A LoRA id for error messages: `id` / `loraId` / `lora_<n>`.
 fn lora_display_id(lora: &Value, index: usize) -> String {
     lora.get("id")
@@ -2229,7 +2328,11 @@ pub fn validate_lora_compatibility(
                 .any(|family| is_base_model_gated_family(family))
             {
                 if let Some(base) = lora_base_model(lora) {
-                    if base != model_id {
+                    // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
+                    // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
+                    // (sc-15017) — its base can never equal that model's own id.
+                    if !base_model_satisfies_gate(model_family.unwrap_or_default(), model_id, &base)
+                    {
                         return Err(format!(
                             "LoRA {lora_id} was trained for base model {base}, not {model_id}; \
                              Wan 5B and 14B LoRAs are not interchangeable."
@@ -2681,7 +2784,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("flux"), Some("flux_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "flux"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -2690,7 +2793,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("chroma"), Some("chroma_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "chroma"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -2699,7 +2802,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("kolors"), Some("kolors_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "kolors"),
-            vec!["text_to_image", "character_image", "style_variations"],
+            vec!["text_to_image", "character_image"],
         );
     }
 
@@ -2708,7 +2811,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("sdxl"), Some("sdxl_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "sdxl"),
-            vec!["text_to_image", "edit_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -3648,7 +3751,7 @@ mod tests {
         assert_eq!(super::model_adapter_for_family("anima"), Some("anima"));
         assert_eq!(
             super::model_capabilities_for_type_and_family("image", "anima"),
-            vec!["text_to_image", "style_variations"]
+            vec!["text_to_image"]
         );
         assert_eq!(
             super::diffusers_class_name_to_family("AnimaModularPipeline").as_deref(),
@@ -4071,7 +4174,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("sd3"), Some("sd3"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "sd3"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -4331,6 +4434,27 @@ mod tests {
     }
 
     #[test]
+    fn imported_family_defaults_do_not_restore_unrouted_image_modes() {
+        for (family, adapter) in [
+            ("lens", "lens_turbo"),
+            ("chroma", "chroma_diffusers"),
+            ("qwen-image", "qwen_image"),
+            ("sdxl", "sdxl_diffusers"),
+            ("mage-flow", "mlx_mage"),
+        ] {
+            let mut entry = serde_json::Map::new();
+            apply_model_manifest_defaults(&mut entry, "image", Some(family));
+
+            assert_eq!(entry["adapter"], adapter, "{family} adapter default");
+            assert_eq!(
+                entry["capabilities"],
+                json!(["text_to_image"]),
+                "imported {family} must expose only its routed text-to-image default"
+            );
+        }
+    }
+
+    #[test]
     fn imported_krea_2_gets_adapter_and_text_to_image_capability() {
         // sc-14108 (epic 14015): an imported single-file krea_2 base checkpoint whose family the
         // base-weight gate stamps must ALSO pick up the krea_2 family defaults, or it stays
@@ -4343,12 +4467,12 @@ mod tests {
 
         // The imported model is now MLX-Krea-routed and selectable as a text-to-image model.
         assert_eq!(entry["adapter"], "mlx_krea");
-        // Text-to-image + edit_image (the MLX Kontext edit surface, sc-14119) + style_variations.
+        // Text-to-image + edit_image (the MLX Kontext edit surface, sc-14119).
         // img2img is a `ui.img2img` toggle (asserted in the sibling test), NOT a capabilities value.
         // `character_image` stays unclaimed (no IP-Adapter/identity surface on the bare transformer).
         assert_eq!(
             entry["capabilities"],
-            json!(["text_to_image", "edit_image", "style_variations"])
+            json!(["text_to_image", "edit_image"])
         );
         // `loraCompatibility.families` carries the normalized token (as every other family does,
         // e.g. wan-video above) — Krea LoRAs resolve to it through `canonical_lora_family`.
@@ -4426,13 +4550,10 @@ mod tests {
         apply_model_manifest_defaults(&mut entry, "image", Some("mage-flow"));
 
         assert_eq!(entry["adapter"], "mlx_mage");
-        // Text-to-image + style variations. NOT `edit_image` (that needs an `mage_flow_edit*`
-        // checkpoint, which is not a training target) and NOT `character_image` (no identity
-        // surface) — the non-edit Mage descriptors advertise no conditioning at all.
-        assert_eq!(
-            entry["capabilities"],
-            json!(["text_to_image", "style_variations"])
-        );
+        // Text-to-image only. There is no separate style route; `edit_image` needs a
+        // `mage_flow_edit*` checkpoint, which is not a training target, and the non-edit Mage
+        // descriptors advertise no identity/conditioning surface.
+        assert_eq!(entry["capabilities"], json!(["text_to_image"]));
         assert_eq!(entry["loraCompatibility"]["families"], json!(["mage-flow"]));
 
         assert_eq!(
@@ -4759,12 +4880,160 @@ mod tests {
         .is_ok());
     }
 
+    /// 🔴 sc-15017: the family half of the gate was never the whole gate. `wan-video` is
+    /// base-model GATED, and that gate keys on the LORA's declared family — so it fires on a Krea
+    /// Realtime job too, where exact id equality can never hold (the LoRA records a Wan base,
+    /// the model is `krea_realtime_14b`). Left alone, every base-model-STAMPED Wan LoRA — which is
+    /// what SceneWorks' own importer writes — was refused on Krea while an unstamped one passed.
+    ///
+    /// The relaxation must not dissolve the gate: 5B and 14B stay non-interchangeable.
+    #[test]
+    fn base_model_gate_admits_wan_14b_on_krea_but_still_splits_5b_from_14b() {
+        // Exact equality is unchanged, and it is the ONLY answer for a genuine Wan model: the
+        // second arm cannot fire there, because `wan-video` has no extra-compatible entry.
+        assert!(base_model_satisfies_gate(
+            "wan-video",
+            "wan_2_2_t2v_14b",
+            "wan_2_2_t2v_14b"
+        ));
+        assert!(
+            !base_model_satisfies_gate("wan-video", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"),
+            "two 14B WAN models must still pin to their own base — the relaxation is only for the \
+             extra-compatible relation, not a blanket 14B pass"
+        );
+        assert!(!base_model_satisfies_gate(
+            "wan-video",
+            "wan_2_2_t2v_14b",
+            "wan_2_2"
+        ));
+
+        // Krea Realtime accepts a Wan 14B base…
+        assert!(base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_2_t2v_14b"
+        ));
+        assert!(base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_1_t2v_14b"
+        ));
+        // …and REFUSES the 5B TI2V base, which is the whole reason the gate exists.
+        assert!(
+            !base_model_satisfies_gate("krea-realtime", "krea_realtime_14b", "wan_2_2"),
+            "the 5B TI2V base has 48 latent channels — admitting it would garble the render"
+        );
+        // A model with no extra-compatible entry gets no relaxation, even between two 14B ids.
+        // (This used to name `scail2`, which gained a `wan-video` entry in sc-18200 — so it now
+        // legitimately DOES relax, and is asserted separately below. `ltx-video` has no entry.)
+        assert!(!base_model_satisfies_gate(
+            "ltx-video",
+            "ltx_2_3_14b",
+            "wan_2_2_t2v_14b"
+        ));
+        // 🔴 …and REFUSES an I2V base, even though it is the same 14B size class. Krea Realtime is a
+        // TEXT-to-video backbone: an I2V LoRA targets `cross_attn.k_img`/`v_img`, which it does not
+        // have. The product already refuses this stamp on the sibling T2V model by exact equality
+        // (asserted right below), so admitting it here would be the one place that inconsistency
+        // existed — and it would surface as a hard engine error AFTER a multi-GB tier fetch instead
+        // of a 400 at submit.
+        assert!(!base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_2_i2v_14b"
+        ));
+        assert!(
+            !base_model_satisfies_gate("wan-video", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"),
+            "the sibling T2V model this mirrors must genuinely refuse the same stamp"
+        );
+        // The exclusion is a path SEGMENT, not a substring: an id that merely CONTAINS the letters
+        // must still pass, or a future entry could be refused for its spelling.
+        assert!(base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_2_si2vx_14b"
+        ));
+        // And an I2V base still loads on its OWN model — the exclusion is scoped to the
+        // extra-compatible arm; it does not tighten exact equality.
+        assert!(base_model_satisfies_gate(
+            "wan-video",
+            "wan_2_2_i2v_14b",
+            "wan_2_2_i2v_14b"
+        ));
+
+        // End to end through the pre-flight the worker runs.
+        let stamped_14b = json!({
+            "id": "origami", "family": "wan-video", "baseModel": "wan_2_2_t2v_14b"
+        });
+        assert!(
+            validate_lora_compatibility(
+                std::slice::from_ref(&stamped_14b),
+                Some("krea-realtime"),
+                "krea_realtime",
+                Some("krea_realtime_14b"),
+            )
+            .is_ok(),
+            "a base-model-stamped Wan 14B LoRA must run on Krea Realtime"
+        );
+        let stamped_5b = json!({
+            "id": "ti2v_style", "family": "wan-video", "baseModel": "wan_2_2"
+        });
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&stamped_5b),
+            Some("krea-realtime"),
+            "krea_realtime",
+            Some("krea_realtime_14b"),
+        )
+        .is_err());
+        // The same 5B LoRA is still fine on its own model — so the rejection above is the SIZE
+        // class, not the stamp merely being present.
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&stamped_5b),
+            Some("wan-video"),
+            "wan_video",
+            Some("wan_2_2"),
+        )
+        .is_ok());
+    }
+
     /// sc-18200: SCAIL-2's DiT is Wan2.1-I2V-derived and ships the raw I2V module names, and the
     /// bundled `scail2_lightning` toggle IS a lightx2v Wan2.1-I2V LoRA — so a Wan LoRA must load on
     /// a SCAIL-2 model. Same shape as the krea-realtime entry above, and asserted the same way so
     /// it DISCRIMINATES: dropping the registry entry leaves `[scail2]` (and the job-creation gate
     /// then rejects the lightning LoRA outright), while declaring `wan-video` as SCAIL-2's own
     /// family would make the FIRST element `wan-video`, which this pins against.
+    /// The base-model half, which only exists on this line (sc-15017). The `wan-video` registry entry
+    /// is read by `base_model_satisfies_gate` too, so sc-18200 gained a SECOND meaning when forward-
+    /// ported here — and the I2V axis sc-15017 wrote for Krea Realtime is INVERTED for SCAIL-2.
+    /// Krea Realtime is a T2V backbone with no `cross_attn.k_img`/`v_img`, so an I2V stamp must be
+    /// refused there. SCAIL-2 is Wan2.1-**I2V**-derived and carries those projections — the bundled
+    /// lightning adapter patches them — so an I2V base is its EXACT match. Ported naively, SCAIL-2
+    /// would have refused the right LoRAs and admitted the weaker ones, silently.
+    #[test]
+    fn scail2_base_model_gate_admits_i2v_unlike_the_t2v_backbone() {
+        // The exact architectural match: a Wan I2V 14B base on SCAIL-2.
+        assert!(
+            base_model_satisfies_gate("scail2", "scail2_14b", "wan_2_2_i2v_14b"),
+            "SCAIL-2 is I2V-derived and has k_img/v_img — an I2V base is its exact match"
+        );
+        // The same stamp stays refused on the T2V backbone, unchanged by this split.
+        assert!(
+            !base_model_satisfies_gate("krea-realtime", "krea_realtime_14b", "wan_2_2_i2v_14b"),
+            "Krea Realtime has no image cross-attention; sc-15017's exclusion still holds there"
+        );
+        // A T2V base is still admitted on SCAIL-2 (same 40×5120 block layout, minus the img stack).
+        assert!(base_model_satisfies_gate(
+            "scail2",
+            "scail2_14b",
+            "wan_2_2_t2v_14b"
+        ));
+        // The size class still gates on BOTH: the 5B TI2V base is refused either way.
+        assert!(
+            !base_model_satisfies_gate("scail2", "scail2_14b", "wan_2_2"),
+            "the 5B TI2V base is a different latent geometry — the relaxation is size-classed"
+        );
+    }
+
     #[test]
     fn scail2_accepts_wan_loras_one_directionally() {
         assert_eq!(

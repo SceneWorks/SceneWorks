@@ -304,7 +304,7 @@ pub(super) fn mochi_precheck(
 ///
 /// What is NOT shared with the MLX twin, and why this is a sibling rather than a widened cfg: the
 /// budget is a `VramBudget` gated on `free_gb` (not unified `total_gb`), the reserve is
-/// `vram_gate::HEADROOM_GB` (not `OS_RESERVE_GB` — the OS does not draw from discrete VRAM), and the
+/// `vram_gate::HEADROOM_GB` (not MLX's unified reserve — the OS does not draw from discrete VRAM), and the
 /// message is CUDA-worded. `budget` arrives resolved, so this stays free of the GPU probe and the whole
 /// decision is unit-testable without CUDA.
 ///

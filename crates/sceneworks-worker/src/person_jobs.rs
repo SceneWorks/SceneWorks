@@ -47,7 +47,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::image_sampling::sample_rgb_bilinear;
 use image::RgbImage;
 use serde_json::{json, Value};
@@ -73,7 +72,7 @@ use runtime_macos::media::Result as MlxResult;
 // The off-Mac (Windows/Linux candle GPU-worker lane) backend is `ort` (onnxruntime) with the
 // CUDA execution provider + a CPU fallback (sc-5498) — the same EP pattern as `pose_jobs`.
 #[cfg(not(target_os = "macos"))]
-use ort::execution_providers::CUDAExecutionProvider;
+use ort::ep::CUDA;
 #[cfg(not(target_os = "macos"))]
 use ort::session::Session;
 #[cfg(not(target_os = "macos"))]
@@ -840,7 +839,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
         // by `pose_jobs`); best-effort, see `ort_cuda`.
         crate::ort_cuda::preload_cuda_dylibs();
         b = b
-            .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])
+            .with_execution_providers([CUDA::default().build().error_on_failure()])
             .map_err(ort_err)?;
     }
     b.commit_from_file(path).map_err(ort_err)
@@ -936,7 +935,7 @@ pub(crate) fn detect_people_blocking(
 }
 
 // ---------------------------------------------------------------------------
-// weights resolution + download-on-first-use (backend-neutral: the macOS MLX safetensors
+// weights resolution (backend-neutral: the macOS MLX safetensors
 // or the off-Mac ONNX export, selected by the cfg-split `DET_FILE`/`DET_REPO`)
 // ---------------------------------------------------------------------------
 
@@ -944,7 +943,7 @@ pub(crate) fn detect_people_blocking(
 /// off-Mac, per `DET_FILE`): explicit env pin (`SCENEWORKS_PERSON_DETECTOR_WEIGHTS`), then the
 /// app cache `<data_dir>/cache/person-detect/`, then the model dir
 /// `<data_dir>/models/person-detect/`. Returns `Ok(None)` when nothing is staged (then
-/// `ensure_detector_weights` downloads it).
+/// `require_detector_weights` turns that into an actionable install error).
 ///
 /// A set-but-missing `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` is an operator error: it fails
 /// loudly (`InvalidPayload`) via [`crate::util::resolve_env_file_pin`] instead of silently
@@ -958,6 +957,15 @@ pub(crate) fn resolve_detector_weights(settings: &Settings) -> WorkerResult<Opti
     )? {
         return Ok(Some(path));
     }
+    // The installed location: whatever the `person_detector` Model Manager entry cached. That entry
+    // declares BOTH platform repos and `retain_downloads_for_os` keeps the one for this OS, so the
+    // cfg-selected `DET_REPO`/`DET_REVISION` pair below always names the artifact actually installed.
+    if let Some(path) =
+        crate::downloads::resolve_hf_component_file(settings, DET_REPO, DET_REVISION, DET_FILE)
+    {
+        return Ok(Some(path));
+    }
+    // Legacy pre-migration roots, read-only (AC10 of sc-17598) — nothing writes here any more.
     for sub in ["cache/person-detect", "models/person-detect"] {
         let candidate = settings.data_dir.join(sub).join(DET_FILE);
         if candidate.exists() {
@@ -967,22 +975,18 @@ pub(crate) fn resolve_detector_weights(settings: &Settings) -> WorkerResult<Opti
     Ok(None)
 }
 
-/// Resolve the detector weights (MLX safetensors on macOS / ONNX export off-Mac, per
-/// `DET_REPO`/`DET_FILE`), downloading them from HuggingFace on first use (into the app cache)
-/// with streaming progress/cancel and size-aware resume.
-pub(crate) async fn ensure_detector_weights(
-    settings: &Settings,
-    context: &DownloadContext<'_>,
-) -> WorkerResult<PathBuf> {
-    if let Some(path) = resolve_detector_weights(settings)? {
-        return Ok(path);
-    }
-    let target = settings
-        .data_dir
-        .join("cache")
-        .join("person-detect")
-        .join(DET_FILE);
-    ensure_hf_cached_file(context, DET_REPO, DET_REVISION, DET_FILE, &target).await
+/// The person-detector weights (MLX safetensors on macOS / ONNX export off-Mac, per
+/// `DET_REPO`/`DET_FILE`), or an actionable install error (sc-17629 / sc-17635).
+///
+/// Replaces the former `ensure_detector_weights`, which downloaded ~80 MB mid-generation. No
+/// `DownloadContext` parameter, so this lane cannot fetch (epic 17625).
+pub(crate) fn require_detector_weights(settings: &Settings) -> WorkerResult<PathBuf> {
+    resolve_detector_weights(settings)?.ok_or_else(|| {
+        crate::WorkerError::InvalidPayload(format!(
+            "The person detector is not installed. Install \"YOLO11m Person Detector\" from the \
+             Model Manager, or point SCENEWORKS_PERSON_DETECTOR_WEIGHTS at a local {DET_FILE}."
+        ))
+    })
 }
 
 #[cfg(test)]

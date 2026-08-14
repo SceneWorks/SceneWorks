@@ -1,9 +1,14 @@
-//! Host-keyed download credential store backed by a `0600` JSON file in the config
-//! dir (sc-1893). Used by the server/Docker deployment, where there is no per-user
-//! OS keychain: the rust-api manages the file via `/api/v1/credentials` and the
-//! worker reads it. The on-disk shape mirrors the worker's `SCENEWORKS_CREDENTIALS`
-//! env map (`{ host: { token, scheme } }`) with an extra `label`, so the worker can
-//! parse either source the same way.
+//! Host-keyed download credential store backed by a `0600` JSON file (sc-1893). Used
+//! by the server/Docker deployment, where there is no per-user OS keychain: the
+//! rust-api manages the file via `/api/v1/credentials` and the worker reads it. The
+//! on-disk shape mirrors the worker's `SCENEWORKS_CREDENTIALS` env map
+//! (`{ host: { token, scheme } }`) with an extra `label`, so the worker can parse
+//! either source the same way.
+//!
+//! The file lived in the config dir until sc-16540, which is a directory pointed at
+//! the repo checkout on purpose (see [`resolve_credentials_dir`]). It now resolves
+//! independently, with [`migrate_legacy_store`] moving an existing install's tokens
+//! across on first start.
 //!
 //! There is no application-level encryption: a headless container has no per-user
 //! vault and any key would have to live beside the data, so the realistic
@@ -17,9 +22,125 @@ use serde::{Deserialize, Serialize};
 
 use crate::store_util::{lock_store_path, random_hex};
 
-/// Filename of the credential store within the config dir. Shared so the rust-api
-/// (writer) and the worker (reader) never drift.
+/// Filename of the credential store. Shared so the rust-api (writer) and the worker
+/// (reader) never drift.
 pub const CREDENTIALS_FILENAME: &str = "credentials.json";
+
+/// Env var naming the directory that holds [`CREDENTIALS_FILENAME`] (sc-16540).
+///
+/// Needed because the *default* deliberately ignores `SCENEWORKS_CONFIG_DIR`, and a
+/// container's OS-default config dir is not on a mounted volume — so Docker/RunPod
+/// must say where the store lives or it would not survive a restart.
+pub const CREDENTIALS_DIR_ENV: &str = "SCENEWORKS_CREDENTIALS_DIR";
+
+/// Where the credential store lives, given the config dir (sc-16540).
+///
+/// **Deliberately not `config_dir`.** `SCENEWORKS_CONFIG_DIR` is pointed at the repo
+/// checkout on purpose — `.env.example` sets `SCENEWORKS_CONFIG_DIR=config` and
+/// docker-compose bind-mounts `./config` — because that is how a developer editing
+/// `builtin.models.jsonc` sees the change live. That makes it exactly the wrong home
+/// for a plaintext token: a directory whose whole job is being edited, copied between
+/// machines and scanned by tooling. Secrets and hand-edited source want opposite
+/// handling, so the store gets its own resolution.
+///
+/// Precedence:
+/// 1. [`CREDENTIALS_DIR_ENV`], when set and non-blank — the operator/orchestrator has
+///    said where a persistent volume is, and that answer beats any guess.
+/// 2. The OS app-config dir ([`crate::app_paths::AppPaths::platform_default_checked`]),
+///    which is never a checkout.
+/// 3. `config_dir` — the pre-sc-16540 location. Only reachable when the OS gave us no
+///    home directory at all (a minimal container with no `HOME`). Keeping the old
+///    behavior there is not a regression, and the alternative — a *relative* `config`
+///    from the repo-relative fallback — is the very bug being fixed.
+///
+/// Pure so the precedence is unit-testable without mutating process env; see
+/// [`credentials_dir`] for the env-reading wrapper.
+pub fn resolve_credentials_dir(
+    env_override: Option<&str>,
+    platform_config_dir: Option<&Path>,
+    config_dir: &Path,
+) -> PathBuf {
+    if let Some(explicit) = env_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(explicit);
+    }
+    platform_config_dir.map_or_else(|| config_dir.to_path_buf(), Path::to_path_buf)
+}
+
+/// [`resolve_credentials_dir`] against the live process environment.
+pub fn credentials_dir(config_dir: &Path) -> PathBuf {
+    let env_override = std::env::var(CREDENTIALS_DIR_ENV).ok();
+    let platform = crate::app_paths::AppPaths::platform_default_checked();
+    resolve_credentials_dir(
+        env_override.as_deref(),
+        platform.as_ref().map(|paths| paths.config_dir.as_path()),
+        config_dir,
+    )
+}
+
+/// The pre-sc-16540 store location: `<config_dir>/credentials.json`. Retained so an
+/// existing install's tokens are found and migrated rather than silently lost.
+pub fn legacy_credentials_file(config_dir: &Path) -> PathBuf {
+    config_dir.join(CREDENTIALS_FILENAME)
+}
+
+/// Outcome of [`migrate_legacy_store`], so the caller can log precisely what happened
+/// instead of inferring it from a bare `bool`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyMigration {
+    /// Nothing to do: no legacy file, or the two paths are the same directory.
+    NotNeeded,
+    /// Legacy store moved to the new location. Carries the path that was removed.
+    Migrated(PathBuf),
+    /// Both stores exist. The new one is authoritative and the legacy file was left
+    /// alone — it may hold credentials the new one does not, and deleting a secret
+    /// we did not write is not ours to do. The operator is told to remove it.
+    BothPresent(PathBuf),
+}
+
+/// Move a pre-sc-16540 `<config_dir>/credentials.json` to the resolved credentials dir.
+///
+/// Called by the rust-api at startup because the API is the store's sole writer. The
+/// migration goes through [`CredentialFileStore::load`]/[`CredentialFileStore::save`]
+/// rather than copying bytes, so a corrupt legacy file surfaces as an error (and is
+/// left in place) instead of being faithfully reproduced at the new path, and so the
+/// new file is created `0600` with the same atomic-rename + fsync guarantees as any
+/// other write.
+///
+/// Removing the legacy file is the point of the exercise — leaving it would keep the
+/// plaintext token in the checkout — but it happens only after the new store is
+/// durably written, and a failure to unlink is a warning, not an error: the new file
+/// is already authoritative by then.
+pub fn migrate_legacy_store(
+    config_dir: &Path,
+    credentials_dir: &Path,
+) -> io::Result<LegacyMigration> {
+    let legacy_path = legacy_credentials_file(config_dir);
+    let current = CredentialFileStore::new(credentials_dir);
+    if current.path() == legacy_path {
+        return Ok(LegacyMigration::NotNeeded);
+    }
+    if !legacy_path.is_file() {
+        return Ok(LegacyMigration::NotNeeded);
+    }
+    if current.path().is_file() {
+        return Ok(LegacyMigration::BothPresent(legacy_path));
+    }
+    let legacy = CredentialFileStore::new(config_dir);
+    let map = legacy.load()?;
+    current.save(&map)?;
+    if let Err(error) = std::fs::remove_file(&legacy_path) {
+        tracing::warn!(
+            path = %legacy_path.display(),
+            error = %error,
+            "migrated the credential store but could not remove the old file; delete it by hand \
+             — it still holds your tokens in plaintext",
+        );
+    }
+    Ok(LegacyMigration::Migrated(legacy_path))
+}
 
 /// A stored credential's persisted fields. The token is the only secret.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,9 +169,11 @@ pub struct CredentialFileStore {
 }
 
 impl CredentialFileStore {
-    pub fn new(config_dir: &Path) -> Self {
+    /// `dir` is the directory holding [`CREDENTIALS_FILENAME`] — resolve it with
+    /// [`credentials_dir`] rather than passing `config_dir` directly (sc-16540).
+    pub fn new(dir: &Path) -> Self {
         Self {
-            path: config_dir.join(CREDENTIALS_FILENAME),
+            path: dir.join(CREDENTIALS_FILENAME),
         }
     }
 
@@ -291,6 +414,166 @@ pub fn loose_credentials_mode(path: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The credential store must NEVER default into the config dir, because that dir is
+    /// deliberately pointed at the repo checkout (`.env.example` sets
+    /// `SCENEWORKS_CONFIG_DIR=config`; compose bind-mounts `./config`). sc-16540.
+    #[test]
+    fn credentials_dir_prefers_env_then_platform_and_never_config_by_default() {
+        let config = Path::new("/repo/config");
+        let platform = Path::new("/home/u/.config/sceneworks");
+
+        // 1. An explicit env override wins over everything — the operator knows where
+        //    their persistent volume is.
+        assert_eq!(
+            resolve_credentials_dir(Some("/mnt/secrets"), Some(platform), config),
+            PathBuf::from("/mnt/secrets"),
+        );
+        // A blank/whitespace env var is "unset", not "use the empty path".
+        for blank in ["", "   "] {
+            assert_eq!(
+                resolve_credentials_dir(Some(blank), Some(platform), config),
+                platform.to_path_buf(),
+                "a blank {blank:?} override must fall through, not resolve to an empty path",
+            );
+        }
+        // 2. Otherwise the OS app-config dir — NOT the config dir.
+        assert_eq!(
+            resolve_credentials_dir(None, Some(platform), config),
+            platform.to_path_buf(),
+        );
+        // 3. Only with no home directory at all does it fall back to the config dir.
+        //    That is the pre-sc-16540 behavior, so it is not a regression — and it beats
+        //    the alternative, `AppPaths::platform_default`'s RELATIVE `config`, which
+        //    would mean "wherever this process happened to start".
+        assert_eq!(
+            resolve_credentials_dir(None, None, config),
+            config.to_path_buf(),
+        );
+    }
+
+    #[test]
+    fn migrate_moves_the_legacy_store_and_removes_the_plaintext_original() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config");
+        let creds = temp.path().join("credentials");
+        std::fs::create_dir_all(&config).expect("config dir");
+
+        CredentialFileStore::new(&config)
+            .set("huggingface.co", "HF", "bearer", "secret-token")
+            .expect("seed legacy store");
+        let legacy_path = legacy_credentials_file(&config);
+        assert!(legacy_path.is_file(), "legacy store seeded");
+
+        assert_eq!(
+            migrate_legacy_store(&config, &creds).expect("migrate"),
+            LegacyMigration::Migrated(legacy_path.clone()),
+        );
+
+        // The token survived...
+        let moved = CredentialFileStore::new(&creds).load().expect("load moved");
+        assert_eq!(
+            moved
+                .get("huggingface.co")
+                .map(|entry| entry.token.as_str()),
+            Some("secret-token"),
+        );
+        // ...and the plaintext copy is GONE from the config dir. Leaving it behind
+        // would defeat the entire point of the move.
+        assert!(
+            !legacy_path.exists(),
+            "the legacy plaintext store must not survive the migration",
+        );
+
+        // Re-running is a no-op rather than an error or a resurrection.
+        assert_eq!(
+            migrate_legacy_store(&config, &creds).expect("second migrate"),
+            LegacyMigration::NotNeeded,
+        );
+    }
+
+    #[test]
+    fn migrate_is_a_noop_without_a_legacy_store_or_when_the_dirs_match() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(&config).expect("config dir");
+
+        assert_eq!(
+            migrate_legacy_store(&config, &temp.path().join("credentials")).expect("migrate"),
+            LegacyMigration::NotNeeded,
+            "no legacy file means nothing to do",
+        );
+
+        // Same directory (the no-home fallback in `resolve_credentials_dir`): the file is
+        // already where it belongs, and a naive implementation would delete it.
+        CredentialFileStore::new(&config)
+            .set("civitai.com", "Civit", "query", "k")
+            .expect("seed");
+        assert_eq!(
+            migrate_legacy_store(&config, &config).expect("migrate"),
+            LegacyMigration::NotNeeded,
+        );
+        assert!(
+            legacy_credentials_file(&config).is_file(),
+            "migrating a directory onto itself must not delete the store",
+        );
+    }
+
+    /// Both present: the new store wins and the old file is LEFT ALONE. It may hold
+    /// hosts the new one does not, and silently deleting a secret we did not write is
+    /// not ours to do — the API warns the operator instead.
+    #[test]
+    fn migrate_reports_both_present_without_touching_either_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config");
+        let creds = temp.path().join("credentials");
+        std::fs::create_dir_all(&config).expect("config dir");
+
+        CredentialFileStore::new(&config)
+            .set("huggingface.co", "old", "bearer", "old-token")
+            .expect("seed legacy");
+        CredentialFileStore::new(&creds)
+            .set("huggingface.co", "new", "bearer", "new-token")
+            .expect("seed current");
+
+        assert_eq!(
+            migrate_legacy_store(&config, &creds).expect("migrate"),
+            LegacyMigration::BothPresent(legacy_credentials_file(&config)),
+        );
+        assert!(legacy_credentials_file(&config).is_file(), "legacy kept");
+        assert_eq!(
+            CredentialFileStore::new(&creds)
+                .load()
+                .expect("load")
+                .get("huggingface.co")
+                .map(|entry| entry.token.as_str()),
+            Some("new-token"),
+            "the existing store must not be overwritten by the legacy one",
+        );
+    }
+
+    /// A corrupt legacy store must ERROR rather than migrate an empty map — that would
+    /// turn "unreadable" into "you have no credentials" permanently, by deleting the
+    /// only copy. Same reasoning as `load`'s refusal to treat corruption as empty.
+    #[test]
+    fn migrate_refuses_a_corrupt_legacy_store_and_leaves_it_in_place() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config");
+        let creds = temp.path().join("credentials");
+        std::fs::create_dir_all(&config).expect("config dir");
+        std::fs::write(legacy_credentials_file(&config), "{ not json").expect("write corrupt");
+
+        let error = migrate_legacy_store(&config, &creds).expect_err("corrupt store must error");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            legacy_credentials_file(&config).is_file(),
+            "a corrupt store must be left for the operator to fix, not deleted",
+        );
+        assert!(
+            !CredentialFileStore::new(&creds).path().exists(),
+            "nothing must be written to the new location from a corrupt source",
+        );
+    }
 
     #[test]
     fn set_list_delete_round_trip_redacts_token() {

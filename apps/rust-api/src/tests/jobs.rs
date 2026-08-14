@@ -305,6 +305,433 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
             StatusCode::CREATED,
             "{job_type} must still enqueue: {body}"
         );
+        assert_eq!(
+            body["payload"],
+            json!({ "sourceAssetId": "asset-1" }),
+            "legacy raw payloads without a catalog model must remain unchanged"
+        );
+    }
+}
+
+/// sc-18480: Batch Detail keeps its established raw `/api/v1/jobs` contract, but the Candle SDXL
+/// provider needs the selected model's three descriptor-owned co-requisites. Start with the exact
+/// client shape (no `modelManifestEntry`) and prove the API enriches the persisted worker payload
+/// from the shipped catalog. `model_jobs::sdxl_co_requisites_resolve_all_three_from_every_live_*`
+/// proves this same three-id entry resolves to installed paths at the worker seam.
+#[tokio::test]
+async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Batch Detail",
+            "requestedGpu": "auto",
+            "payload": {
+                "projectId": "project-1",
+                "sourceAssetId": "asset-1",
+                "model": "realvisxl",
+                "displayName": "portrait.png",
+                "advanced": { "strength": 0.55, "cnScale": 0.7 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "detail job enqueues: {job}");
+
+    let entry = &job["payload"]["modelManifestEntry"];
+    assert_eq!(entry["id"], "realvisxl");
+    assert_eq!(entry["family"], "sdxl");
+    assert_eq!(entry["type"], "image");
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(
+        job["payload"]["advanced"]["mlxQuantize"],
+        json!(0),
+        "the Candle route must persist its supported dense-bf16 tier instead of inheriting q4"
+    );
+    let component_ids: std::collections::BTreeSet<&str> = entry["downloads"]
+        .as_array()
+        .expect("authoritative downloads array")
+        .iter()
+        .filter(|download| download["coRequisite"] == json!(true))
+        .filter_map(|download| download["componentId"].as_str())
+        .collect();
+    assert_eq!(
+        component_ids,
+        std::collections::BTreeSet::from([
+            "tokenizer_clip_l",
+            "tokenizer_clip_bigg",
+            "vae_fp16_fix",
+        ]),
+        "the raw job must reach Candle with every component its SDXL descriptor requires"
+    );
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "candle-detail-worker",
+            "gpuId": "0",
+            "gpuName": "Candle GPU",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "candle-detail-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "detail dispatches: {claimed}");
+    assert_eq!(claimed["job"]["id"], job["id"]);
+}
+
+#[tokio::test]
+async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "requestedGpu": "auto",
+            "payload": {
+                "projectId": "project-1",
+                "sourceAssetId": "asset-1",
+                "model": "realvisxl",
+                "advanced": { "strength": 0.55, "cnScale": 0.7 },
+                "modelManifestEntry": {
+                    "id": "client-spoof",
+                    "family": "sdxl",
+                    "downloads": [{
+                        "coRequisite": true,
+                        "componentId": "vae_fp16_fix",
+                        "repo": "untrusted/arbitrary-repo",
+                        "files": ["arbitrary.safetensors"]
+                    }]
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "detail job enqueues: {job}");
+    let entry = &job["payload"]["modelManifestEntry"];
+    assert_eq!(entry["id"], "realvisxl");
+    assert_eq!(entry["family"], "sdxl");
+    assert!(
+        !entry.to_string().contains("untrusted/arbitrary-repo"),
+        "client manifest metadata must be replaced, never merged or trusted: {entry}"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn raw_batch_detail_rejects_every_explicit_packed_tier_carrier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_image_model_manifests(temp_dir.path());
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for advanced in [
+        json!({ "mlxQuantize": 4 }),
+        json!({ "mlxQuantize": 8 }),
+        json!({ "convRot": true }),
+        json!({ "quantTier": "nvfp4" }),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_detail",
+                "projectId": "project-1",
+                "requestedGpu": "auto",
+                "payload": {
+                    "projectId": "project-1",
+                    "sourceAssetId": "asset-1",
+                    "model": "realvisxl",
+                    "advanced": advanced
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("dense bf16")),
+            "{advanced}: {body}"
+        );
+    }
+
+    // A legacy no-model payload remains unmodified only while it carries no explicit packed
+    // selection. Otherwise ImageRequest's fallback model would turn this into a hidden packed
+    // RealVisXL request and bypass the route-owned Candle admission contract.
+    for advanced in [
+        json!({ "mlxQuantize": 4 }),
+        json!({ "convRot": true }),
+        json!({ "quantTier": "nvfp4" }),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_detail",
+                "requestedGpu": "auto",
+                "payload": { "advanced": advanced }
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "no-model {advanced}: {body}"
+        );
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("dense bf16")));
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs array").is_empty());
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn retry_and_duplicate_recanonicalize_batch_detail_manifest_and_dense_tier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_image_model_manifests(temp_dir.path());
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "requestedGpu": "auto",
+            "payload": {
+                "projectId": "project-1",
+                "sourceAssetId": "asset-1",
+                "model": "realvisxl",
+                "advanced": { "strength": 0.55 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "modelManifestEntry": {
+                        "id": "client-spoof",
+                        "family": "krea_2",
+                        "modelPath": "C:/attacker/checkpoint.safetensors"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        assert_eq!(replay["payload"]["modelManifestEntry"]["id"], "realvisxl");
+        assert_eq!(replay["payload"]["modelManifestEntry"]["family"], "sdxl");
+        assert_eq!(replay["payload"]["advanced"]["mlxQuantize"], 0);
+        assert!(
+            !replay["payload"].to_string().contains("client-spoof"),
+            "{operation} must overwrite spoofed metadata: {replay}"
+        );
+    }
+
+    for operation in ["retry", "duplicate"] {
+        for advanced in [
+            json!({ "mlxQuantize": 4 }),
+            json!({ "convRot": true }),
+            json!({ "quantTier": "nvfp4" }),
+        ] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{operation} {advanced}: {body}"
+            );
+            assert!(body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("dense bf16")));
+        }
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().map(Vec::len),
+        Some(3),
+        "only the original plus two canonical spoof replays may persist"
+    );
+}
+
+#[tokio::test]
+async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Imported image replay" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    for (mode, source) in [
+        ("text_to_image", Value::Null),
+        ("edit_image", json!("source-asset")),
+    ] {
+        let mut body = json!({
+            "projectId": project_id,
+            "mode": mode,
+            "prompt": "a fox",
+            "model": "imported_krea",
+            "count": 1
+        });
+        if !source.is_null() {
+            body["sourceAssetId"] = source;
+        }
+        let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", body).await;
+        assert_eq!(status, StatusCode::CREATED, "mode={mode}: {original}");
+        assert_eq!(
+            original["payload"]["modelManifestEntry"]["id"],
+            "imported_krea"
+        );
+        let job_id = original["id"].as_str().expect("job id");
+
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({
+                    "payloadChanges": {
+                        "modelManifestEntry": {
+                            "id": "client-spoof",
+                            "family": "sdxl",
+                            "paths": { "model": "C:/attacker/other-model" }
+                        }
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{mode} {operation}: {replay}");
+            let entry = &replay["payload"]["modelManifestEntry"];
+            assert_eq!(entry["id"], "imported_krea");
+            assert_eq!(entry["family"], "krea_2");
+            assert!(
+                entry["paths"]["model"]
+                    .as_str()
+                    .is_some_and(|path| path.contains("imported_krea")),
+                "the authoritative imported install path must survive: {entry}"
+            );
+            assert!(
+                !entry.to_string().contains("attacker"),
+                "{mode} {operation} must replace the spoofed path: {entry}"
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_shipped_image_model_manifests(root: &std::path::Path) {
+    let manifest_dir = root.join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    write_empty_sibling_manifests(&manifest_dir);
+}
+
+fn write_imported_image_model_manifests(root: &std::path::Path) {
+    let manifest_dir = root.join("config/manifests");
+    let install_dir = root.join("data/models/imports/imported_krea");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::create_dir_all(&install_dir).expect("imported install dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models write");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        format!(
+            r#"{{
+                "schemaVersion": 1,
+                "models": [{{
+                    "id": "imported_krea",
+                    "name": "Imported Krea",
+                    "type": "image",
+                    "family": "krea_2",
+                    "capabilities": ["text_to_image", "edit_image"],
+                    "paths": {{ "model": "{}" }},
+                    "defaults": {{ "count": 1, "resolution": "1024x1024" }},
+                    "limits": {{}},
+                    "loraCompatibility": {{ "families": ["krea_2"] }}
+                }}]
+            }}"#,
+            install_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .expect("user models write");
+    for (name, key) in [
+        ("builtin.loras.jsonc", "loras"),
+        ("user.loras.jsonc", "loras"),
+        ("builtin.recipe-presets.jsonc", "presets"),
+        ("user.recipe-presets.jsonc", "presets"),
+    ] {
+        std::fs::write(
+            manifest_dir.join(name),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty sibling manifest writes");
     }
 }
 
@@ -315,7 +742,7 @@ async fn generic_model_backed_jobs_reject_path_unsafe_model_before_create() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    for job_type in ["image_upscale", "prompt_refine"] {
+    for job_type in ["image_upscale", "image_detail", "prompt_refine"] {
         let (status, body) = request(
             app.clone(),
             "POST",
@@ -424,6 +851,147 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
         jobs.as_array().expect("jobs array").len(),
         1,
         "invalid conversion targets must fail before persistence"
+    );
+}
+
+/// Write a two-variant convert-at-install family that SHARES one source repo — the Anima shape: each
+/// card names its own `mlx.convertSourceFile` inside `owner/shared`, and the per-variant downloads are
+/// serialized, so one variant's weights land while the other's are still streaming.
+fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    let models = ["alpha", "beta"]
+        .into_iter()
+        .map(|variant| {
+            json!({
+                "id": format!("fixture_{variant}"),
+                "name": format!("Fixture {variant}"),
+                "type": "image",
+                "family": "fixture",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "owner/shared",
+                    "files": [format!("split_files/diffusion_models/{variant}.safetensors")]
+                }],
+                "mlx": {
+                    "requiresConversion": true,
+                    "converter": "fixture_quant",
+                    "convertSourceRepo": "owner/shared",
+                    "convertSourceFile": format!("split_files/diffusion_models/{variant}.safetensors")
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({ "schemaVersion": 1, "models": models }))
+            .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(config_dir);
+}
+
+/// Seed `file` into the HF cache snapshot for `repo` under `data_dir`, the way a completed download
+/// leaves it (`refs/main` → `snapshots/<rev>/<file>`).
+fn seed_snapshot_file(data_dir: &std::path::Path, repo: &str, file: &str) {
+    let revision = "a".repeat(40);
+    let repo_dir = huggingface_repo_cache_path(data_dir, repo).expect("repo cache path");
+    let snapshot = repo_dir.join("snapshots").join(&revision);
+    let path = snapshot.join(file);
+    std::fs::create_dir_all(path.parent().expect("snapshot parent")).expect("snapshot dir creates");
+    std::fs::write(&path, b"weights").expect("source file writes");
+    std::fs::create_dir_all(repo_dir.join("refs")).expect("refs dir creates");
+    std::fs::write(repo_dir.join("refs").join("main"), &revision).expect("refs/main writes");
+}
+
+/// Michael, on-device (Anima 2B Turbo): the three Anima variants share `circlestone-labs/Anima` and
+/// download one at a time, so the sibling cards flipped to *downloaded* the moment THEIR files landed.
+/// Converting the variant whose 4 GB DiT was still streaming enqueued a job that the worker failed
+/// instantly with a bare "Anima source DiT is missing." — indistinguishable from a real defect. The
+/// convert request boundary must refuse it while it can still explain why, and must NOT block the
+/// sibling whose weights ARE on disk.
+#[tokio::test]
+async fn model_convert_is_refused_while_its_source_weights_are_still_downloading() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _env = isolate_hf_cache();
+    shared_repo_convert_manifest(&temp_dir.path().join("config/manifests"));
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    // Nothing cached at all: the source repo, not just one variant's file, is missing.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"].as_str().is_some_and(
+            |detail| detail.contains("owner/shared") && detail.contains("not downloaded")
+        ),
+        "an uncached source repo must say so: {body}"
+    );
+
+    // Alpha's weights land; beta's are still streaming (the Anima situation).
+    seed_snapshot_file(
+        &data_dir,
+        "owner/shared",
+        "split_files/diffusion_models/alpha.safetensors",
+    );
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_beta/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"].as_str().is_some_and(|detail| detail
+            .contains("split_files/diffusion_models/beta.safetensors")
+            && detail.contains("has not finished downloading")),
+        "a shared-repo sibling's missing file must name the file, not the repo: {body}"
+    );
+
+    // The variant whose weights ARE cached converts — the gate refuses the unready one only.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a cached source must still convert: {body}"
+    );
+
+    // An in-flight download for the model itself is reported as such, with its progress, even once
+    // the file exists (a re-download of the same variant).
+    let (status, download) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{download}");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("still downloading")),
+        "an in-flight download for this model must be named as the reason: {body}"
     );
 }
 
@@ -709,6 +1277,41 @@ fn person_readiness_reflects_live_worker_capabilities() {
     assert_eq!(readiness["segment"]["ready"], json!(false));
 }
 
+/// sc-16260: an `unhealthy` worker is heartbeating, so it is NOT offline — but it has withdrawn
+/// every capability it serves and will claim nothing. Readiness must exclude it, or the UI ungates
+/// Replace Person on a host whose GPU cannot be initialized.
+///
+/// Pinned against a worker that still advertises the capability, which is what makes this a real
+/// gate rather than a restatement of the capability check: the SAME advertisement reads ready when
+/// idle and not-ready when unhealthy.
+#[test]
+fn person_readiness_excludes_an_unhealthy_worker() {
+    let advertised = vec![
+        WorkerCapability::PersonDetect,
+        WorkerCapability::PersonTrack,
+    ];
+
+    let idle = vec![readiness_worker(
+        "gpu",
+        WorkerStatus::Idle,
+        advertised.clone(),
+    )];
+    assert_eq!(
+        person_readiness_from_workers(&idle)["detect"]["ready"],
+        json!(true),
+        "control: the identical advertisement must read ready while the worker is idle"
+    );
+
+    let unhealthy = vec![readiness_worker("gpu", WorkerStatus::Unhealthy, advertised)];
+    let readiness = person_readiness_from_workers(&unhealthy);
+    assert_eq!(
+        readiness["detect"]["ready"],
+        json!(false),
+        "an unhealthy worker cannot run person detection, whatever its registration still says"
+    );
+    assert_eq!(readiness["track"]["ready"], json!(false));
+}
+
 #[tokio::test]
 async fn create_image_job_rejects_over_length_negative_prompt() {
     // sc-8884 (F-082): negativePrompt now shares the prompt char cap.
@@ -755,6 +1358,511 @@ async fn create_image_job_rejects_oversized_advanced_object() {
     assert!(error["detail"]
         .as_str()
         .is_some_and(|detail| detail.contains("advanced")));
+}
+
+#[tokio::test]
+async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let body = |model: &str, advanced: Value| {
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "model": model,
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": advanced,
+        })
+    };
+
+    let (status, initial) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        body(
+            "flux2_dev",
+            json!({
+                "enhancePrompt": true,
+                "enhanceTemperature": 0.2,
+                "enhanceMaxTokens": 2048,
+            }),
+        ),
+    )
+    .await;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    assert_eq!(status, StatusCode::CREATED, "{initial}");
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{initial}");
+        assert!(initial["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("native MLX or Candle")));
+    }
+
+    for (advanced, detail) in [
+        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": true, "enhanceTemperature": 2.01 }),
+            "must be between 0 and 2",
+        ),
+        (
+            json!({ "enhancePrompt": true, "enhanceMaxTokens": 2049 }),
+            "must be between 1 and 2048",
+        ),
+        (
+            json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
+            "requires advanced.enhancePrompt=true",
+        ),
+        (
+            json!({
+                "enhancePrompt": true,
+                "promptEnhancement": { "outcome": "enhanced" },
+            }),
+            "worker-owned",
+        ),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body("flux2_dev", advanced),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains(detail)),
+            "{error}"
+        );
+    }
+
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        body("flux2_klein_9b", json!({ "enhancePrompt": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|value| value.contains("FLUX.2-Klein")));
+
+    for strict_control in [
+        json!({ "poses": [{ "id": "pose-1" }] }),
+        json!({ "controlWeights": { "overlayId": "flux2-depth" } }),
+        json!({ "controlImage": "asset-1" }),
+        json!({ "controlMode": "depth" }),
+    ] {
+        let mut advanced = strict_control.as_object().unwrap().clone();
+        advanced.insert("enhancePrompt".to_owned(), json!(true));
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body("flux2_dev", Value::Object(advanced)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("strict control")));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        // Retry and duplicate validate the exact shallow-merged payload they will enqueue. A valid
+        // dev job therefore cannot be replayed as Klein while retaining its enhancement request.
+        let job_id = initial["id"].as_str().expect("created job id");
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "model": "flux2_klein_9b" } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("FLUX.2-Klein")));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        // Candle owns exactly the native base + bespoke edit routes. Character/style modes and
+        // legacy reference aliases must never reach the generic base renderer and drop their input.
+        for mode in ["character_image", "style_variations"] {
+            let mut payload = body("flux2_dev", json!({ "enhancePrompt": true }));
+            payload["mode"] = json!(mode);
+            payload["referenceAssetId"] = json!("reference-1");
+            let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "mode={mode}: {error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("Candle supports only")));
+        }
+
+        for carrier in [
+            json!({ "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = body("flux2_dev", json!({ "enhancePrompt": true }));
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(carrier.as_object().unwrap().clone());
+            let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("cannot include source or reference")));
+        }
+
+        let mut missing_edit_input = body("flux2_dev", json!({ "enhancePrompt": true }));
+        missing_edit_input["mode"] = json!("edit_image");
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            missing_edit_input,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("requires a source or reference")));
+
+        let mut valid_edit = body("flux2_dev", json!({ "enhancePrompt": true }));
+        valid_edit["mode"] = json!("edit_image");
+        valid_edit["sourceAssetId"] = json!("source-1");
+        let (status, edit) = request(app.clone(), "POST", "/api/v1/image/jobs", valid_edit).await;
+        assert_eq!(status, StatusCode::CREATED, "{edit}");
+
+        let job_id = initial["id"].as_str().expect("created job id");
+        for operation in ["retry", "duplicate"] {
+            for mode in [
+                "character_image",
+                "style_variations",
+                "reference",
+                "image_to_image",
+            ] {
+                let (status, error) = request(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v1/jobs/{job_id}/{operation}"),
+                    json!({
+                        "payloadChanges": {
+                            "mode": mode,
+                            "referenceAssetId": "reference-1"
+                        }
+                    }),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{operation} mode={mode}: {error}"
+                );
+                assert!(error["detail"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("Candle supports only")));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // MLX legitimately owns all four surfaced modes, provided every edit-like mode carries the
+        // reference that selects its native edit route.
+        for (mode, carrier) in [
+            ("edit_image", json!({ "sourceAssetId": "source-1" })),
+            (
+                "character_image",
+                json!({ "referenceAssetId": "reference-1" }),
+            ),
+            (
+                "style_variations",
+                json!({ "referenceAssetIds": ["reference-1"] }),
+            ),
+        ] {
+            let mut payload = body("flux2_dev", json!({ "enhancePrompt": true }));
+            payload["mode"] = json!(mode);
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(carrier.as_object().unwrap().clone());
+            let (status, created) =
+                request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+            assert_eq!(status, StatusCode::CREATED, "mode={mode}: {created}");
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        // A backendless API cannot enqueue enhancement directly or resurrect it through a replay.
+        let (status, plain) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body("flux2_dev", json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{plain}");
+        let job_id = plain["id"].as_str().expect("plain job id");
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": { "enhancePrompt": true } } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("native MLX or Candle")));
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[tokio::test]
+async fn post_preset_prompt_enhancement_uses_the_resolved_candle_route() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "z_image_turbo",
+              "name": "Z-Image",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "character_image", "style_variations"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {}, "ui": {}
+            },
+            {
+              "id": "flux2_dev",
+              "name": "FLUX.2 Dev",
+              "family": "flux2",
+              "type": "image",
+              "adapter": "flux2_diffusers",
+              "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {}, "ui": { "promptEnhance": true }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models write");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models write");
+    for name in ["builtin.loras.jsonc", "user.loras.jsonc"] {
+        std::fs::write(
+            manifest_dir.join(name),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("lora manifest writes");
+    }
+    std::fs::write(
+        manifest_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [{
+            "id": "resolved_flux2_dev",
+            "name": "Resolved FLUX.2 Dev",
+            "workflow": "text_to_image",
+            "model": "flux2_dev",
+            "loras": []
+          }]
+        }
+        "#,
+    )
+    .expect("builtin presets write");
+    std::fs::write(
+        manifest_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user presets write");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Prompt enhancement preset" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "z_image_turbo",
+            "mode": "character_image",
+            "prompt": "mist over hills",
+            "referenceAssetId": "reference-1",
+            "recipePresetId": "resolved_flux2_dev",
+            "advanced": { "enhancePrompt": true }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("Candle supports only")),
+        "the post-preset FLUX.2-dev model must be checked against Candle's actual route: {error}"
+    );
+}
+
+#[tokio::test]
+async fn create_image_job_enforces_the_pose_output_ceiling() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let poses: Vec<Value> = (0..sceneworks_core::image_request::MAX_JOB_POSES)
+        .map(|index| json!({ "id": format!("pose-{index}"), "keypoints": [] }))
+        .collect();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": { "poses": poses },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let mut over = poses;
+    over.push(json!({ "id": "one-too-many", "keypoints": [] }));
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": { "poses": over },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(
+        error["detail"],
+        "advanced.poses must contain at most 64 entries; each pose renders one image"
+    );
+}
+
+/// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.
+/// Retry and duplicate therefore reject until the caller reduces `advanced.poses` to the current
+/// product ceiling. This makes the compatibility policy executable instead of an incidental side
+/// effect of which creation route happened to run.
+#[tokio::test]
+async fn legacy_over_limit_pose_job_is_readable_but_cannot_be_replayed() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "legacy pose set",
+            "count": 1,
+            "advanced": { "poses": [{ "id": "pose-0", "keypoints": [] }] },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let job_id = created["id"].as_str().expect("job id");
+    let mut legacy_payload = created["payload"]
+        .as_object()
+        .cloned()
+        .expect("stored payload object");
+    let legacy_poses: Vec<Value> = (0..=sceneworks_core::image_request::MAX_JOB_POSES)
+        .map(|index| json!({ "id": format!("legacy-pose-{index}"), "keypoints": [] }))
+        .collect();
+    legacy_payload.insert("advanced".to_owned(), json!({ "poses": legacy_poses }));
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let updated = connection
+        .execute(
+            "update jobs set payload_json = ?1 where id = ?2",
+            rusqlite::params![Value::Object(legacy_payload).to_string(), job_id],
+        )
+        .expect("legacy payload writes");
+    assert_eq!(updated, 1);
+    drop(connection);
+
+    let (status, stored) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert_eq!(
+        stored["payload"]["advanced"]["poses"]
+            .as_array()
+            .map(Vec::len),
+        Some(65)
+    );
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert_eq!(
+            error["detail"],
+            "advanced.poses must contain at most 64 entries; each pose renders one image"
+        );
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs.as_array().map(Vec::len), Some(1));
 }
 
 #[tokio::test]

@@ -104,6 +104,15 @@ inference package.
 
 ## Private repository access
 
+> **Superseded, 2026-08-07 (sc-17879).** This section and the credential paragraphs of
+> "Administrative release configuration" below are a record of the cutover, not current
+> guidance. `SceneWorks/inference` is public; a pinned revision fetches anonymously with no
+> credential helper, `GIT_CONFIG_NOSYSTEM=1` and `HOME=/nonexistent`. The
+> `SCENEWORKS_INFERENCE_READ_TOKEN` rewrite described below has been removed from every workflow
+> and from the container build, so fork pull requests now build the Rust lanes with nothing
+> configured. Only the dispatch-only calibration `actions/checkout` still names the secret, and it
+> falls back to `github.token`. See the README for the current posture.
+
 SceneWorks and ChatWorks remain public while the canonical inference repository remains private.
 That accepted visibility boundary has two operational consequences:
 

@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { configValidation } from "../../training/trainingConfig.js";
+import { configDraftFromTarget, configValidation } from "../../training/trainingConfig.js";
 import { summarize } from "../../validation/issues.js";
 import { ConfigureJobPanel } from "./ConfigureJobPanel.jsx";
 
@@ -107,6 +107,58 @@ function baseProps(overrides = {}) {
     ...overrides,
   };
 }
+
+it("renders a target-seeded logit-normal timestep schedule", () => {
+  const selectedTarget = {
+    ...TARGET,
+    kernel: "sd3_lora",
+    defaults: {
+      ...VALID_DRAFT,
+      advanced: { timestepType: "logit_normal" },
+    },
+  };
+  const configDraft = configDraftFromTarget(selectedTarget, DATASET, ["auto"]);
+
+  mount(
+    <ConfigureJobPanel
+      {...baseProps({ selectedTarget, configDraft, showAdvancedConfig: true })}
+    />,
+  );
+
+  const timestepSelect = [...container.querySelectorAll("label")]
+    .find((label) => label.textContent.includes("Timestep type"))
+    ?.querySelector("select");
+  expect(timestepSelect?.value).toBe("logit_normal");
+  expect([...timestepSelect.options].map((option) => option.textContent)).toContain("Logit Normal");
+});
+
+it.each([
+  ["Anima", "anima_lora"],
+  ["Mage", "mage_flow_lora"],
+])("does not offer SD3-only logit-normal scheduling for %s", (_name, kernel) => {
+  const selectedTarget = {
+    ...TARGET,
+    kernel,
+    defaults: {
+      ...VALID_DRAFT,
+      advanced: { timestepType: "sigmoid" },
+    },
+  };
+  const configDraft = configDraftFromTarget(selectedTarget, DATASET, ["auto"]);
+
+  mount(
+    <ConfigureJobPanel
+      {...baseProps({ selectedTarget, configDraft, showAdvancedConfig: true })}
+    />,
+  );
+
+  const timestepSelect = [...container.querySelectorAll("label")]
+    .find((label) => label.textContent.includes("Timestep type"))
+    ?.querySelector("select");
+  const values = [...timestepSelect.options].map((option) => option.value);
+  expect(values).toEqual(["sigmoid", "linear", "uniform", "weighted"]);
+  expect(values).not.toContain("logit_normal");
+});
 
 function submitButton() {
   return container.querySelector(".training-config-actions button.primary-action");
@@ -316,11 +368,56 @@ describe("ConfigureJobPanel full base fine-tune", () => {
   });
 
   it("replaces it with an explanation on a full base fine-tune", () => {
-    mount(<ConfigureJobPanel {...baseProps({ showAdvancedConfig: true, isFullFinetune: true })} />);
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          isFullFinetune: true,
+          selectedTarget: {
+            ...TARGET,
+            defaults: {
+              advanced: {
+                fullFinetuneConfig: {
+                  mixedPrecision: "f32",
+                  gradientCheckpointing: false,
+                },
+              },
+            },
+          },
+          configDraft: { ...VALID_DRAFT, precision: "bf16" },
+        })}
+      />,
+    );
     expect(checkpointingCheckbox()).toBeFalsy();
     expect(container.textContent).toContain(
       "Gradient checkpointing is not available for a full base fine-tune yet",
     );
+    const precision = [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith("Precision"))
+      ?.querySelector("input");
+    expect(precision).toBeTruthy();
+    expect(precision.disabled).toBe(true);
+    expect(precision.value).toBe("f32");
+    expect(container.textContent).toContain("requires F32 for full base fine-tuning");
+  });
+
+  it("preserves MLX full-finetune precision and checkpointing controls", () => {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          isFullFinetune: true,
+          configDraft: { ...VALID_DRAFT, precision: "bf16", gradientCheckpointing: true },
+        })}
+      />,
+    );
+    const precision = [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith("Precision"))
+      ?.querySelector("input");
+    expect(precision.disabled).toBe(false);
+    expect(precision.value).toBe("bf16");
+    expect(checkpointingCheckbox()).toBeTruthy();
+    expect(checkpointingCheckbox().querySelector("input").checked).toBe(true);
   });
 
   // Mage advertises all three of its trainer paths. Each must render a HUMAN label, not the raw
@@ -369,5 +466,75 @@ describe("ConfigureJobPanel full base fine-tune", () => {
       node.textContent.trim().startsWith("LoKr factor"),
     );
     expect(factor).toBeTruthy();
+  });
+});
+
+// ControlNet preprocessor provisioning. The panel must both SHOW the offer and have the run
+// blocked; those are two different wires (the notice prop vs the validation context), and getting
+// only one right is the failure this covers — an offer beside a live Start button, or a dead Start
+// button with nothing on screen explaining it.
+describe("ConfigureJobPanel — missing control preprocessor", () => {
+  const CONTROL_TARGET = {
+    id: "krea_pose_control",
+    name: "Krea Pose Control",
+    outputKind: "control_branch",
+    defaults: { advanced: { controlType: "pose" } },
+  };
+  const DWPOSE = {
+    id: "dwpose_pose_detector",
+    name: "DWPose Pose Detector",
+    installState: "missing",
+    downloadSizeLabel: "330 MB",
+  };
+
+  it("offers the download and blocks Start training", () => {
+    const missingControlModels = [DWPOSE];
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          selectedTarget: CONTROL_TARGET,
+          missingControlModels,
+          // The real rules, with the same list the notice renders — so the button and the offer
+          // cannot disagree.
+          configValidity: validityFor(VALID_DRAFT, {
+            activeDataset: DATASET,
+            selectedTarget: CONTROL_TARGET,
+            missingControlModels,
+          }),
+          onDownloadModel: noop,
+        })}
+      />,
+    );
+    expect(container.querySelector(".required-models-notice")).toBeTruthy();
+    expect(container.textContent).toContain("DWPose Pose Detector");
+    expect(container.textContent).toContain("Pose ControlNet training");
+    const start = [...container.querySelectorAll("button")].find((el) =>
+      el.textContent.includes("Start training"),
+    );
+    expect(start).toBeTruthy();
+    expect(start.disabled).toBe(true);
+  });
+
+  it("renders no notice for a provisioned ControlNet run", () => {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          selectedTarget: CONTROL_TARGET,
+          missingControlModels: [],
+          configValidity: validityFor(VALID_DRAFT, {
+            activeDataset: DATASET,
+            selectedTarget: CONTROL_TARGET,
+            missingControlModels: [],
+          }),
+        })}
+      />,
+    );
+    expect(container.querySelector(".required-models-notice")).toBeNull();
+  });
+
+  // A LoRA target renders no condition at all, so it must never see this.
+  it("renders no notice for a LoRA target", () => {
+    mount(<ConfigureJobPanel {...baseProps({ missingControlModels: [] })} />);
+    expect(container.querySelector(".required-models-notice")).toBeNull();
   });
 });

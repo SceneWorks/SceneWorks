@@ -646,7 +646,7 @@ export function CharacterGenerationPanel({
         characterId,
         referenceAssetId,
         prompt: prompt.trim(),
-        negativePrompt: advanced.negativePrompt,
+        negativePrompt: advanced.supportsNegativePrompt ? advanced.negativePrompt : "",
         // angleSet/poses make the worker emit one image per angle/pose regardless of
         // count; count must satisfy the API's 1-8 guard, so send 1 (worker overrides).
         count: 1,

@@ -90,6 +90,18 @@ const STEPS = [
     // → `error[E0599]: no function get`. CI omits it for the same reason.
     args: ["check", "-p", "sceneworks-rust-api", "--features", "backend-candle"],
   },
+  {
+    label: "check (Candle memory adapter)",
+    args: [
+      "check",
+      "-p",
+      "sceneworks-memory-adapter",
+      "--features",
+      "candle",
+      "--bin",
+      "memory-candle-adapter",
+    ],
+  },
 ];
 
 function run(cmd, args, env) {
