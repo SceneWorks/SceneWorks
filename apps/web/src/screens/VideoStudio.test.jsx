@@ -1437,6 +1437,82 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     expect(payload.advanced.steps).toBeUndefined();
   });
 
+  // sc-19502 — the MULTI-entry half of the same constraint. `steps_limit_error` refuses off-menu
+  // counts by MEMBERSHIP, not by a floor, so a two-entry menu makes a free-text box exactly as
+  // unsatisfiable as it is for the pinned case: the user can type 30 and the enqueue gate 400s.
+  // Every other reader on this seam is already set-shaped, so the studio must be too.
+  const MENU_LTX = {
+    ...NON_WAN,
+    id: "ltx_menu",
+    name: "LTX (two schedules)",
+    // Fixed point: `defaults.steps` is ON the menu, the manifest invariant the Rust side asserts
+    // (`shipped_manifest_step_limits_are_what_core_reads`). It is NOT `limits.steps[0]` by
+    // definition — declared second here so a `[0]`-as-default regression cannot pass.
+    defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 12 },
+    limits: { steps: [4, 12] },
+    ui: { label: "LTX Menu" },
+  };
+  const labeledSelect = (label) =>
+    [...container.querySelectorAll("label")]
+      .find((el) => el.textContent.trim().startsWith(label))
+      ?.querySelector("select");
+
+  it("offers a menu-shaped Steps picker for a model declaring more than one legal count", async () => {
+    const context = baseContext({ videoModels: [MENU_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    // A free-text box here would be the "UI looser than the gate" desync. It must be a picker.
+    expect(labeledInput("Steps")).toBeNull();
+    const steps = labeledSelect("Steps");
+    expect(steps).toBeTruthy();
+    expect(steps.disabled).toBe(false);
+    // Exactly the declared menu, in declared order, plus the cleared "model default" entry the
+    // panel's own `cleared values → model default` hint promises. Nothing else is renderable.
+    expect([...steps.options].map((option) => option.value)).toEqual(["", "4", "12"]);
+    // The cleared entry shows `defaults.steps` (12) — NOT `limits.steps[0]` (4). If the empty option
+    // ever started advertising the menu's first entry, this is the assertion that catches it.
+    expect(steps.options[0].textContent).toBe("12 (model default)");
+    expect(steps.value).toBe("");
+    expect(steps.title).toMatch(/renders at 4 or 12 steps only/);
+  });
+
+  it("never emits an off-menu advanced.steps for a multi-entry menu, and does emit an on-menu one", async () => {
+    // Same real staleness path as the pinned case: type 30 against an unmenued model, then switch.
+    const unmenued = { ...NON_WAN, id: "wan_2_2", name: "Wan 2.2" };
+    const context = baseContext({ videoModels: [unmenued, MENU_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    const modelPicker = () =>
+      [...container.querySelectorAll("label")]
+        .find((el) => el.textContent.trim().startsWith("Model"))
+        ?.querySelector("select");
+
+    await act(async () => setSelect(modelPicker(), "wan_2_2"));
+    await act(async () => setInput(labeledInput("Steps"), "30"));
+    expect(labeledInput("Steps").value).toBe("30");
+
+    await act(async () => setSelect(modelPicker(), "ltx_menu"));
+    // The stale 30 is off this model's menu, so the picker falls back to the cleared entry rather
+    // than to the menu's first option — which is what a `<select>` with an unmatched value shows,
+    // and would silently assert `limits.steps[0]` is the default.
+    expect(labeledSelect("Steps").value).toBe("");
+
+    await click(buttonWithText(container, "Render clip"));
+    const stale = context.createVideoJob.mock.calls[0][0];
+    expect(stale.model).toBe("ltx_menu");
+    expect(stale.advanced.steps).toBeUndefined();
+
+    // …and the picker is a working control, not a decoration: an on-menu pick reaches the payload.
+    // Without this half, suppressing `steps` unconditionally would pass the assertion above.
+    await act(async () => setSelect(labeledSelect("Steps"), "4"));
+    expect(labeledSelect("Steps").value).toBe("4");
+    await click(buttonWithText(container, "Render clip"));
+    const picked = context.createVideoJob.mock.calls[1][0];
+    expect(picked.advanced.steps).toBe(4);
+  });
+
   it("does not emit advanced.lightning for a non-Wan engine", async () => {
     const context = baseContext({ videoModels: [NON_WAN] });
     await render(context);

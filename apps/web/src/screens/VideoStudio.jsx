@@ -98,6 +98,15 @@ import {
   stepsMenuFromModel,
 } from "../samplerOptions.js";
 
+// "8" / "4 or 8" / "4, 8, or 12" — the same phrasing `humanized_number_menu` gives the enqueue
+// gate's own rejection (crates/sceneworks-core/src/video_request.rs, sc-19502), so the Steps
+// picker's tooltip states the legal set the way a 400 from that gate would.
+function humanizedNumberMenu(menu) {
+  if (menu.length <= 1) return String(menu[0] ?? "");
+  if (menu.length === 2) return `${menu[0]} or ${menu[1]}`;
+  return `${menu.slice(0, -1).join(", ")}, or ${menu[menu.length - 1]}`;
+}
+
 const ltxVideoModelId = "ltx_2_3";
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
@@ -430,6 +439,24 @@ export function VideoStudio() {
   const stepsMenu = stepsMenuFromModel(selectedModel);
   const stepsPinnedValue = stepsMenu?.length === 1 ? stepsMenu[0] : null;
   const stepsPinned = stepsPinnedValue !== null;
+  // A menu with MORE than one entry is a CHOICE, not a pin — but the gate refuses off-menu counts
+  // exactly as hard there, so a free-text box would be the same "UI looser than the gate" desync in
+  // a different shape. Render the declared set as a picker, the way `fpsOptions` renders `limits.fps`
+  // below. No shipped model declares a multi-entry menu today, so this path is latent; it exists
+  // because every OTHER reader on this seam is already set-shaped (`allowed_steps` and
+  // `humanized_number_menu` in crates/sceneworks-core/src/video_request.rs, `stepsMenuFromModel`,
+  // `checkInMenu` in PresetManagerScreen, gen-core's `supported_steps`) and leaving this one
+  // singleton-only would make the studio the single seam that silently reopens the defect.
+  const stepsChoice = stepsMenu !== null && stepsMenu.length > 1 ? stepsMenu : null;
+  // Whether the override currently held is something the selected model can actually render. A
+  // number typed against a PREVIOUS model survives the switch (the same staleness `stepsPinned`
+  // suppresses), and a `<select>` whose `value` matches no `<option>` displays its first one — which
+  // would quietly assert `limits.steps[0]` is the default. It is not; `defaults.steps` is, and the
+  // manifest fixed-point invariant (`shipped_manifest_step_limits_are_what_core_reads`) guarantees
+  // that default is itself on the menu. So an off-menu override falls back to the empty
+  // "model default" option and, below, is kept out of the payload rather than 400ing.
+  const stepsOffMenu =
+    stepsChoice !== null && stepsOverride !== "" && !stepsChoice.includes(Number(stepsOverride));
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -1375,8 +1402,13 @@ export function VideoStudio() {
           // sending the pinned value — is what "use the baked schedule" means to the engine, and it
           // also means a stale number left in the box by a previously-selected model can never leak
           // into the payload and 400.
+          //
+          // `stepsOffMenu` is the multi-entry half of the same suppression: the picker below shows
+          // such a stale value as "model default", so emitting it anyway would send a count the UI
+          // is not displaying AND that the enqueue gate refuses.
           ...(!lightningActive &&
           !stepsPinned &&
+          !stepsOffMenu &&
           stepsOverride !== "" &&
           Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
@@ -2131,28 +2163,57 @@ export function VideoStudio() {
               ) : null}
               <label>
                 Steps
-                <input
-                  min="1"
-                  max="80"
-                  disabled={lightningActive || stepsPinned}
-                  onChange={(event) => setStepsOverride(event.target.value)}
-                  placeholder={
-                    lightningActive
-                      ? "4 (Lightning)"
-                      : stepsPinned
-                        ? `${stepsPinnedValue} (fixed schedule)`
-                        : String(stepsDefaultFromModel(selectedModel) ?? "")
-                  }
-                  title={
-                    lightningActive
-                      ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
-                      : stepsPinned
-                        ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
-                        : undefined
-                  }
-                  type="number"
-                  value={lightningActive || stepsPinned ? "" : stepsOverride}
-                />
+                {stepsChoice ? (
+                  <select
+                    disabled={lightningActive}
+                    onChange={(event) => setStepsOverride(event.target.value)}
+                    title={
+                      lightningActive
+                        ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                        : `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it renders at ${humanizedNumberMenu(stepsChoice)} steps only.`
+                    }
+                    value={lightningActive || stepsOffMenu ? "" : stepsOverride}
+                  >
+                    {/* The cleared state, exactly as for the free-text box above and as the panel's
+                        own "cleared values → model default" hint promises: no `advanced.steps` is
+                        sent and the engine runs `defaults.steps`. It is deliberately NOT
+                        `stepsChoice[0]` — `limits.steps[0]` is not a default — and it is safe
+                        because the manifest invariant pins `defaults.steps` onto the menu. */}
+                    <option value="">
+                      {stepsDefaultFromModel(selectedModel) == null
+                        ? "Model default"
+                        : `${stepsDefaultFromModel(selectedModel)} (model default)`}
+                    </option>
+                    {stepsChoice.map((value) => (
+                      <option key={value} value={String(value)}>
+                        {value}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    min="1"
+                    max="80"
+                    disabled={lightningActive || stepsPinned}
+                    onChange={(event) => setStepsOverride(event.target.value)}
+                    placeholder={
+                      lightningActive
+                        ? "4 (Lightning)"
+                        : stepsPinned
+                          ? `${stepsPinnedValue} (fixed schedule)`
+                          : String(stepsDefaultFromModel(selectedModel) ?? "")
+                    }
+                    title={
+                      lightningActive
+                        ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                        : stepsPinned
+                          ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
+                          : undefined
+                    }
+                    type="number"
+                    value={lightningActive || stepsPinned ? "" : stepsOverride}
+                  />
+                )}
               </label>
               {supportsGuidance ? (
                 <label>
