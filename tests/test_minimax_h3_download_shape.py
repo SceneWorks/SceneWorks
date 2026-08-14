@@ -1,5 +1,16 @@
 """sc-17139: the MiniMax-H3 hosted-artifact layout decision is schema-expressible TODAY.
 
+⚠️ SUPERSEDED AS A DESCRIPTION OF THE SHIPPED ARTIFACTS (amended by sc-17158, 2026-08-13).
+
+This module still does what it was written to do — prove the sc-17139 shape needs no schema change,
+and it never asserted anything about the live catalog — but the sketch below is NOT what got built.
+``SceneWorks/minimax-h3-ref-mlx`` and ``SceneWorks/minimax-h3-components-mlx`` were never created:
+sc-17150 shipped ONE repo holding both DiT partitions, and sc-17143 proved the text encoder
+byte-identical to upstream Qwen, so it is sourced upstream rather than re-hosted or tiered. The
+authored entries live in ``config/manifests/builtin.models.jsonc``; the amendment box at the top of
+``docs/sc-17139-minimax-h3-hosting-layout.md`` is the reconciliation of record. **Do not author a new
+entry from the constants in this file.**
+
 ``docs/sc-17139-minimax-h3-hosting-layout.md`` decides how the MiniMax-H3 family is
 re-hosted on the SceneWorks HF org: only the DiT and the text encoder are tiered, both
 VAEs are shared dense co-requisites, and ``transformer_ref`` becomes a second manifest

@@ -7,6 +7,36 @@ This is the layout decision that gates sc-17150 (build and upload the tiers) and
 (author the manifest entry). It decides *what we host, under what names, in what shape*. It
 does not build anything and does not add a manifest entry.
 
+> ## ⚠️ Amendment — what actually shipped differs from §1–§4. Read this before authoring anything.
+>
+> Recorded by **sc-17158** on 2026-08-13. This document, and its executable half
+> `tests/test_minimax_h3_download_shape.py`, remain as the record of the decision **as taken**;
+> they are not the record of the artifacts that exist. Three things changed during sc-17150 /
+> sc-17143 and the manifest in `config/manifests/builtin.models.jsonc` follows the changed facts:
+>
+> 1. **One repository, not three.** `SceneWorks/minimax-h3-mlx`
+>    @ `f22bc294f46894584645aec59a513ee411450c96` holds *both* DiT partitions at every tier as
+>    `<tier>/transformer/` and `<tier>/transformer_ref/` (97 files, 240,725,488,299 B, public).
+>    **`SceneWorks/minimax-h3-ref-mlx` and `SceneWorks/minimax-h3-components-mlx` were never
+>    created.** The two manifest entries share the one repo and differ only in their per-tier
+>    `files` predicate, which keeps a per-tier delete scoped to its own subtree.
+> 2. **The text encoder is not re-hosted and not tiered.** sc-17143 proved all 14 shards
+>    byte-for-byte identical to `Qwen/Qwen3-VL-32B-Instruct`, so sc-17150 (activity 18712) decided
+>    to source it upstream rather than mirror it — which also makes §6's layer-50 trim moot as a
+>    *hosting* step. The manifest fetches `text_encoder/` from `MiniMaxAI/MiniMax-H3`
+>    @ `939557dc319dd91227e30195a763f272ba7f8765` and omits **shard 13 only** (4,875,990,584 B,
+>    7.3 %) — the engine reads shards 1–12 and 14, so §6's projected 15.209 GB saving is 4.88 GB in
+>    practice. A packed (tiered) text encoder is filed as **sc-19120**, which explicitly reopens the
+>    source-upstream decision because a packed artifact is *derived* and cannot come from Qwen.
+> 3. **Both VAEs come from the same upstream snapshot**, at their exact directory sizes
+>    (`vae/` 10,415,634,127 B, `audio_vae/` 605,431,611 B — the safetensors totals in §2/§9 plus
+>    each directory's `config.json` and index).
+>
+> What did NOT change: the DiT is the only tiered component; the text encoder and both VAEs are
+> shared `coRequisite` rows, byte-identical across both entries so the floor downloads once;
+> `transformer_ref` is a second entry (`minimax_h3_ref`, §7); and the About→Licenses gate registers
+> **two** ids (§8).
+
 Downstream consumers of this document:
 
 | Story | Consumes |
