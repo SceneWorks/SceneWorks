@@ -884,6 +884,219 @@ export const RUNG4_APPLICABILITIES = Object.freeze([
 ]);
 export const RUNG4_IMPLEMENTATIONS = Object.freeze(["shared-primitive", "provider-local", "none"]);
 export const RUNG4_REQUEST_PEAKS = Object.freeze(["moves", "does-not-move", "unmeasured"]);
+export const RUNG4_CONTRACT_SUPPORT = Object.freeze([
+  "implemented",
+  "missing",
+  "structurally-not-applicable",
+]);
+
+/**
+ * The prerequisite claim this survey may not carry again (sc-18664).
+ *
+ * Rung 4's only shared prerequisite is `LoadShape::DeferredMaterialization`
+ * (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, inference
+ * `crates/contracts/gen-core/src/memory_strategy.rs:290-293`). SC-15998 removed the rung-1 edge the
+ * survey's notes asserted, because it had encoded one provider's coupled loader shape as universal
+ * arithmetic.
+ *
+ * Scoped to `notes` deliberately, and the scope is the whole point. A PROVIDER may still append its
+ * own `BoundedTransformerResidency -> StagedResidency` edge through `additional_prerequisites`, and
+ * mlx-gen-anima and mlx-gen-chroma do — so the same sentence is TRUE inside those families' entries
+ * and false as a blanket note. A document-wide ban would have forced a rewrite of a correct
+ * provider-specific verdict, which is exactly what sc-18664 was told not to do.
+ */
+export const STALE_RUNG1_PREREQUISITE_PATTERNS = Object.freeze([
+  /rung 4 requires rung 1/i,
+  /requires rung 1 engaged in the same request/i,
+]);
+
+/**
+ * The notes' half of the correction: the stale claim is gone AND the real one is stated.
+ *
+ * Both directions, because an absence check alone passes on notes that say nothing at all — the
+ * quiet outcome that would let the next reader re-derive the removed edge from the silence.
+ */
+export function assertRung4NotesRecordTheContractPrerequisite(notes) {
+  const body = (notes ?? []).join("\n");
+  for (const pattern of STALE_RUNG1_PREREQUISITE_PATTERNS) {
+    if (pattern.test(body)) {
+      throw new Error(
+        `rung-4 survey notes restate the rung-1 prerequisite SC-15998 removed (${pattern}). Rung 4 requires LoadShape::DeferredMaterialization and nothing else; a provider's own additional_prerequisites edge belongs in that family's entry, not in the shared notes (sc-18664)`,
+      );
+    }
+  }
+  for (const required of ["LoadShape::DeferredMaterialization", "SC-15998"]) {
+    if (!body.includes(required)) {
+      throw new Error(
+        `rung-4 survey notes must name ${required}: the correction is a positive statement of rung 4's sole shared prerequisite, not just the absence of the old one (sc-18664)`,
+      );
+    }
+  }
+}
+
+/**
+ * The family verdict as a FUNCTION of the per-stack verdicts, so it cannot be asserted independently.
+ *
+ * This is the survey's own `structuralApplicability` vocabulary restated as arithmetic: `full` is one
+ * uniform stack that a single BlockPlan bounds with only embedders and heads outside it; `partial` is
+ * a trunk that decomposes into two or more separately-indexed stacks needing a plan each, or that
+ * carries a remainder which cannot be windowed at all; `none` is no windowable stack anywhere.
+ */
+export function deriveOutOfMatrixApplicability(stacks) {
+  const windowable = stacks.filter((stack) => stack.structuralApplicability !== "none");
+  if (!windowable.length) return "none";
+  const remainder = stacks.length - windowable.length;
+  return windowable.length === 1 && remainder === 0 && windowable[0].structuralApplicability === "full"
+    ? "full"
+    : "partial";
+}
+
+/**
+ * Validate the surveyed families the MATRIX cannot carry a verdict for (sc-18664).
+ *
+ * `families` is fenced to the image catalog in both directions — the generator builds from
+ * `manifest.models.filter(type === "image")`, and `assertRung4SurveyCoversEveryFamily` rejects a
+ * survey key the catalog does not advertise — so a video family placed there fails generation rather
+ * than producing a row. MiniMax-H3 is the first family to hit that: it is `"type": "video"`, and
+ * `familyGroup` throws on `minimax_h3`, so it has no group key either.
+ *
+ * These records are therefore validated here and never published. The guard that keeps them from
+ * becoming a museum is the catalog check: the day `familyGroup` learns one of the named entries, this
+ * throws and the record has to move into `families`, where the coverage fence can see it.
+ */
+export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
+  const records = new Map();
+  const families = parsed.families ?? {};
+  for (const [group, family] of Object.entries(parsed.outOfMatrixFamilies ?? {})) {
+    const where = `rung-4 survey out-of-matrix ${family.name ?? group}`;
+    if (Object.hasOwn(families, group)) {
+      throw new Error(
+        `${where}: SC-${group} is also a \`families\` key — one family gets one verdict, in one place`,
+      );
+    }
+    if (!family.catalogEntries?.length) {
+      throw new Error(`${where}: must name the catalog entries it is a survey OF`);
+    }
+    if (familyGroups) {
+      for (const id of family.catalogEntries) {
+        let owner = null;
+        try {
+          owner = familyGroups(id);
+        } catch {
+          owner = null;
+        }
+        if (owner !== null) {
+          throw new Error(
+            `${where}: familyGroup now resolves ${id} to family SC-${owner}, so the matrix carries this lane — move the record into \`families\` where the coverage fence can see it (sc-18664)`,
+          );
+        }
+      }
+    }
+    for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
+      const at = `${where} (${backend})`;
+      if (!RUNG4_APPLICABILITIES.includes(verdict.structuralApplicability)) {
+        throw new Error(
+          `${at}: unknown structuralApplicability ${JSON.stringify(verdict.structuralApplicability)}`,
+        );
+      }
+      if (!RUNG4_IMPLEMENTATIONS.includes(verdict.implementation)) {
+        throw new Error(`${at}: unknown implementation ${JSON.stringify(verdict.implementation)}`);
+      }
+      if (!RUNG4_REQUEST_PEAKS.includes(verdict.requestPeak?.finding)) {
+        throw new Error(
+          `${at}: unknown requestPeak finding ${JSON.stringify(verdict.requestPeak?.finding)}`,
+        );
+      }
+      if (!verdict.evidence?.length) {
+        throw new Error(`${at}: a verdict derived from provider code must cite at least one source`);
+      }
+      const stacks = verdict.stacks ?? [];
+      if (!stacks.length) {
+        throw new Error(
+          `${at}: the family verdict is derived from per-stack verdicts, so the stacks have to be there`,
+        );
+      }
+      const seen = new Set();
+      for (const stack of stacks) {
+        const stackAt = `${at}: stacks[${JSON.stringify(stack.id)}]`;
+        if (!stack.id || seen.has(stack.id)) {
+          throw new Error(`${stackAt}: every stack needs its own id, and ids must not repeat`);
+        }
+        seen.add(stack.id);
+        if (!RUNG4_APPLICABILITIES.includes(stack.structuralApplicability)) {
+          throw new Error(
+            `${stackAt}: unknown structuralApplicability ${JSON.stringify(stack.structuralApplicability)}`,
+          );
+        }
+        if (!stack.reason) {
+          throw new Error(`${stackAt}: a per-stack verdict without a stated reason is an assertion`);
+        }
+        if (stack.windowable !== (stack.structuralApplicability !== "none")) {
+          throw new Error(
+            `${stackAt}: windowable ${JSON.stringify(stack.windowable)} contradicts structuralApplicability ${JSON.stringify(stack.structuralApplicability)}`,
+          );
+        }
+        if (stack.structuralApplicability === "none" && !stack.structural?.length) {
+          throw new Error(
+            `${stackAt}: a stack the rung cannot bound is a Structurally N/A claim, which the epic accepts only with static provider evidence — none is cited`,
+          );
+        }
+      }
+      const derived = deriveOutOfMatrixApplicability(stacks);
+      if (derived !== verdict.structuralApplicability) {
+        throw new Error(
+          `${at}: records ${verdict.structuralApplicability} but its stacks derive ${derived} — the family verdict follows from the stacks, it is not a separate claim`,
+        );
+      }
+      // AC2's second half: a `partial` family has to say WHICH stacks are the no, or the verdict
+      // reads as a shrug. Exact set equality in both directions, so a stale name cannot survive a
+      // stack being reclassified.
+      const unwindowable = stacks
+        .filter((stack) => stack.structuralApplicability === "none")
+        .map((stack) => stack.id)
+        .sort();
+      const declared = [...(verdict.nonWindowableStacks ?? [])].sort();
+      if (JSON.stringify(declared) !== JSON.stringify(unwindowable)) {
+        throw new Error(
+          `${at}: nonWindowableStacks is ${JSON.stringify(declared)} but the stacks the rung cannot bound are ${JSON.stringify(unwindowable)}`,
+        );
+      }
+      if (!RUNG4_CONTRACT_SUPPORT.includes(verdict.contractSupport)) {
+        throw new Error(
+          `${at}: unknown contractSupport ${JSON.stringify(verdict.contractSupport)} — it mirrors gen_core::MemoryStrategySupport for this provider`,
+        );
+      }
+      // The survey and the provider contract have to agree, in BOTH directions. A survey that says
+      // the rung applies while the contract declares the architecture lacks what it optimizes is a
+      // contradiction; a survey that says it applies while the contract merely has not built it is
+      // the ordinary case, and needs the reason on the record so the gap is not read as a defect.
+      if (verdict.contractSupport === "structurally-not-applicable" && derived !== "none") {
+        throw new Error(
+          `${at}: the contract declares rung 4 StructurallyNotApplicable while this survey names a windowable stack — one of the two is wrong`,
+        );
+      }
+      if (verdict.contractSupport === "implemented" && derived === "none") {
+        throw new Error(
+          `${at}: the contract declares rung 4 Implemented while this survey finds no windowable stack — one of the two is wrong`,
+        );
+      }
+      if (verdict.contractSupport !== "implemented") {
+        if (verdict.implementation !== "none") {
+          throw new Error(
+            `${at}: claims implementation ${JSON.stringify(verdict.implementation)} while the contract does not declare rung 4 Implemented`,
+          );
+        }
+        if (derived !== "none" && !(verdict.contractReason && verdict.contractSource)) {
+          throw new Error(
+            `${at}: rung 4 applies to a stack but the contract does not implement it — record contractSource and contractReason, or the gap reads as an unexplained hole`,
+          );
+        }
+      }
+      records.set(`${group}:${backend}`, verdict);
+    }
+  }
+  return records;
+}
 
 /**
  * Parse and validate the SC-15969 rung-4 applicability survey.
@@ -907,6 +1120,11 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
   if (!families || typeof families !== "object") {
     throw new Error("rung-4 survey: missing `families`");
   }
+  // sc-18664. Both run on every generation, which is what gives them reach: `--check` in CI and the
+  // pre-push hook go through here, so a stale prerequisite note or an unvalidated out-of-matrix
+  // record fails the same way a bad family verdict does.
+  assertRung4NotesRecordTheContractPrerequisite(parsed.notes);
+  parseOutOfMatrixRung4Families(parsed, { familyGroups });
   const survey = new Map();
   for (const [group, family] of Object.entries(families)) {
     for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
