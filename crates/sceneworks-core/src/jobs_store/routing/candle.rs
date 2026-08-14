@@ -20,16 +20,12 @@ use crate::jobs_store::routing::{
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
 /// carrying `request.loras` stays on the candle lane instead of being refused. Wan-14B applies
-/// adapters per MoE expert, while LTX installs additive residuals on its video-attention projections
-/// for both the packed Q4 base and dense Eros checkpoint. Wan-5B, SVD, and Mochi advertise no LoRA
-/// slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
+/// adapters per MoE expert, while base LTX installs additive residuals on its video-attention
+/// projections. 10Eros is MLX-only after sc-18902's failed Candle/CUDA acceptance; Wan-5B, SVD, and
+/// Mochi advertise no LoRA slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
 /// `CANDLE_VIDEO_ROUTED_MODELS` mirrors the routed engines.
-pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
-    "wan_2_2_t2v_14b",
-    "wan_2_2_i2v_14b",
-    "ltx_2_3",
-    "ltx_2_3_eros",
-];
+pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] =
+    &["wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "ltx_2_3"];
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add

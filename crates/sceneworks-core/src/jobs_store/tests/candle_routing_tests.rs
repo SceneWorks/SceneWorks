@@ -1803,20 +1803,19 @@ fn candle_routed_video_models_are_eligible_in_their_native_shape() {
 
 #[test]
 fn non_candle_video_models_and_conditioned_shapes_fall_back() {
-    // `ltx_2_3_eros` now routes to candle for plain text_to_video (sc-5495 — it's a full dense
-    // LTX-2.3 fine-tune on the `ltx_2_3_distilled` engine), but any conditioned eros shape is
-    // refused and remains queued (the candle LTX lane is txt2video-only).
-    assert!(
-        video_request_candle_eligible("ltx_2_3_eros", &object(json!({ "mode": "text_to_video" }))),
-        "ltx_2_3_eros text_to_video must route to the candle lane"
-    );
-    assert!(
-        !video_request_candle_eligible(
-            "ltx_2_3_eros",
-            &object(json!({ "mode": "first_last_frame" }))
-        ),
-        "a conditioned ltx_2_3_eros shape must fall back to the Python worker"
-    );
+    // sc-18902: exact-head Candle/CUDA acceptance proved that the dense, undistilled 10Eros
+    // checkpoint produces unresolved noise through Candle's single-pass distilled engine. No
+    // 10Eros shape may route to Candle; the validated MLX two-pass distill recipe remains available.
+    for payload in [
+        json!({ "mode": "text_to_video" }),
+        json!({ "mode": "text_to_video", "loras": [{ "id": "ltx_style" }] }),
+        json!({ "mode": "first_last_frame" }),
+    ] {
+        assert!(
+            !video_request_candle_eligible("ltx_2_3_eros", &object(payload.clone())),
+            "ltx_2_3_eros must remain off Candle for every shape: {payload}"
+        );
+    }
     // A genuinely non-candle video model is refused and remains queued.
     assert!(
         !video_request_candle_eligible(
@@ -1916,20 +1915,16 @@ fn candle_video_models_with_provider_slots_accept_user_loras() {
         ),
         "wan_2_2_i2v_14b i2v + source + user LoRA must stay on candle"
     );
-    // The pinned candle LTX provider installs additive LoRA residuals on the video-attention
-    // projections for both the packed base tier and the dense Eros checkpoint.
-    for model in ["ltx_2_3", "ltx_2_3_eros"] {
-        assert!(
-            video_request_candle_eligible(
-                model,
-                &object(json!({
-                    "mode": "text_to_video",
-                    "loras": [{ "id": "ltx_style" }],
-                }))
-            ),
-            "{model} text_to_video + user LoRA must stay on candle"
-        );
-    }
+    // The pinned base-LTX Candle provider installs additive LoRA residuals on video-attention
+    // projections. Eros is deliberately absent: its required distill adapter does not fit this
+    // provider surface (sc-18902).
+    assert!(video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({
+            "mode": "text_to_video",
+            "loras": [{ "id": "ltx_style" }],
+        }))
+    ));
     // Families whose candle provider advertises no LoRA slot still refuse a LoRA.
     for (model, payload) in [
         (
@@ -2278,10 +2273,11 @@ fn candle_worker_claims_txt2video_but_refuses_other_video_shapes() {
             "candle worker should claim {model} image_to_video"
         );
     }
-    // Claims `ltx_2_3_eros` text_to_video (sc-5495 — the candle LTX engine serves the eros fine-tune
-    // too). Refuses an unported model, a conditioned (i2v) shape on a txt2video model, an image→video
-    // model (svd) in a txt2video shape, and the 14B I2V in a txt2video shape (both image→video only).
-    assert!(worker_supports_job(
+    // sc-18902: Candle refuses Eros after exact-head runtime evidence showed its undistilled dense
+    // checkpoint collapses to noise on this single-pass engine. It also refuses an unported model,
+    // a conditioned (i2v) shape on a txt2video model, an image→video model (svd) in a txt2video shape,
+    // and the 14B I2V in a txt2video shape (both image→video only).
+    assert!(!worker_supports_job(
         &candle,
         &video_generate_job(json!({ "model": "ltx_2_3_eros", "mode": "text_to_video" }))
     ));

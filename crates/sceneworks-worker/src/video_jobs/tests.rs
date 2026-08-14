@@ -11256,19 +11256,16 @@ mod candle_video_label_tests {
         assert_eq!(candle_video_engine_id("ltx_2_3"), Some("ltx_2_3_distilled"));
         // SVD maps to the candle `svd_xt` engine (sc-5493).
         assert_eq!(candle_video_engine_id("svd"), Some("svd_xt"));
-        // eros now shares the one candle LTX-2.3 engine with the base (sc-5495 wired the eros
-        // dense checkpoint through `ltx_2_3_distilled`; they differ only in `candle_video_repo`).
-        assert_eq!(
-            candle_video_engine_id("ltx_2_3_eros"),
-            Some("ltx_2_3_distilled")
-        );
-        assert!(is_candle_video_engine("ltx_2_3_eros"));
+        // sc-18902: exact-head Candle/CUDA acceptance rendered unresolved noise from Eros's
+        // undistilled dense checkpoint. Until Candle has a complete validated distill recipe it
+        // must not resolve an engine id or advertise this model.
+        assert_eq!(candle_video_engine_id("ltx_2_3_eros"), None);
+        assert!(!is_candle_video_engine("ltx_2_3_eros"));
         for model in [
             "wan_2_2",
             "wan_2_2_t2v_14b",
             "wan_2_2_i2v_14b",
             "ltx_2_3",
-            "ltx_2_3_eros",
             "svd",
         ] {
             assert!(is_candle_video_engine(model), "{model}");

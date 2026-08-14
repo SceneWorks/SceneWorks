@@ -695,8 +695,11 @@ pub(super) fn resolve_ltx_adapters(
 }
 
 /// Resolve user-selected LTX video LoRAs for both native providers. MLX and Candle consume the same
-/// PEFT attention-projection files and strengths. Candle has one distilled denoise pass, so this
-/// shared resolver deliberately excludes the MLX-only two-pass 10Eros distill recipe above.
+/// PEFT attention-projection files and strengths. This deliberately excludes the model-required
+/// 10Eros distill recipe: MLX injects that two-pass recipe in [`resolve_ltx_adapters`], while Candle
+/// does not route 10Eros after exact-head CUDA acceptance proved that the undistilled checkpoint
+/// collapses to noise and its cond_safe adapter does not fit Candle's single-pass adapter surface
+/// (sc-18902, run 31766800005).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
