@@ -56,9 +56,19 @@ machine (the remote-access lane, epic 4484), a workflow envelope's suggested act
 | Route | Gated? | Where |
 | --- | --- | --- |
 | `POST /api/v1/models/:id/download` | **Yes** — 403 `license_acknowledgment_required` unless the body carries `licenseAcknowledged: true`. Keyed on the catalog **id**. | `create_model_download_job`, `apps/rust-api/src/models.rs` |
-| `POST /api/v1/jobs` with `model_download` / `model_import` / `lora_download` / `lora_import` | **Yes** — same 403 and same code, keyed on the payload's **repo** (and on a huggingface.co `sourceUrl`). | `validate_raw_job_payload`, `apps/rust-api/src/jobs.rs` → `ensure_job_payload_license_acknowledged` |
-| `POST /api/v1/models/import` (JSON and multipart) | **Yes** — same 403, same repo-keyed predicate. | `queue_model_import_job`, `apps/rust-api/src/models.rs` |
-| `POST /api/v1/loras/:id/download`, `POST /api/v1/loras/import` | **No** — and nothing to enforce today: no LoRA in either catalog declares `requiresLicenseAcknowledgment`, and none names an H3 repo. A licence-restricted LoRA would need this section extended first. | — |
+| `POST /api/v1/jobs` with `model_download` / `model_import` / `model_convert` / `lora_download` / `lora_import` | **Yes** — same 403 and same code, keyed on the payload's **repo** (and on a huggingface.co `sourceUrl`). | `validate_raw_job_payload`, `apps/rust-api/src/jobs.rs` → `ensure_job_payload_license_acknowledged` |
+| `POST /api/v1/models/import` (JSON) | **Yes** — same 403, same repo-keyed predicate. | `queue_model_import_job`, `apps/rust-api/src/models.rs` |
+| `POST /api/v1/models/import` (multipart) | **Yes**, and **moot**: the same gate runs, but the parser rejects a request without an upload `file` (400), so this form cannot name a remote repo to fetch in the first place. Listed so the row is not read as an omission. | `model_import_request_from_multipart`, `apps/rust-api/src/models.rs` |
+| `POST /api/v1/loras/import` | **Yes** — same 403, same repo-keyed predicate. This route takes a caller-supplied `repo`/`sourceUrl` and **never consults the LoRA catalog** for it, so what the LoRA catalog declares has no bearing on what it can reach. | `queue_lora_import_job`, `apps/rust-api/src/loras.rs` |
+| `POST /api/v1/loras/:id/download` | **No gate needed** — it resolves the repo **from the catalog entry** named by the path id and 404s an id the catalog does not contain, so a caller cannot point it at a repo. A licence-restricted LoRA would still need one, since the gate above is keyed on the fetched repo and this route never reads the request for one. | `create_lora_download_job`, `apps/rust-api/src/loras.rs` |
+
+`model_convert` is on the list for a reason that is not obvious from its payload: it names no `repo`
+at all. Its LTX arm hands the payload's **`baseRepo`** to `ensure_ltx_upscaler_cached` →
+`ensure_hf_files_cached` — a real download — and `upscalerFile` is a **glob**, so `"**"` pulls the
+whole named repo. Adding the job type to the gate alone would have been **inert**: the shared
+predicate read only `repo` and `sourceUrl`. It now reads every repo-bearing payload key
+(`LICENSE_GATED_REPO_PAYLOAD_KEYS` — `repo`, `baseRepo`, `sourceRepo`), which is what makes the job
+type's presence bite.
 
 The repo-keyed half is what closes the generic queue route, which enqueues `job_type` + payload
 **verbatim**: `run_model_download_job` reads `repo` / `files` / `revision` straight out of the
@@ -67,7 +77,17 @@ payload with no catalog lookup between the request and Hugging Face. Its index i
 MiniMax-H3's shared text encoder and both VAEs come from `MiniMaxAI/MiniMax-H3` itself — and from
 the **unfiltered** manifest, because every H3 download row is `platforms: ["macos"]` and an
 OS-filtered index would leave the gate absent on Linux and Windows. Repo keys are compared
-case-insensitively.
+case-insensitively, and a trailing `.git` — the git-remote spelling of the same repository, which
+passes the worker's `validate_hf_repo_id` — is stripped before the comparison.
+
+**The limit of a repo-keyed index, stated plainly.** It recognises Hugging Face repos. A `sourceUrl`
+pointing at a **non-huggingface.co host** — a third-party mirror, or `cdn-lfs.huggingface.co` and the
+other CDN/LFS hostnames that serve the same bytes from a different name — is **not** matched, and
+`/models/import` answers 201. That is inherent to keying on the repo rather than on the bytes: the
+same weights republished anywhere else are, to this index, a different source. It is not a defect in
+the enforcement above and the table does not claim otherwise, but it is the boundary, and this
+section has twice been read as claiming more than it does. Closing it would mean gating by content
+rather than by name, which nothing here attempts.
 
 **Client side — where the terms are shown.** The acknowledgment UI lives on the Models screen
 (`apps/web/src/screens/ModelManagerScreen.jsx`). The gate renders when the card renders **any
@@ -115,8 +135,13 @@ button, and the partially-installed matrix), `apps/web/src/simple/SimpleModelMan
 `apps/web/src/hooks/useWorkflowDrop.test.jsx` (the workflow drop's entry resolution), and
 `apps/rust-api/src/tests/catalog.rs` — where
 `license_acknowledgment_generic_jobs_route_refuses_what_the_typed_route_refuses` runs the typed and
-generic requests against one app instance, and
-`license_acknowledgment_model_import_is_refused_for_a_restricted_repo` covers the import route. The
+generic requests against one app instance,
+`license_acknowledgment_model_import_is_refused_for_a_restricted_repo` covers the import route,
+`license_acknowledgment_lora_import_is_refused_for_a_restricted_repo` covers `/loras/import`,
+`license_acknowledgment_lora_download_is_keyed_on_the_catalog_not_the_caller` pins *why*
+`/loras/:id/download` needs no gate (so the row fails if that ever stops being true),
+`license_acknowledgment_model_convert_is_refused_for_a_restricted_base_repo` covers `baseRepo`, and
+`license_acknowledgment_is_not_bypassed_by_a_git_suffix` covers the `.git` spelling. The
 manifest declarations are pinned by
 `tests/test_builtin_manifest_audit.py::test_minimax_h3_requires_license_acknowledgment_without_a_credential`.
 

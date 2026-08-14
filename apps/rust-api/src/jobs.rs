@@ -477,12 +477,26 @@ async fn validate_raw_job_payload(
     //
     // The LoRA download/import types are in the list because they take the same `repo` + `files`
     // shape through `run_lora_download_job` and would otherwise be the identical bypass wearing a
-    // different `job_type`. Their own typed routes (`/loras/:id/download`, `/loras/import`) are NOT
-    // gated — no LoRA declares a licence acknowledgment today, so there is nothing for them to
-    // enforce yet; see `docs/minimax-h3-use-restriction-safeguards.md` for the boundary.
+    // different `job_type`. `/loras/import` applies the SAME predicate on its own typed route
+    // (`queue_lora_import_job`) — it fetches whatever repo the caller names and never consults the
+    // LoRA catalog for it, so what the catalog happens to declare has no bearing on what that route
+    // can reach. `/loras/:id/download` needs no gate of its own: it resolves the repo FROM the
+    // catalog entry named by the path id and 404s an id the catalog does not contain, so a caller
+    // cannot point it at a repo.
+    //
+    // `model_convert` is here because it is a fetching job type too, and less obviously so: it
+    // names no `repo`, but `resolve_convert_plan`'s LTX arm hands the payload's `baseRepo` to
+    // `ensure_ltx_upscaler_cached` → `ensure_hf_files_cached`, and `upscalerFile` is a GLOB — so
+    // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
+    // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
+    // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
     if matches!(
         job_type,
-        JobType::ModelDownload | JobType::ModelImport | JobType::LoraDownload | JobType::LoraImport
+        JobType::ModelDownload
+            | JobType::ModelImport
+            | JobType::ModelConvert
+            | JobType::LoraDownload
+            | JobType::LoraImport
     ) {
         crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
     }

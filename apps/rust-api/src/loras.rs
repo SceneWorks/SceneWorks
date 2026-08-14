@@ -915,6 +915,24 @@ pub(crate) async fn queue_lora_import_job(
     if let Some(source_url) = payload.source_url.as_deref() {
         validate_source_url(source_url)?;
     }
+    // Licence acknowledgment, keyed on the repo this import will FETCH (sc-17227) — the same
+    // predicate `POST /api/v1/jobs` and `POST /api/v1/models/import` apply.
+    //
+    // This route had no licence logic of any kind, and the reason first given for leaving it out —
+    // that no LoRA in the catalog declares the flag or names an H3 repo — was wrong on its own
+    // terms: nothing here ever consults the LoRA catalog for the repo. The worker
+    // (`run_lora_import_job`) takes the payload's `repo` verbatim, and with an empty `files` list
+    // `HuggingFaceSnapshot::resolve` + `download_snapshot` pull the WHOLE repo. So
+    // `{"repo": "MiniMaxAI/MiniMax-H3"}` fetched the restricted weights here while the identical
+    // `lora_import` job posted to `/api/v1/jobs` was answered 403. What the LoRA catalog contains
+    // has no bearing on what this route can reach; the repo the caller names is the whole of it.
+    crate::models::ensure_license_acknowledged_for_source(
+        &state,
+        &[payload.repo.as_deref()],
+        payload.source_url.as_deref(),
+        payload.license_acknowledged,
+    )
+    .await?;
     if !matches!(payload.scope.as_str(), "global" | "project") {
         return Err(ApiError::bad_request(
             "LoRA scope must be global or project",
@@ -1145,6 +1163,7 @@ pub(crate) async fn lora_import_request_from_multipart(
         family: None,
         base_model: None,
         expected_sha256: None,
+        license_acknowledged: false,
         scope: default_lora_scope(),
         project_id: None,
         uploaded_source_path: false,
@@ -1210,6 +1229,15 @@ pub(crate) async fn lora_import_request_from_multipart(
                 "notes" => payload.notes = value.to_owned(),
                 "scope" => payload.scope = value.to_owned(),
                 "projectId" => payload.project_id = Some(value.to_owned()),
+                // Accepted for parity with the model-import parser (sc-17227). Unlike that one,
+                // this parser accepts no `repo`/`sourceUrl` and rejects a request without an
+                // upload `file` below, so the licence gate never has a candidate here and this
+                // assertion cannot currently be needed. Parsed anyway so the field is not the
+                // missing half if a remote source is ever added to this form — the same reason
+                // `_ => {}` silently dropping it would be the wrong default.
+                "licenseAcknowledged" => {
+                    payload.license_acknowledged = value.eq_ignore_ascii_case("true")
+                }
                 _ => {}
             }
         }

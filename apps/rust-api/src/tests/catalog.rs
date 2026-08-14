@@ -5522,6 +5522,282 @@ async fn license_acknowledgment_model_import_is_refused_for_a_restricted_repo() 
     );
 }
 
+/// `POST /api/v1/loras/import` fetches a caller-supplied repo and never consults the LoRA catalog
+/// for it — `run_lora_import_job` takes the payload's `repo` verbatim and, with an empty `files`,
+/// downloads the WHOLE repo. It was 201 for `MiniMaxAI/MiniMax-H3` while the identical `lora_import`
+/// job posted to `/api/v1/jobs` was 403. That the LoRA catalog declares no licence flag is beside
+/// the point: the catalog is not what this route reads.
+#[tokio::test]
+async fn license_acknowledgment_lora_import_is_refused_for_a_restricted_repo() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({ "repo": "MiniMaxAI/MiniMax-H3", "name": "x" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+
+    // The re-host row carries the same flag through the same index, so it is refused too.
+    let (rehost_status, rehost_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({ "repo": "SceneWorks/minimax-h3-mlx", "name": "x" }),
+    )
+    .await;
+    assert_eq!(rehost_status, StatusCode::FORBIDDEN, "{rehost_body:?}");
+    assert_eq!(rehost_body["code"], "license_acknowledgment_required");
+
+    // A huggingface.co `sourceUrl` addressing the same repo fetches the same bytes.
+    let (url_status, url_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({
+            "sourceUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/adapter.safetensors",
+            "name": "x"
+        }),
+    )
+    .await;
+    assert_eq!(url_status, StatusCode::FORBIDDEN, "{url_body:?}");
+    assert_eq!(url_body["code"], "license_acknowledgment_required");
+
+    // Control: an ordinary LoRA import is untouched by the gate.
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({ "repo": "owner/some-lora", "name": "ordinary" }),
+    )
+    .await;
+    assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
+
+    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so the
+    // raw-payload re-validation on retry sees it rather than refusing what was just authorized.
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/loras/import",
+        json!({
+            "repo": "MiniMaxAI/MiniMax-H3",
+            "name": "x",
+            "licenseAcknowledged": true
+        }),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(
+        asserted_job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the queued LoRA import must carry the assertion: {asserted_job:?}",
+    );
+}
+
+/// `POST /api/v1/loras/:id/download` needs no gate of its own, and this pins WHY rather than
+/// asserting the absence: it resolves the repo from the catalog entry the path id names, so an id
+/// the catalog does not contain is a 404 and a caller has no way to supply a repo at all. If that
+/// ever changes — an id-free download, or a body-supplied repo — this test fails and the route
+/// joins the gated list.
+#[tokio::test]
+async fn license_acknowledgment_lora_download_is_keyed_on_the_catalog_not_the_caller() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // The restricted repo is not a LoRA id, and there is nowhere else in this request to put it.
+    for id in ["MiniMaxAI%2FMiniMax-H3", "minimax_h3", "not_a_lora"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/loras/{id}/download"),
+            json!({ "requestedGpu": "auto" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a non-catalog LoRA id must 404 rather than fetch anything: {id} -> {body:?}"
+        );
+    }
+
+    // A repo in the BODY is inert: the route reads the catalog entry, never the request.
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/loras/not_a_lora/download",
+        json!({ "requestedGpu": "auto", "repo": "MiniMaxAI/MiniMax-H3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
+/// `model_convert` names no `repo`, which is why it was missed — but `resolve_convert_plan`'s LTX
+/// arm hands the payload's `baseRepo` to `ensure_ltx_upscaler_cached` → `ensure_hf_files_cached`,
+/// and `upscalerFile` is a GLOB, so `"**"` downloads the whole named repo. Adding the job type to
+/// the gate alone would have been INERT: the shared predicate read only `repo`/`sourceUrl`. This
+/// asserts the pair — the job type is gated AND `baseRepo` is one of the keys it reads.
+#[tokio::test]
+async fn license_acknowledgment_model_convert_is_refused_for_a_restricted_base_repo() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let settings = test_settings(&temp_dir);
+    let output_dir = settings.data_dir.join("models/mlx/converted-1");
+    let app = create_app(settings).expect("app creates");
+
+    let convert_payload = |base_repo: &str, acknowledged: bool| {
+        let mut payload = json!({
+            "modelId": "ltx_local",
+            "converter": "ltx_video",
+            "sourceRepo": "owner/plain",
+            "sourceFile": "ltx.safetensors",
+            "baseRepo": base_repo,
+            "upscalerFile": "**",
+            "outputDir": output_dir.display().to_string(),
+        });
+        if acknowledged {
+            payload["licenseAcknowledged"] = Value::Bool(true);
+        }
+        json!({ "type": "model_convert", "requestedGpu": "auto", "payload": payload })
+    };
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        convert_payload("MiniMaxAI/MiniMax-H3", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    assert!(
+        body["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("MiniMaxAI/MiniMax-H3"),
+        "the refusal names the repo the CONVERT would have fetched: {body:?}"
+    );
+
+    // Control: an unrestricted `baseRepo` still enqueues, so the gate is keyed on the repo and not
+    // on the job type being refused wholesale (which would break every real conversion).
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        convert_payload("Lightricks/LTX-Video", false),
+    )
+    .await;
+    assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
+
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        convert_payload("MiniMaxAI/MiniMax-H3", true),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(asserted_job["payload"]["baseRepo"], "MiniMaxAI/MiniMax-H3");
+}
+
+/// `MiniMaxAI/MiniMax-H3.git` is the git-remote spelling of the same repository. It passes the
+/// worker's `validate_hf_repo_id`, so before the `.git` strip it missed the index and was answered
+/// 201 — the one spelling nothing on our side refused, leaving Hugging Face's own 401 as the only
+/// backstop. Exercised through the ROUTES rather than the private key helper, so the strip is
+/// pinned where it matters.
+#[tokio::test]
+async fn license_acknowledgment_is_not_bypassed_by_a_git_suffix() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for repo in [
+        "MiniMaxAI/MiniMax-H3.git",
+        "MiniMaxAI/MiniMax-H3.git/",
+        "MiniMaxAI/MiniMax-H3.GIT",
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            raw_model_download_job(repo),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{repo} -> {body:?}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+    }
+
+    // `/models/import` runs `validate_huggingface_repo` first, which splits on `/` and demands
+    // exactly two parts — so the trailing-slash spelling is refused THERE, with a 400 and no
+    // licence code, before the gate is reached. Asserted as the 400 it actually is rather than
+    // folded into the 403s above: both are refusals, but they are different refusals.
+    for repo in ["MiniMaxAI/MiniMax-H3.git", "MiniMaxAI/MiniMax-H3.GIT"] {
+        let (import_status, import_body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({ "repo": repo, "type": "video" }),
+        )
+        .await;
+        assert_eq!(
+            import_status,
+            StatusCode::FORBIDDEN,
+            "{repo} -> {import_body:?}"
+        );
+        assert_eq!(import_body["code"], "license_acknowledgment_required");
+    }
+    let (slashed_status, slashed_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({ "repo": "MiniMaxAI/MiniMax-H3.git/", "type": "video" }),
+    )
+    .await;
+    assert_eq!(slashed_status, StatusCode::BAD_REQUEST, "{slashed_body:?}");
+    assert!(
+        slashed_body["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("owner/name form"),
+        "the earlier refusal is the repo-form validator, not the licence gate: {slashed_body:?}"
+    );
+
+    // The strip must not swallow a DIFFERENT repo that merely ends in a dotted segment.
+    let (plain_status, plain_job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("owner/plain.git"),
+    )
+    .await;
+    assert_eq!(
+        plain_status,
+        StatusCode::CREATED,
+        "an unrestricted repo is unaffected by the suffix strip: {plain_job:?}"
+    );
+}
+
 #[tokio::test]
 async fn license_acknowledgment_survives_a_typed_download_retry() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");

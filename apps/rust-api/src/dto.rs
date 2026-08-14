@@ -1213,6 +1213,14 @@ pub(crate) struct LoraImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227) — the same field, default, and meaning as on [`ModelImportRequest`]. A LoRA
+    /// import takes a caller-supplied `repo`/`sourceUrl` and never looks it up in the LoRA catalog,
+    /// so it can name a licence-restricted MODEL repo; the gate is keyed on that repo, not on
+    /// anything the LoRA catalog declares. Serialized onto the queued job only when true, so a
+    /// retry of an authorized import re-validates against the assertion the request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default = "default_lora_scope")]
     pub(crate) scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

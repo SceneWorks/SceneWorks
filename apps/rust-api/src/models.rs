@@ -489,8 +489,21 @@ pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
 /// Canonical comparison key for a Hugging Face `owner/name`. Lowercased so a case-variant repo
 /// string cannot walk past a gate keyed on the catalog's spelling — the hub resolves `owner/Name`
 /// and `owner/name` to the same repository, so treating them as different would be a bypass.
+///
+/// A trailing `.git` is stripped for the same reason: `MiniMaxAI/MiniMax-H3.git` is the git-remote
+/// spelling of the same repository, it passes the worker's `validate_hf_repo_id`, and it was the
+/// one spelling that missed this index — leaving Hugging Face's own 401 as the only thing between
+/// the request and the weights. Stripped AFTER the trailing-slash trim (and re-trimmed) so
+/// `…/MiniMax-H3.git/` and `…/MiniMax-H3/.git` both normalize too.
 fn huggingface_repo_key(repo: &str) -> Option<String> {
     let repo = repo.trim().trim_end_matches('/').trim();
+    let repo = match repo.rfind('.') {
+        // `rfind` yields a char boundary, so the slice is safe; compared case-insensitively
+        // because the lowercasing below happens only after this strip.
+        Some(dot) if repo[dot..].eq_ignore_ascii_case(".git") => repo[..dot].trim_end_matches('/'),
+        _ => repo,
+    };
+    let repo = repo.trim();
     if repo.is_empty() {
         return None;
     }
@@ -577,25 +590,31 @@ async fn license_acknowledgment_repo_index(
 /// than on the model id is what lets ONE mechanism close both: the payloads have no `modelId` to
 /// look up, but they must name the repo or they cannot fetch anything.
 ///
+/// `repos` is a LIST because "the repo this request will fetch" is not always spelled `repo`: a
+/// `model_convert` payload names its download target in `baseRepo` (the LTX converter's
+/// `ensure_ltx_upscaler_cached` fetches it, and `upscalerFile` is a glob, so `"**"` pulls the whole
+/// repo). Checking every repo-bearing key of a payload is what keeps this ONE predicate rather than
+/// one per job type — a new key is an addition to the list, not a second gate.
+///
 /// `acknowledged` is the caller's own assertion, exactly as on the typed route: the gate obtains
 /// an affirmative acknowledgment, it is not an authorization check (see
 /// `docs/minimax-h3-use-restriction-safeguards.md`).
-async fn ensure_license_acknowledged_for_source(
+pub(crate) async fn ensure_license_acknowledged_for_source(
     state: &AppState,
-    repo: Option<&str>,
+    repos: &[Option<&str>],
     source_url: Option<&str>,
     acknowledged: bool,
 ) -> Result<(), ApiError> {
     // Each candidate keeps the caller's own spelling next to the lookup key, so the refusal echoes
     // what was actually requested rather than the lowercased index key.
-    let candidates: Vec<(String, String)> = [
-        repo.map(str::to_owned),
-        source_url.and_then(huggingface_repo_from_url),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(|named| huggingface_repo_key(&named).map(|key| (named, key)))
-    .collect();
+    let candidates: Vec<(String, String)> = repos
+        .iter()
+        .copied()
+        .flatten()
+        .map(str::to_owned)
+        .chain(source_url.and_then(huggingface_repo_from_url))
+        .filter_map(|named| huggingface_repo_key(&named).map(|key| (named, key)))
+        .collect();
     if candidates.is_empty() {
         return Ok(());
     }
@@ -620,15 +639,28 @@ async fn ensure_license_acknowledged_for_source(
     })
 }
 
+/// Every payload key that can name a Hugging Face repo the WORKER will fetch (sc-17227). Keep this
+/// aligned with the worker's own readers: `run_model_download_job` / `run_model_import_job` /
+/// `run_lora_*_job` take `repo` (`crates/sceneworks-worker/src/model_jobs.rs`), and
+/// `resolve_convert_plan` takes `baseRepo` — which the LTX arm hands to `ensure_ltx_upscaler_cached`
+/// → `ensure_hf_files_cached`, a real download. `sourceRepo` is listed because it is the other repo
+/// a convert payload names; it resolves against the local cache today (`huggingface_snapshot_dir`),
+/// so gating it costs nothing and removes the question of which of the two a future arm fetches.
+const LICENSE_GATED_REPO_PAYLOAD_KEYS: &[&str] = &["repo", "baseRepo", "sourceRepo"];
+
 /// [`ensure_license_acknowledged_for_source`] over a raw job payload — the shape
 /// `POST /api/v1/jobs` (and the retry/duplicate re-validation) hands to the worker verbatim.
 pub(crate) async fn ensure_job_payload_license_acknowledged(
     state: &AppState,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
+    let repos: Vec<Option<&str>> = LICENSE_GATED_REPO_PAYLOAD_KEYS
+        .iter()
+        .map(|key| payload.get(*key).and_then(Value::as_str))
+        .collect();
     ensure_license_acknowledged_for_source(
         state,
-        payload.get("repo").and_then(Value::as_str),
+        &repos,
         payload.get("sourceUrl").and_then(Value::as_str),
         payload
             .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
@@ -2009,7 +2041,7 @@ pub(crate) async fn queue_model_import_job(
     // bytes. The same predicate the raw jobs route uses, so there is one mechanism, not two.
     ensure_license_acknowledged_for_source(
         &state,
-        payload.repo.as_deref(),
+        &[payload.repo.as_deref()],
         payload.source_url.as_deref(),
         payload.license_acknowledged,
     )
