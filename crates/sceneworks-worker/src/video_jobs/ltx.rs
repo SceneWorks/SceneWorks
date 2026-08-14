@@ -48,8 +48,19 @@ pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682).
 /// The native downloader still verifies each file's own hash on download. Bumped in sc-13870 to the
 /// packed-q4 + Gemma revision validated by the candle training and inference round-trip.
+///
+/// Bumped again in sc-18853 to the direct-child revision that adds the dense `bf16/` tier. The old
+/// pin predates that directory, so its `bf16/*` fetch resolved no files. The newer revision changes
+/// no q4/q8/gemma paths and must stay aligned with every `ltx_2_3` manifest download row.
 #[cfg(target_os = "macos")]
-pub(super) const LTX_BUNDLE_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
+pub(super) const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
+
+/// The only older LTX bundle snapshot whose contents are allowed to complement the current pin.
+/// [`LTX_BUNDLE_REVISION`] is a proven strict superset of this direct parent: its only additions are
+/// the ten `bf16/` files. Keeping the parent explicit prevents an unrelated cached revision from
+/// bypassing the immutable product pin during the split-cache compatibility scan (sc-18853).
+#[cfg(target_os = "macos")]
+pub(super) const LTX_BUNDLE_PRE_BF16_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -145,6 +156,36 @@ pub(super) fn ltx_bundle_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> 
         .find(|dir| ltx_dir_is_complete(dir))
 }
 
+/// Search the two proven-compatible Hugging Face bundle revisions while keeping tier preference
+/// dominant (sc-18853). An existing install can retain q4/q8 in the old snapshot and place bf16 in
+/// the bumped one; selecting only one snapshot would silently downgrade a bf16 request to q8.
+///
+/// Do not enumerate arbitrary sibling snapshots here. A cache can contain manually downloaded or
+/// future revisions; letting one of those satisfy a preferred tier would bypass the immutable
+/// [`LTX_BUNDLE_REVISION`] pin. The only admitted fallback is its direct parent, whose old paths were
+/// verified byte-identical before this hotfix. The current pin wins a same-tier tie.
+#[cfg(target_os = "macos")]
+pub(super) fn ltx_bundle_subdir_across_revisions(
+    selected: &Path,
+    order: &[&str],
+) -> Option<PathBuf> {
+    let Some(snapshots) = selected
+        .parent()
+        .filter(|parent| parent.file_name().and_then(|name| name.to_str()) == Some("snapshots"))
+    else {
+        return ltx_bundle_subdir(selected, order);
+    };
+    let roots = [
+        snapshots.join(LTX_BUNDLE_REVISION),
+        snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION),
+    ];
+    order.iter().find_map(|sub| {
+        roots
+            .iter()
+            .find_map(|root| ltx_bundle_subdir(root, &[sub]))
+    })
+}
+
 /// Resolve the converted LTX MLX snapshot dir. Env override (`SCENEWORKS_MLX_LTX_DIR` /
 /// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey SceneWorks bundle
 /// [`LTX_BUNDLE_REPO`], descending into its `q4/`/`q8/` subdir. Only a dir **complete for the
@@ -194,7 +235,9 @@ pub(super) fn resolve_ltx_model_dir(
     // load.
     if !eros {
         if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
-            if let Some(dir) = ltx_bundle_subdir(&root, ltx_bundle_tier_order(request)) {
+            if let Some(dir) =
+                ltx_bundle_subdir_across_revisions(&root, ltx_bundle_tier_order(request))
+            {
                 return Ok(dir);
             }
         }
@@ -500,7 +543,7 @@ pub(super) async fn ensure_ltx_q8_present(
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
         return Ok(());
     };
-    if ltx_dir_is_complete(&root.join("q8")) {
+    if ltx_bundle_subdir_across_revisions(&root, &["q8"]).is_some() {
         return Ok(());
     }
     let files = vec!["q8/*".to_owned()];
@@ -521,7 +564,7 @@ pub(super) async fn ensure_ltx_q8_present(
 /// `bf16/*` from the FIXED [`LTX_BUNDLE_REVISION`] the first time it is requested. No-op for eros, for
 /// non-bf16 jobs, or when `bf16/` is already complete. Mirrors [`ensure_ltx_q8_present`].
 #[cfg(target_os = "macos")]
-async fn ensure_ltx_bf16_present(
+pub(super) async fn ensure_ltx_bf16_present(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -533,7 +576,7 @@ async fn ensure_ltx_bf16_present(
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
         return Ok(());
     };
-    if ltx_dir_is_complete(&root.join("bf16")) {
+    if ltx_bundle_subdir_across_revisions(&root, &["bf16"]).is_some() {
         return Ok(());
     }
     let files = vec!["bf16/*".to_owned()];
