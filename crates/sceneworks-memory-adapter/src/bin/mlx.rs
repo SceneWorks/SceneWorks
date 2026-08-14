@@ -344,6 +344,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scoped_generation_preserves_generator_and_finish_failures() {
+        let mut observed = Some(ScopedGenerationFailureKind::Error);
+        let error = settle_scoped_generation(
+            Err(mlx_gen::gen_core::Error::Msg(
+                "generator exploded".to_owned(),
+            )),
+            Err(mlx_gen::gen_core::Error::Msg("finish exploded".to_owned())),
+            &mut observed,
+        )
+        .expect_err("neither terminal failure may be discarded");
+        assert_eq!(
+            error,
+            "generate calibrated request: generator exploded; finish calibrated request: finish exploded"
+        );
+        assert_eq!(observed, Some(ScopedGenerationFailureKind::Finish));
+
+        let mut control = Some(ScopedGenerationFailureKind::Error);
+        let error = settle_scoped_generation(
+            Err(mlx_gen::gen_core::Error::Msg(
+                "generator exploded".to_owned(),
+            )),
+            Ok(()),
+            &mut control,
+        )
+        .expect_err("the generator failure remains terminal when finish succeeds");
+        assert_eq!(error, "generator exploded");
+        assert_eq!(control, Some(ScopedGenerationFailureKind::Error));
+    }
+
+    #[test]
     fn wired_limit_prefers_explicit_bytes() {
         assert_eq!(
             resolve_wired_limit(Some("123"), Some("456"), Some("789"), 999).unwrap(),
@@ -1308,6 +1338,7 @@ fn scoped_generate(
 enum ScopedGenerationFailureKind {
     Canceled,
     Error,
+    Finish,
 }
 
 fn scoped_generate_observed(
@@ -1393,15 +1424,39 @@ fn scoped_generate_observed(
     };
     let finish = scope.finish(outcome);
     if let Some(error) = phase_error {
-        *observed_failure = Some(ScopedGenerationFailureKind::Error);
-        finish.map_err(|finish| format!("{error}; finish calibrated request: {finish}"))?;
-        return Err(error);
+        return match finish {
+            Ok(()) => {
+                *observed_failure = Some(ScopedGenerationFailureKind::Error);
+                Err(error)
+            }
+            Err(finish) => {
+                *observed_failure = Some(ScopedGenerationFailureKind::Finish);
+                Err(format!("{error}; finish calibrated request: {finish}"))
+            }
+        };
     }
+    settle_scoped_generation(result, finish, observed_failure)
+}
+
+/// Combine the generator and request-scope terminals without losing either failure. A provider
+/// generation error does not make `finish` advisory: lifecycle certification requires the scope to
+/// close successfully on complete, canceled, and error outcomes alike.
+fn settle_scoped_generation(
+    result: mlx_gen::gen_core::Result<GenerationOutput>,
+    finish: mlx_gen::gen_core::Result<()>,
+    observed_failure: &mut Option<ScopedGenerationFailureKind>,
+) -> Result<GenerationOutput, String> {
     match (result, finish) {
         (Ok(output), Ok(())) => Ok(output),
-        (Err(error), _) => Err(error.to_string()),
+        (Err(error), Ok(())) => Err(error.to_string()),
+        (Err(error), Err(finish)) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Finish);
+            Err(format!(
+                "generate calibrated request: {error}; finish calibrated request: {finish}"
+            ))
+        }
         (Ok(_), Err(error)) => {
-            *observed_failure = Some(ScopedGenerationFailureKind::Error);
+            *observed_failure = Some(ScopedGenerationFailureKind::Finish);
             Err(format!("finish calibrated request: {error}"))
         }
     }
@@ -5343,7 +5398,6 @@ fn ltx_load_spec(
 /// that claims `staged_residency` through a tiled decode is a false attestation. This calls the
 /// production entry point rather than re-deriving either bound, so the arm cannot drift from the
 /// engine it is measuring.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct LtxDecodePlan {
     tiling: Option<TilingConfig>,
@@ -5455,8 +5509,8 @@ impl Drop for LtxInjectedBudget {
     }
 }
 
-#[cfg(test)]
 impl LtxDecodePlan {
+    #[cfg(test)]
     fn resolve(geometry: LtxGeometry) -> Result<Self, String> {
         Self::resolve_against_live_budget(geometry)
     }
@@ -5472,6 +5526,64 @@ impl LtxDecodePlan {
             tiling,
             writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
         })
+    }
+
+    /// Resolve the decode path that the provider will physically execute. An explicit bounded
+    /// selection always routes through `decode_tiled`; the ordinary staged carrier leaves the
+    /// provider to its live-budget auto selector, which may still tile on a constrained host.
+    fn resolve_for_selection(
+        selection: &MemorySelection,
+        geometry: LtxGeometry,
+    ) -> Result<Self, String> {
+        if selection.strategy == MemoryStrategy::BoundedDecode {
+            let tile_px = selection.parameters.decode_tile_edge.ok_or_else(|| {
+                "bounded LTX decode is missing its selected spatial tile edge".to_owned()
+            })?;
+            let overlap_px = selection.parameters.decode_overlap.ok_or_else(|| {
+                "bounded LTX decode is missing its selected spatial overlap".to_owned()
+            })?;
+            let (height, width, _) = Self::i32_geometry(geometry)?;
+            return Ok(Self {
+                tiling: Some(TilingConfig {
+                    spatial: Some(SpatialTiling {
+                        tile_px: i32::try_from(tile_px)
+                            .map_err(|_| "LTX decode tile edge must fit i32".to_owned())?,
+                        overlap_px: i32::try_from(overlap_px)
+                            .map_err(|_| "LTX decode overlap must fit i32".to_owned())?,
+                    }),
+                    temporal: None,
+                }),
+                writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
+            });
+        }
+        Self::resolve_against_live_budget(geometry)
+    }
+
+    /// A campaign row may only attest the strategy it physically executes. In particular, a
+    /// staged/single-pass row on a smaller host must fail closed when the provider auto-tiler
+    /// engages; relabeling that render after the fact would violate the frozen plan selector.
+    fn validate_selected_strategy(self, selection: &MemorySelection) -> Result<(), String> {
+        let requested_tiling = selection.strategy == MemoryStrategy::BoundedDecode;
+        if self.tiling.is_some() != requested_tiling {
+            return Err(format!(
+                "planned LTX strategy {:?} does not match the physical decode path {:?}; this host auto-selected bounded decode, so the staged single-pass row is not capturable here",
+                selection.strategy,
+                self.rung(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn lifecycle_fault_phase(self) -> MemoryPhase {
+        if self.tiling.is_some() {
+            MemoryPhase::Decode
+        } else {
+            MemoryPhase::Denoise
+        }
+    }
+
+    fn tiling_engaged(self) -> bool {
+        self.tiling.is_some()
     }
 
     /// The same production selector, resolved against an INJECTED memory budget instead of this
@@ -5526,6 +5638,7 @@ impl LtxDecodePlan {
         }
     }
 
+    #[cfg(test)]
     fn engaged_rungs(self) -> Vec<&'static str> {
         let mut rungs = vec!["resident", "staged_residency"];
         if self.tiling.is_some() {
@@ -5543,10 +5656,17 @@ impl LtxDecodePlan {
     }
 
     /// The selected temporal tile length in OUTPUT frames, or 0 when that axis is not tiled.
+    #[cfg(test)]
     fn temporal_tile_frames(self) -> u64 {
         self.tiling
             .and_then(|config| config.temporal)
             .map_or(0, |temporal| u64::from(temporal.tile_frames.max(0) as u32))
+    }
+
+    fn spatial_overlap_px(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.spatial)
+            .map_or(0, |spatial| u64::from(spatial.overlap_px.max(0) as u32))
     }
 }
 
@@ -5825,6 +5945,7 @@ fn verify_ltx_lifecycle(
     geometry: LtxGeometry,
     fps: u32,
     seed: u64,
+    fault_phase: MemoryPhase,
 ) -> Result<LtxLifecycleMetrics, String> {
     clear_cache();
     reset_peak_memory();
@@ -5853,12 +5974,6 @@ fn verify_ltx_lifecycle(
         rms_error,
         ..Default::default()
     };
-    let fault_phase = if context.selection.strategy == MemoryStrategy::BoundedDecode {
-        MemoryPhase::Decode
-    } else {
-        MemoryPhase::Denoise
-    };
-
     let cancelled = ltx_request(geometry, fps, seed);
     let cancel_signal = cancelled.cancel.clone();
     let mut cancel_triggered = false;
@@ -6026,6 +6141,8 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         );
     }
     let selection = planned_selection(request)?;
+    let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
+    decode_plan.validate_selected_strategy(&selection)?;
     let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
     if !matches!(tier, "q4" | "q8" | "bf16") {
         return Err(format!(
@@ -6227,8 +6344,15 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         return Err("LTX-2.3 admission rejected an exact-fit calibrated budget".to_owned());
     }
 
-    let lifecycle =
-        verify_ltx_lifecycle(generator.as_ref(), &context, &measured, geometry, fps, seed)?;
+    let lifecycle = verify_ltx_lifecycle(
+        generator.as_ref(),
+        &context,
+        &measured,
+        geometry,
+        fps,
+        seed,
+        decode_plan.lifecycle_fault_phase(),
+    )?;
     let maximum_error = lifecycle.maximum_error;
     let mean_error = lifecycle.mean_error;
     let rms_error = lifecycle.rms_error;
@@ -6326,10 +6450,10 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("latentTokens", "count", u64::from(geometry.latent_frames) * u64::from(geometry.width / 32) * u64::from(geometry.height / 32)),
                 ("outputFps", "count", u64::from(fps)),
                 ("audioTrackDecoded", "count", u64::from(has_audio)),
-                ("decodeTilingEngaged", "count", u64::from(context.selection.strategy == MemoryStrategy::BoundedDecode)),
-                ("decodeWritableFrameCap", "count", VaeTiling::LTX.writable_frame_cap(geometry.height as i32, geometry.width as i32).max(0) as u64),
-                ("decodeTileSpatialPx", "count", u64::from(context.selection.parameters.decode_tile_edge.unwrap_or(0))),
-                ("decodeTileOverlapPx", "count", u64::from(context.selection.parameters.decode_overlap.unwrap_or(0))),
+                ("decodeTilingEngaged", "count", u64::from(decode_plan.tiling_engaged())),
+                ("decodeWritableFrameCap", "count", decode_plan.writable_frame_cap.max(0) as u64),
+                ("decodeTileSpatialPx", "count", decode_plan.spatial_tile_px()),
+                ("decodeTileOverlapPx", "count", decode_plan.spatial_overlap_px()),
                 ("mlxMemoryLimitBytes", "bytes", get_memory_limit() as u64),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
@@ -7854,6 +7978,11 @@ mod ltx_tests {
             "at the cap and inside the memory budget the decode must stay single-pass"
         );
         assert_eq!(single.rung(), "staged_residency");
+        assert_eq!(single.lifecycle_fault_phase(), MemoryPhase::Denoise);
+        let staged_selection = planned_selection(&ltx_request_json(1280, 704, 297)).unwrap();
+        single
+            .validate_selected_strategy(&staged_selection)
+            .unwrap();
         // SC-19109 replaces historical host inference with an explicit provider-owned selection:
         // the same geometry can deliberately request bounded decode with its exact carrier tuple.
         let mut request = ltx_request_json(1280, 704, 297);
@@ -7867,6 +7996,15 @@ mod ltx_tests {
         contract.validate_selection(&selection).unwrap();
         let attested = ltx_attested_strategy(&request, &selection, &contract).unwrap();
         assert_eq!(attested, request["planned"]["strategy"]);
+        let explicit = LtxDecodePlan::resolve_for_selection(
+            &selection,
+            validate_ltx_geometry(1280, 704, 297).unwrap(),
+        )
+        .unwrap();
+        explicit.validate_selected_strategy(&selection).unwrap();
+        assert_eq!(explicit.lifecycle_fault_phase(), MemoryPhase::Decode);
+        assert_eq!(explicit.spatial_tile_px(), 384);
+        assert_eq!(explicit.spatial_overlap_px(), 64);
 
         // The one-sided half of the claim, asserted rather than assumed: the write cap is a CEILING
         // on single-pass frames, not the place tiling starts. A smaller host tiles the very same
@@ -7896,6 +8034,16 @@ mod ltx_tests {
                 "{width}x{height} f{frames} must tile for MEMORY under a {budget_gib} GiB budget"
             );
             assert_eq!(constrained.rung(), "bounded_decode");
+            assert_eq!(constrained.lifecycle_fault_phase(), MemoryPhase::Decode);
+            let staged_selection =
+                planned_selection(&ltx_request_json(width, height, frames)).unwrap();
+            let mismatch = constrained
+                .validate_selected_strategy(&staged_selection)
+                .expect_err("an auto-tiled render must not attest a staged single-pass row");
+            assert!(
+                mismatch.contains("auto-selected bounded decode"),
+                "{mismatch}"
+            );
             // The write bound PERMITTED a single pass here (`f <= cap`) and memory still tiled it.
             assert_eq!(
                 constrained.writable_frame_cap - i64::from(frames),
