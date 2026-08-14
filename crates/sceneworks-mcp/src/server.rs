@@ -1005,9 +1005,11 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
             }
         }
         // sc-17161. `reference_to_video` is one of the twelve modes `VIDEO_JOB_MODES` admits and
-        // was the only one this tool could not reach — MiniMax-H3 Ref2VA's ONLY mode, and the mode
-        // the `referenceAudioAssetIds` field sc-17160 added exists to feed, so the field was
-        // reachable while the mode that consumes it was not.
+        // the only one MiniMax-H3 needs — it is Ref2VA's ONLY mode, and the mode the
+        // `referenceAudioAssetIds` field sc-17160 added exists to feed, so the field was reachable
+        // while the mode that consumes it was not. It is NOT the tool's last gap: `video_to_video`,
+        // `reference_video_to_video`, `multi_video_to_video`, `ads2v` and `animate_character` stay
+        // unreachable from here, so this emits 7 of the 12.
         //
         // "at least one reference of ANY kind" mirrors `validate_video_job`'s arm exactly
         // (apps/rust-api/src/lib.rs): Ref2VA conditions on images AND clips AND audio, and an
@@ -1918,10 +1920,12 @@ mod tests {
 
     /// sc-17161: `reference` is a real mode, not a synonym for `generate`.
     ///
-    /// `reference_to_video` is one of the twelve modes `VIDEO_JOB_MODES` admits and was the ONLY
-    /// one `submit_video_job` could not reach. That gap is what made sc-17160's
-    /// `referenceAudioAssetIds` field inert here: the field was on the tool while the single mode
-    /// that consumes it was not, so an agent could set audio references and never render with them.
+    /// `reference_to_video` is one of the twelve modes `VIDEO_JOB_MODES` admits and the only one
+    /// MiniMax-H3 needs. That gap is what made sc-17160's `referenceAudioAssetIds` field inert
+    /// here: the field was on the tool while the single mode that consumes it was not, so an agent
+    /// could set audio references and never render with them. Five modes — `video_to_video`,
+    /// `reference_video_to_video`, `multi_video_to_video`, `ads2v` and `animate_character` — remain
+    /// unreachable from `submit_video_job` after this, which emits 7 of the 12.
     #[test]
     fn video_job_body_reference_mode_carries_all_three_reference_kinds() {
         let args = video_args_from(json!({

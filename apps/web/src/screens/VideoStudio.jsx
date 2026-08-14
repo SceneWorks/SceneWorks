@@ -1140,12 +1140,24 @@ export function VideoStudio() {
     : [];
   const outgoingSourceClipAssetIds =
     mode === "multi_video_to_video" || showReferenceClips ? sourceClipAssetIds : [];
+  // The audio references the selected MODEL will carry, gated on its declared
+  // `limits.maxReferenceAudioAssets` (default 0) rather than a hardcoded mode list — which modes
+  // take audio references is a model fact, which is why the payload slot was never mode-gated.
+  // Before this the payload sent the raw state, so a selection made on Ref2VA rode along into a
+  // job for a model that declares no audio cap at all.
+  const outgoingReferenceAudioAssetIds = refCaps.audio > 0 ? referenceAudioAssetIds : [];
   const referenceLimitMessage = referenceLimitError({
     modelName: selectedModel?.name,
     caps: refCaps,
     images: outgoingReferenceAssetIds.length,
     clips: outgoingSourceClipAssetIds.length,
-    audio: referenceAudioAssetIds.length,
+    // The count the visible PICKER can change, not the raw state. `referenceAudioAssetIds` outlives
+    // the picker — it is persisted per project and restored on mount — so counting it raw meant
+    // selecting one audio reference on Ref2VA and then switching mode or model disabled Generate
+    // with "…but 1 are selected. Remove them", while the only control that could remove them had
+    // just unmounted. That refusal was unclearable, and it survived a restart. A cap the form on
+    // screen cannot violate must not be able to refuse.
+    audio: showAudioReferences ? referenceAudioAssetIds.length : 0,
   });
   const hasInputs =
     mode === "text_to_video" ||
@@ -1165,7 +1177,7 @@ export function VideoStudio() {
     (mode === "reference_to_video" &&
       (referenceAssetIds.length > 0 ||
         outgoingSourceClipAssetIds.length > 0 ||
-        (refCaps.audio > 0 && referenceAudioAssetIds.length > 0))) ||
+        outgoingReferenceAudioAssetIds.length > 0)) ||
     (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0) ||
     // Bernini multi-source modes (sc-5425): mv2v needs >=2 clips; ads2v needs a source
     // clip, a reference video, and >=1 reference image.
@@ -1350,12 +1362,12 @@ export function VideoStudio() {
         // Bernini subject references (sc-4703 / sc-5425) — the reference-driven modes + ads2v carry
         // them; SCAIL-2 character animation (sc-5449) carries the reference character image.
         referenceAssetIds: outgoingReferenceAssetIds,
-        // Reference AUDIO clips (sc-17160). Deliberately NOT gated on a hardcoded mode list like
-        // the two above: which modes take audio references is a MODEL fact, declared as
-        // `limits.maxReferenceAudioAssets` and enforced server-side, and a model that takes none
-        // refuses a non-empty list at enqueue. Hardcoding a mode list here would have to be edited
-        // again the moment sc-17159 lands the modes.
-        referenceAudioAssetIds,
+        // Reference AUDIO clips (sc-17160). Gated on the MODEL's declared cap, not on a hardcoded
+        // mode list like the two above: which modes take audio references is a model fact,
+        // declared as `limits.maxReferenceAudioAssets` and enforced server-side, and a model that
+        // takes none refuses a non-empty list at enqueue. Sending the raw state meant a selection
+        // made on Ref2VA rode into a job for a model with no audio cap once the picker unmounted.
+        referenceAudioAssetIds: outgoingReferenceAudioAssetIds,
         // Bernini ads2v reference video (sc-5425).
         referenceClipAssetId: mode === "ads2v" ? referenceClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,

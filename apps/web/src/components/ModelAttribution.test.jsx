@@ -130,8 +130,14 @@ describe("ModelAttribution (sc-17161)", () => {
     // `fallbackModels` is a MIRROR, and the generation surfaces render whichever catalog is in
     // hand — the fallback one is what they get before /api/v1/models answers. A licence obligation
     // discharged only once the network responds is not discharged.
+    // Derived from the manifest, not a hardcoded pair: the sibling test below pins WHICH entries
+    // declare an attribution, so this one must cover whatever that set turns out to be. A
+    // hardcoded pair would let a newly-declaring entry ship unmirrored while both tests stayed
+    // green.
     const { fallbackModels } = await import("../constants.js");
-    for (const entry of [MINIMAX, MINIMAX_REF]) {
+    const declaring = manifestModels.filter((model) => model.ui?.attribution);
+    expect(declaring.length).toBeGreaterThan(0);
+    for (const entry of declaring) {
       const mirrored = fallbackModels.find((model) => model.id === entry.id);
       expect(mirrored, `${entry.id} must be mirrored`).toBeTruthy();
       expect(mirrored.ui?.attribution).toBe(entry.ui.attribution);

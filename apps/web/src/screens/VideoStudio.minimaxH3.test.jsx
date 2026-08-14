@@ -168,10 +168,20 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
   });
 
   it("preselects the declared default duration, not the first menu entry", async () => {
-    // `limits.durations[0]` is NOT the default — they agree for this model by deliberate choice,
-    // so the assertion is against `defaults.duration` to keep the dependency the right way round.
+    // Asserted on BERNINI, because MiniMax-H3's `defaults.duration` and `limits.durations[0]` are
+    // the same 5.1667 — on H3 alone the two claims are indistinguishable, and substituting
+    // `durations[0]` for `defaults.duration` in the studio leaves every H3 test green. Bernini is
+    // the model where they differ, so it is the only place this assertion means anything.
+    expect(BERNINI.defaults.duration).not.toBe(BERNINI.limits.durations[0]);
+    await render(baseContext({ videoModels: [BERNINI] }));
+    expect(Number(selectLabelled("Duration").value)).toBe(BERNINI.defaults.duration);
+    expect(Number(selectLabelled("Duration").value)).not.toBe(BERNINI.limits.durations[0]);
+
+    // The H3 leg still runs: the default has to be ON the fourteen-rung lattice, which is a claim
+    // about the menu rather than about which entry is preselected.
     await render(baseContext());
     expect(Number(selectLabelled("Duration").value)).toBe(MINIMAX.defaults.duration);
+    expect(MINIMAX.limits.durations).toContain(MINIMAX.defaults.duration);
   });
 
   it("submits an exact lattice value, not a rounded label", async () => {
@@ -301,6 +311,49 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(payload.mode).toBe("reference_to_video");
     expect(payload.referenceAudioAssetIds).toEqual(["aud_1"]);
     expect(payload.referenceAssetIds).toEqual([]);
+  });
+
+  it("does not strand an audio-reference refusal on a form that cannot clear it", async () => {
+    // The picker unmounts with the mode; `referenceAudioAssetIds` does not — it is persisted per
+    // project and restored on mount. Counting the RAW state therefore disabled Generate on
+    // Text → Video with "…takes no reference audio clips, but 1 are selected. Remove them", while
+    // the only control that could remove them had just left with the mode. That refusal survived
+    // navigation AND a restart, and it is reachable only because this story shipped the picker —
+    // the mirror image of the declared-but-undrivable class the story exists to close.
+    const context = baseContext({
+      videoModels: [MINIMAX, MINIMAX_REF],
+      assets: [asset("aud_1", "audio", "voice")],
+    });
+    await render(context);
+
+    await click(modeTab("Reference → Video"));
+    expect(selectLabelled("Model").value).toBe("minimax_h3_ref");
+    await click(fieldLabelled("Reference audio").querySelector("button"));
+    await click(
+      [...document.querySelectorAll(".asset-picker-card")].find((card) => card.textContent.includes("voice")),
+    );
+    await click(
+      [...document.querySelectorAll(".asset-picker-footer button")].find(
+        (b) => b.textContent.trim() === "Use Selection",
+      ),
+    );
+
+    // The primary path: the tab the studio opens on. The model snaps to the base partition, which
+    // declares an audio cap of zero, and the picker goes with the mode.
+    await click(modeTab("Text → Video"));
+    expect(selectLabelled("Model").value).toBe("minimax_h3");
+    expect(MINIMAX.limits.maxReferenceAudioAssets).toBe(0);
+    expect(fieldLabelled("Reference audio"), "the only control that could clear the selection").toBeFalsy();
+
+    expect(container.textContent).not.toContain("reference audio clips");
+    const generate = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(generate.disabled, "a cap this form cannot violate must not be able to refuse").toBe(false);
+
+    // …and the selection does not ride along into a job for a model that conditions on no audio.
+    await click(generate);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.mode).toBe("text_to_video");
+    expect(payload.referenceAudioAssetIds).toEqual([]);
   });
 
   // ------------------------------------------------------------- attribution

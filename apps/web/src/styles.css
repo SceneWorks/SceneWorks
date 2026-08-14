@@ -7781,10 +7781,6 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--accent);
 }
 
-/* Licence-required UI attribution (sc-17227), e.g. MiniMax H3 Community License §IV.2. Sits
-   directly above the description and reads at full text weight/colour rather than the muted
-   description tone — "prominently display" is the obligation, so it must not look like a
-   footnote. */
 /* Prompt-guide tables (sc-17161). Scrolls inside its own box so a wide table never widens the
    guide modal. */
 .markdown-table-wrap {
@@ -7811,6 +7807,10 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--surface-2);
 }
 
+/* Licence-required UI attribution (sc-17227), e.g. MiniMax H3 Community License §IV.2. Sits
+   directly above the description and reads at full text weight/colour rather than the muted
+   description tone — "prominently display" is the obligation, so it must not look like a
+   footnote. */
 .model-card-attribution {
   margin: 0;
   font-size: 13px;
