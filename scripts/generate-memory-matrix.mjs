@@ -1386,6 +1386,14 @@ function strategyStatus({
   const currentDeclaredCalibrations = allDeclaredCalibrations.filter((binding) =>
     closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }),
   );
+  // Semantic quality receipts authorize exact geometry choices in the runtime planner. They are
+  // not numeric tuning ranges and must never be projected into the published calibration matrix,
+  // where their presence could be mistaken for measured memory evidence.
+  const publishableParameterRanges = (implementation) => {
+    const { decodeGeometryPolicies: _semanticReceipt, ...publishedRanges } =
+      implementation?.parameterRanges ?? {};
+    return publishedRanges;
+  };
   const calibrationStatus = (bindings, source, evidenceAdmissionCurrent) => {
     const fingerprints = sortedUnique(bindings.map((binding) => binding.fingerprint));
     const parameters = sortedUnique(
@@ -1403,7 +1411,7 @@ function strategyStatus({
         ...(staticImplementation?.parameters ?? {}),
         ...JSON.parse(parameters[0]),
         ...(staticImplementation
-          ? { publishedRanges: staticImplementation.parameterRanges }
+          ? { publishedRanges: publishableParameterRanges(staticImplementation) }
           : {}),
       },
       calibrationFingerprint: fingerprints[0],
@@ -1431,7 +1439,7 @@ function strategyStatus({
       source: staticImplementation.source,
       parameters: {
         ...staticImplementation.parameters,
-        publishedRanges: staticImplementation.parameterRanges,
+        publishedRanges: publishableParameterRanges(staticImplementation),
       },
       calibrationFingerprint: staticImplementation.fingerprint,
       engagedRungs: staticImplementation.engagedRungs,

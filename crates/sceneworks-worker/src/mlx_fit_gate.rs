@@ -5374,6 +5374,226 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shipped_decode_quality_corpus_is_exact_and_drives_the_physical_planner() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let expected = [
+            ("chroma1_base", "chroma", 4_usize, 1_usize),
+            ("chroma1_flash", "chroma", 4, 2),
+            ("chroma1_hd", "chroma", 4, 0),
+            ("illustrious_xl_v1", "sdxl", 10, 0),
+            ("illustrious_xl_v2", "sdxl", 10, 0),
+            ("kolors", "kolors", 7, 0),
+            ("realvisxl", "sdxl", 10, 0),
+            ("realvisxl_lightning", "sdxl", 10, 6),
+            ("sdxl", "sdxl", 10, 0),
+        ];
+        let expected_ids = expected
+            .iter()
+            .map(|(id, ..)| *id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut all_rows = 0_usize;
+        let mut all_admitted = 0_usize;
+
+        for (model_id, family, row_count, admitted_count) in expected {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .unwrap_or_else(|| panic!("shipped {model_id} manifest entry"));
+            let model_object = model.as_object().expect("model object");
+            let mlx = model["mlx"].as_object().expect("mlx object");
+            let implementations = mlx["memoryStrategyContract"]["implementations"]
+                .as_array()
+                .expect("memory strategy implementations");
+            let bounded = implementations
+                .iter()
+                .filter(|implementation| implementation["rung"] == "bounded_decode")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                bounded.len(),
+                1,
+                "{model_id}: one route-local decode declaration"
+            );
+            assert_eq!(bounded[0]["tiers"], serde_json::json!(["q4"]));
+            assert_eq!(bounded[0]["modes"], serde_json::json!(["text_to_image"]));
+            assert_eq!(bounded[0]["overlays"], serde_json::json!(["none"]));
+
+            let rows = decode_quality_policies_from_manifest(model_object, model_id)
+                .unwrap_or_else(|error| panic!("{model_id}: shipped quality corpus: {error}"));
+            assert_eq!(rows.len(), row_count, "{model_id}: sealed row count");
+            assert!(rows.iter().all(|row| {
+                row.resolved_route == model_id
+                    && row.family == family
+                    && row.backend == gen_core::MemoryBackend::Mlx
+                    && row.tier.quant == Some(gen_core::Quant::Q4)
+                    && row.mode == MemoryMode::TextToImage
+                    && row.overlay.is_none()
+                    && !row.use_pid
+                    && row.geometry.batch == 1
+                    && row.geometry.frames == 1
+                    && row.geometry.reference_count == 0
+                    && row.implementation_fingerprint
+                        == gen_core::MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT
+            }));
+            let admitted = rows
+                .iter()
+                .filter(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
+                .count();
+            assert_eq!(admitted, admitted_count, "{model_id}: admitted row count");
+            all_rows += rows.len();
+            all_admitted += admitted;
+
+            let q4 = model["downloads"]
+                .as_array()
+                .expect("downloads")
+                .iter()
+                .find(|download| download["variant"] == "q4")
+                .unwrap_or_else(|| panic!("{model_id}: q4 artifact"));
+            assert!(rows.iter().all(|row| {
+                row.artifact.repository == q4["repo"].as_str().unwrap()
+                    && row.artifact.revision == q4["revision"].as_str().unwrap()
+                    && row.artifact.variant == "q4"
+                    && row.artifact.fingerprint
+                        == format!(
+                            "{}@{}:q4",
+                            q4["repo"].as_str().unwrap(),
+                            q4["revision"].as_str().unwrap()
+                        )
+            }));
+            let expected_shape = if family == "sdxl" {
+                gen_core::LoadShape::DeferredMaterialization
+            } else {
+                gen_core::LoadShape::EagerMaterialization
+            };
+            assert!(rows.iter().all(|row| row.load_shape == expected_shape));
+
+            let measured_resolutions = rows
+                .iter()
+                .map(|row| format!("{}x{}", row.geometry.width, row.geometry.height))
+                .collect::<std::collections::BTreeSet<_>>();
+            for resolution in model["limits"]["resolutions"]
+                .as_array()
+                .expect("advertised resolutions")
+            {
+                assert!(
+                    measured_resolutions.contains(resolution.as_str().unwrap()),
+                    "{model_id}: advertised {resolution} must have an exact admitted-or-refused row"
+                );
+            }
+
+            let mut generator = fixture_generator();
+            let contract = generator.contract.as_mut().expect("fixture contract");
+            contract.provider_id = model_id.to_owned();
+            contract.load_shape = expected_shape;
+            contract.calibration = None;
+            contract
+                .adopt_decode_geometry_policies(family, rows.clone())
+                .unwrap_or_else(|error| panic!("{model_id}: adopt shipped corpus: {error}"));
+            assert!(
+                contract.conformance_errors().is_empty(),
+                "{model_id}: {:?}",
+                contract.conformance_errors()
+            );
+            let mut plan = fixture_plan();
+            plan.engine_id = model_id;
+            plan.model_id = model_id.to_owned();
+
+            if let Some(row) = rows
+                .iter()
+                .find(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
+            {
+                let result = synthesize_estimate_ladder(
+                    contract,
+                    &plan,
+                    "text_to_image",
+                    None,
+                    row.geometry,
+                    false,
+                    None,
+                    &[],
+                );
+                assert!(
+                    result.estimates.iter().any(|candidate| {
+                        candidate.selection.strategy == MemoryStrategy::BoundedDecode
+                            && candidate.selection.parameters.decode_tile_edge
+                                == Some(row.tile_edge)
+                            && candidate.selection.parameters.decode_overlap == Some(row.overlap)
+                    }),
+                    "{model_id}: admitted row must create its exact physical decode candidate"
+                );
+            }
+            let refused = rows
+                .iter()
+                .find(|row| {
+                    matches!(
+                        row.disposition,
+                        MemoryDecodeQualityDisposition::Refused { .. }
+                    )
+                })
+                .expect("every route retains refused evidence");
+            let result = synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                refused.geometry,
+                false,
+                None,
+                &[],
+            );
+            assert!(
+                result.estimates.iter().all(|candidate| {
+                    candidate.selection.strategy != MemoryStrategy::BoundedDecode
+                }),
+                "{model_id}: refused row must not create a physical decode candidate"
+            );
+            let matched = contract
+                .decode_geometry_policies_for_request(MemoryDecodePolicyQuery {
+                    tier: plan.tier,
+                    load_shape: contract.load_shape,
+                    mode_key: "text_to_image",
+                    overlay: None,
+                    geometry: refused.geometry,
+                    use_pid: false,
+                })
+                .expect("exact policy query");
+            assert!(
+                matched.iter().any(|row| {
+                    matches!(
+                        row.disposition,
+                        MemoryDecodeQualityDisposition::Refused { .. }
+                    ) && row.production_evidence_sha256 == refused.production_evidence_sha256
+                }),
+                "{model_id}: refusal must retain its typed sealed evidence identity"
+            );
+        }
+
+        assert_eq!((all_rows, all_admitted), (69, 9));
+        for model in models {
+            let id = model["id"].as_str().expect("model id");
+            if !expected_ids.contains(id) {
+                let count = model["mlx"]["memoryStrategyContract"]["implementations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|implementation| {
+                        implementation["parameterRanges"]
+                            .get("decodeGeometryPolicies")
+                            .is_some()
+                    })
+                    .count();
+                assert_eq!(
+                    count, 0,
+                    "{id}: unrelated route must not inherit P9 evidence"
+                );
+            }
+        }
+    }
+
     /// sc-18408 item (d): every MLX plan row must resolve through the shipped registry to a
     /// weights-free provider contract. This is deliberately derived from the plan rather than a
     /// hand-maintained provider list: adding a planned lane without registering its contract must
