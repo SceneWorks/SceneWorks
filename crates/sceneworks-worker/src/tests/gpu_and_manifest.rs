@@ -2139,8 +2139,9 @@ fn sana_sprint_manifest_entry_gates_correctly() {
 
 /// sc-9946 (epic 8506): the Kolors builtin entry ships the standard q4/q8/bf16 quant matrix from the
 /// un-gated `SceneWorks/kolors-mlx` re-host (was upstream `Kwai-Kolors/Kolors-diffusers` dense +
-/// install-time quant). Unlike SANA, Kolors keeps its full capability surface. Asserts the flip to the
-/// SceneWorks repo, the per-tier variants (q4 default + q8 + bf16) each an installable artifact with a
+/// install-time quant). Unlike SANA, Kolors keeps its live edit and character surfaces; the retired
+/// `style_variations` UI mode is intentionally absent. Asserts the flip to the SceneWorks repo, the
+/// per-tier variants (q4 default + q8 + bf16) each an installable artifact with a
 /// `footprint`, `mlx.quantize: 4` (packed q4 default) + `minMemoryGb`, and the reserved kolors LoRA
 /// family — so a manifest drift fails CI without a real download. Descriptor guidance/steps are covered
 /// by `model_table_rows_resolve_and_flags_match_descriptor`.
@@ -2153,8 +2154,8 @@ fn kolors_manifest_entry_gates_correctly() {
         Some("kolors"),
         "kolors family"
     );
-    // Kolors keeps its full edit/character/style surface; SANA's narrower reference surface is
-    // non-edit singular-reference img2img.
+    // Kolors keeps its live edit/character surface; SANA's narrower reference surface is non-edit
+    // singular-reference img2img. The retired style mode must not reappear in the catalog.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
@@ -2162,13 +2163,8 @@ fn kolors_manifest_entry_gates_correctly() {
         .unwrap_or_default();
     assert_eq!(
         caps,
-        vec![
-            "text_to_image",
-            "edit_image",
-            "character_image",
-            "style_variations"
-        ],
-        "kolors keeps its full capability surface"
+        vec!["text_to_image", "edit_image", "character_image"],
+        "kolors keeps its full live capability surface without the retired style mode"
     );
     // Un-gated SceneWorks/* MLX re-host (the tier LICENSE travels with the weights) — NO `gated: true`.
     assert_ne!(

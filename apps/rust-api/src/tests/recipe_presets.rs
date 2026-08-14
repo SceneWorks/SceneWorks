@@ -1,6 +1,14 @@
 //! rust-api recipe_presets tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+#[test]
+fn text_to_image_preset_defaults_exclude_retired_style_mode() {
+    assert_eq!(
+        crate::recipe_presets::default_recipe_preset_modes_for_workflow("text_to_image"),
+        vec!["text_to_image".to_owned(), "character_image".to_owned()]
+    );
+}
+
 #[tokio::test]
 async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -716,7 +724,7 @@ async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
             "name": "Atrium Look",
             "model": "z_image_turbo",
             "workflow": "text_to_image",
-            "modes": ["text_to_image", "character_image", "style_variations"],
+            "modes": ["text_to_image", "character_image"],
             "defaults": {
                 "prompt": "a portrait in the atrium",
                 "negativePrompt": "blurry",

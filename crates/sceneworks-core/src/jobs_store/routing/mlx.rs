@@ -401,13 +401,14 @@ pub(crate) fn z_image_base_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
-/// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**
-/// (`text_to_image` + `style_variations`; no edit / reference / ControlNet — those would be
-/// later engine ports), so every non-edit `image_generate` job routes to the in-process Rust
-/// `mlx-gen-chroma` worker on Mac. An `edit_image` mode — which Chroma has no path for on any
-/// platform — stays off MLX (defensive; the UI never offers edit for Chroma). All three variants
-/// (`chroma1_hd` / `chroma1_base` / `chroma1_flash`) share this gate. Third-party LyCORIS and peft
-/// LoKr apply on the core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
+/// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**; it has no
+/// edit / reference / ControlNet surface, so every non-edit `image_generate` job routes to the
+/// in-process Rust `mlx-gen-chroma` worker on Mac. The retired `style_variations` alias may still be
+/// admitted defensively for legacy API payloads, but it is no longer advertised by the catalog or
+/// UI. An `edit_image` mode — which Chroma has no path for on any platform — stays off MLX
+/// (defensive; the UI never offers edit for Chroma). All three variants (`chroma1_hd` /
+/// `chroma1_base` / `chroma1_flash`) share this gate. Third-party LyCORIS and peft LoKr apply on the
+/// core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
 pub(crate) fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }

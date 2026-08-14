@@ -4114,8 +4114,9 @@ fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiErro
 }
 
 /// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
-/// actual native backend route: MLX owns base/edit/character/style while Candle owns only base and
-/// its bespoke `edit_image` lane. It is not inherited by Klein, strict control, backendless builds,
+/// actual native backend route: MLX owns base/edit/character plus the defensive legacy style alias,
+/// while Candle owns only base and its bespoke `edit_image` lane. It is not inherited by Klein,
+/// strict control, backendless builds,
 /// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
 /// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.
 fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
