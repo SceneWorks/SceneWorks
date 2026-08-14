@@ -1,10 +1,11 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32_with, resolve_pid_weights, run_candle_strict_control,
-    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError,
-    WorkerResult, ZImageControl, ZImageControlPaths, ZImageControlRequest,
+    attach_manifest_text_encoder, pid_effective_dims, pid_output_tier, pose_entries,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_pid_weights,
+    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
+    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl, ZImageControlPaths,
+    ZImageControlRequest,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -299,6 +300,7 @@ fn zimage_control_raw_settings(
 /// the base control path in `ZImageControl` and threads `guidance` + `negative_prompt` (both inert on Turbo).
 pub(super) struct ZImageStrictControl {
     snapshot: PathBuf,
+    load_spec: gen_core::LoadSpec,
     controlnet: PathBuf,
     prompt: String,
     width: u32,
@@ -318,10 +320,6 @@ pub(super) struct ZImageStrictControl {
     /// The [`STRICT_CONTROL_ENGINES`] catalog id for this job's model — `z_image_turbo_control` (Turbo) or
     /// `z_image_control` (base, sc-8379) — the `advanced.controlMode` validation key.
     engine_id: &'static str,
-    /// Per-generation PiD decoder weights (epic 7840, sc-8044): `Some` only when opted in (`advanced.usePid`)
-    /// AND the PiD + Gemma snapshots are cached (Z-Image is the FLUX.1 latent space → `zimage-turbo` alias).
-    /// Threaded into `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native VAE decode.
-    pid: Option<gen_core::PidWeights>,
 }
 
 #[cfg(test)]
@@ -331,6 +329,7 @@ pub(super) fn zimage_strict_control_test_fixture(
 ) -> ZImageStrictControl {
     ZImageStrictControl {
         snapshot: path.clone(),
+        load_spec: gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(path.clone())),
         controlnet: path,
         prompt: "p".to_owned(),
         width: 512,
@@ -349,7 +348,6 @@ pub(super) fn zimage_strict_control_test_fixture(
         } else {
             ZIMAGE_CTRL_ENGINE_ID
         },
-        pid: None,
     }
 }
 
@@ -385,7 +383,27 @@ impl CandleStrictControl for ZImageStrictControl {
     /// generation opted in — every path [`Self::load`] holds co-resident (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
         let mut overlays = vec![self.controlnet.as_path()];
-        overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        overlays.extend(crate::conditioning_fit::pid_paths(
+            self.load_spec.pid.as_ref(),
+        ));
+        if let Some(text_encoder) = self.load_spec.text_encoder.as_ref() {
+            let transformer = self.snapshot.join("transformer");
+            let vae = self.snapshot.join("vae");
+            if transformer.is_dir() && vae.is_dir() {
+                overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+                overlays.push(vae.as_path());
+                return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+                    if self.is_base {
+                        "Z-Image"
+                    } else {
+                        "Z-Image Turbo"
+                    },
+                    "strict-pose Fun-ControlNet branch",
+                    &transformer,
+                    &overlays,
+                ));
+            }
+        }
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             if self.is_base {
                 "Z-Image"
@@ -401,21 +419,23 @@ impl CandleStrictControl for ZImageStrictControl {
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = ZImageControlPaths {
             snapshot: self.snapshot.clone(),
+            text_encoder: None,
             control: self.controlnet.clone(),
             // Base `z_image` (sc-8680) → the faithful undistilled control path (shift-6.0, ~50-step,
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
         };
-        let model = ZImageControl::load(&paths).map_err(|error| {
-            WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
-        })?;
-        // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
-        match &self.pid {
-            Some(pid) => model.with_pid(pid).map_err(|error| {
-                WorkerError::Engine(format!("Z-Image control PiD decoder load failed: {error}"))
-            }),
-            None => Ok(model),
-        }
+        self.load_spec
+            .read_prepared_files_unchanged(|| {
+                let model = ZImageControl::load_with_spec(&paths, &self.load_spec)?;
+                match self.load_spec.pid.as_ref() {
+                    Some(pid) => model.with_pid(pid),
+                    None => Ok(model),
+                }
+            })
+            .map_err(|error| {
+                WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
+            })
     }
 
     fn generate_one(
@@ -444,7 +464,7 @@ impl CandleStrictControl for ZImageStrictControl {
                 .filter(|value| !value.trim().is_empty()),
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
-            use_pid: self.pid.is_some(),
+            use_pid: self.load_spec.pid.is_some(),
             // Request-scoped lifecycle controls, new on this request in the `8ffa211a` inference pin
             // (sc-17054). Nothing on the strict-control route selects them — the fit gate's
             // `GenerationMemory` is plumbed on the generic generation path, not here — and the
@@ -538,8 +558,16 @@ pub(super) async fn generate_candle_zimage_control_stream(
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
+    let mut selected_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
+        .with_control(gen_core::WeightsSource::File(controlnet.clone()));
+    if let Some(pid) = pid_weights.as_ref() {
+        selected_spec = selected_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
+    selected_spec = attach_manifest_text_encoder(selected_spec, engine_id, request, settings)?;
+
     let provider = ZImageStrictControl {
         snapshot: base,
+        load_spec: selected_spec,
         controlnet,
         prompt: request.prompt.clone(),
         width,
@@ -550,7 +578,6 @@ pub(super) async fn generate_candle_zimage_control_stream(
         guidance,
         negative_prompt,
         engine_id,
-        pid: pid_weights,
     };
 
     run_candle_strict_control(

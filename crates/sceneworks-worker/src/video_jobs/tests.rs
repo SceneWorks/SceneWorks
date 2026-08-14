@@ -1781,7 +1781,6 @@ impl ArmProbe {
             *seen_spec.lock().unwrap() = Some(spec.clone());
             Ok(Box::new(ProbeGenerator {
                 descriptor: gen_core::ModelDescriptor {
-                    denoiser_output_latent_space: None,
                     // Leaked so the descriptor's `&'static str` id reflects the engine actually
                     // asked for; the probe outlives nothing, so the leak is bounded by the test.
                     id: Box::leak(engine_id.to_owned().into_boxed_str()),
@@ -1789,7 +1788,9 @@ impl ArmProbe {
                     backend: "probe",
                     modality: gen_core::Modality::Video,
                     capabilities: gen_core::Capabilities::default(),
+                    denoiser_output_latent_space: None,
                     control_kinds: None,
+                    encoder_contract: None,
                     required_components: &[],
                 },
                 request: seen_request,
@@ -8430,7 +8431,7 @@ fn ltx_text_encoder_options_hide_unstaged_alternate() {
     assert_eq!(
         default_only
             .iter()
-            .map(|option| option.id)
+            .map(|option| option.id.as_str())
             .collect::<Vec<_>>(),
         vec![DEFAULT_TEXT_ENCODER_ID]
     );
@@ -8438,7 +8439,10 @@ fn ltx_text_encoder_options_hide_unstaged_alternate() {
 
     let staged = ltx_text_encoder_options(true);
     assert_eq!(
-        staged.iter().map(|option| option.id).collect::<Vec<_>>(),
+        staged
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
         vec![DEFAULT_TEXT_ENCODER_ID, AMORAL_TEXT_ENCODER_ID]
     );
     assert!(!staged[1].is_default);

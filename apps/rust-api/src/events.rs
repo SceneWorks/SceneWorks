@@ -237,6 +237,7 @@ pub(crate) async fn job_events(
         .collect::<std::collections::HashSet<_>>();
     jobs.retain(|job| !cleared_job_id_set.contains(&job.id));
     jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let jobs = public_job_snapshots(jobs);
     let initial_jobs = EventMessage {
         event: "jobs.snapshot".to_owned(),
         data: serde_json::to_string(&json!({

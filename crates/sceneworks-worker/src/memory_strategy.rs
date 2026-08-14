@@ -1751,12 +1751,13 @@ mod tests {
         fn new(generate: MockGenerate, configure_fails: bool) -> Self {
             Self {
                 descriptor: gen_core::ModelDescriptor {
-                    denoiser_output_latent_space: None,
                     id: "lifecycle_mock",
                     family: "test",
                     backend: "candle",
                     modality: gen_core::Modality::Image,
                     capabilities: Default::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
                 },

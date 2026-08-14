@@ -88,7 +88,7 @@ pub(crate) async fn create_timeline_export(
         payload.requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn extract_timeline_frame(
@@ -140,5 +140,5 @@ pub(crate) async fn extract_timeline_frame(
         payload.requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }

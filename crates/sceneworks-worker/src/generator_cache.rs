@@ -88,6 +88,10 @@ pub(crate) struct LoadIdentity {
     text_encoder: Option<CacheWeightsSource>,
     /// `LoadSpec::components` is a `BTreeMap`, so iteration preserves the stable component-id order.
     components: Vec<(String, CacheWeightsSource)>,
+    /// The complete prepared receipt participates in warm identity even when a contract-owned
+    /// companion (for example a File encoder's sibling config or selected tokenizer) is not nested
+    /// beneath any `WeightsSource` slot.
+    prepared_files: Vec<PinnedWeightsFile>,
 }
 
 /// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
@@ -101,7 +105,7 @@ pub(crate) struct ExecutionPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheWeightsSource {
-    Dir(PathBuf, Fingerprint),
+    Dir(PathBuf, Fingerprint, Vec<PinnedWeightsFile>),
     File(PathBuf, Box<CacheFileIdentity>),
 }
 
@@ -246,6 +250,11 @@ impl LoadIdentity {
                 .iter()
                 .map(|(id, source)| Ok((id.clone(), CacheWeightsSource::from_spec(spec, source)?)))
                 .collect::<gen_core::Result<_>>()?,
+            prepared_files: spec
+                .prepared_file_pins()
+                .iter()
+                .map(|(_, pin)| pin.clone())
+                .collect(),
         })
     }
 }
@@ -282,7 +291,16 @@ fn log_warm_policy_mismatch(
 impl CacheWeightsSource {
     fn from_spec(spec: &LoadSpec, source: &WeightsSource) -> gen_core::Result<Self> {
         Ok(match source {
-            WeightsSource::Dir(path) => Self::Dir(path.clone(), Fingerprint::of(path)),
+            WeightsSource::Dir(path) => {
+                let absolute = std::path::absolute(path)?;
+                let prepared_members = spec
+                    .prepared_file_pins()
+                    .iter()
+                    .filter(|(member, _)| member.starts_with(&absolute))
+                    .map(|(_, pin)| pin.clone())
+                    .collect();
+                Self::Dir(path.clone(), Fingerprint::of(path), prepared_members)
+            }
             WeightsSource::File(path) => Self::File(
                 path.clone(),
                 Box::new(match spec.prepared_file_pin_for(path)? {
@@ -1742,6 +1760,79 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_includes_text_encoder_substitution() {
+        let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
+        let first = base
+            .clone()
+            .with_text_encoder(WeightsSource::Dir(PathBuf::from("/encoders/qwen-a")));
+        let second = base
+            .clone()
+            .with_text_encoder(WeightsSource::File(PathBuf::from(
+                "/encoders/qwen-b.safetensors",
+            )));
+
+        assert_ne!(
+            LoadIdentity::from_load_spec("z_image_turbo", &base),
+            LoadIdentity::from_load_spec("z_image_turbo", &first)
+        );
+        assert_ne!(
+            LoadIdentity::from_load_spec("z_image_turbo", &first),
+            LoadIdentity::from_load_spec("z_image_turbo", &second)
+        );
+    }
+
+    #[test]
+    fn cache_key_includes_every_prepared_encoder_companion() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let selected = dir.path().join("selected-encoder");
+        let tokenizer = selected.join("tokenizer");
+        std::fs::create_dir_all(&tokenizer).expect("create selected encoder");
+        let shard = selected.join("model-00001-of-00001.safetensors");
+        let config = selected.join("config.json");
+        let tokenizer_json = tokenizer.join("tokenizer.json");
+        std::fs::write(&shard, b"shard-v1").expect("write shard");
+        std::fs::write(&config, br#"{"model_type":"qwen3"}"#).expect("write config");
+        std::fs::write(&tokenizer_json, br#"{"model":{"vocab":{}}}"#).expect("write tokenizer");
+
+        let make_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(dir.path().join("base")))
+                .with_text_encoder(WeightsSource::Dir(selected.clone()));
+            spec.prepare_with_file_pins(
+                [&shard, &config, &tokenizer_json]
+                    .into_iter()
+                    .map(|path| PinnedWeightsFile::pin(path).expect("pin encoder receipt")),
+            )
+            .expect("prepare exact encoder receipt");
+            spec
+        };
+
+        let prepared_v1 = make_spec();
+        let key_v1 = LoadIdentity::try_from_load_spec("qwen_image", &prepared_v1)
+            .expect("first prepared encoder identity");
+        assert_eq!(key_v1.prepared_files.len(), 3);
+
+        std::fs::write(&config, br#"{"model_type":"qwen3","revision":2}"#).expect("replace config");
+        LoadIdentity::try_from_load_spec("qwen_image", &prepared_v1)
+            .expect_err("a mutated companion must fail before a warm cache lookup");
+
+        let key_v2 = LoadIdentity::try_from_load_spec("qwen_image", &make_spec())
+            .expect("replacement receipt identity");
+        assert_ne!(
+            key_v1, key_v2,
+            "changing only the encoder config must invalidate the warm generator"
+        );
+
+        std::fs::write(&tokenizer_json, br#"{"model":{"vocab":{"replacement":1}}}"#)
+            .expect("replace tokenizer");
+        let key_v3 = LoadIdentity::try_from_load_spec("qwen_image", &make_spec())
+            .expect("replacement tokenizer identity");
+        assert_ne!(
+            key_v2, key_v3,
+            "changing only the selected tokenizer must invalidate the warm generator"
+        );
+    }
+
+    #[test]
     fn cache_key_fingerprints_primary_file_and_named_companions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dit = dir.path().join("dit.safetensors");
@@ -1900,6 +1991,7 @@ mod tests {
         assert_exact(identity.face_dir.as_ref().expect("identity face"));
         assert_exact(key_v1.text_encoder.as_ref().expect("text encoder"));
         assert_exact(&key_v1.components[0].1);
+        assert_eq!(key_v1.prepared_files, vec![pin_v1.clone()]);
 
         std::fs::write(&path, b"prepared-v2-is-longer").expect("replace weights");
         LoadIdentity::try_from_load_spec("provider", &spec)
@@ -1931,6 +2023,41 @@ mod tests {
             .expect("new request prepares the new source identity");
         let key_v2 = LoadIdentity::try_from_load_spec("provider", &new_spec).expect("cold key v2");
         assert_ne!(key_v1, key_v2, "the replacement is a cold cache identity");
+    }
+
+    #[test]
+    fn prepared_directory_members_participate_in_cache_identity() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let transformer = root.path().join("transformer");
+        std::fs::create_dir(&transformer).expect("create transformer dir");
+        let config = transformer.join("config.json");
+        let weights = transformer.join("diffusion_pytorch_model.safetensors");
+        std::fs::write(&config, b"{\"kind\":\"mage\"}").expect("write config");
+        std::fs::write(&weights, b"weights-v1").expect("write weights");
+
+        let make_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.clone()));
+            spec.prepare_with_file_pins([
+                PinnedWeightsFile::pin(&config).expect("pin config"),
+                PinnedWeightsFile::pin(&weights).expect("pin weights"),
+            ])
+            .expect("prepare directory members");
+            spec
+        };
+        let key_v1 = LoadIdentity::try_from_load_spec("mage_flow_base", &make_spec())
+            .expect("first directory identity");
+        match &key_v1.weights {
+            CacheWeightsSource::Dir(_, _, members) => assert_eq!(members.len(), 2),
+            other => panic!("expected prepared directory identity, got {other:?}"),
+        }
+
+        std::fs::write(&weights, b"weights-v2").expect("replace child in place");
+        let key_v2 = LoadIdentity::try_from_load_spec("mage_flow_base", &make_spec())
+            .expect("replacement directory identity");
+        assert_ne!(
+            key_v1, key_v2,
+            "a child-file replacement must invalidate a warm directory generator"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1978,12 +2105,13 @@ mod tests {
 
     fn stub_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "sc3724_stub",
             family: "test",
             backend: "stub",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }

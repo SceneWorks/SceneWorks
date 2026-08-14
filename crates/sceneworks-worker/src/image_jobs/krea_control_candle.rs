@@ -1,10 +1,10 @@
 use super::{
-    admit_conditioning_paths, gate_tier_key, gate_with_evict_reclaim, krea_model_subdir,
-    lora_label, nvfp4_host_eligible, nvfp4_selected, pose_entries, resolve_adapters,
-    resolve_advanced_or_manifest_u32, resolve_text_style_gain, run_candle_strict_control,
-    trusted_control_weight_revision, AdapterSpec, ApiClient, CancelFlag, CandleStrictControl,
-    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings,
-    Value, WorkerError, WorkerResult,
+    admit_conditioning_paths, attach_manifest_text_encoder, gate_tier_key, gate_with_evict_reclaim,
+    krea_model_subdir, lora_label, nvfp4_host_eligible, nvfp4_selected, pose_entries,
+    resolve_adapters, resolve_advanced_or_manifest_u32, resolve_text_style_gain,
+    run_candle_strict_control, trusted_control_weight_revision, AdapterSpec, ApiClient, CancelFlag,
+    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{advanced, huggingface_snapshot_dir};
 use super::{
@@ -423,6 +423,8 @@ fn krea_control_candle_raw_settings(
 /// (no quant tier). Moved onto the blocking thread, loaded once, drives every pose.
 pub(super) struct KreaStrictControl {
     base: PathBuf,
+    /// Complete API-prepared load receipt retained through the bespoke provider construction.
+    load_spec: gen_core::LoadSpec,
     /// Immutable INT8-ConvRot DiT selected by the request. `None` loads `base/transformer`.
     convrot_dit: Option<PathBuf>,
     control: PathBuf,
@@ -465,6 +467,8 @@ pub(super) struct KreaStrictControl {
 pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictControl {
     KreaStrictControl {
         base: path.clone(),
+        load_spec: gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(path.clone()))
+            .with_control(gen_core::WeightsSource::File(path.clone())),
         convrot_dit: None,
         control: path,
         adapters: Vec::new(),
@@ -572,9 +576,10 @@ impl CandleStrictControl for KreaStrictControl {
             // Compatibility-only load field; request-scoped residency is authoritative.
             offload_policy: gen_core::OffloadPolicy::Resident,
         };
-        runtime_cuda::providers::krea::Krea2Control::load(&paths).map_err(|error| {
-            WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
-        })
+        runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &self.load_spec)
+            .map_err(|error| {
+                WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
+            })
     }
 
     fn generate_one(
@@ -699,6 +704,34 @@ pub(super) async fn generate_candle_krea_control_stream(
     // (the branch is 3.30 B params ≈ 6.6 GB bf16, ~3.3 GB at q8).
     let branch_tier = crate::krea_control_fit::control_branch_tier_for_key(tier);
 
+    let mut memory_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()));
+    memory_spec = match tier {
+        "q4" => memory_spec.with_quant(gen_core::Quant::Q4),
+        "q8" | "int8-convrot" => memory_spec.with_quant(gen_core::Quant::Q8),
+        _ => memory_spec,
+    };
+    memory_spec = memory_spec.with_control(gen_core::WeightsSource::File(control.clone()));
+    if !adapters.is_empty() {
+        memory_spec = memory_spec.with_adapters(adapters.clone());
+    }
+    if let Some(convrot_dit) = convrot_dit.as_ref() {
+        memory_spec = memory_spec.with_component(
+            gen_core::KREA_CONVROT_DIT_COMPONENT,
+            gen_core::WeightsSource::File(convrot_dit.clone()),
+        );
+    }
+    memory_spec =
+        attach_manifest_text_encoder(memory_spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
+    let selected_text_encoder = memory_spec.text_encoder.clone();
+    let admitted_text_encoder = selected_text_encoder
+        .as_ref()
+        .map(|source| match source {
+            gen_core::WeightsSource::Dir(path) | gen_core::WeightsSource::File(path) => {
+                path.clone()
+            }
+        })
+        .unwrap_or_else(|| base.join("text_encoder"));
+
     // Conditioning-overlay weights FLOOR (sc-16069) — run HERE, before the ladder, and therefore before
     // the `note_loaded_peak` below. Ordering is the whole reason this lane gates itself instead of through
     // `run_candle_strict_control` (`ConditioningAdmission::GatedInPreamble`): a rejection after
@@ -719,7 +752,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         // The bf16 surface supplies only tokenizer/Qwen3-VL/VAE on this route; its dense transformer is
         // not loaded. Price the actual ConvRot DiT plus the two weight-bearing shared component dirs so
         // the floor neither hides the int8 trunk nor charges the unused bf16 trunk.
-        let shared_components = [base.join("text_encoder"), base.join("vae")];
+        let shared_components = [admitted_text_encoder.clone(), base.join("vae")];
         let shared_component_paths: Vec<&Path> =
             shared_components.iter().map(PathBuf::as_path).collect();
         admit_conditioning_paths(
@@ -731,27 +764,24 @@ pub(super) async fn generate_candle_krea_control_stream(
         )
         .await?;
     } else {
-        let control_overlay: Vec<&Path> = if branch_tier.is_some() {
-            Vec::new()
-        } else {
-            vec![control.as_path()]
-        };
+        // Price the exact component set so a replacement does not silently keep charging the
+        // bundled encoder while omitting the selected file. Tokenizer/config files are negligible;
+        // the weight-bearing set is transformer + selected encoder + VAE (+ dense branch).
+        let transformer = base.join("transformer");
+        let vae = base.join("vae");
+        let mut component_paths = vec![admitted_text_encoder.as_path(), vae.as_path()];
+        if branch_tier.is_none() {
+            component_paths.push(control.as_path());
+        }
         admit_conditioning_paths(
             settings,
             "Krea 2",
             "pose-ControlNet branch",
-            &base,
-            &control_overlay,
+            &transformer,
+            &component_paths,
         )
         .await?;
     }
-
-    let mut memory_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()));
-    memory_spec = match tier {
-        "q4" => memory_spec.with_quant(gen_core::Quant::Q4),
-        "q8" | "int8-convrot" => memory_spec.with_quant(gen_core::Quant::Q8),
-        _ => memory_spec,
-    };
     let provider_memory_contract = crate::inference_runtime::media()
         .memory_strategy_contract(KREA_CONTROL_ENGINE_ID, &memory_spec)
         .ok()
@@ -766,6 +796,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         reference_count: crate::krea_control_fit::KREA_CONTROL_REFERENCE_COUNT,
     };
     let runtime_evidence_verified = adapter_bytes == 0
+        && selected_text_encoder.is_none()
         && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);
 
     let raw_budget = crate::vram_gate::apply_vram_cap(
@@ -938,6 +969,7 @@ pub(super) async fn generate_candle_krea_control_stream(
 
     let provider = KreaStrictControl {
         base,
+        load_spec: memory_spec,
         convrot_dit,
         control,
         adapters,

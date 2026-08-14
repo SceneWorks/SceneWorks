@@ -1323,6 +1323,13 @@ async fn model_and_lora_routes_match_manifest_behavior() {
                   "name": "User Model",
                   "ui": { "label": "User" },
                   "customPluginMetadata": { "vendorKey": "preserved" }
+                },
+                {
+                  "id": "user-only-model",
+                  "name": "Z User Import",
+                  "family": "z-image",
+                  "type": "image",
+                  "paths": { "model": "/missing/user-only-model" }
                 }
               ]
             }
@@ -1401,6 +1408,8 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // sc-12338: schema enforcement is builtin-only. User manifests remain a lenient
     // extension surface; an unknown custom key must neither brick the route nor be dropped.
     assert_eq!(models[0]["customPluginMetadata"]["vendorKey"], "preserved");
+    assert_eq!(models[0]["catalogScope"], "builtin");
+    assert_eq!(models[0]["removable"], true);
     assert_eq!(models[0]["adapter"], "z_image_diffusers");
     assert_eq!(models[0]["downloadable"], true);
     assert_eq!(models[0]["downloadSizeBytes"], 12884901888_u64);
@@ -1410,6 +1419,13 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert!(models[0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("owner__model")));
+    let user_only = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "user-only-model")
+        .expect("genuine user-only model");
+    assert_eq!(user_only["catalogScope"], "user");
 
     let (status, loras) = request(
         app.clone(),
@@ -1465,6 +1481,26 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "must stay fail closed",
+            "model": "user-only-model",
+            "count": 1,
+            "width": 512,
+            "height": 512,
+            "advanced": { "controlMode": "pose" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refusal["detail"].as_str().is_some_and(|detail| {
+        detail.contains("candle_unsupported") || detail.contains("imported_control_unsupported")
+    }));
+
     let (status, image_job) = request(
         app.clone(),
         "POST",
@@ -1503,6 +1539,10 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         "loras/style.safetensors"
     );
     assert_eq!(image_job["payload"]["model"], "base-model");
+    assert_eq!(
+        image_job["payload"]["modelManifestEntry"]["catalogScope"],
+        "builtin"
+    );
     assert_eq!(image_job["payload"]["loras"][0]["family"], "z-image");
     assert_eq!(
         image_job["payload"]["loras"][0]["compatibility"]["families"][0],
@@ -1595,6 +1635,31 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["repo"], "owner/model");
     assert_eq!(job["payload"]["files"][0], "*.safetensors");
     assert_eq!(job["payload"]["targetDir"], models[0]["installedPath"]);
+
+    // Removing a user overlay does not remove or reclassify the protected builtin. The direct
+    // manifest lookup in the delete route owns this behavior independently of routing scope.
+    let (status, deleted_overlay) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/base-model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted_overlay["removedManifestEntry"], true);
+    assert_eq!(deleted_overlay["removedLocalArtifacts"], false);
+    let (status, restored_models) =
+        request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let restored_builtin = restored_models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "base-model")
+        .expect("protected builtin remains after overlay deletion");
+    assert_eq!(restored_builtin["name"], "Base Model");
+    assert_eq!(restored_builtin["catalogScope"], "builtin");
+    assert_eq!(restored_builtin["installState"], "installed");
 
     let (status, job) = request(
         app,

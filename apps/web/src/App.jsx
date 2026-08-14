@@ -549,8 +549,13 @@ export function App() {
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], audio: [], document: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
-  // Mac UI gating (sc-3486): inert until the capabilities endpoint reports macGatingActive.
+  // Mac UI gating (sc-3486): the value is inert until the capabilities endpoint reports
+  // macGatingActive, but keep a separate readiness bit so consumers do not mistake that
+  // temporary fallback for authoritative Candle capability facts.
   const [macCapabilities, setMacCapabilities] = useState(DEFAULT_MAC_CAPABILITIES);
+  const [macCapabilitiesAuthoritative, setMacCapabilitiesAuthoritative] = useState(false);
+  const [macCapabilitiesError, setMacCapabilitiesError] = useState("");
+  const [macCapabilitiesLoading, setMacCapabilitiesLoading] = useState(false);
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -872,6 +877,10 @@ export function App() {
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const generatedAssetRefreshesRef = useRef(new Map());
   const refreshShellDataRef = useRef(null);
+  // A retry or token transition supersedes any older capabilities request. Fetch aborts normally
+  // provide this guarantee too, but the request id keeps a late/non-cooperative response from
+  // restoring stale platform facts after a newer request has started.
+  const macCapabilitiesRequestRef = useRef(0);
   const refreshModelsRef = useRef(null);
   const refreshModelAndLorasRef = useRef(null);
   const refreshTrainingTargetsRef = useRef(null);
@@ -1818,6 +1827,49 @@ export function App() {
     editorScratchRegistry.sweep(jobs);
   }, [jobs, editorScratchRegistry]);
 
+  const refreshMacCapabilities = useCallback(async ({ signal } = {}) => {
+    const requestId = macCapabilitiesRequestRef.current + 1;
+    macCapabilitiesRequestRef.current = requestId;
+    // Preserve the last payload for inert Mac-gating helpers, but it is not authorization for
+    // decoder reconciliation/submission while this request is unsettled.
+    setMacCapabilitiesAuthoritative(false);
+    setMacCapabilitiesLoading(true);
+    try {
+      const value = await apiFetch("/api/v1/capabilities/mac", token, { signal });
+      if (signal?.aborted || macCapabilitiesRequestRef.current !== requestId) {
+        return false;
+      }
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        typeof value.macGatingActive !== "boolean"
+      ) {
+        throw new Error("the API returned an invalid capability response");
+      }
+      setMacCapabilities(value);
+      setMacCapabilitiesAuthoritative(true);
+      setMacCapabilitiesError("");
+      return true;
+    } catch (err) {
+      if (
+        isAbortError(err) ||
+        signal?.aborted ||
+        macCapabilitiesRequestRef.current !== requestId
+      ) {
+        return false;
+      }
+      setMacCapabilitiesError(
+        `Could not load engine capabilities: ${err?.message || "unknown error"}`,
+      );
+      return false;
+    } finally {
+      if (macCapabilitiesRequestRef.current === requestId) {
+        setMacCapabilitiesLoading(false);
+      }
+    }
+  }, [token]);
+
   async function refreshShellData({ signal } = {}) {
     const fetchInitial = async (domain, label, path, fallback, optional = false) => {
       try {
@@ -1830,7 +1882,7 @@ export function App() {
         }
         const error = optional ? "" : `${label}: ${err.message}`;
         setDomainError(domain, error);
-        return { label, value: fallback, error };
+        return { label, value: fallback, error, failed: true };
       }
     };
     const projectsPromise = fetchInitial(
@@ -1844,15 +1896,9 @@ export function App() {
       setProjectsLoaded(true);
       return result;
     });
-    fetchInitial(
-      "mac-capabilities",
-      "Mac capabilities",
-      "/api/v1/capabilities/mac",
-      DEFAULT_MAC_CAPABILITIES,
-      true,
-    )
-      .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
-      .catch(() => {});
+    // This optional surface must not hold up shell hydration. Its own state keeps alternate
+    // decoder requests fail-closed and gives affected users retry/reset recovery on failure.
+    void refreshMacCapabilities({ signal });
     const shellPromises = [
       fetchInitial("jobs", "Jobs", "/api/v1/jobs", []).then((result) => {
         if (result.aborted) return result;
@@ -3339,6 +3385,10 @@ export function App() {
     models,
     // Mac UI gating (sc-3486)
     macCapabilities,
+    macCapabilitiesAuthoritative,
+    macCapabilitiesError,
+    macCapabilitiesLoading,
+    refreshMacCapabilities,
     loras,
     deleteLora,
     updateLora,
@@ -3454,6 +3504,8 @@ export function App() {
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, macCapabilities,
+    macCapabilitiesAuthoritative, macCapabilitiesError, macCapabilitiesLoading,
+    refreshMacCapabilities,
     loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, deleteModelVariant, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
     createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,

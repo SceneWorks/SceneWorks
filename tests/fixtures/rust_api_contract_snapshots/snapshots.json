@@ -1636,6 +1636,7 @@
         "capabilities": [
           "text_to_image"
         ],
+        "catalogScope": "builtin",
         "defaults": {
           "height": 1024,
           "width": 1024
@@ -1736,6 +1737,7 @@
         "capabilities": [
           "text_to_image"
         ],
+        "catalogScope": "builtin",
         "defaults": {
           "height": 1024,
           "width": 1024
@@ -1831,6 +1833,7 @@
           "capabilities": [
             "text_to_image"
           ],
+          "catalogScope": "builtin",
           "defaults": {
             "height": 1024,
             "width": 1024
@@ -1926,6 +1929,7 @@
         "capabilities": [
           "text_to_image"
         ],
+        "catalogScope": "builtin",
         "defaults": {
           "height": 1024,
           "width": 1024
@@ -2149,7 +2153,7 @@
       "capabilities": [
         "text_to_image"
       ],
-      "catalogScope": "user",
+      "catalogScope": "builtin",
       "defaults": {
         "height": 1024,
         "width": 1024
@@ -2994,6 +2998,7 @@
         "capabilities": [
           "text_to_image"
         ],
+        "catalogScope": "builtin",
         "defaults": {
           "height": 1024,
           "width": 1024

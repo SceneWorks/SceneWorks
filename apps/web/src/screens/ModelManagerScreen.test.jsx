@@ -1529,6 +1529,7 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
     name: "Z-Image-Turbo",
     type: "image",
     family: "z-image",
+    catalogScope: "builtin",
     capabilities: ["text_to_image"],
     installState: "installed",
     removable: true,
@@ -1548,7 +1549,13 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
     await flushConfirm();
 
     expect(appConfirmMock).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "Delete model?", tone: "danger" }),
+      expect.objectContaining({
+        title: "Delete model?",
+        tone: "danger",
+        message: expect.stringContaining(
+          "Deleting removes a user overlay or SceneWorks-owned local files when present",
+        ),
+      }),
     );
     expect(deleteModel).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }));
   });

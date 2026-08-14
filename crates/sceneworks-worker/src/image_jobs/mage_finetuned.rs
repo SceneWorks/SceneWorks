@@ -67,6 +67,14 @@ const MAGE_FINETUNED_DEFAULT_STEPS: u32 = 30;
 #[cfg(target_os = "macos")]
 const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+struct PreparedMageFinetunedTransformer {
+    directory: PathBuf,
+    config: gen_core::PinnedWeightsFile,
+    weights: gen_core::PinnedWeightsFile,
+}
+
 /// Resolve the fine-tuned Mage-Flow transformer directory for `request`, or `None` when this is not
 /// a fine-tuned-Mage job. `Some(dir)` only when ALL hold:
 ///   - the model's declared `family` is `mage-flow` (the route-by-family token),
@@ -85,7 +93,7 @@ const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 fn resolve_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
-) -> WorkerResult<Option<PathBuf>> {
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
     if request
         .model_manifest_entry
         .get("family")
@@ -118,7 +126,24 @@ fn resolve_mage_finetuned_transformer(
         raw_path,
         "Fine-tuned Mage-Flow checkpoint",
     )?;
-    Ok(sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path).then_some(path))
+    if !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path) {
+        return Ok(None);
+    }
+    let config = crate::paths::pin_app_managed_model_file(
+        settings,
+        &path.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
+        "Fine-tuned Mage-Flow config",
+    )?;
+    let weights = crate::paths::pin_app_managed_model_file(
+        settings,
+        &path.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+        "Fine-tuned Mage-Flow weights",
+    )?;
+    Ok(Some(PreparedMageFinetunedTransformer {
+        directory: path,
+        config,
+        weights,
+    }))
 }
 
 /// Resolve the installed base's shared `text_encoder` + `vae` component dirs, staged onto the
@@ -137,7 +162,11 @@ fn resolve_mage_finetuned_transformer(
 fn resolve_mage_finetuned_components(
     settings: &Settings,
 ) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>> {
-    let descriptor = crate::inference_runtime::media_descriptor(MAGE_FINETUNED_BASE_MODEL)
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "mage-flow",
+        gen_core::ImportedModelSource::TransformerDirectory,
+        gen_core::ImportedModelOperation::Generate,
+    )
         .ok_or_else(|| {
             WorkerError::Engine(
                 "the Mage-Flow generator is not registered in this runtime build — cannot resolve \
@@ -176,34 +205,43 @@ fn resolve_mage_finetuned_components(
 /// installed — a missing one surfaces as the loud
 /// [`resolve_mage_finetuned_components`] error in the handler rather than a silent fall-through to
 /// the stub. Mirrors the shape of the other `…_available` predicates.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool {
-    if request.mode == "edit_image"
-        || !request.loras.is_empty()
-        || !pose_entries(request).is_empty()
-        || !request.reference_asset_ids.is_empty()
-        || non_empty(&request.reference_asset_id)
-        || non_empty(&request.source_asset_id)
-        || request.mask_asset_id.is_some()
-        || request.character_id.is_some()
-        || request.character_look_id.is_some()
-        || request
-            .advanced
-            .get("phases")
-            .and_then(Value::as_array)
-            .is_some_and(|phases| !phases.is_empty())
-    {
-        return false;
-    }
     matches!(
-        resolve_mage_finetuned_transformer(request, settings),
+        prepare_mage_finetuned_transformer(request, settings),
         Ok(Some(_))
     )
 }
 
+/// Validate the exact registered Mage generate shape and retain its pinned transformer files for
+/// dispatch. Production moves this value through [`PreparedImageRoute`] so async admission work
+/// cannot retarget the payload-selected directory between route selection and provider load.
+#[cfg(target_os = "macos")]
+fn prepare_mage_finetuned_transformer(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    let Some(descriptor) = imported_generate_request_supported(
+        request,
+        "mage-flow",
+        gen_core::ImportedModelSource::TransformerDirectory,
+    ) else {
+        return Ok(None);
+    };
+    if imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow").is_err() {
+        return Ok(None);
+    }
+    resolve_mage_finetuned_transformer(request, settings)
+}
+
 /// Flat telemetry recorded on assets rendered from a fine-tuned base.
 #[cfg(target_os = "macos")]
-fn mage_finetuned_raw_settings(request: &ImageRequest, steps: u32, guidance: f32) -> JsonObject {
+fn mage_finetuned_raw_settings(
+    request: &ImageRequest,
+    steps: u32,
+    guidance: f32,
+    quant_bits: Option<i64>,
+) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -214,6 +252,14 @@ fn mage_finetuned_raw_settings(request: &ImageRequest, steps: u32, guidance: f32
     );
     // The provenance that makes an asset traceable back to the run that produced its base.
     raw.insert("baseCheckpoint".to_owned(), Value::String(request.model.clone()));
+    raw.insert(
+        "engine".to_owned(),
+        Value::String(MAGE_FINETUNED_ENGINE.to_owned()),
+    );
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map_or(Value::Null, Value::from),
+    );
     raw
 }
 
@@ -228,22 +274,28 @@ async fn generate_mage_finetuned_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    transformer: PreparedMageFinetunedTransformer,
     plan: &ImagePlan,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let transformer = resolve_mage_finetuned_transformer(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "The fine-tuned Mage-Flow checkpoint could not be resolved — its recorded path is not \
-             a complete transformer directory (config.json + diffusion_pytorch_model.safetensors)."
-                .to_owned(),
-        )
-    })?;
     // Require the base's shared components before any compute — a clear "install the Mage-Flow
     // Base model first" error rather than a deep load failure.
     let components = resolve_mage_finetuned_components(settings)?;
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "mage-flow",
+        gen_core::ImportedModelSource::TransformerDirectory,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .ok_or_else(|| {
+        WorkerError::Engine(
+            "this runtime has no registered fine-tuned Mage-Flow generate route".to_owned(),
+        )
+    })?;
+    let (quant, quant_bits) =
+        imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow")?;
 
     let (width, height) = (request.width, request.height);
     let steps =
@@ -256,38 +308,33 @@ async fn generate_mage_finetuned_stream(
         MAGE_FINETUNED_DEFAULT_GUIDANCE,
         1.0..=20.0,
     );
-    let raw_settings = mage_finetuned_raw_settings(request, steps, guidance);
+    let raw_settings = mage_finetuned_raw_settings(request, steps, guidance, quant_bits);
 
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let mut spec = components.into_iter().fold(
+        LoadSpec::new(WeightsSource::Dir(transformer.directory)),
+        |spec, (id, source)| spec.with_component(id, source),
+    );
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        [transformer.config, transformer.weights],
+        "Fine-tuned Mage-Flow source preparation failed",
+    )?;
+    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
+
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        MAGE_FINETUNED_ENGINE,
+        descriptor.id,
         0,
-        move || {
-            // `spec.weights` is the fine-tuned TRANSFORMER dir itself (not a snapshot root): a
-            // training run emits the DiT alone, so both shared components MUST be staged and there
-            // is deliberately no flat-layout fallback engine-side.
-            let spec = components.into_iter().fold(
-                LoadSpec::new(WeightsSource::Dir(transformer)),
-                |spec, (id, source)| spec.with_component(id, source),
-            );
-            runtime_macos::providers::mage::load_finetuned(
-                // The published checkpoint the fine-tune started from — the ONLY Mage generation
-                // training target — which is what fixes the architecture and the undistilled
-                // sampling regime the trained weights inherit.
-                runtime_macos::providers::mage::MageVariant::Base,
-                &spec,
-            )
-            .map_err(|error| {
-                WorkerError::Engine(format!(
-                    "Fine-tuned Mage-Flow checkpoint load failed: {error}"
-                ))
-            })
-        },
+        spec,
+        "Fine-tuned Mage-Flow checkpoint load failed".to_owned(),
         move |model, tx, cancel| {
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {

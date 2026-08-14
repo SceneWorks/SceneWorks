@@ -101,6 +101,10 @@ mod credentials_ipc;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod cache_thread;
 mod inference_runtime;
+mod text_encoder_selection;
+pub use text_encoder_selection::{
+    image_text_encoder_options, resolve_image_text_encoder_selection, ImageTextEncoderOption,
+};
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
 // `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
 // (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets

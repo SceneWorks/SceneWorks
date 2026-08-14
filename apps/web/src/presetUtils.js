@@ -200,8 +200,8 @@ export function loraHasResolvableFamily(lora) {
 
 export function loraMatchesModel(lora, model) {
   // The API WITHDREW this model's synthesized LoRA advertisement because no backend lane on this
-  // deployment can honour it — an imported Krea 2 checkpoint on a candle host (the candle
-  // single-file entrypoint takes no adapters, sc-14135), or a Mage-Flow fine-tune on any host.
+  // deployment can honour it — for example, a ComfyUI Qwen-Image tree whose registered provider
+  // accepts the imported transformer assembly but advertises no adapter format.
   // Fail CLOSED, and check this BEFORE the family test: the withdrawal also empties
   // `loraCompatibility.families`, which would otherwise fall into the "cannot gate" permissive
   // branch below and keep offering every LoRA — a selection the API now 400s on. The models the

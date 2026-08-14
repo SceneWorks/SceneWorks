@@ -548,7 +548,13 @@ async fn generate_krea_control_stream(
     // LoRA/LoKr adapters (resolved above) install additively on the base DiT (mlx-gen sc-11720).
     let (quant, _quant_bits) = resolve_quant(request, Some(&weights_dir));
     let adapter_count = adapters.len();
-    let spec = krea_control_spec(weights_dir, control_weights, quant, adapters);
+    let spec = attach_selected_decoder(
+        krea_control_spec(weights_dir, control_weights, quant, adapters),
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
+    let spec = attach_manifest_text_encoder(spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
     let calibration_provenance = krea_control_calibration_provenance(
         match &spec.weights {
             WeightsSource::Dir(path) => path,

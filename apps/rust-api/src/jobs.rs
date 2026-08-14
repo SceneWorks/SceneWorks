@@ -21,7 +21,7 @@ pub(crate) async fn list_jobs(
     .await?;
     handle_stale_sweep(&state, &sweep);
     let jobs = jobs?;
-    Ok(Json(jobs))
+    Ok(Json(public_job_snapshots(jobs)))
 }
 
 /// Worker → API write of a job's structured generation metrics (epic 10402).
@@ -114,7 +114,7 @@ pub(crate) async fn create_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn claim_job(
@@ -324,9 +324,9 @@ pub(crate) async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
-    Ok(Json(
+    Ok(Json(public_job_snapshot(
         store_call(state, move |store, _timeout| store.get_job(&job_id)).await?,
-    ))
+    )))
 }
 
 pub(crate) async fn cancel_job(
@@ -339,7 +339,7 @@ pub(crate) async fn cancel_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) async fn retry_job(
@@ -365,7 +365,7 @@ pub(crate) async fn retry_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
@@ -404,7 +404,7 @@ pub(crate) async fn duplicate_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
@@ -438,6 +438,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
             &mut merged,
         )
         .await?;
+
+        // Retry and duplicate are image-job creation boundaries too. Discard any persisted or
+        // caller-supplied path-bearing resolution and rebuild it from the current catalog plus the
+        // authored opaque id, so a removed/retargeted choice fails before the queue transaction.
+        let model_id = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?
+            .to_owned();
+        let mut manifest_entry = resolve_model_manifest_entry(state, &model_id).await?;
+        resolve_selected_image_text_encoder(state, &merged, &model_id, &mut manifest_entry).await?;
+        merged.insert("modelManifestEntry".to_owned(), manifest_entry);
     }
     Ok(merged)
 }
@@ -566,7 +578,7 @@ pub(crate) async fn cancel_pending_jobs(
     publish_queue(&state).await?;
     Ok(Json(CancelPendingJobsResponse {
         canceled: jobs.len(),
-        jobs,
+        jobs: public_job_snapshots(jobs),
         extra: Default::default(),
     }))
 }
@@ -586,7 +598,7 @@ pub(crate) async fn clear_job(
     .await?;
     publish(&state, "jobs.cleared", &json!({ "ids": [job.id.clone()] }));
     publish_queue(&state).await?;
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) async fn update_job_progress(
@@ -713,7 +725,7 @@ pub(crate) async fn update_job_progress(
     if status_changed {
         publish_queue(&state).await?;
     }
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) fn terminal_model_job_changes_catalog(job_type: &JobType, status: &JobStatus) -> bool {
@@ -1346,6 +1358,10 @@ pub(crate) async fn register_trained_base_checkpoint(
     entry.insert(
         "paths".to_owned(),
         json!({ "model": output_dir.display().to_string() }),
+    );
+    entry.insert(
+        "importSourceShape".to_owned(),
+        Value::String("transformer_directory".to_owned()),
     );
     entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
     sceneworks_core::lora_family::apply_model_manifest_defaults(

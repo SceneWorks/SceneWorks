@@ -53,6 +53,7 @@ const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 // two-revisions-in-one-lockfile skew `inferenceManifests()` exists to prevent one step earlier.
 const INFERENCE_CRATES = [
   "sceneworks-gen-core",
+  "sceneworks-gen-core-testkit",
   "runtime-macos",
   "runtime-cuda",
   "mlx-gen",

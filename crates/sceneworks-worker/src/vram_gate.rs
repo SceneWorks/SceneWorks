@@ -485,9 +485,62 @@ impl KreaRuntimeEvidenceContext {
             artifact_repository: "SceneWorks/krea-2-turbo-mlx".into(),
             resolved_revision: "d009674080cc1bccf2b629d834c34bf5eccdb723".into(),
             tier_root: tier_root.into(),
-            resolved_artifact_root: std::path::PathBuf::new(),
+            resolved_artifact_root: krea_test_artifact_root(tier_root),
         }
     }
+}
+
+/// Sparse, weights-free Krea source used by the Candle-only memory-contract tests.
+///
+/// The provider's memory lookup now shares its complete production load-spec validation, including
+/// the encoder and tokenizer contracts. An empty path therefore no longer represents a valid source.
+/// Keep the tests on the real lookup seam with a structurally truthful fixture; no model tensor is
+/// materialized and no memory evidence is measured or rewritten here.
+#[cfg(test)]
+fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: std::path::PathBuf,
+    }
+
+    static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+    let fixture = FIXTURE.get_or_init(|| {
+        let temp = tempfile::tempdir().expect("Krea memory-contract fixture root");
+        let root = temp.path().to_path_buf();
+        let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
+            .expect("Krea encoder contract");
+        for (tier, bits) in [("q4", Some(4)), ("q8", Some(8)), ("bf16", None)] {
+            let tier_root = root.join(tier);
+            gen_core_testkit::write_encoder_contract_fixture(
+                &tier_root.join("text_encoder"),
+                contract,
+            )
+            .expect("write sparse Krea encoder fixture");
+            if let Some(bits) = bits {
+                let transformer = tier_root.join("transformer");
+                std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
+                std::fs::write(
+                    transformer.join("config.json"),
+                    serde_json::to_vec(&serde_json::json!({
+                        "quantization": { "bits": bits, "group_size": 64 }
+                    }))
+                    .expect("Krea transformer fixture config"),
+                )
+                .expect("write Krea transformer fixture config");
+            }
+        }
+        Fixture { _temp: temp, root }
+    });
+    assert!(
+        matches!(tier, "q4" | "q8" | "bf16"),
+        "unsupported Krea fixture tier {tier}"
+    );
+    fixture.root.join(tier)
+}
+
+#[cfg(test)]
+fn krea_test_load_spec(tier: &str) -> gen_core::LoadSpec {
+    gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(krea_test_artifact_root(tier)))
 }
 
 /// Read a measured phase curve `fixedGb + perMpxGb * megapixels`. The manifest stores fixed weight /
@@ -675,6 +728,15 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     if pixels > max_pixels {
         return Some(KreaTurboFit::Unverified {
             reason: MemoryEvidenceVerdict::OutOfEnvelope,
+        });
+    }
+    // Runtime artifact identity is a required evidence dimension. Preserve the explicit unverified
+    // result when it is unavailable instead of attempting provider source validation against an
+    // empty path and collapsing to `None`; callers keep the same resident-or-reject fallback, while
+    // diagnostics retain the truthful reason.
+    if runtime.is_none() {
+        return Some(KreaTurboFit::Unverified {
+            reason: MemoryEvidenceVerdict::Unverified,
         });
     }
     let load_root = runtime
@@ -2245,10 +2307,7 @@ mod tests {
             .as_object()
             .expect("Krea turbo fit");
         let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
-            )
+            .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec("q4"))
             .expect("Krea contract lookup succeeds")
             .expect("Krea contract exists");
         let identity = provider_contract
@@ -2946,10 +3005,7 @@ mod tests {
         );
 
         let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
-            )
+            .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec("q4"))
             .expect("Krea contract lookup succeeds")
             .expect("Krea contract exists");
         assert!(
@@ -2981,10 +3037,7 @@ mod tests {
         assert_eq!(manifest_fingerprint, "krea-turbo-cuda-phase-curves-v1");
 
         let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
-            )
+            .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec("q4"))
             .expect("Krea contract lookup succeeds")
             .expect("Krea contract exists");
         let provider_fingerprint = provider_contract

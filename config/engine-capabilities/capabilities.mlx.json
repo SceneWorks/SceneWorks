@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "c84a51765afa6e9b18a8cc1d7a296cedb46d31f1",
+    "inferenceRevision": "237725526b0fa1a64227a5a60871f0e8c23c9978",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -521,7 +521,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_raw",
@@ -543,7 +552,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_turbo",
@@ -565,7 +583,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_turbo_control",
@@ -587,7 +614,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_turbo_edit",
@@ -609,7 +645,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_realtime_14b",
@@ -872,7 +917,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "qwen_image_control",
@@ -894,7 +948,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "qwen_image_edit",
@@ -916,7 +979,16 @@
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
         }
-      }
+      },
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "sana_1600m",
@@ -1353,6 +1425,137 @@
           "shiftBits": 1038966011
         }
       }
+    }
+  ],
+  "imports": [
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "edit",
+      "providerId": "krea_2_turbo_edit",
+      "conditioning": [
+        "reference",
+        "multi_reference"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "generate",
+      "providerId": "krea_2_turbo",
+      "conditioning": [
+        "reference"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "multi_phase",
+      "providerId": "krea_2_raw",
+      "conditioning": [
+        "reference"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "pose",
+      "providerId": "krea_2_turbo_control",
+      "conditioning": [
+        "control"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "mage-flow",
+      "source": "transformer_directory",
+      "operation": "generate",
+      "providerId": "mage_flow_base",
+      "conditioning": [],
+      "supportsLora": false,
+      "supportsLokr": false,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": false,
+      "registryCached": true
+    },
+    {
+      "family": "sdxl",
+      "source": "fused_checkpoint",
+      "operation": "edit",
+      "providerId": "sdxl",
+      "conditioning": [
+        "reference",
+        "mask",
+        "control"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "sdxl",
+      "source": "fused_checkpoint",
+      "operation": "generate",
+      "providerId": "sdxl",
+      "conditioning": [
+        "reference",
+        "mask",
+        "control"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
     }
   ]
 }

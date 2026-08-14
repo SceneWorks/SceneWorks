@@ -31,31 +31,27 @@
 const KREA_IMPORTED_ENGINE: &str = "mlx_krea_imported";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
-/// Whether the selected backend's imported registry lane is exposed by this worker for adapters — i.e.
-/// it serves job LoRAs (sc-14111) and the Kontext edit surface (sc-14119, whose required
-/// `krea2_identity_edit` LoRA IS an adapter). The candle worker lane stays **t2i / img2img only** until
-/// its edit-conditioning helpers are shared cross-platform. img2img (a `Conditioning::Reference` init) needs
-/// no adapter, so it is served on both backends regardless of this flag. Read by
-/// [`krea_imported_request_shape_available`] (the claim gate mirrors the scheduler's
-/// `imported_image_request_family_eligible(adapters_supported)`), so a candle host never routes a
-/// LoRA/edit imported job into this lane.
-#[cfg(target_os = "macos")]
-const KREA_IMPORTED_SUPPORTS_ADAPTERS: bool = true;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const KREA_IMPORTED_SUPPORTS_ADAPTERS: bool = false;
-/// Whether the selected backend can serve **strict-pose control** on an imported single-file Krea 2
-/// checkpoint. The pose ControlNet is a `control_scale`-scaled residual branch (`Krea2ControlBranch`)
-/// folded onto the frozen Turbo DiT at load — architecturally independent of the DiT's weights, so a
-/// same-shape imported fine-tune composes with it exactly as the builtin base does. The MLX runtime
-/// has the registered File-capable `krea_2_turbo_control` provider; the candle worker keeps rejecting
-/// pose here until its control surface is enabled — and
-/// the scheduler mirror (`imported_image_request_family_eligible`) agrees per backend, so a candle
-/// host never claims an imported pose job (a candle-required deployment fails it terminally via the
-/// `candle_unsupported` enforce sweep rather than stranding it).
-#[cfg(target_os = "macos")]
-const KREA_IMPORTED_SUPPORTS_POSE_CONTROL: bool = true;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const KREA_IMPORTED_SUPPORTS_POSE_CONTROL: bool = false;
+fn krea_imported_operation(request: &ImageRequest) -> gen_core::ImportedModelOperation {
+    if request_has_multiphase(request) {
+        gen_core::ImportedModelOperation::MultiPhase
+    } else if !pose_entries(request).is_empty() {
+        gen_core::ImportedModelOperation::Pose
+    } else if request.mode == "edit_image" {
+        gen_core::ImportedModelOperation::Edit
+    } else {
+        gen_core::ImportedModelOperation::Generate
+    }
+}
+
+/// Resolve the exact imported source shape and operation through the live provider registry. An
+/// absent row is an explicit refusal; sibling routes for the family are never unioned.
+fn krea_imported_descriptor(request: &ImageRequest) -> Option<gen_core::ModelDescriptor> {
+    crate::inference_runtime::imported_model_descriptor(
+        "krea_2",
+        gen_core::ImportedModelSource::TransformerFile,
+        krea_imported_operation(request),
+    )
+}
 /// The base tier whose shared Qwen3-VL text encoder + Qwen VAE + tokenizer + DiT architecture config the
 /// imported single-file transformer is paired with. The Turbo turnkey (`SceneWorks/krea-2-turbo-mlx`,
 /// sc-7573) is the default base — its published Krea 2 architecture matches the community merges, and its
@@ -299,22 +295,56 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through to the stub.
 /// Mirrors the shape of the other `…_available` predicates.
 fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
-    // Rejected on EVERY backend (bare-transformer lane): inpaint mask, character / look, multi-phase.
-    if request.mask_asset_id.is_some()
-        || request.character_id.is_some()
-        || request.character_look_id.is_some()
-        || request
-            .advanced
-            .get("phases")
-            .and_then(Value::as_array)
-            .is_some_and(|phases| !phases.is_empty())
+    let operation = krea_imported_operation(request);
+    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+        && operation != gen_core::ImportedModelOperation::Pose
     {
         return false;
     }
+    if operation == gen_core::ImportedModelOperation::Pose
+        && !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported(&request.advanced)
+    {
+        return false;
+    }
+    let Some(descriptor) = krea_imported_descriptor(request) else {
+        return false;
+    };
+    let caps = &descriptor.capabilities;
+    if imported_model_quant(request, &descriptor, "Imported Krea 2").is_err() {
+        return false;
+    }
+    // These identities need asset-resolution paths the imported handler does not own.
+    if request.mask_asset_id.is_some()
+        || request.character_id.is_some()
+        || request.character_look_id.is_some()
+    {
+        return false;
+    }
+    if !request.loras.is_empty() && !(caps.supports_lora || caps.supports_lokr) {
+        return false;
+    }
+    if request_has_multiphase(request) {
+        return request.mode != "edit_image"
+            && pose_entries(request).is_empty()
+            && request.reference_asset_ids.is_empty()
+            && request.reference_asset_id.is_none()
+            && request.source_asset_id.is_none();
+    }
     // A pose set inside edit mode is no lane anywhere (the builtin edit lane rejects it too), and
-    // outside edit mode it is the strict-pose control surface — pose-control-capable backend only.
+    // outside edit mode it requires a registered provider accepting Control conditioning.
     if !pose_entries(request).is_empty() {
-        if request.mode == "edit_image" || !KREA_IMPORTED_SUPPORTS_POSE_CONTROL {
+        if request.mode == "edit_image"
+            || !caps
+                .conditioning
+                .contains(&gen_core::ConditioningKind::Control)
+        {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if requested_control_kind(request)
+            .and_then(|kind| validate_control_kind(KREA_CONTROL_ENGINE_ID, &kind))
+            .is_err()
+        {
             return false;
         }
         // The plural edit set and a bare `sourceAssetId` would be silently dropped by the pose
@@ -333,7 +363,15 @@ fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
         let has_edit_reference = !request.reference_asset_ids.is_empty()
             || non_empty(&request.reference_asset_id)
             || non_empty(&request.source_asset_id);
-        return KREA_IMPORTED_SUPPORTS_ADAPTERS && has_edit_reference;
+        let accepts_reference = caps
+            .conditioning
+            .contains(&gen_core::ConditioningKind::Reference);
+        let accepts_multi = caps
+            .conditioning
+            .contains(&gen_core::ConditioningKind::MultiReference);
+        return has_edit_reference
+            && accepts_reference
+            && (request.reference_asset_ids.len() <= 1 || accepts_multi);
     }
 
     // Non-edit t2i / img2img. img2img rides a single `referenceAssetId`; the plural edit set and a bare
@@ -341,8 +379,11 @@ fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
     if !request.reference_asset_ids.is_empty() || request.source_asset_id.is_some() {
         return false;
     }
-    // LoRAs (sc-14111) ride the adapter path — adapter-capable backend only.
-    if !request.loras.is_empty() && !KREA_IMPORTED_SUPPORTS_ADAPTERS {
+    if request.reference_asset_id.is_some()
+        && !caps
+            .conditioning
+            .contains(&gen_core::ConditioningKind::Reference)
+    {
         return false;
     }
     true
@@ -366,17 +407,10 @@ fn krea_imported_control_available(request: &ImageRequest, settings: &Settings) 
         && krea_imported_available(request, settings)
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Debug)]
 struct PreparedKreaImportedSources {
     dit_pin: gen_core::PinnedWeightsFile,
     prepared_adapters: PreparedAdapters,
-}
-
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-#[derive(Debug)]
-struct PreparedKreaImportedSources {
-    dit_pin: gen_core::PinnedWeightsFile,
 }
 
 #[cfg(target_os = "macos")]
@@ -488,11 +522,9 @@ fn prepare_krea_imported_sources(
     let Some(dit_pin) = resolve_imported_krea_dit_pin(request, settings)? else {
         return Ok(None);
     };
-    #[cfg(target_os = "macos")]
     let prepared_adapters = resolve_prepared_adapters(request, settings)?;
     Ok(Some(PreparedKreaImportedSources {
         dit_pin,
-        #[cfg(target_os = "macos")]
         prepared_adapters,
     }))
 }
@@ -608,24 +640,20 @@ fn krea_imported_control_raw_settings(
 /// The promoted ENVELOPE, however, is deliberately NOT reused, and `None` is passed for the
 /// resolved-artifact provenance on purpose rather than by omission. Promoted `krea_2_turbo_control`
 /// evidence is artifact-bound, and every measured record in the corpus was captured on the **q4**
-/// base tier (fixture `krea-pose-control-q4-seed16099`). This composition is DENSE: the native
-/// loader materializes the imported single file bf16 (an int8-per-row file is dequantized at load,
-/// and there is no quantize path on the native control assembly), so the imported 12B DiT is
-/// ~24 GiB resident against the ~6 GiB the q4 record measured. Same architecture is NOT the same
-/// footprint once the tier differs, and this gate's permissive-side failure mode is an OS Jetsam
-/// SIGKILL — so the request runs on the conservative estimate path instead. The estimate is honest
-/// about the real assembly: the spec points at the resolved DENSE `bf16` base tier (whose
-/// `transformer/` ships the same-shape dense weights the imported file carries) plus the overlay
-/// and adapter files.
+/// base tier (fixture `krea-pose-control-q4-seed16099`). The imported native-control assembly does
+/// support an explicit Q4/Q8 load-time selection; without one it materializes the imported file as
+/// dense bf16. Even a Q4 selection cannot inherit that promoted record, because the user's imported
+/// DiT has no pinned artifact identity proving it is the measured checkpoint. The request therefore
+/// stays on the conservative estimate path. That estimate sees the real assembly: the primary File
+/// DiT, its requested quant tier, the resolved dense `bf16` companion tier, the control overlay, and
+/// adapter files.
 ///
 /// Note what it would actually take for this lane to serve promoted numbers, so the estimate path
 /// is not mistaken for a one-line gap: promoted evidence is ARTIFACT-bound, and an imported DiT is
 /// a user file with no pinned repository/revision/variant to bind to — so a dense-tier capture
-/// alone would not reach it. It would also need an explicit decision that a same-shape dense
-/// imported DiT may INHERIT a dense record measured on the builtin base (defensible — identical
-/// architecture and dtype means identical resident bytes, which is exactly the property the q4
-/// record lacks), plus something that proves the imported file really is that shape and dtype
-/// before the inheritance applies. That is an evidence-reuse policy change, not a binding.
+/// alone would not reach it. Reuse would need an explicit policy plus provenance proving the imported
+/// file is the exact artifact/load shape represented by a promoted record before inheritance applies.
+/// That is an evidence-reuse policy change, not a binding.
 ///
 /// Independently of the estimate, the generator's own measured, architecture-keyed feasibility
 /// check (`control_geometry_fits`, sized off the arch config + branch block count + tiers) guards
@@ -651,6 +679,12 @@ async fn generate_krea_imported_control_stream(
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first"
     // error (the shared TE/VAE/tokenizer + arch config the control assembly pairs the DiT with).
     let base_dir = resolve_krea_imported_base_tier(settings)?;
+    let descriptor = krea_imported_descriptor(request).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "This runtime has no registered imported Krea pose provider.".to_owned(),
+        )
+    })?;
+    let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported Krea 2")?;
     let control_weights = control_pin.loader_path().to_path_buf();
     let PreparedAdapters {
         specs: adapters,
@@ -675,8 +709,12 @@ async fn generate_krea_imported_control_stream(
 
     let poses = parse_poses(request);
     let count = poses.len();
-    let raw_settings =
+    let mut raw_settings =
         krea_imported_control_raw_settings(request, steps, control_scale, count, adapters.len());
+    raw_settings.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(Value::from).unwrap_or(Value::Null),
+    );
     // Strict pose shares one seed across the set so noise-derived attributes stay constant.
     let seed = resolve_seed(request, 0);
 
@@ -706,11 +744,26 @@ async fn generate_krea_imported_control_stream(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    spec = attach_selected_decoder_unprepared(
+        spec,
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
+    let decoder_pin =
+        selected_decoder_component_pin(&spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
+    spec = prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
         std::iter::once(dit_pin)
             .chain(std::iter::once(control_pin))
-            .chain(adapter_pins),
+            .chain(adapter_pins)
+            .chain(decoder_pin),
         "Krea 2 imported pose source preparation failed",
     )?;
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
@@ -840,6 +893,61 @@ fn krea_imported_conditioning(img2img: Option<(Image, f32)>) -> Vec<Conditioning
     }
 }
 
+/// Explicit imported-checkpoint quant selection. Absence preserves the checkpoint's own effective
+/// encoding; a selected load-time tier is accepted only when the exact provider advertises it.
+fn imported_model_quant(
+    request: &ImageRequest,
+    descriptor: &gen_core::ModelDescriptor,
+    label: &str,
+) -> WorkerResult<(Option<Quant>, Option<i64>)> {
+    let named = request
+        .advanced
+        .get("quantTier")
+        .or_else(|| request.advanced.get("quant"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    let bits = request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    });
+    let selected = if let Some(named) = named.as_deref() {
+        match named {
+            "nvfp4" => Some(Quant::Nvfp4),
+            "q4" => Some(Quant::Q4),
+            "q8" => Some(Quant::Q8),
+            "bf16" | "dense" => None,
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{label} quant tier '{other}' is unknown; use bf16, q8, or q4."
+                )))
+            }
+        }
+    } else {
+        match bits {
+            Some(1..=4) => Some(Quant::Q4),
+            Some(5..) => Some(Quant::Q8),
+            Some(i64::MIN..=0) => None,
+            None => return Ok((None, None)),
+        }
+    };
+    if let Some(quant) = selected {
+        if !descriptor.capabilities.supported_quants.contains(&quant) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "The registered provider '{}' does not support imported {:?} quantization.",
+                descriptor.id, quant
+            )));
+        }
+    }
+    let bits = match selected {
+        Some(Quant::Q4) => Some(4),
+        Some(Quant::Q8) => Some(8),
+        Some(Quant::Nvfp4) | None => None,
+    };
+    Ok((selected, bits))
+}
+
 /// Flat telemetry recorded on imported-Krea assets. No guidance — the imported distilled-Turbo merges
 /// are CFG-free (the Turbo descriptor advertises `supports_guidance=false`). `is_edit` records the
 /// Kontext edit lane (sc-14119) vs plain t2i/img2img, and `adapter_count` the number of applied
@@ -890,16 +998,41 @@ fn krea_imported_raw_settings(
     raw
 }
 
-/// Resolve edit conditioning for the imported lane on MLX after route selection has already pinned
-/// the adapter stack. Returns `Some(vec)` for an `edit_image` job: the fitted source reference(s) as a
-///     single `Reference` or a scene+person `MultiReference`, built exactly like [`generate_krea_edit_stream`]
-///     (`edit_reference_ids` → `load_reference_image` → `fit_edit_references` → `build_edit_conditioning`);
-///     `None` for t2i / img2img (the caller uses [`krea_imported_conditioning`] instead).
-///
-/// macOS-only: the edit helpers (`edit_reference_ids` / `fit_edit_references` / `build_edit_conditioning`)
-/// and the MLX native loader's adapter parameter live only on the MLX build, so the candle imported lane
-/// (t2i / img2img only, sc-14135) never calls this.
-#[cfg(target_os = "macos")]
+fn krea_imported_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        return request.reference_asset_ids.clone();
+    }
+    request
+        .reference_asset_id
+        .as_deref()
+        .or(request.source_asset_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| vec![id.to_owned()])
+        .unwrap_or_default()
+}
+
+fn krea_imported_has_edit_adapter(request: &ImageRequest) -> bool {
+    request.loras.iter().any(|lora| {
+        lora.get("conditioningRole")
+            .and_then(Value::as_str)
+            .map(|role| role.trim().to_ascii_lowercase().replace('-', "_") == "image_edit")
+            .unwrap_or(false)
+    })
+}
+
+fn krea_imported_edit_conditioning(references: Vec<Image>) -> Vec<Conditioning> {
+    if references.len() == 1 {
+        vec![Conditioning::Reference {
+            image: references.into_iter().next().expect("one reference"),
+            strength: None,
+        }]
+    } else {
+        vec![Conditioning::MultiReference { images: references }]
+    }
+}
+
+/// Resolve cross-platform edit conditioning after route selection pinned the adapter stack.
 fn resolve_krea_imported_edit_conditioning(
     request: &ImageRequest,
     settings: &Settings,
@@ -911,23 +1044,23 @@ fn resolve_krea_imported_edit_conditioning(
     // R5 (epic 10871): the bare transformer cannot edit without the `krea2_identity_edit` LoRA — the
     // in-context / grounded source conditioning is inert without the trained weights. Require it before
     // any compute, mirroring the builtin `generate_krea_edit_stream`.
-    if !request_has_image_edit_lora(request) {
+    if !krea_imported_has_edit_adapter(request) {
         return Err(WorkerError::InvalidPayload(
             "Krea 2 edit requires the Krea 2 Identity Edit LoRA (or another image-edit LoRA): without \
              it the source-image conditioning is inert. Select it in the LoRA picker."
                 .to_owned(),
         ));
     }
-    let reference_ids = edit_reference_ids(request);
+    let reference_ids = krea_imported_edit_reference_ids(request);
     if reference_ids.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Krea 2 edit requires a source image.".to_owned(),
         ));
     }
-    if reference_ids.len() > KREA_MAX_EDIT_REFERENCES {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Krea 2 edit takes at most {KREA_MAX_EDIT_REFERENCES} images (image 1, then image 2)."
-        )));
+    if reference_ids.len() > 2 {
+        return Err(WorkerError::InvalidPayload(
+            "Krea 2 edit takes at most 2 images (image 1, then image 2).".to_owned(),
+        ));
     }
     let mut sources = Vec::with_capacity(reference_ids.len());
     for id in &reference_ids {
@@ -938,10 +1071,17 @@ fn resolve_krea_imported_edit_conditioning(
             project_path,
         )?);
     }
-    // Pre-fit each source to the target W×H (crop / pad / outpaint→pad), fixed order preserved — the same
-    // shared edit-conditioning path the builtin lanes use.
-    let sources = fit_edit_references(sources, request, request.width, request.height)?;
-    Ok(Some(build_edit_conditioning(&sources)))
+    let sources = if request.fit_mode == "stretch" {
+        sources
+    } else {
+        sources
+            .into_iter()
+            .map(|source| {
+                fit_engine_image(source, request.width, request.height, &request.fit_mode)
+            })
+            .collect::<WorkerResult<Vec<_>>>()?
+    };
+    Ok(Some(krea_imported_edit_conditioning(sources)))
 }
 
 fn krea_imported_reference_count(conditioning: &[Conditioning]) -> u32 {
@@ -1049,6 +1189,61 @@ fn krea_imported_generate_pass(
         }
         _ => Err(WorkerError::Engine(
             "Krea 2 imported checkpoint returned non-image output".to_owned(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn krea_imported_generate_multiphase(
+    generator: &dyn Generator,
+    prompt: &str,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    phases: Vec<gen_core::GenerationPhase>,
+    text_style_gain: Option<f32>,
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
+    preview: gen_core::PreviewSink,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let mut request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        phases: Some(phases),
+        text_style_gain,
+        memory: memory_evaluation.map(|evaluation| evaluation.memory),
+        preview,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_evaluation.map(|evaluation| &evaluation.context),
+        on_progress,
+    )
+    .map_err(|error| {
+        WorkerError::Engine(format!(
+            "Krea 2 imported multi-phase generation failed: {error}"
+        ))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::Engine(
+                    "Krea 2 imported multi-phase request produced no image".to_owned(),
+                )
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::Engine(
+            "Krea 2 imported multi-phase request returned non-image output".to_owned(),
         )),
     }
 }
@@ -1182,6 +1377,8 @@ fn drive_krea_imported_mlx_items<E>(
     height: u32,
     steps: u32,
     conditioning: Vec<Conditioning>,
+    negative_prompt: Option<String>,
+    phases: Option<Vec<gen_core::GenerationPhase>>,
     text_style_gain: Option<f32>,
     hires_fix: Option<HiresFixPlan>,
     tx: tokio::sync::mpsc::Sender<GenEvent>,
@@ -1215,21 +1412,38 @@ where
         let _request_memory_limit = memory_evaluation
             .process_limit_bytes
             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-        let generated = krea_imported_generate_one(
-            generator,
-            &prompt,
-            width,
-            height,
-            seed,
-            steps,
-            &conditioning,
-            text_style_gain,
-            hires_fix,
-            Some(&memory_evaluation),
-            preview,
-            &cancel,
-            on_progress,
-        );
+        let generated = if let Some(phases) = phases.clone() {
+            krea_imported_generate_multiphase(
+                generator,
+                &prompt,
+                negative_prompt.clone(),
+                width,
+                height,
+                seed,
+                phases,
+                text_style_gain,
+                Some(&memory_evaluation),
+                preview,
+                &cancel,
+                on_progress,
+            )
+        } else {
+            krea_imported_generate_one(
+                generator,
+                &prompt,
+                width,
+                height,
+                seed,
+                steps,
+                &conditioning,
+                text_style_gain,
+                hires_fix,
+                Some(&memory_evaluation),
+                preview,
+                &cancel,
+                on_progress,
+            )
+        };
         let (out_width, out_height, pixels) = match generated {
             Ok(image) => image,
             Err(_) if cancel.is_cancelled() => return Ok(None),
@@ -1260,17 +1474,21 @@ async fn generate_krea_imported_stream(
 ) -> WorkerResult<()> {
     let PreparedFileDispatch { plan, sources } = dispatch;
     let request = &plan.request;
-    #[cfg(target_os = "macos")]
     let PreparedKreaImportedSources {
         dit_pin,
         prepared_adapters,
     } = sources;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let PreparedKreaImportedSources { dit_pin } = sources;
     let dit = dit_pin.loader_path().to_path_buf();
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
     let is_edit = request.mode == "edit_image";
+    let descriptor = krea_imported_descriptor(request).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "This runtime has no registered imported Krea provider for the requested operation."
+                .to_owned(),
+        )
+    })?;
+    let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported Krea 2")?;
 
     // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
     // img2img lane uses (`resolve_generic_lane_conditioning`'s generic arm), and it is CROSS-PLATFORM —
@@ -1285,73 +1503,114 @@ async fn generate_krea_imported_stream(
 
     // Adapter File identities were prepared during route selection and survive every async preamble
     // await. Build only the edit conditioning here; the handler must never re-pin its selected stack.
-    #[cfg(target_os = "macos")]
     let edit_conditioning =
         resolve_krea_imported_edit_conditioning(request, settings, project_path)?;
-    #[cfg(target_os = "macos")]
     let adapter_count = prepared_adapters.specs.len();
-    #[cfg(not(target_os = "macos"))]
-    let adapter_count = 0usize;
-    #[cfg(target_os = "macos")]
     let conditioning = edit_conditioning.unwrap_or_else(|| krea_imported_conditioning(img2img));
-    #[cfg(not(target_os = "macos"))]
-    let conditioning = krea_imported_conditioning(img2img);
+
+    let phase_specs = request_has_multiphase(request)
+        .then(|| {
+            ensure_multiphase_job_shape(request)?;
+            parse_multiphase_specs(request)
+        })
+        .transpose()?;
+    let phases = phase_specs.as_deref().map(build_generation_phases);
+    if phases.is_some() && request.hires_fix.enabled {
+        return Err(WorkerError::InvalidPayload(
+            "Krea multi-phase denoise cannot be combined with Hires.fix.".to_owned(),
+        ));
+    }
 
     let (width, height) = (request.width, request.height);
-    let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
+    let steps = phase_specs.as_ref().map_or_else(
+        || resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
+        |specs| specs.iter().map(|phase| phase.steps).sum(),
+    );
     let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
     let text_style_gain = resolve_text_style_gain(request);
-    let raw_settings = krea_imported_raw_settings(request, steps, is_edit, adapter_count);
+    let mut raw_settings = krea_imported_raw_settings(request, steps, is_edit, adapter_count);
+    raw_settings.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(Value::from).unwrap_or(Value::Null),
+    );
+    if let Some(specs) = phase_specs.as_ref() {
+        raw_settings.insert("multiPhase".to_owned(), Value::Bool(true));
+        raw_settings.insert(
+            "phases".to_owned(),
+            serde_json::to_value(
+                specs
+                    .iter()
+                    .map(|phase| {
+                        json!({
+                            "steps": phase.steps,
+                            "guidance": phase.guidance,
+                            "loras": phase.loras.iter().map(|lora| json!({
+                                "index": lora.index,
+                                "weight": lora.weight,
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("phase telemetry serializes"),
+        );
+    }
 
     // Per-image work items: (seed, prompt) — `request.count` renders, each its own seed.
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+    let negative_prompt = (!request.negative_prompt.trim().is_empty())
+        .then(|| request.negative_prompt.clone());
 
-    let engine_id = if is_edit {
-        "krea_2_turbo_edit"
-    } else {
-        "krea_2_turbo"
-    };
+    let engine_id = descriptor.id;
     let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(base_dir.clone()),
     );
-    #[cfg(target_os = "macos")]
-    {
-        if !prepared_adapters.specs.is_empty() {
-            spec = spec.with_adapters(prepared_adapters.specs);
-        }
-        crate::paths::prepare_load_spec_with_file_pins(
-            &mut spec,
-            std::iter::once(dit_pin).chain(prepared_adapters.pins),
-            "Krea 2 imported source preparation failed",
-        )?;
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
     }
-    #[cfg(not(target_os = "macos"))]
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        std::iter::once(dit_pin),
+    if !prepared_adapters.specs.is_empty() {
+        spec = spec.with_adapters(prepared_adapters.specs);
+    }
+    spec = attach_selected_decoder_unprepared(spec, engine_id, request, settings)?;
+    let decoder_pin = selected_decoder_component_pin(&spec, engine_id, request, settings)?;
+    spec = prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        engine_id,
+        request,
+        settings,
+        std::iter::once(dit_pin)
+            .chain(prepared_adapters.pins)
+            .chain(decoder_pin),
         "Krea 2 imported source preparation failed",
     )?;
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let cold_admission = {
         // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
-        // not be double-priced. Admit exactly the prepared primary plus the companion component dirs.
+        // not be double-priced. A selected encoder is already represented by the spec's prepared
+        // contract receipt, so only admit the bundled encoder dir for the default path.
         let text_encoder = base_dir.join("text_encoder");
         let vae = base_dir.join("vae");
+        let mut companions = vec![vae];
+        if spec.text_encoder.is_none() {
+            companions.push(text_encoder);
+        }
+        let companion_refs = companions
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
         prepare_cached_candle_base_floor(
             &request.model,
             "Krea imported",
             settings,
             &spec,
-            &[text_encoder.as_path(), vae.as_path()],
+            &companion_refs,
         )?
     };
-
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
         engine_id,
@@ -1390,6 +1649,8 @@ async fn generate_krea_imported_stream(
                 height,
                 steps,
                 conditioning,
+                negative_prompt,
+                phases,
                 text_style_gain,
                 hires_fix,
                 tx,
@@ -1419,21 +1680,38 @@ async fn generate_krea_imported_stream(
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
-                let generated = krea_imported_generate_one(
-                    model,
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    &conditioning,
-                    text_style_gain,
-                    hires_fix,
-                    None,
-                    preview,
-                    &cancel,
-                    on_progress,
-                );
+                let generated = if let Some(phases) = phases.clone() {
+                    krea_imported_generate_multiphase(
+                        model,
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        phases,
+                        text_style_gain,
+                        None,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )
+                } else {
+                    krea_imported_generate_one(
+                        model,
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        &conditioning,
+                        text_style_gain,
+                        hires_fix,
+                        None,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )
+                };
                 let (out_width, out_height, pixels) = match generated {
                     Ok(image) => image,
                     Err(_) if cancel.is_cancelled() => return Ok(None),

@@ -1292,22 +1292,46 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
       measured: true,
     });
     expect(byId.get("sensenova_u1_8b").mlx?.minMemoryGb).toBeUndefined();
-    // krea_2_raw ships a candle block, and ships NO footprint on any download.
+    // krea_2_raw ships a candle block. Its native model tiers still carry no footprint evidence;
+    // SC-18315 adds one soft co-requisite with an exact on-disk byte identity only. That donor must
+    // not acquire resident/peak values until separate runtime evidence exists.
     expect(byId.get("krea_2_raw").candle).toMatchObject({
       minMemoryGb: 32,
       vramGbByTier: { q4: 28.8, q8: 33.4, bf16: 46.4 },
       measured: false,
     });
     expect(byId.get("krea_2_raw").mlx?.minMemoryGb).toBe(48);
-    for (const download of byId.get("krea_2_raw").downloads ?? []) {
-      expect(download.footprint, "krea_2_raw ships no footprint at all").toBeUndefined();
+    const isWanDecoderDonor = (download) =>
+      download.repo === "SceneWorks/krea-realtime-14b-mlx" &&
+      download.componentId === "vae" &&
+      download.files?.length === 1 &&
+      download.files[0] === "q4/vae.safetensors";
+    const kreaRawDownloads = byId.get("krea_2_raw").downloads ?? [];
+    const wanDecoderDonors = kreaRawDownloads.filter(isWanDecoderDonor);
+    expect(wanDecoderDonors).toHaveLength(1);
+    expect(wanDecoderDonors[0]).toMatchObject({
+      coRequisite: true,
+      required: "soft",
+      platforms: ["macos"],
+      estimatedSizeBytes: 507591212,
+    });
+    expect(wanDecoderDonors[0].footprint).toEqual({
+      diskSizeBytes: 507591212,
+      residentMemoryBytes: null,
+      peakMemoryBytes: null,
+    });
+    for (const download of kreaRawDownloads.filter((download) => !isWanDecoderDonor(download))) {
+      expect(download.footprint, "krea_2_raw native tiers ship no footprint evidence").toBeUndefined();
     }
-    // ...and it is NOT the only one: krea_2_turbo has the identical shape, and the two of them are the
-    // complete set of footprint-less matrix entries. The fixture comment claimed "the ONE shipped entry".
+    // ...and it is NOT the only one: krea_2_turbo has the identical native-tier shape, and the two of
+    // them are the complete set of footprint-less matrix entries after excluding only the exact
+    // alternate-decoder donor above. The fixture comment claimed "the ONE shipped entry".
     const footprintless = manifestModels
       .filter((model) => tiersOn(model, "macos").length > 0)
       .filter((model) =>
-        (model.downloads ?? []).every((download) => download.footprint === undefined),
+        (model.downloads ?? [])
+          .filter((download) => !isWanDecoderDonor(download))
+          .every((download) => download.footprint === undefined),
       )
       .map((model) => model.id)
       .sort();
