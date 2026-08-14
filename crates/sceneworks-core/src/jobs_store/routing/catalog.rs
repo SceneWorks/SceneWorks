@@ -934,6 +934,31 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // loudly rather than routing it elsewhere. So it is neither candle-routed nor a candle i2v/VACE
     // model — the same all-false candle shape `scail2_14b` carries, and for the same reason.
     VideoModelCaps::new("krea_realtime_14b", true, false, false, false),
+    // Wan2.2 VACE-Fun A14B (epic 3456 / sc-3458): the dual-expert control checkpoint, exposed for
+    // `replace_person` alone. It had NO row at all until sc-17159, which is the GH #2074 shape
+    // exactly — the worker's `resolve_video_route` has carried a dedicated
+    // `VideoRoute::ReplacePersonWanVaceFun` arm (`generate_wan_vace_fun`, sc-3459) since it shipped,
+    // and the manifest ships a macOS MLX download for it, yet with no row here
+    // `VIDEO_MLX_ROUTED_MODELS` missed the id, so `video_job_is_mlx_eligible` refused every job
+    // (queued forever, never claimed) AND `video_model_mac_support` reported the `classify_video_gap`
+    // "this video model has no MLX engine" reason — untrue for a model whose engine arm is right
+    // there. Every candle column is false and load-bearing: it is in none of the `CANDLE_VIDEO_*`
+    // sets (the candle VACE lane runs the Wan2.1-VACE-14B tree under `wan_2_2` / the 14B pair), so
+    // the MLX lane is the only lane it has.
+    VideoModelCaps::new("wan_2_2_vace_fun_14b", true, false, false, false),
+    // MiniMax-H3 / Hailuo 3.0, both partitions (epic 17137, sc-17158 manifest / sc-17159 routing):
+    // joint audio+video generation. `minimax_h3` serves t2va + fl2va (`text_to_video` /
+    // `image_to_video` / `first_last_frame`); `minimax_h3_ref` serves Ref2VA
+    // (`reference_to_video`) off the `transformer_ref` checkpoint. The per-partition mode split is
+    // in `video_mode_is_mlx_eligible` — the generic arm would have handed `minimax_h3_ref` the
+    // t2v/i2v it cannot do while refusing the one mode it can.
+    //
+    // Every candle column is false, and that is a statement about the LANE rather than about VRAM:
+    // the manifest declares NO `candle` block and every download row is `platforms: ["macos"]`, so
+    // macOS is the only platform this family installs on. sc-17156 adds the candle lane and flips
+    // these columns with it. Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
+    VideoModelCaps::new("minimax_h3", true, false, false, false),
+    VideoModelCaps::new("minimax_h3_ref", true, false, false, false),
 ];
 
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
@@ -1446,8 +1471,9 @@ mod tests {
         CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
         CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
         MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS,
-        VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
+        VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, VIDEO_UI_MODES,
     };
+    use crate::jobs_store::JobSnapshot;
 
     /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
     /// membership, same length (so no id was dropped, added, or duplicated). Order is intentionally
@@ -1685,6 +1711,11 @@ mod tests {
         "scail2_14b",
         "mochi_1",
         "krea_realtime_14b",
+        // sc-17159 — three ids that had a worker dispatch arm and/or a shipped macOS download but
+        // no row in the table, so nothing on the MLX lane could claim them.
+        "wan_2_2_vace_fun_14b",
+        "minimax_h3",
+        "minimax_h3_ref",
     ];
 
     const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
@@ -2313,6 +2344,213 @@ mod tests {
             .filter(|m| m.get("type").and_then(serde_json::Value::as_str) == Some("image"))
             .cloned()
             .collect()
+    }
+
+    /// The VIDEO half of [`builtin_image_models`] — the shipped rows the Video Studio reads
+    /// `capabilities` out of to build its mode tabs.
+    fn builtin_video_models() -> Vec<serde_json::Value> {
+        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw)).expect("parses as JSON");
+        manifest
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .expect("models array")
+            .iter()
+            .filter(|m| m.get("type").and_then(serde_json::Value::as_str) == Some("video"))
+            .cloned()
+            .collect()
+    }
+
+    /// A `video_generate`-family [`JobSnapshot`] carrying the media `mode` requires, so a routing
+    /// gate is judged on a shape it actually serves rather than on an empty payload it would refuse
+    /// for a second reason. Mirrors the API's own `mode` → `JobType` map in `create_video_job`.
+    ///
+    /// `text_to_video` deliberately carries NO `sourceAssetId`: `video_request_candle_eligible`
+    /// rejects a stray source image on the non-i2v lane, so adding one would make the candle half
+    /// of the probe answer `false` for a reason that has nothing to do with the capability.
+    fn video_capability_probe(model: &str, mode: &str) -> JobSnapshot {
+        let job_type = match mode {
+            "extend_clip" => "video_extend",
+            "video_bridge" => "video_bridge",
+            "replace_person" => "person_replace",
+            _ => "video_generate",
+        };
+        let mut payload = serde_json::json!({ "model": model, "mode": mode });
+        let media = payload.as_object_mut().expect("probe payload is an object");
+        match mode {
+            "image_to_video" => {
+                media.insert("sourceAssetId".to_owned(), serde_json::json!("img-1"));
+            }
+            "first_last_frame" => {
+                media.insert("sourceAssetId".to_owned(), serde_json::json!("img-1"));
+                media.insert("lastFrameAssetId".to_owned(), serde_json::json!("img-2"));
+            }
+            "extend_clip" | "video_to_video" => {
+                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
+            }
+            "video_bridge" => {
+                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
+                media.insert(
+                    "bridgeRightClipAssetId".to_owned(),
+                    serde_json::json!("clip-2"),
+                );
+            }
+            "replace_person" => {
+                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
+                media.insert("personTrackId".to_owned(), serde_json::json!("track-1"));
+                media.insert("characterId".to_owned(), serde_json::json!("character-1"));
+            }
+            "reference_to_video" => {
+                media.insert("referenceAssetIds".to_owned(), serde_json::json!(["img-1"]));
+            }
+            "reference_video_to_video" | "animate_character" => {
+                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
+                media.insert("referenceAssetIds".to_owned(), serde_json::json!(["img-1"]));
+            }
+            "multi_video_to_video" => {
+                media.insert(
+                    "sourceClipAssetIds".to_owned(),
+                    serde_json::json!(["clip-1", "clip-2"]),
+                );
+            }
+            "ads2v" => {
+                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
+                media.insert(
+                    "referenceClipAssetId".to_owned(),
+                    serde_json::json!("clip-2"),
+                );
+                media.insert("referenceAssetIds".to_owned(), serde_json::json!(["img-1"]));
+            }
+            _ => {}
+        }
+        serde_json::from_value(serde_json::json!({
+            "id": "job_video_probe",
+            "type": job_type,
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-08-14T00:00:00Z",
+            "updatedAt": "2026-08-14T00:00:00Z"
+        }))
+        .expect("valid video job")
+    }
+
+    /// The (model, capability) pairs the shipped manifest ADVERTISES that no lane will claim.
+    ///
+    /// Not a suppression list — an inventory that the guard asserts is EXACT, so fixing an entry
+    /// turns the test red until the entry is deleted, and a NEW divergence turns it red too. Empty
+    /// is the target state; every row here is a filed, surfaced defect, never a quiet exemption.
+    const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[
+        // sc-19504 (found by this guard, sc-17159). `wan_2_2_i2v_14b` advertises `first_last_frame`
+        // and no lane serves it: the mlx `wan2_2_i2v_14b` descriptor declares
+        // `conditioning: [Reference]` with NO `Keyframe` at the pinned inference revision
+        // (`mlx-gen-wan/src/model.rs`, verified against 014134e3), and the candle i2v gate requires
+        // `mode == "image_to_video"`, so a FLF request on this model queues forever. Whether the
+        // fix is dropping the capability or adding an engine keyframe path is a product/engine
+        // decision, which is why it is recorded rather than silently patched here.
+        (
+            "wan_2_2_i2v_14b",
+            "first_last_frame",
+            "no Keyframe conditioning on the 14B I2V descriptor; candle i2v serves image_to_video only (sc-19504)",
+        ),
+    ];
+
+    /// **THE CLASS GUARD (sc-17159, GH #2074).** A video mode in a shipped model's `capabilities`
+    /// is a promise to the user — the Video Studio builds its mode tabs from that array. This
+    /// asserts the promise is keepable: every advertised capability is a mode the Mac gate can
+    /// reason about ([`VIDEO_UI_MODES`]) AND one some lane will actually CLAIM.
+    ///
+    /// GH #2074 is the shape: SCAIL-2's `animate_character` was wired through the catalog,
+    /// `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate and the worker's
+    /// dispatch — everything but the API allow-list — and 400'd on every submission from the moment
+    /// it shipped. This guard's own run found two more: `wan_2_2_vace_fun_14b` had no
+    /// [`VIDEO_MODEL_CAPS`] row at all despite a dedicated `VideoRoute::ReplacePersonWanVaceFun` arm
+    /// (fixed in sc-17159), and `wan_2_2_i2v_14b`'s `first_last_frame` (recorded above).
+    ///
+    /// Derived from the real tables on BOTH sides, never a restated list: the ADVERTISEMENT is read
+    /// out of the shipped `builtin.models.jsonc` bytes, and the CLAIM is the real predicates
+    /// [`video_job_is_mlx_eligible`] / [`video_job_is_candle_eligible`] that `worker_supports_job`
+    /// consults. So a new family is covered the moment its manifest row lands.
+    ///
+    /// The API allow-list is the sixth surface and lives in a different crate; its half of this
+    /// guard is `every_declared_video_capability_is_submittable` (apps/rust-api tests/jobs.rs),
+    /// which reads the same manifest bytes against the real `VIDEO_JOB_MODES` constant.
+    #[test]
+    fn every_declared_video_capability_is_claimable_by_some_lane() {
+        let models = builtin_video_models();
+        assert!(
+            models.len() >= 12,
+            "the shipped video catalog shrank unexpectedly ({}) — this guard reads the real \
+             manifest and would be asserting almost nothing",
+            models.len()
+        );
+
+        let mut unclaimable: Vec<(String, String)> = Vec::new();
+        let mut advertised_pairs = 0_usize;
+        for model in &models {
+            let id = model
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .expect("every model row has an id");
+            let capabilities = model
+                .get("capabilities")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("{id}: every shipped video model declares capabilities"));
+            assert!(
+                !capabilities.is_empty(),
+                "{id}: a video model with no capabilities serves no mode at all"
+            );
+            for capability in capabilities {
+                let mode = capability
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: capabilities entries are strings"));
+                advertised_pairs += 1;
+                // The Mac gate builds `macSupport.features.videoModes` by mapping VIDEO_UI_MODES;
+                // a capability outside it is invisible to `macVideoModeBlock` and to the studio's
+                // own mode list, so the tab can never be offered however well it is routed.
+                assert!(
+                    VIDEO_UI_MODES.contains(&mode),
+                    "{id} advertises `{mode}` but it is not in VIDEO_UI_MODES, so the Video Studio \
+                     has no tab for it and the Mac gate has no entry for it"
+                );
+                let job = video_capability_probe(id, mode);
+                let claimable = super::super::mlx::video_job_is_mlx_eligible(&job)
+                    || super::super::candle::video_job_is_candle_eligible(&job);
+                if !claimable {
+                    unclaimable.push((id.to_owned(), mode.to_owned()));
+                }
+            }
+        }
+        assert!(
+            advertised_pairs >= 30,
+            "only {advertised_pairs} (model, capability) pairs were probed — the manifest read is \
+             wrong and this guard is vacuous"
+        );
+
+        let known: BTreeSet<(String, String)> = KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES
+            .iter()
+            .map(|(id, mode, _)| ((*id).to_owned(), (*mode).to_owned()))
+            .collect();
+        let found: BTreeSet<(String, String)> = unclaimable.into_iter().collect();
+        assert_eq!(
+            found, known,
+            "the set of advertised-but-unclaimable video capabilities changed. A pair present in \
+             `found` and absent from `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` is a mode the Video \
+             Studio offers and NO lane will claim — the job queues forever next to an idle worker, \
+             with no error (GH #2074). A pair in the constant and not in `found` has been fixed: \
+             delete its row."
+        );
     }
 
     /// The IMPORTED-side half of the class guard below, which reads `builtin.models.jsonc` and so

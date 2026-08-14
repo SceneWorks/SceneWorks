@@ -160,6 +160,30 @@ pub(crate) fn ensure_video_engine_weights(
     if krea_realtime_engine_id(&request.model).is_some() {
         resolve_krea_realtime_tier_dir_and_quant(settings, request)?;
     }
+    // MiniMax-H3 (epic 17137 / sc-17159). It is MLX-routed from this commit — every gate from the
+    // API allow-list to `video_mode_is_mlx_eligible` now admits its declared modes — but the mlx
+    // engine is NOT in the pinned inference revision, so no arm of `resolve_video_route` matches
+    // its ids and every job lands on `VideoRoute::Stub`. Without this refusal the stub would hand
+    // the user a PROCEDURAL FAKE CLIP — silently, since a generated-looking mp4 with the requested
+    // geometry is indistinguishable from a real render until watched. That is precisely the
+    // degradation sc-4176 added this gate to prevent, and the same arm Mochi and Krea each needed.
+    //
+    // Unconditional rather than snapshot-resolving on purpose: installed weights would not make it
+    // renderable. What makes it renderable is the pin bump (sc-18650) landing
+    // `platform_runtime::providers::minimax_h3` plus the `generate_minimax_h3` dispatch arm
+    // (sc-19508, which REPLACES this arm with the real tier resolver rather than deleting it —
+    // an unprovisioned install must still fail loudly); until then "no engine" is the honest reason
+    // and a weights check would misreport it as "download the tier".
+    // `crates/sceneworks-worker/src/pinned_engine_geometry.rs` carries the two mechanisms that
+    // force this arm to be revisited: `REV_WITHOUT_MINIMAX_H3` (fires on any pin move) and
+    // `minimax_h3_arrival_tripwire` (stops COMPILING the moment the provider is importable).
+    if sceneworks_core::video_request::is_minimax_h3_model(&request.model) {
+        return Err(WorkerError::Engine(format!(
+            "{} cannot render in this build: the MiniMax-H3 MLX engine is not in the pinned \
+             inference revision yet (sc-18650). No output was produced.",
+            request.model
+        )));
+    }
     Ok(())
 }
 
