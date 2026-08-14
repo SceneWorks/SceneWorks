@@ -305,6 +305,11 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
             StatusCode::CREATED,
             "{job_type} must still enqueue: {body}"
         );
+        assert_eq!(
+            body["payload"],
+            json!({ "sourceAssetId": "asset-1" }),
+            "legacy raw payloads without a catalog model must remain unchanged"
+        );
     }
 }
 
@@ -445,6 +450,288 @@ async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
         !entry.to_string().contains("untrusted/arbitrary-repo"),
         "client manifest metadata must be replaced, never merged or trusted: {entry}"
     );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn raw_batch_detail_rejects_every_explicit_packed_tier_carrier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_image_model_manifests(temp_dir.path());
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for advanced in [
+        json!({ "mlxQuantize": 4 }),
+        json!({ "mlxQuantize": 8 }),
+        json!({ "convRot": true }),
+        json!({ "quantTier": "nvfp4" }),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_detail",
+                "projectId": "project-1",
+                "requestedGpu": "auto",
+                "payload": {
+                    "projectId": "project-1",
+                    "sourceAssetId": "asset-1",
+                    "model": "realvisxl",
+                    "advanced": advanced
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("dense bf16")),
+            "{advanced}: {body}"
+        );
+    }
+
+    // A legacy no-model payload remains unmodified only while it carries no explicit packed
+    // selection. Otherwise ImageRequest's fallback model would turn this into a hidden packed
+    // RealVisXL request and bypass the route-owned Candle admission contract.
+    for advanced in [
+        json!({ "mlxQuantize": 4 }),
+        json!({ "convRot": true }),
+        json!({ "quantTier": "nvfp4" }),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_detail",
+                "requestedGpu": "auto",
+                "payload": { "advanced": advanced }
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "no-model {advanced}: {body}"
+        );
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("dense bf16")));
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs array").is_empty());
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn retry_and_duplicate_recanonicalize_batch_detail_manifest_and_dense_tier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_image_model_manifests(temp_dir.path());
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "requestedGpu": "auto",
+            "payload": {
+                "projectId": "project-1",
+                "sourceAssetId": "asset-1",
+                "model": "realvisxl",
+                "advanced": { "strength": 0.55 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "modelManifestEntry": {
+                        "id": "client-spoof",
+                        "family": "krea_2",
+                        "modelPath": "C:/attacker/checkpoint.safetensors"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        assert_eq!(replay["payload"]["modelManifestEntry"]["id"], "realvisxl");
+        assert_eq!(replay["payload"]["modelManifestEntry"]["family"], "sdxl");
+        assert_eq!(replay["payload"]["advanced"]["mlxQuantize"], 0);
+        assert!(
+            !replay["payload"].to_string().contains("client-spoof"),
+            "{operation} must overwrite spoofed metadata: {replay}"
+        );
+    }
+
+    for operation in ["retry", "duplicate"] {
+        for advanced in [
+            json!({ "mlxQuantize": 4 }),
+            json!({ "convRot": true }),
+            json!({ "quantTier": "nvfp4" }),
+        ] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{operation} {advanced}: {body}"
+            );
+            assert!(body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("dense bf16")));
+        }
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().map(Vec::len),
+        Some(3),
+        "only the original plus two canonical spoof replays may persist"
+    );
+}
+
+#[tokio::test]
+async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Imported image replay" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    for (mode, source) in [
+        ("text_to_image", Value::Null),
+        ("edit_image", json!("source-asset")),
+    ] {
+        let mut body = json!({
+            "projectId": project_id,
+            "mode": mode,
+            "prompt": "a fox",
+            "model": "imported_krea",
+            "count": 1
+        });
+        if !source.is_null() {
+            body["sourceAssetId"] = source;
+        }
+        let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", body).await;
+        assert_eq!(status, StatusCode::CREATED, "mode={mode}: {original}");
+        assert_eq!(
+            original["payload"]["modelManifestEntry"]["id"],
+            "imported_krea"
+        );
+        let job_id = original["id"].as_str().expect("job id");
+
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({
+                    "payloadChanges": {
+                        "modelManifestEntry": {
+                            "id": "client-spoof",
+                            "family": "sdxl",
+                            "paths": { "model": "C:/attacker/other-model" }
+                        }
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{mode} {operation}: {replay}");
+            let entry = &replay["payload"]["modelManifestEntry"];
+            assert_eq!(entry["id"], "imported_krea");
+            assert_eq!(entry["family"], "krea_2");
+            assert!(
+                entry["paths"]["model"]
+                    .as_str()
+                    .is_some_and(|path| path.contains("imported_krea")),
+                "the authoritative imported install path must survive: {entry}"
+            );
+            assert!(
+                !entry.to_string().contains("attacker"),
+                "{mode} {operation} must replace the spoofed path: {entry}"
+            );
+        }
+    }
+}
+
+fn write_shipped_image_model_manifests(root: &std::path::Path) {
+    let manifest_dir = root.join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    write_empty_sibling_manifests(&manifest_dir);
+}
+
+fn write_imported_image_model_manifests(root: &std::path::Path) {
+    let manifest_dir = root.join("config/manifests");
+    let install_dir = root.join("data/models/imports/imported_krea");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::create_dir_all(&install_dir).expect("imported install dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models write");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        format!(
+            r#"{{
+                "schemaVersion": 1,
+                "models": [{{
+                    "id": "imported_krea",
+                    "name": "Imported Krea",
+                    "type": "image",
+                    "family": "krea_2",
+                    "capabilities": ["text_to_image", "edit_image"],
+                    "paths": {{ "model": "{}" }},
+                    "defaults": {{ "count": 1, "resolution": "1024x1024" }},
+                    "limits": {{}},
+                    "loraCompatibility": {{ "families": ["krea_2"] }}
+                }}]
+            }}"#,
+            install_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .expect("user models write");
+    for (name, key) in [
+        ("builtin.loras.jsonc", "loras"),
+        ("user.loras.jsonc", "loras"),
+        ("builtin.recipe-presets.jsonc", "presets"),
+        ("user.recipe-presets.jsonc", "presets"),
+    ] {
+        std::fs::write(
+            manifest_dir.join(name),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty sibling manifest writes");
+    }
 }
 
 /// sc-13617 / F-055: raw jobs whose `model` reaches worker-side model path resolution must
