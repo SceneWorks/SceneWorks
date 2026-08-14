@@ -7001,8 +7001,8 @@ async fn generate_stream(
     let quality_opt_in = crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
         &request.model_manifest_entry,
     );
+    let effective_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
     let resolved_artifact = if calibration_opt_in || quality_opt_in {
-        let effective_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
         resolved_mlx_artifact_provenance(
             request,
             settings,
@@ -7035,10 +7035,27 @@ async fn generate_stream(
         && edit_refs.is_empty()
         && ideogram_edit_mask.is_none()
         && hires_fix.is_none();
-    spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
-    // Finalize the full load shape before exporting the encoder receipt: preparation covers every
-    // configured File slot (PiD, adapters, named components) and the same spec then drives fit/load.
+    // Finalize caller-selected text-encoder state before asking the provider about the real
+    // candidate. Chroma must see and reject an external encoder rather than being admitted against
+    // an incomplete LoadSpec which is mutated afterward.
     spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    // SC-18457: provider adoption is an exact three-way intersection. A route-local BTR entry owns
+    // the decision: the typed registry enforces mode/overlay/source semantics and the linked
+    // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
+    // through to legacy shaping; only a manifest with no relevant BTR entry uses that unchanged
+    // path. The tier is the resolved artifact tier, not the load-time quant field on the spec.
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape(
+        engine_id,
+        effective_tier,
+        crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode),
+        &request.model_manifest_entry,
+        spec,
+    );
+    if spec.load_shape_declaration_result
+        == gen_core::LoadShapeDeclarationResult::NotEvaluated
+    {
+        spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
+    }
     let decode_quality_binding = crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
         &request.model_manifest_entry,
         &request.model,

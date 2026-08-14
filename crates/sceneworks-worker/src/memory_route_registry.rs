@@ -4,7 +4,11 @@
 //! dumper. Consumers must not recover it by parsing Rust source text: formatting and equivalent
 //! control-flow refactors are not route facts.
 
-use gen_core::{LoadShape, LoadSpec, Precision, Quant, WeightsSource};
+use gen_core::{
+    LoadShape, LoadShapeDeclarationResult, LoadSpec, MemoryStrategy, MemoryStrategySupport,
+    Precision, Quant, WeightsSource,
+};
+use serde_json::{Map as JsonObject, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MemoryRouteBackend {
@@ -50,6 +54,16 @@ impl MemoryRouteTier {
             Some(Quant::Q4) => Some(Self::Q4),
             Some(Quant::Q8) => Some(Self::Q8),
             Some(Quant::Nvfp4) => Some(Self::Nvfp4),
+        }
+    }
+
+    pub fn from_resolved_tier(tier: &str) -> Option<Self> {
+        match tier {
+            "bf16" => Some(Self::Bf16),
+            "q4" => Some(Self::Q4),
+            "q8" => Some(Self::Q8),
+            "nvfp4" => Some(Self::Nvfp4),
+            _ => None,
         }
     }
 }
@@ -227,6 +241,27 @@ const PLAIN_SINGLE_CONTROL_IP: &[MemoryRouteLoadProfile] = &[
 ];
 const ALL_LOAD_PROFILES: &[MemoryRouteLoadProfile] = &MemoryRouteLoadProfile::ALL;
 const TEXT_ONLY: &[MemoryRouteMode] = &[MemoryRouteMode::TextToImage];
+const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::StyleVariations,
+];
+const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
+const KOLORS_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::StyleVariations,
+    MemoryRouteMode::EditImage,
+    MemoryRouteMode::CharacterImage,
+];
+const PLAIN_IP: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::Plain,
+    MemoryRouteLoadProfile::IpAdapter,
+];
+const PLAIN_LORA_IP: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::Plain,
+    MemoryRouteLoadProfile::Lora,
+    MemoryRouteLoadProfile::IpAdapter,
+];
+const Q4_Q8: &[MemoryRouteTier] = &[MemoryRouteTier::Q4, MemoryRouteTier::Q8];
 const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
 const BF16_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Bf16];
 
@@ -286,6 +321,86 @@ const RULES: &[MemoryRouteRule] = &[
         modes: ALL_MODES,
         load_profiles: ALL_LOAD_PROFILES,
         requires_sequential_selection: true,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "z_image_turbo",
+        tiers: ALL_TIERS,
+        modes: EDIT_MODES,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "z_image",
+        tiers: ALL_TIERS,
+        modes: TEXT_AND_STYLE,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "anima_base",
+        tiers: ALL_TIERS,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "anima_aesthetic",
+        tiers: ALL_TIERS,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "anima_turbo",
+        tiers: ALL_TIERS,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "chroma1_hd",
+        tiers: ALL_TIERS,
+        modes: TEXT_AND_STYLE,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "chroma1_base",
+        tiers: ALL_TIERS,
+        modes: TEXT_AND_STYLE,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "chroma1_flash",
+        tiers: ALL_TIERS,
+        modes: TEXT_AND_STYLE,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "kolors",
+        tiers: BF16_ONLY,
+        modes: KOLORS_MODES,
+        load_profiles: PLAIN_IP,
+        requires_sequential_selection: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "kolors",
+        tiers: Q4_Q8,
+        modes: KOLORS_MODES,
+        load_profiles: PLAIN_LORA_IP,
+        requires_sequential_selection: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
@@ -385,16 +500,240 @@ const RULES: &[MemoryRouteRule] = &[
     },
 ];
 
-fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> bool {
-    RULES.iter().any(|rule| {
+fn matching_rules(selector: MemoryRouteSelector) -> impl Iterator<Item = &'static MemoryRouteRule> {
+    RULES.iter().filter(move |rule| {
         rule.backend == selector.backend
             && rule.provider == selector.provider
             && rule.tiers.contains(&selector.tier)
             && rule.modes.contains(&selector.mode)
             && rule.load_profiles.contains(&selector.load_profile)
             && selector.overlay == selector.load_profile.overlay()
-            && (!rule.requires_sequential_selection || sequential_selected)
     })
+}
+
+#[cfg(test)]
+fn rule_coordinates_match(selector: MemoryRouteSelector) -> bool {
+    matching_rules(selector).next().is_some()
+}
+
+fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> bool {
+    matching_rules(selector).any(|rule| !rule.requires_sequential_selection || sequential_selected)
+}
+
+fn manifest_declares_selector(
+    manifest: &JsonObject<String, Value>,
+    selector: MemoryRouteSelector,
+) -> bool {
+    let Some(mlx) = manifest.get("mlx").and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(contract) = mlx.get("memoryStrategyContract").and_then(Value::as_object) else {
+        return false;
+    };
+    if contract.get("provider").and_then(Value::as_str) != Some(selector.provider) {
+        return false;
+    }
+    contract
+        .get("implementations")
+        .and_then(Value::as_array)
+        .is_some_and(|implementations| {
+            implementations.iter().any(|implementation| {
+                implementation.get("rung").and_then(Value::as_str)
+                    == Some("bounded_transformer_residency")
+                    && implementation
+                        .get("tiers")
+                        .and_then(Value::as_array)
+                        .is_some_and(|tiers| {
+                            tiers
+                                .iter()
+                                .any(|tier| tier.as_str() == Some(selector.tier.as_str()))
+                        })
+                    && implementation
+                        .get("modes")
+                        .and_then(Value::as_array)
+                        .is_some_and(|modes| {
+                            modes
+                                .iter()
+                                .any(|mode| mode.as_str() == Some(selector.mode.as_str()))
+                        })
+                    && implementation
+                        .get("overlays")
+                        .and_then(Value::as_array)
+                        .is_some_and(|overlays| {
+                            overlays
+                                .iter()
+                                .any(|overlay| overlay.as_str() == Some(selector.overlay.as_str()))
+                        })
+            })
+        })
+}
+
+fn has_relevant_btr_declaration(manifest: &JsonObject<String, Value>) -> Result<bool, ()> {
+    let Some(mlx) = manifest.get("mlx").and_then(Value::as_object) else {
+        return Ok(false);
+    };
+    let Some(contract_value) = mlx.get("memoryStrategyContract") else {
+        return Ok(false);
+    };
+    let Some(contract) = contract_value.as_object() else {
+        return Err(());
+    };
+    let Some(implementations_value) = contract.get("implementations") else {
+        return Err(());
+    };
+    let Some(implementations) = implementations_value.as_array() else {
+        return Err(());
+    };
+    Ok(implementations.iter().any(|implementation| {
+        implementation.get("rung").and_then(Value::as_str) == Some("bounded_transformer_residency")
+    }))
+}
+
+/// Evaluate manifest-owned deferred shaping against the exact typed coordinate and linked provider.
+/// The tri-state result distinguishes a route with no BTR declaration (the only case where the
+/// caller may use legacy shaping) from a declared refusal. The resolved artifact tier is explicit:
+/// `LoadSpec::quantize` describes a possible load-time transform and is not artifact-tier proof.
+pub fn evaluate_declared_mlx_load_shape(
+    provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+) -> LoadSpec {
+    evaluate_declared_mlx_load_shape_with(
+        provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        |candidate| {
+            crate::inference_runtime::media()
+                .memory_strategy_contract(provider, candidate)
+                .ok()
+                .flatten()
+                .is_some_and(|contract| {
+                    contract
+                        .capability(MemoryStrategy::BoundedTransformerResidency)
+                        .is_some_and(|capability| {
+                            capability.support == MemoryStrategySupport::Implemented
+                        })
+                })
+        },
+    )
+}
+
+fn evaluate_declared_mlx_load_shape_with(
+    provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+    provider_implements: impl FnOnce(&LoadSpec) -> bool,
+) -> LoadSpec {
+    match has_relevant_btr_declaration(manifest) {
+        Ok(false) => return spec,
+        Err(()) => return spec.with_refused_load_shape_declaration(),
+        Ok(true) => {}
+    }
+    let (Some(tier), Some(mode), Some(load_profile)) = (
+        resolved_tier.and_then(MemoryRouteTier::from_resolved_tier),
+        mode,
+        MemoryRouteLoadProfile::from_spec(&spec),
+    ) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let Some(registered_provider) = RULES
+        .iter()
+        .find(|rule| rule.backend == MemoryRouteBackend::Mlx && rule.provider == provider)
+        .map(|rule| rule.provider)
+    else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let selector = MemoryRouteSelector {
+        backend: MemoryRouteBackend::Mlx,
+        provider: registered_provider,
+        tier,
+        mode,
+        overlay: load_profile.overlay(),
+        load_profile,
+    };
+    if !manifest_declares_selector(manifest, selector) {
+        return spec.with_refused_load_shape_declaration();
+    }
+    let mut matching = matching_rules(selector).peekable();
+    if matching.peek().is_none() {
+        return spec.with_refused_load_shape_declaration();
+    }
+    if matching.all(|rule| rule.requires_sequential_selection) {
+        return spec;
+    }
+    if !matches!(spec.weights, WeightsSource::Dir(_)) {
+        return spec.with_refused_load_shape_declaration();
+    }
+
+    let candidate = spec.clone().with_applied_load_shape_declaration();
+    if provider_implements(&candidate) {
+        candidate
+    } else {
+        spec.with_refused_load_shape_declaration()
+    }
+}
+
+/// Typed manifest-derived population used by correctness harnesses. This is the same declaration
+/// parser production uses, so route additions/removals cannot be mirrored by source-text search.
+pub fn declared_mlx_deferred_routes(models: &[Value]) -> std::collections::BTreeSet<String> {
+    let mut routes = std::collections::BTreeSet::new();
+    for model in models {
+        let Some(model) = model.as_object() else {
+            continue;
+        };
+        let Some(id) = model.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(capabilities) = model.get("capabilities").and_then(Value::as_array) else {
+            continue;
+        };
+        let Some(provider) = model
+            .get("mlx")
+            .and_then(Value::as_object)
+            .and_then(|mlx| mlx.get("memoryStrategyContract"))
+            .and_then(Value::as_object)
+            .and_then(|contract| contract.get("provider"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(provider) = RULES
+            .iter()
+            .find(|rule| rule.backend == MemoryRouteBackend::Mlx && rule.provider == provider)
+            .map(|rule| rule.provider)
+        else {
+            continue;
+        };
+        if MemoryRouteTier::ALL.iter().any(|&tier| {
+            MemoryRouteMode::ALL.iter().any(|&mode| {
+                if !capabilities.iter().any(|capability| {
+                    capability.as_str().and_then(MemoryRouteMode::from_request) == Some(mode)
+                }) {
+                    return false;
+                }
+                MemoryRouteLoadProfile::ALL.iter().any(|&load_profile| {
+                    let selector = MemoryRouteSelector {
+                        backend: MemoryRouteBackend::Mlx,
+                        provider,
+                        tier,
+                        mode,
+                        overlay: load_profile.overlay(),
+                        load_profile,
+                    };
+                    manifest_declares_selector(model, selector) && rule_matches(selector, false)
+                })
+            })
+        }) {
+            routes.insert(id.to_owned());
+        }
+    }
+    routes
 }
 
 pub fn apply_registered_load_shape(
@@ -404,6 +743,9 @@ pub fn apply_registered_load_shape(
     spec: LoadSpec,
     sequential_selected: bool,
 ) -> LoadSpec {
+    if spec.load_shape_declaration_result != LoadShapeDeclarationResult::NotEvaluated {
+        return spec;
+    }
     let Some(rule) = RULES
         .iter()
         .find(|rule| rule.backend == backend && rule.provider == provider)
@@ -473,6 +815,47 @@ pub fn deferred_route_witnesses() -> Vec<MemoryRouteSelector> {
 mod tests {
     use super::*;
 
+    fn declaration(
+        provider: &str,
+        tiers: &[&str],
+        modes: &[&str],
+        overlays: &[&str],
+    ) -> JsonObject<String, Value> {
+        serde_json::json!({
+            "id": provider,
+            "mlx": {
+                "memoryStrategyContract": {
+                    "abi": 1,
+                    "provider": provider,
+                    "implementations": [{
+                        "rung": "bounded_transformer_residency",
+                        "tiers": tiers,
+                        "modes": modes,
+                        "overlays": overlays
+                    }]
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    fn shipped_model(id: &str) -> JsonObject<String, Value> {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin model manifest parses");
+        manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some(id))
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("missing shipped model {id}"))
+            .clone()
+    }
+
     fn spec(tier: MemoryRouteTier, profile: MemoryRouteLoadProfile) -> LoadSpec {
         let base = LoadSpec::new(WeightsSource::Dir("fixture".into()));
         let base = match tier {
@@ -511,6 +894,178 @@ mod tests {
                 base
             }
         }
+    }
+
+    #[test]
+    fn declaration_is_the_marker_and_provider_predicate_is_binding() {
+        let manifest = declaration(
+            "z_image",
+            &["bf16", "q4", "q8"],
+            &["text_to_image", "style_variations"],
+            &["none", "lora"],
+        );
+        assert!(manifest["mlx"].get("supportsSequentialOffload").is_none());
+        let candidate = spec(MemoryRouteTier::Q8, MemoryRouteLoadProfile::Plain);
+        let shaped = evaluate_declared_mlx_load_shape_with(
+            "z_image",
+            Some("q4"),
+            Some(MemoryRouteMode::TextToImage),
+            &manifest,
+            candidate.clone(),
+            |candidate| candidate.load_shape == LoadShape::DeferredMaterialization,
+        );
+        assert_eq!(
+            shaped.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Applied
+        );
+        assert_eq!(shaped.load_shape, LoadShape::DeferredMaterialization);
+        assert_eq!(shaped.quantize, Some(Quant::Q8));
+
+        let refused = evaluate_declared_mlx_load_shape_with(
+            "z_image",
+            Some("q4"),
+            Some(MemoryRouteMode::TextToImage),
+            &manifest,
+            candidate,
+            |_| false,
+        );
+        assert_eq!(
+            refused.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+        assert_eq!(refused.load_shape, LoadShape::EagerMaterialization);
+    }
+
+    #[test]
+    fn declaration_axes_source_and_alias_population_fail_closed() {
+        let base = declaration(
+            "z_image",
+            &["q4"],
+            &["text_to_image", "style_variations"],
+            &["none", "lora"],
+        );
+        let edit = declaration(
+            "z_image_turbo",
+            &["q4"],
+            &["edit_image", "image_to_image"],
+            &["none", "lora"],
+        );
+        let mut edit = edit;
+        edit["id"] = Value::String("z_image_edit".to_owned());
+        let plain = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain);
+        let apply = |provider: &str,
+                     tier: Option<&str>,
+                     mode: Option<MemoryRouteMode>,
+                     manifest: &JsonObject<String, Value>,
+                     spec: LoadSpec| {
+            evaluate_declared_mlx_load_shape_with(provider, tier, mode, manifest, spec, |_| true)
+        };
+        assert_eq!(
+            apply(
+                "z_image",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                &base,
+                plain.clone(),
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Applied
+        );
+        assert_eq!(
+            apply(
+                "z_image_turbo",
+                Some("q4"),
+                Some(MemoryRouteMode::EditImage),
+                &edit,
+                plain.clone(),
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Applied
+        );
+        for (provider, tier, mode, manifest) in [
+            (
+                "z_image",
+                Some("q8"),
+                Some(MemoryRouteMode::TextToImage),
+                &base,
+            ),
+            (
+                "z_image",
+                Some("q4"),
+                Some(MemoryRouteMode::EditImage),
+                &base,
+            ),
+            (
+                "z_image_turbo",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                &edit,
+            ),
+            (
+                "z_image_turbo",
+                None,
+                Some(MemoryRouteMode::EditImage),
+                &edit,
+            ),
+        ] {
+            assert_eq!(
+                apply(provider, tier, mode, manifest, plain.clone()).load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+        assert_eq!(
+            apply(
+                "z_image",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                &base,
+                LoadSpec::new(WeightsSource::File("fixture.safetensors".into())),
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+
+        let mut wrong_provider = base;
+        wrong_provider["mlx"]["memoryStrategyContract"]["provider"] =
+            Value::String("z_image_turbo".to_owned());
+        assert_eq!(
+            apply(
+                "z_image",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                &wrong_provider,
+                plain,
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+    }
+
+    #[test]
+    fn chroma_external_text_encoder_is_visible_to_the_provider_predicate() {
+        let manifest = declaration(
+            "chroma1_base",
+            &["bf16", "q4", "q8"],
+            &["text_to_image", "style_variations"],
+            &["none"],
+        );
+        let mut external = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain);
+        external.text_encoder = Some(WeightsSource::File("external-te.safetensors".into()));
+
+        let shaped = evaluate_declared_mlx_load_shape_with(
+            "chroma1_base",
+            Some("q4"),
+            Some(MemoryRouteMode::TextToImage),
+            &manifest,
+            external,
+            |candidate| candidate.text_encoder.is_none(),
+        );
+        assert_eq!(
+            shaped.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+        assert_eq!(shaped.load_shape, LoadShape::EagerMaterialization);
+        assert!(shaped.text_encoder.is_some());
     }
 
     #[test]
@@ -603,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_witness_is_the_executable_registry_cross_product() {
+    fn finite_witness_is_the_typed_rule_cross_product() {
         let witnesses = deferred_route_witnesses();
         for rule in RULES {
             for tier in MemoryRouteTier::ALL {
@@ -617,23 +1172,311 @@ mod tests {
                             overlay: load_profile.overlay(),
                             load_profile,
                         };
-                        let shape = apply_registered_load_shape(
-                            selector.backend,
-                            selector.provider,
-                            selector.mode,
-                            spec(selector.tier, selector.load_profile),
-                            rule.requires_sequential_selection,
-                        )
-                        .load_shape;
                         assert_eq!(
-                            shape == LoadShape::DeferredMaterialization,
+                            rule_coordinates_match(selector),
                             witnesses.contains(&selector),
-                            "typed witness disagrees with production evaluation for {selector:?}",
+                            "typed witness disagrees with the finite rule cross-product for {selector:?}",
                         );
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn no_btr_declaration_is_the_only_legacy_fallback() {
+        let no_contract = serde_json::json!({ "id": "qwen_image", "mlx": {} })
+            .as_object()
+            .unwrap()
+            .clone();
+        let no_btr = serde_json::json!({
+            "id": "qwen_image",
+            "mlx": { "memoryStrategyContract": { "provider": "qwen_image", "implementations": [{
+                "rung": "bounded_decode"
+            }] } }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let malformed = serde_json::json!({
+            "id": "qwen_image",
+            "mlx": { "memoryStrategyContract": { "provider": "qwen_image", "implementations": {} } }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let evaluate = |manifest: &JsonObject<String, Value>| {
+            evaluate_declared_mlx_load_shape_with(
+                "qwen_image",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                manifest,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
+                |_| true,
+            )
+        };
+        let fallback = evaluate(&no_contract);
+        assert_eq!(
+            fallback.load_shape_declaration_result,
+            LoadShapeDeclarationResult::NotEvaluated
+        );
+        let fallback = apply_registered_load_shape(
+            MemoryRouteBackend::Mlx,
+            "qwen_image",
+            MemoryRouteMode::TextToImage,
+            fallback,
+            false,
+        );
+        assert_eq!(fallback.load_shape, LoadShape::DeferredMaterialization);
+        assert_eq!(
+            evaluate(&no_btr).load_shape_declaration_result,
+            LoadShapeDeclarationResult::NotEvaluated
+        );
+        assert_eq!(
+            evaluate(&malformed).load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+    }
+
+    #[test]
+    fn sequential_owned_declaration_defers_source_judgment_to_the_late_shaper() {
+        let spec = LoadSpec::new(WeightsSource::File("native-turbo.safetensors".into()));
+        let deferred_to_legacy = evaluate_declared_mlx_load_shape_with(
+            "z_image_turbo",
+            Some("q4"),
+            Some(MemoryRouteMode::TextToImage),
+            &shipped_model("z_image_turbo"),
+            spec,
+            |_| panic!("sequential-owned declaration must not call the early provider predicate"),
+        );
+        assert_eq!(
+            deferred_to_legacy.load_shape_declaration_result,
+            LoadShapeDeclarationResult::NotEvaluated,
+        );
+        assert!(matches!(deferred_to_legacy.weights, WeightsSource::File(_)));
+    }
+
+    #[test]
+    fn existing_declared_qwen_route_matches_legacy_shaping() {
+        let manifest = declaration(
+            "qwen_image",
+            &["bf16", "q4", "q8"],
+            &["text_to_image", "edit_image"],
+            &["none", "lora"],
+        );
+        for (mode, profile) in [
+            (MemoryRouteMode::TextToImage, MemoryRouteLoadProfile::Plain),
+            (MemoryRouteMode::EditImage, MemoryRouteLoadProfile::Lora),
+        ] {
+            let input = spec(MemoryRouteTier::Q4, profile);
+            let legacy = apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "qwen_image",
+                mode,
+                input.clone(),
+                false,
+            );
+            let declared = evaluate_declared_mlx_load_shape_with(
+                "qwen_image",
+                Some("q4"),
+                Some(mode),
+                &manifest,
+                input,
+                |_| true,
+            );
+            assert_eq!(
+                declared.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied
+            );
+            assert_eq!(declared.load_shape, legacy.load_shape);
+        }
+    }
+
+    #[test]
+    fn shipped_preexisting_btr_routes_preserve_legacy_positive_surfaces() {
+        for (model_id, provider, tier_name, tier, mode) in [
+            (
+                "z_image_turbo",
+                "z_image_turbo",
+                "q4",
+                MemoryRouteTier::Q4,
+                MemoryRouteMode::TextToImage,
+            ),
+            (
+                "qwen_image",
+                "qwen_image",
+                "q4",
+                MemoryRouteTier::Q4,
+                MemoryRouteMode::TextToImage,
+            ),
+            (
+                "qwen_image_edit_2511",
+                "qwen_image_edit",
+                "q4",
+                MemoryRouteTier::Q4,
+                MemoryRouteMode::EditImage,
+            ),
+            (
+                "krea_2_turbo",
+                "krea_2_turbo",
+                "q4",
+                MemoryRouteTier::Q4,
+                MemoryRouteMode::TextToImage,
+            ),
+            (
+                "sdxl",
+                "sdxl",
+                "bf16",
+                MemoryRouteTier::Bf16,
+                MemoryRouteMode::TextToImage,
+            ),
+            (
+                "realvisxl",
+                "sdxl",
+                "bf16",
+                MemoryRouteTier::Bf16,
+                MemoryRouteMode::TextToImage,
+            ),
+        ] {
+            let input = spec(tier, MemoryRouteLoadProfile::Plain).with_resolved_route(model_id);
+            let legacy = apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                provider,
+                mode,
+                input.clone(),
+                false,
+            );
+            let declared = evaluate_declared_mlx_load_shape_with(
+                provider,
+                Some(tier_name),
+                Some(mode),
+                &shipped_model(model_id),
+                input,
+                |_| true,
+            );
+            let selector = MemoryRouteSelector {
+                backend: MemoryRouteBackend::Mlx,
+                provider,
+                tier,
+                mode,
+                overlay: MemoryRouteOverlay::None,
+                load_profile: MemoryRouteLoadProfile::Plain,
+            };
+            let expected_authority =
+                if matching_rules(selector).any(|rule| !rule.requires_sequential_selection) {
+                    LoadShapeDeclarationResult::Applied
+                } else {
+                    LoadShapeDeclarationResult::NotEvaluated
+                };
+            assert_eq!(
+                declared.load_shape_declaration_result, expected_authority,
+                "{model_id} declaration ownership diverged from its exact typed rule",
+            );
+            assert_eq!(
+                declared.load_shape, legacy.load_shape,
+                "{model_id} declaration evaluation changed its preexisting positive surface",
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_sc18457_declarations_have_exact_nonoverlapping_axes() {
+        let axes = |id: &str| {
+            let model = shipped_model(id);
+            let contract = model["mlx"]["memoryStrategyContract"]
+                .as_object()
+                .expect("memory strategy contract");
+            let provider = contract["provider"].as_str().expect("provider").to_owned();
+            let rows = contract["implementations"]
+                .as_array()
+                .expect("implementations")
+                .iter()
+                .filter(|row| row["rung"].as_str() == Some("bounded_transformer_residency"))
+                .map(|row| {
+                    serde_json::json!({
+                        "tiers": row["tiers"],
+                        "modes": row["modes"],
+                        "overlays": row["overlays"],
+                    })
+                })
+                .collect::<Vec<_>>();
+            (provider, rows)
+        };
+        for id in ["anima_base", "anima_aesthetic", "anima_turbo"] {
+            assert_eq!(
+                axes(id),
+                (
+                    id.to_owned(),
+                    vec![serde_json::json!({
+                        "tiers": ["bf16", "q4", "q8"],
+                        "modes": ["text_to_image"],
+                        "overlays": ["none", "lora"],
+                    })]
+                )
+            );
+        }
+        for id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            assert_eq!(
+                axes(id),
+                (
+                    id.to_owned(),
+                    vec![serde_json::json!({
+                        "tiers": ["bf16", "q4", "q8"],
+                        "modes": ["text_to_image", "style_variations"],
+                        "overlays": ["none"],
+                    })]
+                )
+            );
+        }
+        assert_eq!(
+            axes("z_image"),
+            (
+                "z_image".to_owned(),
+                vec![serde_json::json!({
+                    "tiers": ["bf16", "q4", "q8"],
+                    "modes": ["text_to_image", "style_variations"],
+                    "overlays": ["none", "lora"],
+                })]
+            )
+        );
+        let base_z = shipped_model("z_image");
+        assert!(base_z["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("base Z implementations")
+            .iter()
+            .all(|row| {
+                row["modes"] == serde_json::json!(["text_to_image", "style_variations"])
+                    && row["overlays"] == serde_json::json!(["none", "lora"])
+            }));
+        assert_eq!(
+            axes("z_image_edit"),
+            (
+                "z_image_turbo".to_owned(),
+                vec![serde_json::json!({
+                    "tiers": ["bf16", "q4", "q8"],
+                    "modes": ["edit_image", "image_to_image"],
+                    "overlays": ["none", "lora"],
+                })]
+            )
+        );
+        assert_eq!(
+            axes("kolors"),
+            (
+                "kolors".to_owned(),
+                vec![
+                    serde_json::json!({
+                        "tiers": ["bf16"],
+                        "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+                        "overlays": ["none", "identity"],
+                    }),
+                    serde_json::json!({
+                        "tiers": ["q4", "q8"],
+                        "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+                        "overlays": ["none", "lora", "identity"],
+                    }),
+                ]
+            )
+        );
     }
 
     #[test]
