@@ -1265,7 +1265,7 @@ describe("SceneWorks app shell", () => {
               name: "Kolors",
               type: "image",
               family: "kolors",
-              capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+              capabilities: ["text_to_image", "edit_image", "character_image"],
             },
           ],
           latestAssets: [],
@@ -1548,7 +1548,7 @@ describe("SceneWorks app shell", () => {
     );
   });
 
-  it("surfaces the FLUX.2-dev Enhance prompt toggle (ui.promptEnhance) and submits advanced.enhancePrompt", async () => {
+  it("surfaces the FLUX.2-dev Enhance prompt toggle on Candle base and submits advanced.enhancePrompt", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -1592,7 +1592,7 @@ describe("SceneWorks app shell", () => {
             },
           ],
           latestAssets: [],
-          launchRequest: { id: "launch-flux2dev", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          launchRequest: { id: "launch-flux2dev", view: "Image", mode: "text_to_image" },
           loras: [],
           onPreview: () => {},
           purgeAsset: () => {},
@@ -2097,7 +2097,7 @@ describe("SceneWorks app shell", () => {
     expect(createVideoJob).not.toHaveBeenCalled();
   });
 
-  it("offers a Wan A14B quantization selector and threads the choice into the video job (sc-1982)", async () => {
+  it("offers a Wan A14B native tier selector and threads the choice into the video job (sc-1982)", async () => {
     const createVideoJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -2140,6 +2140,11 @@ describe("SceneWorks app shell", () => {
                     "gguf-q4_k_m": { format: "gguf", label: "GGUF Q4_K_M (smallest)" },
                   },
                 },
+                hasVariantMatrix: true,
+                variants: ["q4", "q8", "bf16"].map((variant) => ({
+                  variant,
+                  installState: variant === "bf16" ? "missing" : "installed",
+                })),
               },
             ],
           },
@@ -2155,14 +2160,14 @@ describe("SceneWorks app shell", () => {
       document.body.querySelector(".advanced-section-toggle").click();
     });
 
-    const quantSelect = field(container, "Quantization");
+    const quantSelect = field(container, "Quant tier");
     expect(quantSelect).toBeTruthy();
     const optionLabels = [...quantSelect.querySelectorAll("option")].map((option) => option.textContent);
-    expect(optionLabels).toContain("GGUF Q8_0 (near-lossless)");
-    expect(optionLabels).toContain("GGUF Q4_K_M (smallest)");
-    expect(optionLabels[0]).toContain("Auto");
+    expect(optionLabels).toContain("Q8 (balanced)");
+    expect(optionLabels).toContain("Q4 (smallest)");
+    expect(field(container, "Quantization")).toBeUndefined();
 
-    await changeField(quantSelect, "gguf-q4_k_m");
+    await changeField(quantSelect, "q4");
     await settle();
 
     await act(async () => {
@@ -2172,9 +2177,10 @@ describe("SceneWorks app shell", () => {
     expect(createVideoJob).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "wan_2_2_t2v_14b",
-        advanced: expect.objectContaining({ quantization: "gguf-q4_k_m" }),
+        advanced: expect.objectContaining({ mlxQuantize: 4 }),
       }),
     );
+    expect(createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
   it("surfaces compatible LoRAs in the Video Studio picker and sends the selection to the job", async () => {

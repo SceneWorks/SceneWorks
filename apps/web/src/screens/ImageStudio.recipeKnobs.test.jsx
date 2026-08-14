@@ -65,6 +65,18 @@ const OTHER_MODEL = {
   },
 };
 
+const FLUX2_DEV = {
+  id: "flux2_dev",
+  name: "FLUX.2 Dev",
+  type: "image",
+  family: "flux2-dev",
+  capabilities: ["text_to_image", "edit_image", "character_image"],
+  installState: "installed",
+  defaults: { resolution: "1024x1024" },
+  limits: { resolutions: ["1024x1024"] },
+  ui: { promptEnhance: true },
+};
+
 const PID_CHECKPOINT = { id: "pid_qwenimage", name: "PiD decoder", installState: "installed" };
 
 const ACCEL_LORA = {
@@ -96,8 +108,8 @@ function baseContext(overrides = {}) {
     deleteAsset: vi.fn(),
     purgeAsset: vi.fn(),
     gpuOptions: [],
-    imageModels: [EVERY_LANE, OTHER_MODEL],
-    models: [EVERY_LANE, OTHER_MODEL, PID_CHECKPOINT],
+    imageModels: [EVERY_LANE, OTHER_MODEL, FLUX2_DEV],
+    models: [EVERY_LANE, OTHER_MODEL, FLUX2_DEV, PID_CHECKPOINT],
     importAsset: vi.fn(),
     latestImageAssets: [],
     recentImageAssets: [],
@@ -227,12 +239,66 @@ describe("a replayed recipe reaches every allow-listed control", () => {
   const persistedStudioSettings = () =>
     JSON.parse(window.localStorage.getItem("sceneworks-studio-image-project_1") ?? "{}");
 
-  it("sets prompt upsampling, the PiD decoder and its output tier", async () => {
+  it("sets the PiD decoder and its output tier without exposing a forged Krea enhancement flag", async () => {
     await render(baseContext({ studioLaunch: launch(everyKnobRecipe()) }));
 
-    expect(checkbox("Enhance prompt").checked).toBe(true);
+    expect(checkbox("Enhance prompt")).toBeUndefined();
     expect(checkbox("PiD decoder").checked).toBe(true);
     expect(document.body.querySelector(".pid-target-select select").value).toBe("2k");
+  });
+
+  it("restores prompt enhancement only onto a route that can execute it", async () => {
+    const recipe = everyKnobRecipe();
+    recipe.model = FLUX2_DEV.id;
+    recipe.rawAdapterSettings = { enhancePrompt: true };
+    await render(baseContext({ studioLaunch: launch(recipe) }));
+
+    expect(checkbox("Enhance prompt").checked).toBe(true);
+  });
+
+  it("clears replayed enhancement on Candle character routes and cannot submit it with a reference", async () => {
+    const reference = {
+      id: "asset_flux_character",
+      type: "image",
+      projectId: "project_1",
+      displayName: "Flux character",
+      status: {},
+      file: { path: "assets/images/flux-character.png", mimeType: "image/png" },
+    };
+    const character = {
+      id: "character_flux",
+      name: "Flux character",
+      looks: [],
+      approvedReferences: [{ assetId: reference.id, asset: reference }],
+    };
+    const recipe = everyKnobRecipe();
+    recipe.mode = "character_image";
+    recipe.model = FLUX2_DEV.id;
+    recipe.normalizedSettings = {
+      ...recipe.normalizedSettings,
+      characterId: character.id,
+    };
+    recipe.rawAdapterSettings = {
+      enhancePrompt: true,
+      referenceAssetId: reference.id,
+    };
+    const createImageJob = vi.fn(async () => ({ id: "job-flux-character" }));
+    await render(
+      baseContext({
+        assets: [reference],
+        characters: [character],
+        createImageJob,
+        studioLaunch: launch(recipe),
+      }),
+    );
+
+    expect(checkbox("Enhance prompt")).toBeUndefined();
+    expect(persistedStudioSettings().enhancePrompt).toBe(false);
+    await click(buttonByText("Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.mode).toBe("character_image");
+    expect(payload.referenceAssetId).toBe(reference.id);
+    expect(payload.advanced).not.toHaveProperty("enhancePrompt");
   });
 
   it("leaves the boolean decoders OFF when the recipe did not record them", async () => {
@@ -246,7 +312,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     delete recipe.rawAdapterSettings.pidTarget;
     await render(baseContext({ studioLaunch: launch(recipe) }));
 
-    expect(checkbox("Enhance prompt").checked).toBe(false);
+    expect(checkbox("Enhance prompt")).toBeUndefined();
     expect(checkbox("PiD decoder").checked).toBe(false);
   });
 
