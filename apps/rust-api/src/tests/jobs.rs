@@ -678,6 +678,7 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn write_shipped_image_model_manifests(root: &std::path::Path) {
     let manifest_dir = root.join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
