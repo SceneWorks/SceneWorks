@@ -5695,6 +5695,31 @@ async fn license_acknowledgment_model_convert_is_refused_for_a_restricted_base_r
         "the refusal names the repo the CONVERT would have fetched: {body:?}"
     );
 
+    // `sourceRepo` is the other repo a convert payload names, and it is in the same key list.
+    // Refused for the same reason and with the same code — asserted so the key is covered rather
+    // than merely declared.
+    let (source_status, source_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_convert",
+            "requestedGpu": "auto",
+            "payload": {
+                "modelId": "ltx_local",
+                "converter": "ltx_video",
+                "sourceRepo": "MiniMaxAI/MiniMax-H3",
+                "sourceFile": "ltx.safetensors",
+                "baseRepo": "Lightricks/LTX-Video",
+                "upscalerFile": "**",
+                "outputDir": output_dir.display().to_string(),
+            },
+        }),
+    )
+    .await;
+    assert_eq!(source_status, StatusCode::FORBIDDEN, "{source_body:?}");
+    assert_eq!(source_body["code"], "license_acknowledgment_required");
+
     // Control: an unrestricted `baseRepo` still enqueues, so the gate is keyed on the repo and not
     // on the job type being refused wholesale (which would break every real conversion).
     let (plain_status, plain_job) = request(
