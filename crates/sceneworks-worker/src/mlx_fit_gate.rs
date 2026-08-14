@@ -2070,6 +2070,7 @@ fn estimate_floor_weights_bytes(
 /// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
 /// knob has no declared range: such a selection cannot be validated, so no candidate is
 /// synthesized for the rung.
+#[allow(clippy::too_many_arguments)]
 fn estimate_floor_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -2167,7 +2168,7 @@ fn estimate_floor_parameters(
             // own estimate with decode omitted, so request-selection-aware engagement cannot
             // accidentally resurrect the route-blind tile domain.
             let candidates = (strategy != MemoryStrategy::BoundedDecode)
-                .then(|| EstimateParameterCandidate {
+                .then_some(EstimateParameterCandidate {
                     parameters: base_parameters,
                     decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
                 })
