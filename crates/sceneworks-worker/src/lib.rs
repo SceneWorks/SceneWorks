@@ -359,10 +359,10 @@ mod anima_gpu_smoke;
 // the hardware evidence for the sc-13817 dense-force fix.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sensenova_gpu_smoke;
-// SC-18902's opt-in real-weight evidence harness for the shipped `ltx_2_3_eros` Candle route.
-// Test-only + candle-only, and itself #[ignore]d: an explicit Windows CUDA workflow dispatch fixes
-// the manifest-default request and captures the current no-distill baseline. It deliberately has no
-// candidate mode and does not alter product routing.
+// SC-18902's retained real-weight evidence harness for the former `ltx_2_3_eros` Candle route.
+// Test-only + candle-only, and itself #[ignore]d: the exact-head Windows CUDA capture proved the
+// undistilled route unusable, so product routing now rejects Eros off-Mac. The harness remains as
+// reproducible historical evidence and does not advertise or restore that route.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod ltx_eros_gpu_smoke;
 // Real-weight GPU smoke for the candle SANA 1600M lane (epic 8485, sc-11780). Test-only + candle-only;

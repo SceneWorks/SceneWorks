@@ -2609,6 +2609,88 @@ mod download_receipt_tests {
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
     }
 
+    /// SC-18902: Eros is a real MLX product route, but its exact-head Candle/CUDA capture was
+    /// unusable. Pin the complete catalog projection so a future edit cannot restore the 46.8 GB
+    /// Windows/Linux offer merely by changing one of the two download rows.
+    #[test]
+    fn ltx_eros_catalog_is_macos_only_and_not_downloadable_off_macos() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = builtin_models_entry("ltx_2_3");
+        assert_ne!(
+            base.get("macOnly").and_then(Value::as_bool),
+            Some(true),
+            "base LTX-2.3 must remain cross-platform"
+        );
+        for os in ["windows", "linux"] {
+            let mut candle_base = base.clone();
+            retain_downloads_for_os(&mut candle_base, os);
+            assert!(
+                model_download_context(&candle_base)
+                    .expect("valid base LTX catalog entry")
+                    .is_some(),
+                "{os}: base LTX-2.3 remains downloadable"
+            );
+            apply_platform_availability(candle_base.as_object_mut().unwrap(), os);
+            assert_ne!(
+                candle_base.get("usable").and_then(Value::as_bool),
+                Some(false),
+                "{os}: base LTX-2.3 remains usable"
+            );
+        }
+
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(true));
+
+        let mut macos = entry.clone();
+        retain_downloads_for_os(&mut macos, "macos");
+        assert_eq!(
+            macos
+                .get("downloads")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2),
+            "macOS retains the Eros checkpoint and required cond_safe adapter"
+        );
+        let macos_context = model_download_context(&macos)
+            .expect("valid Eros download context")
+            .expect("macOS Eros remains downloadable");
+        let macos_state = install_state_for(Some(macos_context), &macos, temp.path());
+        assert!(macos_state.downloadable);
+        apply_platform_availability(macos.as_object_mut().unwrap(), "macos");
+        assert_ne!(macos.get("usable").and_then(Value::as_bool), Some(false));
+
+        for os in ["windows", "linux"] {
+            let mut candle = entry.clone();
+            retain_downloads_for_os(&mut candle, os);
+            assert_eq!(
+                candle
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(0),
+                "{os}: neither the 46.1 GB checkpoint nor the 0.7 GB adapter may be offered"
+            );
+            assert!(
+                model_download_context(&candle)
+                    .expect("valid filtered catalog entry")
+                    .is_none(),
+                "{os}: Eros must have no canonical download"
+            );
+            let state = install_state_for(None, &candle, temp.path());
+            assert!(!state.downloadable, "{os}: Eros must not be downloadable");
+            assert!(
+                !state.installed,
+                "{os}: filtered remote files must not resurrect a picker row"
+            );
+            apply_platform_availability(candle.as_object_mut().unwrap(), os);
+            assert_eq!(candle.get("usable").and_then(Value::as_bool), Some(false));
+            assert!(candle
+                .get("unavailableReason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason.contains("Apple Silicon MLX")));
+        }
+    }
+
     #[test]
     fn multi_repo_marker_filters_nested_receipts_by_requested_repo() {
         let temp = tempfile::tempdir().unwrap();
@@ -4566,6 +4648,7 @@ fn apply_model_catalog_entry(
     // (retained) top-level installState/installedPath fields — nothing existing regresses.
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
+    apply_platform_availability(object, std::env::consts::OS);
     apply_mac_and_mlx_fields(object, data_dir);
     apply_imported_lora_advertisement(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
@@ -4577,6 +4660,23 @@ fn apply_model_catalog_entry(
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
     sceneworks_core::preview_support::apply_to_model_entry(object);
     Ok(model)
+}
+
+/// Apply whole-model platform availability after install-state projection. `macOnly` historically
+/// was an advisory label for image models, so this is deliberately limited to video entries, where
+/// it now denotes an absent off-Mac execution route. Keeping the entry in Model Manager preserves
+/// removal/provenance visibility, while `usable: false` keeps every generation picker and download
+/// offer aligned with the worker's route table.
+fn apply_platform_availability(object: &mut JsonObject, os: &str) {
+    let video_mac_only = object.get("type").and_then(Value::as_str) == Some("video")
+        && object.get("macOnly").and_then(Value::as_bool) == Some(true);
+    if video_mac_only && os != "macos" {
+        object.insert("usable".to_owned(), Value::Bool(false));
+        object.insert(
+            "unavailableReason".to_owned(),
+            Value::String("This video model requires the Apple Silicon MLX backend.".to_owned()),
+        );
+    }
 }
 
 type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
@@ -4651,9 +4751,13 @@ mod model_size_concurrency_tests {
         // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
+        //
+        // SC-18902 then removed Eros's failed Candle route and platform-scoped both of its download
+        // rows to macOS. Its primary context therefore leaves Windows/Linux: 84 → 83, while macOS
+        // remains 87. Base LTX-2.3 stays cross-platform and continues to contribute on every OS.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 87_usize), ("windows", 83), ("linux", 83)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d421293251f2b16c0c0889116dce30d797c9a93272f146667b1cd24c182f8e12",
+    "sceneWorksRevision": "source-tree:d70982ab87b4d9d13ee7f96b9da26e4396765d088289f59336a5496dea6d0574",
     "inferenceRevision": "b4a29108e1eaf873bae3aa85262cd0849c24b311",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "d8cbd7dcd724d2e1ec725bb31fe4d970030aaea8ea6274d67d10e7b34e2ed7c3"
+        "sha256": "2d12bf33595632b45f9108bdd06f3ade54abfc56a9e0247eb6569808b2954d6c"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",

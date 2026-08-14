@@ -2418,7 +2418,8 @@ test("a verdict may run ahead of the model universe, but no further than the rou
     routedLanes({ routingCatalog, routingCandle, routingMlx }),
   );
 
-  // `VIDEO_MODEL_CAPS` routes both LTX entries on both lanes, so both verdicts are inside the fence.
+  // The LTX family remains routed on both lanes through base `ltx_2_3`; Eros contributes only MLX.
+  // Family-level survey verdicts are therefore still inside both real routing fences.
   assert.ok(routed.has("ltx-video:mlx"));
   assert.ok(routed.has("ltx-video:candle"));
   // A lane the catalog does not route is NOT.

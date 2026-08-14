@@ -1151,9 +1151,9 @@ export function parseVideoEngineIds(source, fnName) {
   }
   const body = declaration[1];
   const arms = new Map();
-  // `match model { "a" => Some("x"), "b" | "c" => Some("y"), … }`. The or-pattern is load-bearing:
-  // candle's LTX arm is `"ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled")`, so a single-token
-  // pattern would silently drop the BASE id and report `ltx_2_3` as candle-unrouted.
+  // `match model { "a" => Some("x"), "b" | "c" => Some("y"), … }`. Or-pattern support remains
+  // load-bearing for any provider family that maps several catalog ids to one engine; parsing only
+  // the final token would silently drop the other ids and report them unrouted.
   for (const arm of body.matchAll(
     /((?:(?:"[^"]+"|[A-Z0-9_]+)\s*\|\s*)*(?:"[^"]+"|[A-Z0-9_]+))\s*=>\s*Some\(("[^"]+"|[A-Z0-9_]+)\)/g,
   )) {

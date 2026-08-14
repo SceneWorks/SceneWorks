@@ -275,8 +275,9 @@ fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
 
 /// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. The checkpoint is
 /// already packed, so the returned load quant is deliberately `None`: `LoadSpec::quantize` means
-/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros remains
-/// on its dense standalone checkpoint, so the SceneWorks model id is part of the guard.
+/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros has no
+/// Candle route after SC-18902 acceptance, and the SceneWorks model-id guard prevents its dense
+/// standalone checkpoint from being mistaken for this base-LTX turnkey tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,

@@ -5385,7 +5385,8 @@ fn video_route_replace_person_dispatches_by_model() {
 fn candle_video_route_gates_on_backend_flag_then_mode() {
     let mut settings = Settings::from_env();
 
-    // Candle disabled (default) → always the stub, regardless of model/mode.
+    // Candle disabled (default) → supported models stub, but Eros remains a terminal refusal so a
+    // direct/replayed legacy job can never manufacture procedural success.
     settings.backend_candle_enabled = false;
     let scail2_replace = request(json!({
         "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
@@ -5394,10 +5395,40 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::Stub,
     );
+    let disabled_eros = request(json!({
+        "projectId": "p", "model": "ltx_2_3_eros", "mode": "text_to_video",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&disabled_eros, &settings),
+        CandleVideoRoute::UnsupportedEros,
+    );
 
     // Enabled: `replace_person` on the candle SCAIL-2 model → the SCAIL-2 replacement variant;
     // any other replace-capable model → candle Wan-VACE.
     settings.backend_candle_enabled = true;
+    // sc-18902: a replayed Eros job gets a terminal worker-side refusal before every mode arm. It
+    // must never fall through to procedural Stub output or borrow the Wan-VACE replace/extend lane.
+    for mode in ["text_to_video", "replace_person", "extend_clip"] {
+        let eros = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "mode": mode,
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&eros, &settings),
+            CandleVideoRoute::UnsupportedEros,
+            "Eros {mode} must fail loudly rather than reach a real or stub Candle route",
+        );
+    }
+    let error = reject_unsupported_candle_video_route(CandleVideoRoute::UnsupportedEros)
+        .expect_err("the execution seam must reject the unsupported Eros route");
+    match error {
+        WorkerError::InvalidPayload(message) => {
+            assert!(message.contains("not supported on Candle/CUDA"));
+            assert!(message.contains("Apple Silicon MLX"));
+            assert!(message.contains("base LTX-2.3"));
+        }
+        other => panic!("Eros rejection must remain a typed invalid-payload error, got {other:?}"),
+    }
+    assert!(reject_unsupported_candle_video_route(CandleVideoRoute::Stub).is_ok());
     assert_eq!(
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),

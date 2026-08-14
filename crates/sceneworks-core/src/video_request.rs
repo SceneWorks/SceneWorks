@@ -851,7 +851,8 @@ pub struct VideoAdmissionSurface {
 ///
 /// | family | MLX | candle |
 /// |---|---|---|
-/// | `ltx_2_3`, `ltx_2_3_eros` | routed | routed (t2v) |
+/// | `ltx_2_3` | routed | routed (t2v) |
+/// | `ltx_2_3_eros` | routed | **not routed** — exact-head Candle/CUDA acceptance produced unusable undistilled noise (sc-18902) |
 /// | `wan_2_2` (TI2V-5B) | routed | routed (t2v + VACE) |
 /// | `wan_2_2_t2v_14b` | routed | routed (t2v + VACE) |
 /// | `wan_2_2_i2v_14b` | routed | routed (**i2v only** + VACE) |

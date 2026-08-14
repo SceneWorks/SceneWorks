@@ -1,10 +1,11 @@
-//! SC-18902 evidence harness for the shipped Windows/CUDA `ltx_2_3_eros` route.
+//! SC-18902 evidence harness for the former Windows/CUDA `ltx_2_3_eros` route.
 //!
-//! This is deliberately an ignored, real-weight test rather than product routing. It captures the
-//! current Candle baseline (the Eros checkpoint with no distill adapter) at the shipped defaults.
+//! This is deliberately an ignored, real-weight test rather than product routing. It captured the
+//! rejected Candle baseline (the Eros checkpoint with no distill adapter) at the shipped defaults.
 //! It does not offer a candidate: the complete cond_safe LoRA has 3,320 keys while the current
 //! Candle adapter surface accepts only 768, so filtering it would produce misleading evidence.
-//! The baseline artifact informs a later product decision; this harness does not pre-decide it.
+//! The artifact showed unusable noise and informed removal of the Candle route; this harness retains
+//! the exact evidence request without making the unsupported route reachable in product code.
 //!
 //! The workflow pins every remote artifact revision and fixes every request parameter here. Only
 //! local paths and the output directory come from the environment. In particular there is no
