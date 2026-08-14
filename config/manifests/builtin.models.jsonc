@@ -10995,6 +10995,13 @@
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "fps": [24, 25, 30],
+        // The distilled model bakes its sigma waypoints into training, so 8 is not a default the
+        // caller may move — it is the ONLY renderable count (sc-19502). Both backends derive it from
+        // a byte-identical STAGE1_SIGMAS table (9 waypoints) and the shared gen-core floor refuses
+        // anything else, so this is a genuinely lane-agnostic fact rather than a papered-over
+        // difference. Deliberately NOT `hardMinSteps: 8`: a floor says "at least 8" and would admit
+        // steps: 30, which the engine cannot render.
+        "steps": [8],
         // LTX is bucket-trained on 480p/720p derivatives; squares above 640x640
         // fall outside the training distribution and produce black frames. Keep
         // the square option at 640x640 even though normalized_dimensions would
@@ -11117,6 +11124,10 @@
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "fps": [24, 25, 30],
+        // Same distilled schedule as base LTX-2.3 — same engine id per backend, same baked
+        // STAGE1_SIGMAS — so the same single legal step count (sc-19502). The 10Eros merge changes
+        // the weights, not the sigma waypoints.
+        "steps": [8],
         // See LTX-2.3 note above: squares above 640x640 are out-of-distribution
         // and render black; same engine, so the same ÷64 requirement and the same
         // 704 (= 64·11) 720p buckets apply (sc-12294).

@@ -1372,6 +1372,71 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     expect(labeledInput("Guidance").disabled).toBe(false);
   });
 
+  // sc-19502 — a distilled model bakes its sigma waypoints into training, so LTX-2.3 renders at
+  // exactly 8 steps and BOTH backends now refuse anything else. A free Steps box here would let the
+  // user type a number the enqueue gate 400s on, which is the unsatisfiable-control defect the
+  // story names.
+  const DISTILLED_LTX = {
+    ...NON_WAN,
+    defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
+    limits: { steps: [8] },
+    ui: { label: "LTX-2.3" },
+  };
+
+  it("pins the Steps control for a model that declares a single legal step count", async () => {
+    const context = baseContext({ videoModels: [DISTILLED_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    const steps = labeledInput("Steps");
+    expect(steps.disabled).toBe(true);
+    // The value stays VISIBLE rather than hidden: the user should know the render is 8 steps. This
+    // is the third case in the screen's taxonomy — not the transient Lightning disable, not the
+    // permanently-absent `supportsGuidance` hide.
+    expect(steps.placeholder).toBe("8 (fixed schedule)");
+    expect(steps.title).toMatch(/fixed 8-step schedule/);
+  });
+
+  it("leaves the Steps control free for a model that declares no step menu", async () => {
+    // The overwhelmingly common case. A blanket pin would remove a working control from every
+    // other video model, so this is the half that keeps the test above honest.
+    const context = baseContext({ videoModels: [NON_WAN] });
+    await render(context);
+    await openAdvanced();
+
+    expect(labeledInput("Steps").disabled).toBe(false);
+  });
+
+  it("never emits an off-menu advanced.steps after switching to a pinned model", async () => {
+    // The real path to a stale value: type 30 while an UNPINNED model is selected, then switch to
+    // the distilled one. `stepsOverride` genuinely holds "30" at that point, so this exercises the
+    // suppression rather than an empty box (which would pass no matter what the code did).
+    const unpinned = { ...NON_WAN, id: "wan_2_2", name: "Wan 2.2" };
+    const context = baseContext({ videoModels: [unpinned, DISTILLED_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    const modelPicker = () =>
+      [...container.querySelectorAll("label")]
+        .find((el) => el.textContent.trim().startsWith("Model"))
+        ?.querySelector("select");
+
+    await act(async () => setSelect(modelPicker(), "wan_2_2"));
+    expect(labeledInput("Steps").disabled).toBe(false);
+    await act(async () => setInput(labeledInput("Steps"), "30"));
+    expect(labeledInput("Steps").value).toBe("30");
+
+    // Switch to the distilled model: the control pins and the stale 30 must not reach the payload.
+    await act(async () => setSelect(modelPicker(), "ltx_2_3"));
+    expect(labeledInput("Steps").disabled).toBe(true);
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.model).toBe("ltx_2_3");
+    // Omitting `steps` is what tells the engine to run its baked schedule, and it cannot 400.
+    expect(payload.advanced.steps).toBeUndefined();
+  });
+
   it("does not emit advanced.lightning for a non-Wan engine", async () => {
     const context = baseContext({ videoModels: [NON_WAN] });
     await render(context);

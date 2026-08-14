@@ -857,6 +857,91 @@ fn video_preflight_refuses_a_step_count_under_the_models_declared_floor() {
     );
 }
 
+/// sc-19502: the same backstop for the EXACT-value menu — refuses a step count off the model's
+/// declared `limits.steps` on BOTH sides, and admits a payload that names no step count at all.
+///
+/// The worker gate is what makes the constraint hold for a job that did NOT come through the HTTP
+/// route — a replayed pre-sc-19502 row, or any future non-HTTP producer. It matters more here than
+/// for the floor: this is the last gate before the engine, and on the mlx lane the engine used to
+/// accept anything and silently render its baked schedule, so a job that slipped past enqueue had
+/// nothing downstream to catch it.
+///
+/// Kills the same mutation class: deleting the `steps_limit_error` call from `video_preflight`
+/// leaves every core test green, because the core function is still correct — just not CALLED.
+#[test]
+fn video_preflight_refuses_a_step_count_off_the_models_declared_menu() {
+    // The shipped LTX-2.3 shape: one legal count, and it is the model's own default.
+    let ltx_entry = json!({
+        "limits": { "steps": [8], "fps": [24, 25, 30], "hardMaxDuration": 15 },
+        "defaults": { "duration": 6, "fps": 25, "steps": 8 }
+    });
+
+    // OVER the menu — the case a floor-shaped key would have admitted, and the case the story
+    // names: it used to reach the engine and then 400 late on candle / render silently on mlx.
+    let thirty = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "advanced": { "steps": 30 },
+        "modelManifestEntry": ltx_entry
+    }));
+    assert_eq!(
+        fps_limit_error(&thirty.model, thirty.fps, &thirty.model_manifest_entry),
+        None,
+        "the other gates ADMIT this request — only the step menu refuses it"
+    );
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&thirty) else {
+        panic!("30 steps on a model with an exact 8-step menu must be refused before the load");
+    };
+    assert!(message.contains("ltx_2_3"), "names the model: {message}");
+    assert!(
+        message.contains("fixed 8-step schedule"),
+        "states the legal value: {message}"
+    );
+    assert!(
+        message.contains("asks for 30 steps"),
+        "states what was asked: {message}"
+    );
+
+    // UNDER the menu is refused too, so the menu is not secretly a ceiling.
+    let four = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "advanced": { "steps": 4 },
+        "modelManifestEntry": ltx_entry
+    }));
+    assert!(
+        matches!(video_preflight(&four), Err(WorkerError::InvalidPayload(_))),
+        "4 is off the menu as well"
+    );
+
+    // The model's own shipped default admits, or the gate has bricked the model it was added for.
+    let on_menu = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "advanced": { "steps": 8 },
+        "modelManifestEntry": ltx_entry
+    }));
+    assert!(video_preflight(&on_menu).is_ok(), "8 is the menu");
+
+    // A payload naming NO steps must be ADMITTED — an omitted `steps` means "run the baked
+    // schedule", which is the ordinary path for every distilled model.
+    let no_steps = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "modelManifestEntry": ltx_entry
+    }));
+    assert!(
+        video_preflight(&no_steps).is_ok(),
+        "a steps-less payload must not be refused by the menu"
+    );
+
+    // A job carrying no manifest entry is UNCONSTRAINED — never block without a declared menu.
+    let no_entry = request(json!({
+        "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+        "advanced": { "steps": 30 }
+    }));
+    assert!(
+        video_preflight(&no_entry).is_ok(),
+        "no menu declared => no menu"
+    );
+}
+
 // -----------------------------------------------------------------------------------------
 // Mochi 1 (epic 1788 / sc-11992). These sit on the SUPERSET cfg because the tier resolver, the
 // stride and the on-demand fetches are SHARED by both lanes (one repo, both backends) — so they

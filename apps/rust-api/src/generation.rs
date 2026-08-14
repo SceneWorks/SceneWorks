@@ -591,7 +591,8 @@ pub(crate) async fn create_video_job(
             job_payload.insert("duration".to_owned(), contract_number(duration));
         }
     }
-    // The model's declared `limits.hardMinSteps`, enforced at enqueue (sc-19426). A FOURTH axis: the
+    // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,
+    // sc-19502 — one call, because `steps_limit_error` owns both). A FOURTH axis: the
     // three gates around it bound how long the clip is and how much conditioning media it carries,
     // never how it is SAMPLED — so a MiniMax-H3 request at exactly its 5.1667s floor and its one
     // advertised 24 fps, with no references at all, clears every one of them carrying
@@ -601,6 +602,12 @@ pub(crate) async fn create_video_job(
     //
     // Rejected, never clamped, for the duration cap's reason: raising the step count for the caller
     // doubles the compute they asked for with no error and no signal.
+    //
+    // sc-19502 widened this from a floor to also cover an EXACT menu, and the same call site serves
+    // both. LTX-2.3 is distilled — 8 baked sigma waypoints, no other renderable count — so an
+    // `advanced.steps = 30` request used to 400 late from the candle engine and, on mlx, be accepted
+    // and silently rendered at 8 anyway. Both lanes now refuse it, and this gate refuses it here
+    // first, before the job is dispatched.
     //
     // Same placement rationale as the three gates above — keyed off the post-preset `model_id` and
     // the resolved entry, with the count read off `job_payload` so the gate judges the value

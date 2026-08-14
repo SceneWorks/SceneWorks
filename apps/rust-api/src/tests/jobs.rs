@@ -6582,6 +6582,240 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     );
 }
 
+/// sc-19502: `limits.steps` — the EXACT-value menu — is enforced at enqueue, and the half a floor
+/// could never express is enforced too: an OVER-menu count is refused.
+///
+/// This is the reachability half of the story. `limits.steps: [8]` is only a real constraint if a
+/// real HTTP request trips it, and `advanced.steps: 30` is the exact payload the story names: it
+/// used to be accepted here, then 400 late from the candle engine after dispatch, or — on mlx — be
+/// accepted and silently rendered at 8, a control that visibly did nothing.
+///
+/// The fixture makes the two plausible homes disagree the same way the floor test above does:
+///   * default video model — no menu at all (30 steps is its own business)
+///   * `distilled-vid`     — menu `[8]`, the LTX-2.3 shape
+#[tokio::test]
+async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Default Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Default Vid" }
+            },
+            {
+              "id": "distilled-vid",
+              "name": "Distilled Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/distilled-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": { "steps": [8] },
+              "ui": { "label": "Distilled Vid" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "preset_override",
+              "name": "Preset Override",
+              "workflow": "text_to_video",
+              "model": "distilled-vid",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Step Menu Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // THE CASE THE STORY NAMES. 30 steps: over the menu, so a FLOOR-shaped key would have admitted
+    // it. `model` omitted so the preset's model wins — the sc-12300 shape.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 30 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "30 steps is off distilled-vid's exact menu and must be refused at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("distilled-vid"),
+        "names the model whose menu applied — NOT the default's: {detail}"
+    );
+    assert!(
+        detail.contains("fixed 8-step schedule"),
+        "states the legal value: {detail}"
+    );
+    assert!(
+        detail.contains("asks for 30 steps"),
+        "states what was asked: {detail}"
+    );
+
+    // Under-menu is refused too, so the menu is not secretly a ceiling.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 4 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "4 is off the menu as well");
+
+    // ON the menu admits, and travels VERBATIM. This is what keeps the assertions above from
+    // passing for a gate that simply rejects every step count.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 8 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "8 is the menu: {body}");
+    assert_eq!(body["payload"]["model"], "distilled-vid");
+    assert_eq!(
+        body["payload"]["advanced"]["steps"], 8,
+        "the admitted count travels VERBATIM — the gate refuses, it never rewrites"
+    );
+
+    // A request naming NO steps is admitted: `advanced` is a passthrough map, so an omitted `steps`
+    // means the engine runs its baked schedule. Refusing it would make every distilled model
+    // unusable without the caller knowing its magic number.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a steps-less payload must not be refused by the menu: {body}"
+    );
+
+    // ...and the SAME 30-step request against the default model (no menu) is admitted, proving the
+    // rejection above came from the per-model menu rather than a blanket step bound.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 30 },
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the default model declares no menu, so 30 steps is its own business: {body}"
+    );
+
+    // REACHABILITY FOR THE UI HALF. Video Studio pins its Steps control off `limits.steps`, which
+    // only works if the catalog endpoint actually serializes the key — a `limits` block that
+    // allowlisted its contents would leave the control free while the gate above still refused, i.e.
+    // the UI/gate desync this story exists to remove. Asserted on the wire rather than by reading
+    // the serializer.
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "catalog lists: {catalog}");
+    let listed = catalog
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|model| model["id"] == "distilled-vid")
+        .expect("distilled-vid is listed");
+    assert_eq!(
+        listed["limits"]["steps"],
+        json!([8]),
+        "the catalog must carry limits.steps through to the studio: {listed}"
+    );
+}
+
 /// sc-12400 — the regression sc-12297 shipped: a request that names **no duration at all** was
 /// rejected for "asking for 6s", on 7 of the 10 shipped video models.
 ///

@@ -95,6 +95,7 @@ import {
   schedulerDefaultFromModel,
   schedulerOptionsFromModel,
   stepsDefaultFromModel,
+  stepsMenuFromModel,
 } from "../samplerOptions.js";
 
 const ltxVideoModelId = "ltx_2_3";
@@ -415,6 +416,20 @@ export function VideoStudio() {
   // for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
+  // `limits.steps` — the exact set of step counts the model can render (sc-19502). Distilled models
+  // bake their sigma waypoints into training: LTX-2.3 runs 8 and nothing else, and BOTH backends now
+  // refuse anything off the menu, so an unpinned Steps box here would let the user type a number the
+  // enqueue gate 400s on.
+  //
+  // PINNED (disabled + the value shown), not hidden. The lightning precedent above disables because
+  // the inertness is transient, and `supportsGuidance` hides because the axis is missing entirely.
+  // This is a third case: the axis is real and the value is worth seeing — the user should know the
+  // render is 8 steps — but it is not theirs to move. Hiding it would answer "why is there no Steps
+  // control?" with nothing, and leaving it editable would be the silently-ignored knob this story
+  // exists to remove.
+  const stepsMenu = stepsMenuFromModel(selectedModel);
+  const stepsPinnedValue = stepsMenu?.length === 1 ? stepsMenu[0] : null;
+  const stepsPinned = stepsPinnedValue !== null;
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -1355,7 +1370,15 @@ export function VideoStudio() {
           // the 4-step/CFG-off recipe, so we suppress the manual steps/guidance overrides below to
           // keep the payload consistent with the recipe the UI is reflecting.
           ...(showLightning ? { lightning } : {}),
-          ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+          // `stepsPinned` suppresses the override for the same reason `lightningActive` does: the
+          // count is not the caller's to set (sc-19502). Omitting `steps` entirely — rather than
+          // sending the pinned value — is what "use the baked schedule" means to the engine, and it
+          // also means a stale number left in the box by a previously-selected model can never leak
+          // into the payload and 400.
+          ...(!lightningActive &&
+          !stepsPinned &&
+          stepsOverride !== "" &&
+          Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
             : {}),
           ...(supportsGuidance &&
@@ -2111,12 +2134,24 @@ export function VideoStudio() {
                 <input
                   min="1"
                   max="80"
-                  disabled={lightningActive}
+                  disabled={lightningActive || stepsPinned}
                   onChange={(event) => setStepsOverride(event.target.value)}
-                  placeholder={lightningActive ? "4 (Lightning)" : String(stepsDefaultFromModel(selectedModel) ?? "")}
-                  title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps." : undefined}
+                  placeholder={
+                    lightningActive
+                      ? "4 (Lightning)"
+                      : stepsPinned
+                        ? `${stepsPinnedValue} (fixed schedule)`
+                        : String(stepsDefaultFromModel(selectedModel) ?? "")
+                  }
+                  title={
+                    lightningActive
+                      ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                      : stepsPinned
+                        ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
+                        : undefined
+                  }
                   type="number"
-                  value={lightningActive ? "" : stepsOverride}
+                  value={lightningActive || stepsPinned ? "" : stepsOverride}
                 />
               </label>
               {supportsGuidance ? (

@@ -686,11 +686,14 @@ const seededFallbackModels = [
     name: "LTX-2.3",
     type: "video",
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced", steps: 8 },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
+      // Distilled: 8 baked sigma waypoints is the ONLY renderable count on either backend, so the
+      // Steps control pins rather than accepting a value the enqueue gate would refuse (sc-19502).
+      steps: [8],
       resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {
@@ -704,11 +707,13 @@ const seededFallbackModels = [
     name: "LTX-2.3 10Eros",
     type: "video",
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced", steps: 8 },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
+      // Same distilled schedule as base LTX-2.3 (sc-19502).
+      steps: [8],
       resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {

@@ -22,6 +22,7 @@ import {
   effectiveLimits,
   samplerOptionsFromModel,
   schedulerOptionsFromModel,
+  stepsMenuFromModel,
 } from "../samplerOptions.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
@@ -263,7 +264,9 @@ function loraLabel(lora) {
 // `options` carries the menus the selected model actually honors. A stored value outside
 // its menu is a default the model would silently clamp away, so it blocks the save until
 // the user picks a supported one — the in-menu flag shows what's there but can't be kept.
-function defaultValueErrors(form, isVideo, options) {
+// Exported for test (sc-19502): pure, dependency-free, and the only guard stopping a preset from
+// storing a default the model's own engine would refuse on every job it drives.
+export function defaultValueErrors(form, isVideo, options) {
   const errors = [];
   const checkNumber = (value, label, { min, max, integer = false }) => {
     if (value === "") {
@@ -285,6 +288,12 @@ function defaultValueErrors(form, isVideo, options) {
   checkNumber(form.count, "Variations", { min: 1, max: 8, integer: true });
   checkNumber(form.steps, "Steps", { min: 1, max: 200, integer: true });
   checkNumber(form.guidanceScale, "Guidance", { min: 0, max: 60 });
+  // A distilled model renders at exactly one step count (sc-19502). The generic 1..200 range above
+  // does not know that, so without this a preset could be SAVED with `steps: 30` for LTX-2.3 and
+  // then 400 on every job it drove — a stored default guaranteed to fail, which is the same
+  // unsatisfiable-control defect the Video Studio pin removes. Same shape as the fps menu check
+  // below: the range bounds sanity, the menu bounds what the model can actually do.
+  checkInMenu(form.steps, "Steps", options?.steps);
   checkInMenu(form.resolution, isVideo ? "Resolution" : "Aspect", options?.resolutions);
   if (isVideo) {
     checkNumber(form.duration, "Duration", { min: 1, max: 120 });
@@ -362,7 +371,9 @@ export function PresetManagerScreen() {
   const resolutionOptions = resolutionOptionsForModel(selectedModel, isVideo);
   const durationOptions = durationOptionsForModel(selectedModel);
   const fpsOptions = fpsOptionsForModel(selectedModel);
-  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions };
+  // `steps` has NO fallback menu, unlike the three above: absent means "any count", which is every
+  // model but the distilled ones (sc-19502).
+  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions, steps: stepsMenuFromModel(selectedModel) };
 
   const validation = presetValidation({ loras: form.loras }, loras, selectedModel);
   const valueErrors = defaultValueErrors(form, isVideo, defaultsOptions);
