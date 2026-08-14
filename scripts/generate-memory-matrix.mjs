@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -890,6 +891,9 @@ export const RUNG4_CONTRACT_SUPPORT = Object.freeze([
   "structurally-not-applicable",
 ]);
 
+/** A git sha, abbreviated no shorter than 9 hex characters. See `contractRevision` below. */
+export const RUNG4_CONTRACT_REVISION_PATTERN = /^[0-9a-f]{9,40}$/;
+
 /**
  * The prerequisite claim this survey may not carry again (sc-18664).
  *
@@ -909,6 +913,56 @@ export const STALE_RUNG1_PREREQUISITE_PATTERNS = Object.freeze([
   /rung 4 requires rung 1/i,
   /requires rung 1 engaged in the same request/i,
 ]);
+
+/**
+ * The excision that lets the ban scan the file the ban is written in.
+ *
+ * The pattern literals above necessarily contain the banned text, so a self-scan would always fire.
+ * This names the declaration and removes it first. It fails CLOSED on purpose: rename or reshape
+ * that constant and this stops matching, the literals stay in the scanned text, and the guard
+ * throws rather than going quietly green.
+ */
+const STALE_RUNG1_PATTERN_DECLARATION =
+  /export const STALE_RUNG1_PREREQUISITE_PATTERNS = Object\.freeze\(\[[\s\S]*?\]\);/;
+
+/**
+ * The generator's OWN prose, held to the same ban as the survey's notes (sc-18664).
+ *
+ * One rule, two halves. `assertRung4NotesRecordTheContractPrerequisite` bans the removed rung-1
+ * prerequisite claim from the survey's `notes`; the identical sentence also sat in this file's
+ * `stagedResidencyIsAvailable` docstring — the more authoritative of the two sites, because it is
+ * where a reader of the gate itself lands. Banning a sentence in the data file while leaving it in
+ * the code that reads the data file is the "one half of a pair moved" defect this epic keeps
+ * finding, so both halves run off the SAME `STALE_RUNG1_PREREQUISITE_PATTERNS` constant and a
+ * pattern added for either covers the other for free.
+ *
+ * Doc comments WRAP, and that is not a detail: the removed claim was invisible to a line-oriented
+ * grep of this very file from the day it was written (cb1593ac, sc-15969) until a human read it,
+ * because `engaged in the same` and `request` sat on different lines. The source is therefore
+ * flattened across comment continuations before matching, which is the only reason this guard sees
+ * what a grep could not.
+ *
+ * Scoped to this file and deliberately NOT to `generate-memory-matrix.test.mjs`, which feeds the
+ * banned sentence in as mutation INPUT — that is what proves the notes guard bites, and banning it
+ * there would delete the evidence.
+ */
+export function assertGeneratorSourceDoesNotRestateTheRemovedEdge(source) {
+  const scanned = source
+    .replace(STALE_RUNG1_PATTERN_DECLARATION, "")
+    .replaceAll(/\n[ \t]*\*[ \t]?/g, " ");
+  for (const pattern of STALE_RUNG1_PREREQUISITE_PATTERNS) {
+    if (pattern.test(scanned)) {
+      throw new Error(
+        `scripts/generate-memory-matrix.mjs restates the rung-1 prerequisite SC-15998 removed (${pattern}). BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES is LoadShape::DeferredMaterialization and nothing else; the generator's rung-1 gate is a proxy for the edge individual providers append through additional_prerequisites, not the shared contract rule (sc-18664)`,
+      );
+    }
+  }
+}
+
+const GENERATOR_SOURCE_PATH = fileURLToPath(import.meta.url);
+let generatorSourceCache = null;
+const generatorSourceText = () =>
+  (generatorSourceCache ??= readFileSync(GENERATOR_SOURCE_PATH, "utf8"));
 
 /**
  * The notes' half of the correction: the stale claim is gone AND the real one is stated.
@@ -941,6 +995,19 @@ export function assertRung4NotesRecordTheContractPrerequisite(notes) {
  * uniform stack that a single BlockPlan bounds with only embedders and heads outside it; `partial` is
  * a trunk that decomposes into two or more separately-indexed stacks needing a plan each, or that
  * carries a remainder which cannot be windowed at all; `none` is no windowable stack anywhere.
+ *
+ * The restatement is exact for 38 of the 40 verdicts `families` already carries, and NOT for the
+ * other two — say so rather than claim it is simply the vocabulary. Qwen-Image (`families.15511`)
+ * records `full` on both backends while holding two `blockStacks`, because the second is
+ * control-route-only (`entries: ["qwen_image_control"]`) and is not resident on the routes the
+ * verdict covers. This function has no notion of route scoping and derives `partial` there.
+ *
+ * Route scoping is deliberately NOT added, and the reason is that no record needs it to reach the
+ * right answer. MiniMax-H3 has its own route-conditional stack — `text_encoder.vision_tower`, the
+ * `fl2va` keyframe path only — and is `partial` under either rule, because its two conv stacks and
+ * its several separately-indexed denoise stacks each force `partial` on their own. Adding a route
+ * axis to serve zero consumers would be speculation; the exception is recorded here and pinned by
+ * the test that computes Qwen-Image's derivation and asserts it disagrees with the record.
  */
 export function deriveOutOfMatrixApplicability(stacks) {
   const windowable = stacks.filter((stack) => stack.structuralApplicability !== "none");
@@ -1009,6 +1076,18 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
       }
       if (!verdict.evidence?.length) {
         throw new Error(`${at}: a verdict derived from provider code must cite at least one source`);
+      }
+      // ...and must say which tree those citations resolve in. This is the one thing an
+      // out-of-matrix record needs that a `families` verdict does not: `families` is surveyed
+      // against the crates the Cargo pin already carries, so `generatedFrom.inferenceRevision`
+      // dates every path in it. These records are surveyed BEFORE the lane exists — MiniMax-H3's
+      // `inference:` paths and every byte constant quoted from them resolve at 79f02e6d0, and at
+      // 014134e3 neither H3 crate is present at all. Without the field the record silently mixes
+      // two revisions and reads as if the matrix's own pin dated it (sc-18664).
+      if (!RUNG4_CONTRACT_REVISION_PATTERN.test(verdict.contractRevision ?? "")) {
+        throw new Error(
+          `${at}: contractRevision must name the inference revision this record's evidence paths resolve at, as a git sha of at least 9 hex characters — got ${JSON.stringify(verdict.contractRevision)}. An out-of-matrix record is surveyed from crates the matrix's own pinned revision need not contain, so without it the record mixes two trees (sc-18664)`,
+        );
       }
       const stacks = verdict.stacks ?? [];
       if (!stacks.length) {
@@ -1114,16 +1193,19 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
  *   a non-empty legacy `implementedEntries` or exact `implementationScopes` claim (or the reverse)
  *   is a contradiction, and every named entry has to belong to the family that claims it.
  */
-export function parseRung4Survey(body, { familyGroups } = {}) {
+export function parseRung4Survey(body, { familyGroups, generatorSource } = {}) {
   const parsed = JSON.parse(body);
   const families = parsed.families;
   if (!families || typeof families !== "object") {
     throw new Error("rung-4 survey: missing `families`");
   }
-  // sc-18664. Both run on every generation, which is what gives them reach: `--check` in CI and the
-  // pre-push hook go through here, so a stale prerequisite note or an unvalidated out-of-matrix
-  // record fails the same way a bad family verdict does.
+  // sc-18664. All three run on every generation, which is what gives them reach: `--check` in CI and
+  // the pre-push hook go through here, so a stale prerequisite note, the same claim restated in the
+  // generator's own prose, or an unvalidated out-of-matrix record fails the same way a bad family
+  // verdict does. The source scan sits HERE, next to the notes scan it shares a pattern set with,
+  // so the two halves of the one ban cannot be wired into different code paths.
   assertRung4NotesRecordTheContractPrerequisite(parsed.notes);
+  assertGeneratorSourceDoesNotRestateTheRemovedEdge(generatorSource ?? generatorSourceText());
   parseOutOfMatrixRung4Families(parsed, { familyGroups });
   const survey = new Map();
   for (const [group, family] of Object.entries(families)) {
@@ -1419,11 +1501,32 @@ export function assertRung4SurveyCoversEveryFamily(survey, models) {
 }
 
 /**
- * Whether this entry advertises rung 1 on this backend. Rung 4 requires rung 1 engaged in the same
- * request (`gen_core::memory_strategy`'s `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`), so the rung-4 arm
- * below reads the prerequisite from the SAME predicate the rung-1 arm uses. Restating it would let
- * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
- * reporting rung 4 as unreachable.
+ * Whether this entry advertises rung 1 on this backend.
+ *
+ * The rung-4 arm below gates every family's implementation claim on this predicate, and sc-18664
+ * corrected what that gate IS. It is a PROXY, not the shared contract rule.
+ * `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES` is
+ * `&[MemoryStrategyPrerequisite::LoadShape(LoadShape::DeferredMaterialization)]` at pinned rev
+ * `014134e3` — inference `crates/contracts/gen-core/src/memory_strategy.rs:290-293`, the identifier
+ * on line 292 — exactly one edge, and no rung edge at all. SC-15998 removed the rung edge this
+ * docstring used to attribute to that constant, because it had encoded one provider's coupled
+ * loader shape as universal arithmetic.
+ *
+ * What the proxy stands in for is the edge INDIVIDUAL providers append through
+ * `MemoryProviderContract::additional_prerequisites`. mlx-gen-anima (`memory_strategy.rs:438`) and
+ * mlx-gen-chroma (`:570`) push `BoundedTransformerResidency -> StagedResidency
+ * (EngagedInSameRequest)` when the load is streamable; mlx-gen-bernini deliberately pushes none
+ * (`:378`, asserted `is_empty()` at `:861`) because its conditioning phase is released before
+ * either expert loads. The generator applies the gate to every family regardless of what its
+ * provider declares, because the survey carries no per-(family, backend) record of those edges to
+ * apply it from.
+ *
+ * The blanket proxy is measurably inert on today's catalog: removing both RUNG-4 call sites — the
+ * two below, not the rung-1 arm's own use of this predicate — regenerates a byte-identical
+ * `docs/generated/memory-matrix.json` (957,908 B) and `.md` (16,560 B). Replacing it needs that
+ * per-provider record, which is separate work. `config/rung4-applicability-survey.json`'s notes carry the same
+ * divergence, and `assertGeneratorSourceDoesNotRestateTheRemovedEdge` holds this docstring and
+ * those notes to one ban so they cannot drift apart again.
  */
 function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }) {
   const declaredModel =
