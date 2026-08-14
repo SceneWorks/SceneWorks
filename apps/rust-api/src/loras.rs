@@ -2566,10 +2566,17 @@ mod base_model_gating_tests {
             "families": ["minimax-h3"],
         });
         for model_id in ["minimax_h3", "minimax_h3_ref"] {
-            validate_lora_specs_for_model(&models, &[], model_id, &[lora.clone()], true, "LoRA")
-                .unwrap_or_else(|error| {
-                    panic!("the turbo accelerator must be accepted on {model_id}: {error:?}")
-                });
+            validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(&lora),
+                true,
+                "LoRA",
+            )
+            .unwrap_or_else(|error| {
+                panic!("the turbo accelerator must be accepted on {model_id}: {error:?}")
+            });
         }
     }
 
