@@ -122,6 +122,20 @@ const LICENSE_ACK_ONLY_MODEL = {
   ui: { attribution: "Powered by MiniMax H3", description: "Joint video + audio generation." },
 };
 
+// The shape MiniMax-H3 ACTUALLY ships in (sc-17227): a quant matrix. A tiered model renders the
+// per-tier download panel INSTEAD of the single Download button, so proving the single-variant
+// button is blocked proves nothing about the path a real H3 user takes. Declaration is not
+// reachability — this fixture puts the acknowledgment gate on the tier panel.
+const LICENSE_ACK_TIERED_MODEL = {
+  ...LICENSE_ACK_ONLY_MODEL,
+  hasVariantMatrix: true,
+  variants: [
+    { variant: "bf16", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 75120439132 },
+    { variant: "q8", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 37560219566 },
+    { variant: "q4", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 18780109783 },
+  ],
+};
+
 // A quant-matrix model whose q8 tier is TORN (sc-13383): its files are partly present, so the API
 // reports installState "missing" + cacheState "incomplete" with the missing weights named. The
 // complete q4/bf16 siblings keep the MODEL installed, so only the q8 tier row offers repair.
@@ -463,6 +477,46 @@ describe("ModelManagerScreen gated-model notice", () => {
       (button) => button.textContent.startsWith("Download"),
     );
     expect(downloadButton.disabled).toBe(false);
+  });
+
+  // sc-17227: the tier-panel path. MiniMax-H3 is a quant-matrix model, so a real user never sees
+  // the single Download button — they see the per-tier panel. Every tier checkbox and the panel's
+  // download button must stay disabled until the licence is accepted, and only then may a tier
+  // install. Without this, the gate would be provably right on a path H3 does not take.
+  it("blocks every tier of a license-acknowledgment quant matrix until accepted (sc-17227)", async () => {
+    await render([LICENSE_ACK_TIERED_MODEL]);
+    await selectTab(container, "Video Models");
+    const tierCheckboxes = [...container.querySelectorAll(".model-tier-select input")];
+    expect(tierCheckboxes).toHaveLength(3);
+    for (const box of tierCheckboxes) {
+      expect(box.disabled, "tier checkbox is disabled while unacknowledged").toBe(true);
+    }
+    const tierDownload = container.querySelector(".model-tier-actions button");
+    expect(tierDownload).toBeTruthy();
+    expect(tierDownload.disabled).toBe(true);
+    expect(tierDownload.getAttribute("title")).toBe("Accept the license above before downloading.");
+    await click(tierDownload);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    // Accept → the tiers become selectable and the suggested tier can install.
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    for (const box of [...container.querySelectorAll(".model-tier-select input")]) {
+      expect(box.disabled).toBe(false);
+    }
+    const unblocked = container.querySelector(".model-tier-actions button");
+    expect(unblocked.disabled).toBe(false);
+    await click(unblocked);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+      expect.objectContaining({ variant: expect.any(String) }),
+    );
   });
 
   // sc-17227: an INSTALLED model shows no gate — the acknowledgment is a pre-download step, and
