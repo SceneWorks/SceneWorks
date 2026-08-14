@@ -619,6 +619,44 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
 });
 
+test("decode geometry receipts stay semantic and never publish calibration ranges", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const fingerprint = "800d06acf579a36e604f91955fd6a6852ec70bc39701f7a320f1fdd2bf5ff29d";
+  const targetModels = [
+    "chroma1_base",
+    "chroma1_flash",
+    "chroma1_hd",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
+    "kolors",
+    "realvisxl",
+    "realvisxl_lightning",
+    "sdxl",
+  ];
+  const cells = matrix.cells.filter(
+    (cell) =>
+      targetModels.includes(cell.modelId) &&
+      cell.backend === "mlx" &&
+      cell.tier === "q4" &&
+      cell.mode === "text_to_image" &&
+      cell.overlay === "none" &&
+      cell.rung === "bounded_decode" &&
+      cell.calibrationFingerprint === fingerprint,
+  );
+
+  assert.deepEqual([...new Set(cells.map((cell) => cell.modelId))].sort(), targetModels);
+  assert.ok(
+    cells.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.requiresCurrentCalibrationBinding !== true &&
+        !Object.hasOwn(cell.strategyParameters.publishedRanges, "decodeGeometryPolicies") &&
+        cell.evidence.currentEnvironmentVerification.length === 0,
+    ),
+    "quality receipts must not create a published range, calibration requirement, or Verified evidence",
+  );
+});
+
 test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keeps stale captures historical", async () => {
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),

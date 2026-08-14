@@ -2337,6 +2337,7 @@ mod tests {
         // Field-for-field the context `image_jobs::base` builds for a plain Krea Turbo t2i.
         let context = gen_core::MemoryRunContext {
             selection,
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
             calibration_abi: u32::try_from(
                 turbo_fit["calibrationAbi"]
                     .as_u64()

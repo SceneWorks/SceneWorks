@@ -3,8 +3,9 @@ compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
     MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
-    MemorySelection, MemoryStrategy, MemoryStrategyParameters, TransformerComponent,
+    MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
+    MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    MemoryStrategyParameters, TransformerComponent,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig};
 use mlx_gen::{
@@ -889,6 +890,7 @@ fn krea_context(
                 component_precision_floors: &[],
             },
         },
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         // From the LOADED provider's own identity, never a local copy. A hardcoded fingerprint
         // silently goes stale the moment the provider re-fingerprints — which is exactly what
         // happened here: `krea-control-mlx-v4-q4-pose-bounded-decode-512-64` outlived the
@@ -1405,6 +1407,7 @@ fn run_z_image_reference_loaded(
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let context = MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         load_shape: calibration.load_shape,
@@ -1918,6 +1921,7 @@ fn flux2_admission_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
         // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
@@ -2585,6 +2589,7 @@ fn krea_base_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
@@ -3286,6 +3291,7 @@ fn sdxl_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
@@ -4226,6 +4232,7 @@ fn qwen_provider_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         // From the LOADED provider's own identity. The Qwen spec is not default-shaped —

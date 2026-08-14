@@ -9,7 +9,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "237725526b0fa1a64227a5a60871f0e8c23c9978";
+pub const INFERENCE_PIN: &str = "e58fb08dc6ef622e701ea3a9cb699e5be947593a";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";

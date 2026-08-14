@@ -1497,7 +1497,7 @@ pub(crate) fn resolve_weights_dir(
 }
 
 #[cfg(target_os = "macos")]
-fn resolved_mlx_artifact_tier(
+pub(super) fn resolved_mlx_artifact_tier(
     weights_dir: &Path,
     quant_bits: Option<i64>,
 ) -> Option<&'static str> {
@@ -1521,7 +1521,7 @@ fn fixed_artifact_tier_matches(
 /// supplied by a completed download receipt; local/converted identity is supplied only by the
 /// worker-owned install receipt. Request and manifest provenance fields are intentionally ignored.
 #[cfg(target_os = "macos")]
-fn resolved_mlx_artifact_provenance(
+pub(super) fn resolved_mlx_artifact_provenance(
     request: &ImageRequest,
     settings: &Settings,
     repo: &str,
@@ -4127,6 +4127,7 @@ mod candle_image_load_shape_tests {
                     component_precision_floors: &[],
                 },
             },
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: String::new(),
             load_shape: gen_core::LoadShape::DeferredMaterialization,
@@ -7057,7 +7058,10 @@ async fn generate_stream(
         .and_then(|mlx| mlx.get("calibrations"))
         .and_then(Value::as_array)
         .is_some_and(|calibrations| !calibrations.is_empty());
-    let resolved_artifact = if calibration_opt_in {
+    let quality_opt_in = crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
+        &request.model_manifest_entry,
+    );
+    let resolved_artifact = if calibration_opt_in || quality_opt_in {
         let effective_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
         resolved_mlx_artifact_provenance(
             request,
@@ -7082,6 +7086,10 @@ async fn generate_stream(
     // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
     // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
     spec = attach_selected_decoder(spec, engine_id, request, settings)?;
+    // P9: a shared engine such as `sdxl` serves several independently pinned catalog routes. Bind
+    // the exact resolved model id, independently resolved artifact tree, and running inference
+    // implementation before any semantic quality row reaches the provider contract.
+    spec = spec.with_resolved_route(request.model.clone());
     let plain_text_to_image = matches!(request.mode.as_str(), "image_generation" | "text_to_image")
         && identity_init.is_none()
         && edit_refs.is_empty()
@@ -7091,6 +7099,16 @@ async fn generate_stream(
     // Finalize the full load shape before exporting the encoder receipt: preparation covers every
     // configured File slot (PiD, adapters, named components) and the same spec then drives fit/load.
     spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let decode_quality_binding = crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
+        &request.model_manifest_entry,
+        &request.model,
+        resolved_artifact.as_ref(),
+    )?;
+    spec = crate::mlx_fit_gate::attach_decode_quality_binding(
+        spec,
+        decode_quality_binding,
+        &request.model,
+    );
     let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         engine_id,
         &request.model,
@@ -9635,6 +9653,7 @@ async fn generate_candle_stream(
         let load_shape = crate::vram_gate::krea_turbo_load_shape(turbo_fit)?;
         Some(gen_core::MemoryRunContext {
             selection,
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
             calibration_abi,
             calibration_fingerprint,
             load_shape,

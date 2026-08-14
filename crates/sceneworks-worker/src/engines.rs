@@ -1772,9 +1772,12 @@ mod tests {
     /// (InstantID, candle PuLID) never reach this helper: `mlx_model` returns `None` for them and the
     /// guard `continue`s first — exactly as the size check skips them.
     ///
-    /// The const VALUE agrees across backends for every family (sana/sensenova ÷32, sdxl/kolors ÷8,
-    /// the rest ÷16), so [`pinned_image_stride_pins_each_engines_lattice`] pins one expected value per
-    /// engine on both lanes. Only the const NAME diverges — an accepted precedent (cf. the video
+    /// The const VALUE agrees across backends for every family except SDXL and Kolors: MLX requires
+    /// ÷32 for their full U-Net shape while Candle keeps its ÷8 request lattice (sana/sensenova use
+    /// ÷32 and the remaining families use ÷16). [`pinned_image_stride_pins_each_engines_lattice`]
+    /// therefore pins SDXL and Kolors per backend and one shared expected value for every other
+    /// engine. Const NAME divergence remains an accepted
+    /// precedent (cf. the video
     /// `SIZE_MULTIPLE` vs `SIZE_ALIGN`): mlx spells sana/anima/boogu/ideogram/krea `RES_MULTIPLE` and
     /// sensenova `CELL`; candle spells those `SIZE_MULTIPLE` (sana/anima stay `RES_MULTIPLE`); lens is
     /// `VAE_SCALE_FACTOR` on both — so the mapping is compiled per backend.
@@ -2037,8 +2040,8 @@ mod tests {
     /// [`shipped_image_geometry_is_within_the_pinned_engine_envelope`]. That loop can only go RED when
     /// a SHIPPED bucket drifts off-lattice; this pins the lattice VALUES themselves, so a wrong mapping
     /// or a `runtime-*` pin bump that changes an engine const is RED even while every current bucket
-    /// stays on-stride (they all do — audited). Values are backend-agnostic (only the const NAME
-    /// diverges), so one table covers both lanes.
+    /// stays on-stride. Values are backend-agnostic except for SDXL and Kolors, whose MLX runtimes
+    /// enforce ÷32 while Candle retains ÷8.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -2046,14 +2049,18 @@ mod tests {
     #[test]
     fn pinned_image_stride_pins_each_engines_lattice() {
         // One representative engine id per family × the exact request-dimension multiple its PINNED
-        // engine enforces on BOTH backends. A const that drifts (or a mis-keyed arm) fails here.
+        // engine enforces. A const that drifts (or a mis-keyed arm) fails here.
+        #[cfg(target_os = "macos")]
+        const SDXL_KOLORS_STRIDE: u32 = 32;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        const SDXL_KOLORS_STRIDE: u32 = 8;
         let expected: &[(&str, u32)] = &[
             ("sana_1600m", 32),
             ("sana_sprint_1600m", 32),
             ("sensenova_u1_8b", 32),
             ("sensenova_u1_8b_fast", 32),
-            ("sdxl", 8),
-            ("kolors", 8),
+            ("sdxl", SDXL_KOLORS_STRIDE),
+            ("kolors", SDXL_KOLORS_STRIDE),
             ("sd3_5_large", 16),
             ("chroma1_hd", 16),
             ("flux1_dev", 16),

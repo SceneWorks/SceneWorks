@@ -1814,6 +1814,7 @@ mod tests {
                 parameters: Default::default(),
                 tier: tier(),
             },
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
             // sc-16590 hardened the handshake: with a calibration identity on the contract, the
             // context must match its abi, fingerprint, and load shape exactly or the provider
             // safety check rejects before generate.
