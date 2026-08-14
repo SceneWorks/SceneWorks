@@ -447,6 +447,93 @@ pub fn duration_limit_error(
     })
 }
 
+/// `limits.hardMinSteps` from a resolved manifest entry, or `None` for **no floor**.
+///
+/// The sampling-axis sibling of [`hard_min_duration`], added by sc-19426 because the catalog had no
+/// way to say "this engine REFUSES below N denoise steps" at all — the constraint could only be
+/// written as a manifest comment, which nothing reads.
+///
+/// MiniMax-H3 is the case that forced it. Its scheduler builds the sigma grid as
+/// `linspace(1, 0, steps)` — the terminal `0` is a **grid point**, not a sentinel appended
+/// afterwards — so `steps` points drive `steps - 1` model evaluations, and one point is a schedule
+/// with no evaluation in it. The reference raises
+/// ``"`set_timesteps` requires … `num_inference_steps` >= 2, got 1"`` rather than rendering anything
+/// (diffusers `MiniMaxH3Scheduler::set_timesteps`, `scheduling_minimax_h3.py`). A `steps: 1` request
+/// is therefore not a fast render there, it is an unrenderable one.
+///
+/// Absent ⇒ no floor, so every model that declares nothing is byte-identical to before this key had
+/// a reader — the same never-block-without-evidence posture [`hard_min_duration`] takes, and the
+/// same typo'd-manifest tolerance: a zero, negative, fractional or non-numeric floor is not a
+/// constraint anyone could satisfy, so it falls back to no floor rather than bricking the model.
+///
+/// ⚠️ A **declared** floor is not automatically a **read** one: this reads `as_u64`, so an authored
+/// `2.0` parses as a float and lands back on `None` even though JSON Schema's `integer` accepts it.
+/// `shipped_manifest_step_floors_admit_everything_they_advertise` compares the reader's answer
+/// against a transcription of the manifest bytes for exactly that reason.
+pub fn hard_min_steps(model_manifest_entry: &JsonObject) -> Option<u32> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("hardMinSteps"))
+        .and_then(Value::as_u64)
+        .filter(|floor| *floor > 0)
+        .and_then(|floor| u32::try_from(floor).ok())
+}
+
+/// The denoise step count a video payload actually renders at — `advanced.steps` as the caller named
+/// it — or `None` when they named none, in which case the engine picks and there is nothing to
+/// judge.
+///
+/// Deliberately reads the SAME two shapes, with the same width arithmetic, as the worker's own
+/// `video_jobs::wan::advanced_opt_u32` — a JSON number or a numeric string, narrowed with `as u32`.
+/// A gate that reads fewer shapes than the consumer is a gate with a hole: `"steps": "1"` would slip
+/// past a number-only gate and still reach the engine as 1, and `steps: 4294967297` would slip past
+/// a checked-conversion gate and reach it as 1 as well, which is the exact value the floor exists to
+/// refuse. Pinned by `requested_steps_reads_every_shape_the_worker_reads`.
+///
+/// Unlike [`resolve_duration`] / [`resolve_fps`] this does **not** fall back to `defaults.steps`.
+/// Those two resolve because the API serializes a value for them whether or not the caller named
+/// one, so the gate had to judge the resolved value or it would reject payloads the route built
+/// itself (sc-12400). `advanced` is a verbatim passthrough map with no blanket step count, so an
+/// omitted `steps` really is "the engine's own default" and inventing one here would gate a value
+/// nobody sends. That the shipped `defaults.steps` clears the shipped floor is a MANIFEST invariant,
+/// asserted against the real bytes rather than papered over at runtime.
+pub fn requested_steps(advanced: &JsonObject) -> Option<u32> {
+    advanced.get("steps").and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|steps: u64| steps as u32)
+    })
+}
+
+/// The actionable rejection for a `steps` count under the model's declared [`hard_min_steps`], or
+/// `None` to admit. The pure decision, so both enqueue gates assert on one message (sc-19426).
+///
+/// **Reject, never clamp**, for [`duration_limit_error`]'s reason: quietly raising a 1-step request
+/// to 2 doubles the compute the caller asked for with no error and no signal, which is the same
+/// silent-coercion class as the 848→832 dimension rewrite (sc-11993 / sc-12294) and as delivering
+/// 14.375 s for a 15 s request (sc-17147). It also matches the engine's own posture — the reference
+/// raises rather than rounding up.
+///
+/// Message follows the house convention (`mlx_fit_gate::too_big_error`): name the model, state what
+/// was asked and what the floor is, and give the lever. Pinned by
+/// `steps_limit_error_names_the_model_the_request_and_the_floor`.
+pub fn steps_limit_error(
+    model: &str,
+    steps: u32,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    let floor = hard_min_steps(model_manifest_entry)?;
+    (steps < floor).then(|| {
+        format!(
+            "{model} renders with at least {floor} sampling steps, but this request asks for \
+             {steps}. Raise the step count to {floor} or more, or choose a model that renders in \
+             fewer steps."
+        )
+    })
+}
+
 /// The clip length used when neither the caller nor the model's manifest entry names one — the
 /// historical blanket, kept for models that declare no `defaults.duration`.
 const DEFAULT_DURATION: f32 = 6.0;
@@ -2109,6 +2196,118 @@ mod tests {
         }
     }
 
+    /// Each shipped video model's declared `limits.hardMinSteps`, TRANSCRIBED from the manifest —
+    /// deliberately independent of [`hard_min_steps`], the function under test, exactly as
+    /// [`DURATION_FLOORS`] is of [`hard_min_duration`].
+    ///
+    /// `None` is the load-bearing half, and it is a SURVEY RESULT rather than a default: sc-19426
+    /// read every video engine's schedule construction at the pinned inference rev `014134e3`
+    /// looking for a step count below which it errors or builds an unusable schedule. What it found:
+    ///
+    /// * **Every** engine shares gen-core's `steps == 0` rejection (`generator.rs`, "steps must be
+    ///   >= 1"), so 1 is the universal floor and declaring `hardMinSteps: 1` would be a no-op.
+    /// * Wan / Bernini / SCAIL-2 / Krea-Realtime / SVD all build a structurally valid grid at a
+    ///   single step — SVD's Karras ramp even branches on `n == 1` deliberately — so a floor there
+    ///   would invent a constraint their engines do not have.
+    /// * MiniMax-H3 is the one family whose scheduler REFUSES below 2.
+    ///
+    /// ⚠️ **LTX is a floor-shaped hole this key cannot fill, not a clean `None`.** `candle-gen-ltx`
+    /// runs a baked 8-step distilled schedule and rejects any `steps` that is not exactly
+    /// `NATIVE_STEPS` (8) — an EXACT-VALUE constraint, so `hardMinSteps: 8` would express half of it
+    /// and wrongly admit 30 — while `mlx-gen-ltx` never reads `req.steps` at all and silently
+    /// ignores whatever arrives. Two lanes, one manifest entry, two behaviours; expressing it needs a
+    /// per-lane allowed-set key rather than a floor. Tracked as sc-19502, deliberately NOT smuggled
+    /// in here.
+    const STEP_FLOORS: &[(&str, Option<u32>)] = &[
+        ("ltx_2_3", None),
+        ("ltx_2_3_eros", None),
+        ("svd", None),
+        ("wan_2_2", None),
+        ("wan_2_2_t2v_14b", None),
+        ("wan_2_2_i2v_14b", None),
+        ("wan_2_2_vace_fun_14b", None),
+        ("bernini", None),
+        ("scail2_14b", None),
+        ("krea_realtime_14b", None),
+        // The sigma grid is `linspace(1, 0, steps)` with the terminal 0 INCLUDED, so `steps` points
+        // drive `steps - 1` model evaluations and one point is a schedule with no evaluation in it.
+        // The reference raises rather than rendering (sc-19426).
+        ("minimax_h3", Some(2)),
+        ("minimax_h3_ref", Some(2)),
+    ];
+
+    /// sc-19426 — the step-floor twin of
+    /// `shipped_manifest_duration_floors_admit_everything_they_advertise`, and the test that makes
+    /// `limits.hardMinSteps` a live constraint on the REAL manifest bytes rather than a schema entry
+    /// nothing exercises.
+    ///
+    /// Same four-part skeleton: core reads exactly what is declared (including "nothing"), the
+    /// model's own shipped default is admitted, the floor actually refuses something, and the
+    /// refusal names the model.
+    #[test]
+    fn shipped_manifest_step_floors_admit_everything_they_advertise() {
+        let models = builtin_video_models();
+        assert_eq!(
+            models.len(),
+            STEP_FLOORS.len(),
+            "a video model was added/removed; decide whether its engine REFUSES below a step count \
+             or samples happily at one step, and add it to STEP_FLOORS — an undeclared floor is \
+             silently NO floor"
+        );
+
+        for (id, want_floor) in STEP_FLOORS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+
+            // 1. Core reads exactly what the manifest declares — including "nothing". This is the
+            //    half that catches an authored `2.0`, which JSON Schema's `integer` admits and
+            //    `as_u64` does not, i.e. a declaration with no reader.
+            assert_eq!(hard_min_steps(entry), *want_floor, "{id}: hard min steps");
+
+            let declared_default = entry
+                .get("defaults")
+                .and_then(Value::as_object)
+                .and_then(|defaults| defaults.get("steps"))
+                .and_then(Value::as_u64)
+                .map(|steps| steps as u32);
+
+            let Some(floor) = want_floor else {
+                // A model with no floor admits everything, including the degenerate single step.
+                assert_eq!(steps_limit_error(id, 1, entry), None, "{id}: no floor");
+                continue;
+            };
+
+            // 2. FIXED POINT: the model's own shipped `defaults.steps` — the value the studio puts
+            //    in the form and therefore the likeliest number to arrive — must be admitted, or
+            //    the gate would refuse a request the app itself composed (the sc-12400 class).
+            let default_steps = declared_default.unwrap_or_else(|| {
+                panic!("{id} declares a step floor, so it must declare a default step count")
+            });
+            assert_eq!(
+                steps_limit_error(id, default_steps, entry),
+                None,
+                "{id} defaults to {default_steps} steps; its own floor must admit that"
+            );
+            // …and at the floor admits too: the bound is `<`, like every other bound here.
+            assert_eq!(steps_limit_error(id, *floor, entry), None, "{id}: at-floor");
+
+            // 3. MUTATION CHECK: the floor actually refuses something, and names the model.
+            let under = floor - 1;
+            let message = steps_limit_error(id, under, entry).unwrap_or_else(|| {
+                panic!("{id}: {under} steps is under the {floor}-step floor and must be rejected")
+            });
+            assert!(message.contains(id), "{id}: names the model: {message}");
+            assert!(
+                message.contains("Raise"),
+                "{id}: gives the lever: {message}"
+            );
+        }
+    }
+
     /// sc-17158 — the two partitions are ONE model geometrically and TWO models in what they
     /// condition on. Both halves are asserted here so a future edit cannot drift them apart in the
     /// first sense or collapse them in the second.
@@ -2134,6 +2333,10 @@ mod tests {
             "hardMinDuration",
             "hardMaxDuration",
             "recommendedMaxDuration",
+            // One scheduler ⇒ one step floor (sc-19426). It rides here rather than in its own test
+            // for the same reason the duration bounds do: the two partitions differ only in what
+            // they condition on.
+            "hardMinSteps",
             "fps",
             "maxPixels",
             "resolutions",
@@ -2303,6 +2506,124 @@ mod tests {
         let floor_only = payload(json!({ "limits": { "hardMinDuration": 5.1667 } }));
         assert!(duration_limit_error("floor_only", 3.0, &floor_only).is_some());
         assert_eq!(duration_limit_error("floor_only", 30.0, &floor_only), None);
+    }
+
+    /// sc-19426 — the step floor's message, held to the same house convention as the duration
+    /// bounds': name the model, state what was asked and what the limit is, and give the lever.
+    ///
+    /// The floor is deliberately 4 rather than MiniMax-H3's shipped 2, so every assertion below is
+    /// on a number that appears nowhere else in the entry — a message built from the wrong field
+    /// cannot coincidentally satisfy it.
+    #[test]
+    fn steps_limit_error_names_the_model_the_request_and_the_floor() {
+        let turbo = payload(json!({ "limits": { "hardMinSteps": 4 } }));
+        let message =
+            steps_limit_error("minimax_h3_turbo", 1, &turbo).expect("1 is under the 4-step floor");
+        assert!(
+            message.contains("minimax_h3_turbo"),
+            "names the model: {message}"
+        );
+        assert!(
+            message.contains("at least 4 sampling steps"),
+            "states the floor: {message}"
+        );
+        assert!(
+            message.contains("asks for 1."),
+            "states what was asked: {message}"
+        );
+        assert!(message.contains("Raise"), "gives the lever: {message}");
+
+        // At the floor admits (`<`, matching every other bound in this module being strict), and
+        // there is no ceiling arm to swallow it — a large count is somebody's slow render, not an
+        // error.
+        assert_eq!(steps_limit_error("minimax_h3_turbo", 4, &turbo), None);
+        assert_eq!(steps_limit_error("minimax_h3_turbo", 500, &turbo), None);
+        // …and it refuses, never clamps: the caller gets a message, not a rewritten step count.
+        assert!(steps_limit_error("minimax_h3_turbo", 3, &turbo).is_some());
+    }
+
+    /// The infallibility contract [`hard_min_duration`] holds to, applied to the step floor: an
+    /// absent or unhonorable value is NO floor, so every video model that declares nothing — all ten
+    /// of them before sc-19426 — is byte-for-byte unchanged.
+    #[test]
+    fn absent_or_unhonorable_hard_min_steps_means_no_floor() {
+        let bare = payload(json!({}));
+        assert_eq!(hard_min_steps(&bare), None);
+        assert_eq!(steps_limit_error("bernini", 1, &bare), None);
+
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(2.5),
+            // An authored `2.0` is an `integer` to JSON Schema and a float to serde — so it reads as
+            // NO floor, which is why the shipped-manifest test transcribes the bytes.
+            json!(2.0),
+            json!("2"),
+            json!(null),
+            json!(u64::from(u32::MAX) + 1),
+        ] {
+            let entry = payload(json!({ "limits": { "hardMinSteps": bad } }));
+            assert_eq!(hard_min_steps(&entry), None, "unhonorable floor {bad}");
+            assert_eq!(
+                steps_limit_error("some_model", 1, &entry),
+                None,
+                "an unhonorable floor must not brick the model: {bad}"
+            );
+        }
+
+        // The two hard floors are independent: declaring one must not conjure the other.
+        let duration_only = payload(json!({ "limits": { "hardMinDuration": 5.1667 } }));
+        assert_eq!(hard_min_steps(&duration_only), None);
+        let steps_only = payload(json!({ "limits": { "hardMinSteps": 2 } }));
+        assert_eq!(hard_min_duration(&steps_only), None);
+        assert_eq!(duration_limit_error("steps_only", 0.5, &steps_only), None);
+        assert!(steps_limit_error("steps_only", 1, &steps_only).is_some());
+    }
+
+    /// sc-19426 — the gate must read every shape the CONSUMER reads, or it is a gate with a hole.
+    ///
+    /// `video_jobs::wan::advanced_opt_u32` is what the adapters call to turn `advanced.steps` into
+    /// the number handed to an engine. It accepts a JSON number *or* a numeric string and narrows
+    /// with `as u32`. Both quirks are load-bearing here: `"1"` reaches the engine as 1, and
+    /// `4294967297` WRAPS to 1 — so a gate that read only `as_u64`, or that used a checked
+    /// conversion, would admit two payloads that arrive at the engine as exactly the value the floor
+    /// exists to refuse.
+    #[test]
+    fn requested_steps_reads_every_shape_the_worker_reads() {
+        let advanced = |value: Value| {
+            let mut map = JsonObject::new();
+            map.insert("steps".to_owned(), value);
+            map
+        };
+
+        assert_eq!(requested_steps(&advanced(json!(20))), Some(20));
+        assert_eq!(requested_steps(&advanced(json!("20"))), Some(20));
+        assert_eq!(requested_steps(&advanced(json!(" 20 "))), Some(20));
+        // The wrapping narrow, mirrored from `advanced_opt_u32`.
+        assert_eq!(
+            requested_steps(&advanced(json!(u64::from(u32::MAX) + 2))),
+            Some(1)
+        );
+        // Nothing the worker cannot read is a value this gate may invent.
+        assert_eq!(requested_steps(&JsonObject::new()), None);
+        for unreadable in [json!(null), json!("many"), json!(-4), json!(true)] {
+            assert_eq!(
+                requested_steps(&advanced(unreadable.clone())),
+                None,
+                "unreadable steps {unreadable}"
+            );
+        }
+
+        // …and the floor is applied to the value the worker would have passed down, not to the raw
+        // JSON: both of these reach an engine as 1.
+        let h3 = payload(json!({ "limits": { "hardMinSteps": 2 } }));
+        for wire in [json!("1"), json!(u64::from(u32::MAX) + 2)] {
+            let steps = requested_steps(&advanced(wire.clone())).expect("readable");
+            assert!(
+                steps_limit_error("minimax_h3", steps, &h3).is_some(),
+                "{wire} arrives at the engine as {steps} and must be refused"
+            );
+        }
     }
 
     /// The house message convention (`mlx_fit_gate::too_big_error_names_model_budget_and_optional_staged`):

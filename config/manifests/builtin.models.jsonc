@@ -13159,6 +13159,13 @@
         // the default canvas is already two hours. Recommending a shorter scalar would falsely
         // imply long clips are infeasible everywhere (sc-17152).
         "recommendedMaxDuration": 14.375,
+        // The scheduler's sigma grid is `linspace(1, 0, num_inference_steps)` and the terminal 0 is
+        // a GRID POINT, not a sentinel appended afterwards — so N steps drive N-1 model evaluations
+        // and a single point is a schedule with nothing between its ends. `set_timesteps` raises
+        // "`num_inference_steps` >= 2, got 1" (diffusers `MiniMaxH3Scheduler`), so 1 step is not a
+        // fast draft here, it is unrenderable, and it is REFUSED rather than quietly raised to 2 —
+        // the same reject-never-clamp posture the duration bounds take (sc-19426).
+        "hardMinSteps": 2,
         // One cadence. The lattice, the duration window and every measured render are 24 fps.
         "fps": [24],
         // `CANVAS_MAX_PIXELS` = 1,032,192 = 768 x 1344, and it is ENFORCED as an AREA budget. It had
@@ -13395,6 +13402,8 @@
         "hardMinDuration": 5.1667,
         "hardMaxDuration": 14.375,
         "recommendedMaxDuration": 14.375,
+        // Same scheduler, same two-grid-point floor as `minimax_h3` — see that entry (sc-19426).
+        "hardMinSteps": 2,
         "fps": [24],
         "maxPixels": 1032192,
         "resolutions": ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],

@@ -768,6 +768,95 @@ fn video_preflight_refuses_an_fps_the_model_does_not_advertise() {
     );
 }
 
+/// sc-19426: the same backstop on the SAMPLING axis — refuses a step count under the model's
+/// declared `limits.hardMinSteps`, and admits a payload that names no step count at all.
+///
+/// Kills the same class of mutation: deleting the `steps_limit_error` call from `video_preflight`
+/// leaves every core test green, because the core function is still correct — just not CALLED.
+///
+/// Ungated for the same reason as the two above: no other gate on any lane looks at steps, so this
+/// is the whole backstop rather than a nicety.
+#[test]
+fn video_preflight_refuses_a_step_count_under_the_models_declared_floor() {
+    let h3_entry = json!({
+        "limits": {
+            "durations": [5.1667], "hardMinDuration": 5.1667, "hardMaxDuration": 14.375,
+            "hardMinSteps": 2, "fps": [24]
+        },
+        "defaults": { "duration": 5.1667, "fps": 24, "steps": 50 }
+    });
+
+    // The story's shape: a request the other three gates ALL admit — 5.1667s is exactly the
+    // duration floor, 24 fps is the model's one advertised cadence, no references — that still
+    // hands the scheduler a one-point sigma grid it cannot build a single evaluation from.
+    let one_step = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video", "prompt": "p",
+        "duration": 5.1667, "fps": 24, "advanced": { "steps": 1 },
+        "modelManifestEntry": h3_entry
+    }));
+    assert_eq!(
+        duration_limit_error(
+            &one_step.model,
+            one_step.duration,
+            &one_step.model_manifest_entry
+        ),
+        None,
+        "the duration bounds ADMIT this request — it is exactly the shortest legal clip"
+    );
+    assert_eq!(
+        fps_limit_error(
+            &one_step.model,
+            one_step.fps,
+            &one_step.model_manifest_entry
+        ),
+        None,
+        "…and 24 is the only rate it advertises"
+    );
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&one_step) else {
+        panic!("1 step on a model with a 2-step floor must be refused before the load");
+    };
+    assert!(message.contains("minimax_h3"), "names the model: {message}");
+    assert!(
+        message.contains("at least 2 sampling steps"),
+        "states the floor: {message}"
+    );
+    assert!(
+        message.contains("asks for 1."),
+        "states what was asked: {message}"
+    );
+
+    // The model's own shipped default admits — 50 steps must still run, or the gate has bricked
+    // the model it was added for.
+    let default_steps = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video", "prompt": "p",
+        "duration": 5.1667, "fps": 24, "advanced": { "steps": 50 },
+        "modelManifestEntry": h3_entry
+    }));
+    assert!(video_preflight(&default_steps).is_ok(), "50 is the default");
+
+    // A payload naming NO steps must be ADMITTED. `advanced` is a verbatim passthrough map with no
+    // blanket step count, so an omitted `steps` means "the engine picks" — inventing one here would
+    // refuse ordinary jobs, which is the regression the fps gate above nearly shipped.
+    let no_steps = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video", "prompt": "p",
+        "duration": 5.1667, "fps": 24, "modelManifestEntry": h3_entry
+    }));
+    assert!(
+        video_preflight(&no_steps).is_ok(),
+        "a steps-less payload must not be refused by the floor"
+    );
+
+    // A job carrying no manifest entry is UNCONSTRAINED — never block without a declared floor.
+    let no_entry = request(json!({
+        "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+        "advanced": { "steps": 1 }
+    }));
+    assert!(
+        video_preflight(&no_entry).is_ok(),
+        "no floor declared => no floor"
+    );
+}
+
 // -----------------------------------------------------------------------------------------
 // Mochi 1 (epic 1788 / sc-11992). These sit on the SUPERSET cfg because the tier resolver, the
 // stride and the on-demand fetches are SHARED by both lanes (one repo, both backends) — so they
