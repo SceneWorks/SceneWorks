@@ -2124,6 +2124,153 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
   });
 });
 
+describe("ImageStudio alternate decoder capability hydration (sc-18315)", () => {
+  let container;
+  let root;
+
+  const DECODER_ID = "wan_2_1_vae";
+  const DECODER_MODEL = {
+    ...Z_IMAGE,
+    id: "krea_2_turbo",
+    name: "Krea 2 Turbo",
+    decoders: {
+      byBackend: {
+        candle: [],
+        mlx: [
+          {
+            id: DECODER_ID,
+            label: "Wan 2.1 VAE",
+            available: true,
+            estimatedSizeBytes: 335544320,
+          },
+        ],
+      },
+    },
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("preserves a saved MLX decoder while capabilities are delayed, then restores and submits it", async () => {
+    const storageKey = "sceneworks-studio-image-project_1";
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify({ model: DECODER_MODEL.id, decoder: DECODER_ID }),
+    );
+    const createImageJob = vi.fn(async () => ({ id: "job-decoder" }));
+    const pendingContext = baseContext({
+      createImageJob,
+      imageModels: [DECODER_MODEL],
+      models: [DECODER_MODEL],
+      macCapabilities: { macGatingActive: false, platform: "" },
+      macCapabilitiesAuthoritative: false,
+      preferencesHydrated: true,
+    });
+
+    await render(pendingContext);
+
+    // The inert startup fallback is not Candle evidence: do not reconcile or persist the
+    // restored MLX-only selection, and do not let a request silently omit it.
+    expect(document.body.querySelector(".alternate-decoder-select")).toBeFalsy();
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+    const generate = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate",
+    );
+    expect(generate.disabled).toBe(true);
+    await act(async () => {
+      document.body.querySelector(".studio-shell").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(createImageJob).not.toHaveBeenCalled();
+
+    await render({
+      ...pendingContext,
+      macCapabilities: { macGatingActive: true, platform: "macos" },
+      macCapabilitiesAuthoritative: true,
+    });
+    await click(document.body.querySelector(".advanced-section-toggle"));
+
+    const decoder = document.body.querySelector(".alternate-decoder-select select");
+    expect(decoder).toBeTruthy();
+    expect(decoder.value).toBe(DECODER_ID);
+    expect(generate.disabled).toBe(false);
+    await click(generate);
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced.decoder).toBe(DECODER_ID);
+  });
+
+  it("keeps a failed capability load recoverable without silently dropping the saved decoder", async () => {
+    const storageKey = "sceneworks-studio-image-project_1";
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify({ model: DECODER_MODEL.id, decoder: DECODER_ID }),
+    );
+    const createImageJob = vi.fn(async () => ({ id: "job-native" }));
+    const refreshMacCapabilities = vi.fn(async () => false);
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [DECODER_MODEL],
+        models: [DECODER_MODEL],
+        macCapabilities: { macGatingActive: false, platform: "" },
+        macCapabilitiesAuthoritative: false,
+        macCapabilitiesError: "Could not load engine capabilities: API offline",
+        macCapabilitiesLoading: false,
+        refreshMacCapabilities,
+        preferencesHydrated: true,
+      }),
+    );
+
+    const recovery = document.body.querySelector(".decoder-capability-recovery");
+    expect(recovery).toBeTruthy();
+    expect(recovery.textContent).toContain("API offline");
+    expect(recovery.textContent).toContain("restored decoder has not been changed");
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+
+    await click(
+      [...recovery.querySelectorAll("button")].find((button) => button.textContent === "Retry"),
+    );
+    expect(refreshMacCapabilities).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+
+    await click(
+      [...recovery.querySelectorAll("button")].find(
+        (button) => button.textContent === "Use Native VAE",
+      ),
+    );
+    expect(document.body.querySelector(".decoder-capability-recovery")).toBeFalsy();
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe("native");
+
+    const generate = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate",
+    );
+    expect(generate.disabled).toBe(false);
+    await click(generate);
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("decoder");
+  });
+});
+
 describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-10195)", () => {
   let container;
   let root;

@@ -5460,13 +5460,13 @@ mod tests {
     fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerator {
         RequestGenerator {
             descriptor: gen_core::ModelDescriptor {
-                denoiser_output_latent_space: None,
                 id: "mage_flow",
                 family: "test",
                 backend: "mlx",
                 modality: gen_core::Modality::Image,
                 capabilities: gen_core::Capabilities::default(),
                 encoder_contract: None,
+                denoiser_output_latent_space: None,
                 required_components: &[],
                 control_kinds: None,
             },
@@ -6047,13 +6047,13 @@ mod tests {
             .collect();
         RequestGenerator {
             descriptor: gen_core::ModelDescriptor {
-                denoiser_output_latent_space: None,
                 id: "fixture_provider",
                 family: "test",
                 backend: "mlx",
                 modality: gen_core::Modality::Image,
                 capabilities: gen_core::Capabilities::default(),
                 encoder_contract: None,
+                denoiser_output_latent_space: None,
                 required_components: &[],
                 control_kinds: None,
             },
@@ -6752,13 +6752,13 @@ mod tests {
         fn generator(contract: MemoryProviderContract) -> RequestGenerator {
             RequestGenerator {
                 descriptor: gen_core::ModelDescriptor {
-                    denoiser_output_latent_space: None,
                     id: "krea_2_turbo",
                     family: "krea",
                     backend: "mlx",
                     modality: gen_core::Modality::Image,
                     capabilities: gen_core::Capabilities::default(),
                     encoder_contract: None,
+                    denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
                 },
@@ -6902,13 +6902,13 @@ mod tests {
         fn generator(contract: MemoryProviderContract) -> RequestGenerator {
             RequestGenerator {
                 descriptor: gen_core::ModelDescriptor {
-                    denoiser_output_latent_space: None,
                     id: "sdxl",
                     family: "sdxl",
                     backend: "mlx",
                     modality: gen_core::Modality::Image,
                     capabilities: gen_core::Capabilities::default(),
                     encoder_contract: None,
+                    denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
                 },

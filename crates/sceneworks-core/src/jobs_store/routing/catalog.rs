@@ -948,7 +948,6 @@ pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"]
 
 /// Test oracle for whether the generated provider facts contain at least one MLX route for a
 /// family. It does not authorize a request without an exact source-shaped provider match.
-#[cfg(test)]
 pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
     imported_provider_routes("mlx", family).next().is_some()
 }

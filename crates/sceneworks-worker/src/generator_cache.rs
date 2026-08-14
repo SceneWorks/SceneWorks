@@ -2079,13 +2079,13 @@ mod tests {
 
     fn stub_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "sc3724_stub",
             family: "test",
             backend: "stub",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }

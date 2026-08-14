@@ -227,12 +227,13 @@ async fn generate_krea_edit_stream(
     let adapter_count = adapters.len();
     // Raw → `krea_2_edit` (full-CFG); Turbo → `krea_2_turbo_edit` (CFG-free distilled, sc-11640).
     let engine_id = krea_edit_engine_id(&request.model);
-    let spec = attach_manifest_text_encoder(
+    let spec = attach_selected_decoder(
         load_spec(weights_dir, quant, adapters, None),
         engine_id,
         request,
         settings,
     )?;
+    let spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
     // applied to the edit lane's POSITIVE grounded context by the engine (inference sc-12009).
     let text_style_gain = resolve_text_style_gain(request);

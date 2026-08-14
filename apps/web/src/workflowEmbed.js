@@ -107,7 +107,7 @@ const L_LORAS = "LoRA names, weights, Hugging Face repo ids and exact content ha
 const L_SETTINGS =
   "the shared generation settings (sampler, scheduler, steps, guidance, strength and the other numeric knobs)";
 const L_PASSES =
-  "which optional passes ran — caption upsampling, the PiD decoder and its tier, face restoration — and the control type";
+  "which optional passes ran — caption upsampling, the PiD or alternate decoder and PiD tier, face restoration — and the control type";
 const L_ANGLE = "the head angle or turnaround the run asked for";
 const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
@@ -173,6 +173,7 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.imageGuidanceScale", L_SETTINGS],
   ["advanced.enhancePrompt", L_PASSES],
   ["advanced.usePid", L_PASSES],
+  ["advanced.decoder", L_PASSES],
   ["advanced.pidTarget", L_PASSES],
   ["advanced.faceRestore", L_PASSES],
   ["advanced.controlMode", L_PASSES],

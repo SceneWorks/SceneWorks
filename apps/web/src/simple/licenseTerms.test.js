@@ -70,6 +70,23 @@ describe("modelLicenseRows", () => {
     expect(fluxDev.badge.label).toBe("Non-commercial");
   });
 
+  it("surfaces the alternate decoder terms for every compatible catalog product", () => {
+    const decoder = bundledLicenses.find((component) => component.id === "wan2_1_t2v_14b_diffusers");
+    expect(decoder?.models).toEqual([]);
+    expect(decoder?.appliesToModels).toEqual([
+      "krea_2_turbo",
+      "krea_2_raw",
+      "qwen_image",
+      "qwen_image_edit_2511",
+      "qwen_image_edit_2511_lightning",
+    ]);
+
+    const decoderRow = modelLicenseRows(bundledLicenses).find(
+      (row) => row.id === "wan2_1_t2v_14b_diffusers",
+    );
+    expect(decoderRow?.license).toBe("Apache-2.0");
+  });
+
   it("tolerates an empty or absent corpus", () => {
     expect(modelLicenseRows([])).toEqual([]);
     expect(modelLicenseRows(undefined)).toEqual([]);

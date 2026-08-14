@@ -4887,7 +4887,298 @@ fn apply_model_catalog_entry(
     // diverges by backend and never fully collapses. Additive: a model the generated table does not
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
     sceneworks_core::preview_support::apply_to_model_entry(object);
+    sceneworks_core::decoder_support::apply_to_model_entry(object);
+    apply_decoder_availability(object, data_dir);
     Ok(model)
+}
+
+/// Give a provider-aliased model row the canonical provider's exact optional decoder donors.
+///
+/// Imported Krea entries intentionally carry `downloads: []`: their primary DiT is an in-place user
+/// file, not a downloadable model. Decoder eligibility is nevertheless provider-derived, and the
+/// selected decoder must resolve the same pinned standalone VAE as the builtin Turbo provider. Clone
+/// only soft co-requisites whose component ids occur in the provider's generated decoder facts;
+/// primary downloads and unrelated components (including text encoders) are never inherited.
+fn inherit_provider_decoder_downloads(model: &mut Value, builtin_models: &[Value]) {
+    let Some(object) = model.as_object() else {
+        return;
+    };
+    let Some(model_id) = object.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(provider_id) =
+        sceneworks_core::decoder_support::provider_id_for_backend(object, "mlx")
+    else {
+        return;
+    };
+    if provider_id == model_id {
+        return;
+    }
+    let component_ids = sceneworks_core::decoder_support::component_ids_for_backend(object, "mlx");
+    if component_ids.is_empty() {
+        return;
+    }
+    let Some(provider) = builtin_models.iter().find(|candidate| {
+        candidate.get("id").and_then(Value::as_str) == Some(provider_id.as_str())
+    }) else {
+        return;
+    };
+    let inherited = provider
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| {
+            download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                && download.get("required").and_then(Value::as_str) == Some("soft")
+                && download
+                    .get("componentId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|component_id| {
+                        component_ids
+                            .iter()
+                            .any(|expected| expected == component_id)
+                    })
+                && download
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .is_some_and(|revision| {
+                        revision.len() == 40
+                            && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                && download
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .is_some_and(|repo| !repo.trim().is_empty())
+                && download
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .is_some_and(|files| !files.is_empty())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if inherited.is_empty() {
+        return;
+    }
+
+    let object = model.as_object_mut().expect("checked object above");
+    let existing = object
+        .remove("downloads")
+        .and_then(|downloads| downloads.as_array().cloned())
+        .unwrap_or_default();
+    // Canonical rows lead so both the API availability probe and the worker's exact component
+    // resolver bind the generated decoder id to the provider's source even if a user manifest
+    // happens to contain another soft component with the generic `vae` id.
+    let mut downloads = inherited.clone();
+    downloads.extend(
+        existing
+            .into_iter()
+            .filter(|download| !inherited.iter().any(|canonical| canonical == download)),
+    );
+    object.insert("downloads".to_owned(), Value::Array(downloads));
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OptionalComponentAvailability {
+    installed: bool,
+    estimated_size_bytes: Option<u64>,
+}
+
+/// Enrich descriptor-derived decoder options with the local state of their pinned, soft
+/// co-requisite. Eligibility comes exclusively from engine facts; this function answers only whether
+/// the declared standalone component is present. A full Wan model install is neither consulted nor
+/// implied.
+fn apply_decoder_availability(object: &mut JsonObject, data_dir: &FsPath) {
+    let mut components: std::collections::BTreeMap<String, OptionalComponentAvailability> =
+        std::collections::BTreeMap::new();
+    for download in object
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if download.get("coRequisite").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let Some(component_id) = download.get("componentId").and_then(Value::as_str) else {
+            continue;
+        };
+        let installed = pinned_component_download_installed(download, data_dir);
+        let size = download
+            .get("estimatedSizeBytes")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                download
+                    .get("footprint")
+                    .and_then(|footprint| footprint.get("diskSizeBytes"))
+                    .and_then(Value::as_u64)
+            });
+        // The provider-inheritance seam prepends its canonical exact row. First declaration wins so
+        // a later user-authored soft `vae` row cannot make the Wan option appear installed or divert
+        // the worker to a different file.
+        components
+            .entry(component_id.to_owned())
+            .or_insert(OptionalComponentAvailability {
+                installed,
+                estimated_size_bytes: size,
+            });
+    }
+
+    let Some(by_backend) = object
+        .get_mut(sceneworks_core::decoder_support::DECODERS_FIELD)
+        .and_then(Value::as_object_mut)
+        .and_then(|decoders| {
+            decoders
+                .get_mut(sceneworks_core::decoder_support::BY_BACKEND_FIELD)
+                .and_then(Value::as_object_mut)
+        })
+    else {
+        return;
+    };
+    for options in by_backend.values_mut().filter_map(Value::as_array_mut) {
+        for option in options.iter_mut().filter_map(Value::as_object_mut) {
+            let state = option
+                .get("componentId")
+                .and_then(Value::as_str)
+                .and_then(|id| components.get(id))
+                .copied()
+                .unwrap_or_default();
+            option.insert("available".to_owned(), Value::Bool(state.installed));
+            if let Some(bytes) = state.estimated_size_bytes {
+                option.insert("estimatedSizeBytes".to_owned(), Value::from(bytes));
+            }
+        }
+    }
+}
+
+fn pinned_component_download_installed(download: &Value, data_dir: &FsPath) -> bool {
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return false;
+    };
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let files = string_array_field(download, "files");
+    if files.is_empty() {
+        return false;
+    }
+    let Some(repo_cache) = huggingface_repo_cache_path(data_dir, repo) else {
+        return false;
+    };
+    let snapshot = repo_cache.join("snapshots").join(revision);
+    files
+        .iter()
+        .all(|pattern| snapshot_contains_pattern(&snapshot, pattern))
+}
+
+#[cfg(test)]
+mod decoder_availability_tests {
+    use super::*;
+    use crate::tests::support::isolate_hf_cache;
+
+    fn model() -> Value {
+        json!({
+            "id": "qwen_image",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": "SceneWorks/krea-realtime-14b-mlx",
+                "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+                "coRequisite": true,
+                "required": "soft",
+                "componentId": "vae",
+                "files": ["q4/vae.safetensors"],
+                "estimatedSizeBytes": 507591212
+            }],
+            "decoders": { "byBackend": { "mlx": [{
+                "id": "wan_2_1_vae", "componentId": "vae", "experimental": true
+            }] } }
+        })
+    }
+
+    fn donor_download() -> Value {
+        model()["downloads"][0].clone()
+    }
+
+    #[test]
+    fn option_is_available_only_at_the_declared_pinned_single_file() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let mut model = model();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        assert_eq!(model["decoders"]["byBackend"]["mlx"][0]["available"], false);
+
+        let repo_cache =
+            huggingface_repo_cache_path(data.path(), "SceneWorks/krea-realtime-14b-mlx").unwrap();
+        let wrong = repo_cache.join("snapshots/0000000000000000000000000000000000000000/q4");
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join("vae.safetensors"), b"stale donor").unwrap();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        assert_eq!(model["decoders"]["byBackend"]["mlx"][0]["available"], false);
+
+        let exact = repo_cache.join("snapshots/e68e9a3d98187fdf6936838ffcf6df5aa48d6626/q4");
+        std::fs::create_dir_all(&exact).unwrap();
+        std::fs::write(exact.join("vae.safetensors"), b"pinned donor").unwrap();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        let option = &model["decoders"]["byBackend"]["mlx"][0];
+        assert_eq!(option["available"], true);
+        assert_eq!(option["estimatedSizeBytes"], 507591212_u64);
+    }
+
+    #[test]
+    fn imported_krea_alias_inherits_exact_provider_donor_and_fails_closed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let builtin = vec![json!({
+            "id": "krea_2_turbo",
+            "downloads": [donor_download()]
+        })];
+        let mut imported = json!({
+            "id": "user_kreamania_variant5",
+            "name": "Kreamania Variant 5",
+            "type": "image",
+            "family": "krea_2",
+            "downloads": []
+        });
+
+        inherit_provider_decoder_downloads(&mut imported, &builtin);
+        let donor = &imported["downloads"][0];
+        assert_eq!(donor["repo"], "SceneWorks/krea-realtime-14b-mlx");
+        assert_eq!(
+            donor["revision"],
+            "e68e9a3d98187fdf6936838ffcf6df5aa48d6626"
+        );
+        assert_eq!(donor["files"], json!(["q4/vae.safetensors"]));
+
+        sceneworks_core::decoder_support::apply_to_model_entry(imported.as_object_mut().unwrap());
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"], false,
+            "an imported alias must not advertise an unresolved donor as selectable"
+        );
+
+        let repo_cache =
+            huggingface_repo_cache_path(data.path(), "SceneWorks/krea-realtime-14b-mlx").unwrap();
+        let wrong = repo_cache.join("snapshots/0000000000000000000000000000000000000000/q4");
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join("vae.safetensors"), b"wrong revision").unwrap();
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"],
+            false
+        );
+
+        let exact = repo_cache.join("snapshots/e68e9a3d98187fdf6936838ffcf6df5aa48d6626/q4");
+        std::fs::create_dir_all(&exact).unwrap();
+        std::fs::write(exact.join("vae.safetensors"), b"exact donor").unwrap();
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"],
+            true
+        );
+    }
 }
 
 /// Backfill the explicit source-shape discriminator for user entries created before SC-18312.
@@ -5166,6 +5457,7 @@ async fn load_model_catalog_inputs(
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
+    let decoder_providers = builtin.clone();
     let builtin_model_ids = builtin
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
@@ -5176,6 +5468,7 @@ async fn load_model_catalog_inputs(
     // (Windows/Linux). Keep only the entries applicable to this OS so the download job, status,
     // size, and the frontend all agree on the right repo (sc-3240).
     for model in &mut models {
+        inherit_provider_decoder_downloads(model, &decoder_providers);
         retain_downloads_for_os(model, std::env::consts::OS);
     }
     let download_contexts = models
@@ -5331,6 +5624,7 @@ pub(crate) async fn resolve_model_manifest_entry(
         None
     };
     let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
+    inherit_provider_decoder_downloads(&mut entry, &builtin);
     if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
         // The merged worker-facing entry must carry the same routing authority as `/models`.
         // A user manifest may override builtin presentation/defaults without turning the protected
@@ -5339,6 +5633,12 @@ pub(crate) async fn resolve_model_manifest_entry(
         stamp_legacy_import_source_shape(object, &state.settings.data_dir, scope == "user");
     }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
+    if let Some(object) = entry.as_object_mut() {
+        // The worker receives the same descriptor-derived selection table and local pinned-file
+        // availability as the catalog UI. This keeps enqueue validation and execution on one fact set.
+        sceneworks_core::decoder_support::apply_to_model_entry(object);
+        apply_decoder_availability(object, &state.settings.data_dir);
+    }
     Ok(entry)
 }
 

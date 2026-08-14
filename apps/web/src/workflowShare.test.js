@@ -155,6 +155,20 @@ describe("recipeFromWorkflowShare", () => {
     expect(omitted.rawAdapterSettings).not.toHaveProperty("poses");
   });
 
+  it("restores an explicit alternate decoder and does not invent the native default", () => {
+    const selected = share({ advanced: { decoder: "wan_2_1_vae" } });
+    const recipe = recipeFromWorkflowShare(selected, report());
+    expect(recipe.rawAdapterSettings.decoder).toBe("wan_2_1_vae");
+    expect(workflowSettingRows(selected, report()).find((row) => row.key === "decoder")).toMatchObject({
+      label: "Alternate decoder",
+      restored: true,
+      value: "wan_2_1_vae",
+    });
+
+    const native = recipeFromWorkflowShare(share({ advanced: { steps: 28 } }), report());
+    expect(native.rawAdapterSettings).not.toHaveProperty("decoder");
+  });
+
   it("does not prefill a model this install cannot resolve", () => {
     const missing = report({
       model: {

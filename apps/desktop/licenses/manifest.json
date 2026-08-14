@@ -918,6 +918,31 @@
       ]
     },
     {
+      "id": "wan2_1_t2v_14b_diffusers",
+      "models": [],
+      "appliesToModels": [
+        "krea_2_turbo",
+        "krea_2_raw",
+        "qwen_image",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning"
+      ],
+      "name": "Wan 2.1 VAE alternate decoder",
+      "publisher": "Wan-AI / Alibaba Tongyi Lab",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers",
+      "platforms": [
+        "macos"
+      ],
+      "usage": "Experimental terminal decoder for compatible Krea 2 and Qwen-Image z16 generations. SceneWorks downloads only the pinned q4/vae.safetensors donor file from SceneWorks/krea-realtime-14b-mlx; it does not install or run the full Wan generator. Its Apache-2.0 terms append to the selected base model's terms, so the composition remains governed by the strictest applicable license.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "wan2.1-vae-alternate-apache"
+        }
+      ]
+    },
+    {
       "id": "svd",
       "models": [
         "svd"

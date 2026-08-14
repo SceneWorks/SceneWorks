@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. fc92b21c is the protected merge of the reviewed SC-18312 and SC-18314 provider surfaces. Relative to the previously audited 19188ad6, an exact diff finds no NOTICE, LICENSE, COPYING, THIRD_PARTY, embedded artifact, disclosure, or production include_str!/include_bytes! site change; the two changed include_str! call sites are test-only source guards. The exact scanner still finds the same 625 provenance candidate paths and 94 production-Rust crate prefixes. Fifty-five candidate blobs changed, but every normalized marker and source-area classification is unchanged; the crate-prefix population is byte-identical.",
-  "inferenceRevision": "fc92b21cbbf40436bc2fc49ae452d725fe23986d",
-  "auditDigest": "3126d322ac4801dc6541b2e12665c7266111a68ba06c68e2e822184a01c88aad",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 23772552 is the protected merge of the reviewed SC-18315 inference surface on top of SC-18318. Relative to the previously audited fc92b21c, an exact diff finds no NOTICE, LICENSE, COPYING, THIRD_PARTY, embedded artifact, disclosure, or production include_str!/include_bytes! site change. The exact scanner still finds the same 625 provenance candidate paths and 94 production-Rust crate prefixes. Twenty candidate blob rows changed, but their paths, normalized markers, and source-area classifications are unchanged; the crate-prefix population is byte-identical.",
+  "inferenceRevision": "237725526b0fa1a64227a5a60871f0e8c23c9978",
+  "auditDigest": "ba51829c3d236a2ebb6787e784e35ba344beb0674339bee04402b2091ef7a160",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "fc92b21cbbf40436bc2fc49ae452d725fe23986d",
+    "revision": "237725526b0fa1a64227a5a60871f0e8c23c9978",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 625,
-    "populationSha256": "66c7b5736962cfc4e5026dee98887f23f4e90737ef3900b120997532155bdcf3"
+    "populationSha256": "1484ab8fb4bb3a3828493131ba614717626054f32bad7e9a1af72557b9ba6f88"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "fc92b21cbbf40436bc2fc49ae452d725fe23986d",
+    "revision": "237725526b0fa1a64227a5a60871f0e8c23c9978",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"

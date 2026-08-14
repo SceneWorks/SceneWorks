@@ -27,6 +27,8 @@ mod routing;
 // the gaps/mlx/candle predicates directly; the catalog lists are exercised only by the
 // `#[cfg(test)]` routing suites, so that glob is test-gated to stay warning-clean.
 pub(crate) use routing::candle::*;
+#[cfg(not(test))]
+pub(crate) use routing::catalog::image_family_is_mlx_routed;
 #[cfg(test)]
 pub(crate) use routing::catalog::*;
 pub(crate) use routing::gaps::*;

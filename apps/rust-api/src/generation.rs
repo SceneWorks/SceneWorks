@@ -1,5 +1,79 @@
 use super::*;
 
+/// Validate `advanced.decoder` against the descriptor-derived options on the exact post-preset model
+/// row. This is an enqueue-time fail-closed gate: z48/video/unknown models have no compatible option,
+/// and a soft donor that is not installed cannot produce a job that will fail later on the worker.
+fn validate_selected_decoder_for_manifest(
+    job_payload: &JsonObject,
+    model_manifest_entry: &Value,
+) -> Result<(), ApiError> {
+    let Some(raw) = job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("decoder"))
+    else {
+        return Ok(());
+    };
+    let decoder_id = match raw {
+        Value::Null => return Ok(()),
+        Value::String(value) if value.trim().is_empty() || value == "native" => return Ok(()),
+        Value::String(value) => value.as_str(),
+        _ => {
+            return Err(ApiError::bad_request(
+                "advanced.decoder must be a decoder id string (or 'native')",
+            ))
+        }
+    };
+    if job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("usePid"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(ApiError::bad_request(
+            "advanced.decoder cannot be combined with advanced.usePid; select exactly one decoder",
+        ));
+    }
+
+    // The catalog carries capability facts for every deployable backend, but this API instance can
+    // enqueue only for the backend used on its platform. Looking across every list would let a Linux
+    // candle deployment accept an MLX-only choice and defer the rejection to the worker.
+    let active_backend = if cfg!(target_os = "macos") {
+        "mlx"
+    } else {
+        "candle"
+    };
+    let matching: Vec<&Value> = model_manifest_entry
+        .get(sceneworks_core::decoder_support::DECODERS_FIELD)
+        .and_then(|decoders| decoders.get(sceneworks_core::decoder_support::BY_BACKEND_FIELD))
+        .and_then(Value::as_object)
+        .and_then(|by_backend| by_backend.get(active_backend))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|option| option.get("id").and_then(Value::as_str) == Some(decoder_id))
+        .collect();
+    if matching.is_empty() {
+        let model_id = model_manifest_entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("selected model");
+        return Err(ApiError::bad_request(format!(
+            "decoder '{decoder_id}' is not compatible with {model_id}; z48 and unsupported providers fail closed"
+        )));
+    }
+    if !matching
+        .iter()
+        .any(|option| option.get("available").and_then(Value::as_bool) == Some(true))
+    {
+        return Err(ApiError::bad_request(format!(
+            "decoder '{decoder_id}' is not installed; install or repair its standalone pinned component before submitting"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn create_image_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<ImageJobRequest>,
@@ -50,6 +124,7 @@ pub(crate) async fn create_image_job(
     let mut model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
     resolve_selected_image_text_encoder(&state, &job_payload, &model_id, &mut model_manifest_entry)
         .await?;
+    validate_selected_decoder_for_manifest(&job_payload, &model_manifest_entry)?;
     // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
     // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
@@ -640,6 +715,7 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    validate_selected_decoder_for_manifest(&job_payload, &model_manifest_entry)?;
     // The model's declared `limits.hardMaxDuration`, enforced at enqueue (sc-12297). It had ten
     // declarations and zero readers, so `validate_video_job`'s blanket `1..=30` was the ONLY
     // ceiling: a raw API/MCP/preset-replay caller could ask mochi_1 (cap 5) for 30s @ 30fps, and
@@ -869,5 +945,72 @@ pub(crate) fn typed_generation_route(job_type: &JobType) -> Option<&'static str>
         // `POST /api/v1/jobs` would reach the worker without its entry. One door per generation kind.
         JobType::AudioGenerate => Some("/api/v1/audio/jobs"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod decoder_selection_tests {
+    use super::*;
+
+    fn manifest(available: bool) -> Value {
+        json!({
+            "id": "qwen_image",
+            "decoders": { "byBackend": {
+                "mlx": [{
+                    "id": "wan_2_1_vae",
+                    "componentId": "vae",
+                    "available": available
+                }],
+                "candle": []
+            } }
+        })
+    }
+
+    fn payload(value: Value) -> JsonObject {
+        value.as_object().expect("payload object").clone()
+    }
+
+    #[test]
+    fn decoder_submission_is_default_off_and_fails_closed() {
+        assert!(
+            validate_selected_decoder_for_manifest(&payload(json!({})), &manifest(false)).is_ok()
+        );
+        assert!(validate_selected_decoder_for_manifest(
+            &payload(json!({ "advanced": { "decoder": "native" } })),
+            &manifest(false),
+        )
+        .is_ok());
+        assert!(validate_selected_decoder_for_manifest(
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &manifest(false),
+        )
+        .is_err());
+        let selected = validate_selected_decoder_for_manifest(
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &manifest(true),
+        );
+        if cfg!(target_os = "macos") {
+            assert!(selected.is_ok());
+        } else {
+            assert!(selected.is_err());
+        }
+        assert!(validate_selected_decoder_for_manifest(
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &json!({ "id": "wan_2_2_t2v_a14b" }),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn alternate_decoder_and_pid_are_mutually_exclusive() {
+        let error = validate_selected_decoder_for_manifest(
+            &payload(json!({
+                "advanced": { "decoder": "wan_2_1_vae", "usePid": true }
+            })),
+            &manifest(true),
+        )
+        .unwrap_err()
+        .detail;
+        assert!(error.contains("exactly one decoder"), "got: {error}");
     }
 }

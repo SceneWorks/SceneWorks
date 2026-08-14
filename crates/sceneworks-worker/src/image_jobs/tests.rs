@@ -430,12 +430,12 @@ impl HiresProbeGenerator {
     fn new() -> Self {
         Self {
             descriptor: gen_core::ModelDescriptor {
-                denoiser_output_latent_space: None,
                 id: "hires_probe",
                 family: "test",
                 backend: "test",
                 modality: gen_core::Modality::Image,
                 capabilities: Default::default(),
+                denoiser_output_latent_space: None,
                 control_kinds: None,
                 encoder_contract: None,
                 required_components: &[],
@@ -15164,6 +15164,84 @@ fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf
     let mut settings = Settings::from_env();
     settings.data_dir = dir.to_path_buf();
     (settings, file)
+}
+
+/// An arbitrary imported Krea catalog id resolves through the deterministic Turbo provider and an
+/// explicit decoder selection must bind the exact pinned donor into `LoadSpec.components`. Missing
+/// or wrong-revision files are hard errors; the selected request never degrades to the native VAE.
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_krea_decoder_selection_binds_exact_donor_without_fallback() {
+    const REVISION: &str = "e68e9a3d98187fdf6936838ffcf6df5aa48d6626";
+    let dir = tempfile::tempdir().unwrap();
+    let hub = dir.path().join("hub");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let (settings, dit) = imported_krea_settings_with_file(dir.path());
+    let manifest = json!({
+        "id": "user_kreamania_variant5",
+        "type": "image",
+        "family": "krea_2",
+        "downloads": [{
+            "provider": "huggingface",
+            "repo": "SceneWorks/krea-realtime-14b-mlx",
+            "revision": REVISION,
+            "coRequisite": true,
+            "required": "soft",
+            "componentId": "vae",
+            "files": ["q4/vae.safetensors"]
+        }]
+    });
+    let req = request(json!({
+        "projectId": "p",
+        "model": "user_kreamania_variant5",
+        "advanced": { "decoder": "wan_2_1_vae" },
+        "modelManifestEntry": manifest
+    }));
+    assert_eq!(
+        sceneworks_core::decoder_support::provider_id_for_backend(&req.model_manifest_entry, "mlx")
+            .as_deref(),
+        Some("krea_2_turbo")
+    );
+
+    let base_spec = LoadSpec::new(WeightsSource::File(dit));
+    let missing = attach_selected_decoder(base_spec.clone(), "krea_2_turbo", &req, &settings)
+        .expect_err("an absent selected donor must fail instead of using native decode");
+    assert!(missing.to_string().contains("standalone pinned component"));
+
+    let wrong = hub
+        .join("models--SceneWorks--krea-realtime-14b-mlx")
+        .join("snapshots/0000000000000000000000000000000000000000/q4");
+    std::fs::create_dir_all(&wrong).unwrap();
+    std::fs::write(wrong.join("vae.safetensors"), b"wrong revision").unwrap();
+    assert!(attach_selected_decoder(base_spec.clone(), "krea_2_turbo", &req, &settings,).is_err());
+
+    let exact = hub
+        .join("models--SceneWorks--krea-realtime-14b-mlx")
+        .join("snapshots")
+        .join(REVISION)
+        .join("q4");
+    std::fs::create_dir_all(&exact).unwrap();
+    let donor = exact.join("vae.safetensors");
+    std::fs::write(&donor, b"exact donor").unwrap();
+    let selected = attach_selected_decoder(base_spec, "krea_2_turbo", &req, &settings)
+        .expect("the exact provider donor binds");
+    assert!(
+        matches!(selected.components.get("vae"), Some(WeightsSource::File(path)) if path == &donor),
+        "selected decoder must survive as the exact LoadSpec VAE component"
+    );
+    assert!(
+        selected.prepared_file_pin_for(&donor).unwrap().is_some(),
+        "the selected donor must retain its app-confined prepared identity"
+    );
+    selected
+        .validate_prepared_file_pins()
+        .expect("the unchanged exact donor validates");
+
+    std::fs::write(&donor, b"mutated donor after selection").unwrap();
+    assert!(
+        selected.validate_prepared_file_pins().is_err(),
+        "mutating the donor after request selection must invalidate the prepared load"
+    );
 }
 
 /// `resolve_imported_krea_dit` returns the imported DiT only for a non-builtin `krea_2`-family model

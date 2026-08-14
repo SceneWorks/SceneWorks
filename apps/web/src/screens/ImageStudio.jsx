@@ -47,6 +47,7 @@ import {
   validateCaption,
 } from "../ideogramCaption.js";
 import { buildImageJobRequest, composeImageJobPrompt } from "../imageJobRequest.js";
+import { reconcileDecoderSelection } from "../imageDecoderSelection.js";
 import {
   usePoseLibrary,
   useUserPoseLoader,
@@ -321,6 +322,12 @@ export function ImageStudio() {
     setRequestedGpu,
     updateAssetStatus,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    // App supplies false until GET /capabilities/mac has returned real platform facts.
+    // Legacy/test providers omit the field and already pass authoritative fixtures.
+    macCapabilitiesAuthoritative = true,
+    macCapabilitiesError = "",
+    macCapabilitiesLoading = false,
+    refreshMacCapabilities,
     visibleWorkers = [],
     preferencesHydrated,
   } = useAppContext();
@@ -587,6 +594,9 @@ export function ImageStudio() {
   // it (~2048 output, faster + less GPU memory). Sticky pref, default "4k". Rides `advanced.pidTarget`
   // (emitted only when the PiD toggle is shown+on AND "2k" is picked — "4k" is the worker default).
   const { usePid, setUsePid, pidTarget, setPidTarget } = usePidState(saved);
+  // Experimental alternate terminal decoder. Native is intentionally represented as an omitted
+  // request key so the established provider path stays byte-for-byte identical.
+  const [decoder, setDecoder] = useState(saved.decoder ?? "native");
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -935,6 +945,29 @@ export function ImageStudio() {
   // the worker's capability downtier (sc-10733) still clamps a non-explicit pick to what actually fits.
   const hostMemory = useHostMemory();
   const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const decoderOptions = useMemo(
+    () =>
+      macCapabilitiesAuthoritative
+        ? (selectedModel?.decoders?.byBackend?.[activeBackend] ?? [])
+        : null,
+    [selectedModel, activeBackend, macCapabilitiesAuthoritative],
+  );
+  const showDecoderPicker = Boolean(decoderOptions?.length);
+  // A restored alternate selection must survive the window where App still has only its
+  // inert fallback. During that window the empty Candle option list is not evidence that the
+  // decoder is incompatible, and omitting the selection from a request would silently change
+  // the user's run. Native requests remain safe and need not wait for this optional surface.
+  const decoderCapabilitiesPending = !macCapabilitiesAuthoritative && decoder !== "native";
+  useEffect(() => {
+    if (!selectedModel || !macCapabilitiesAuthoritative) return;
+    const reconciled = reconcileDecoderSelection(decoder, decoderOptions);
+    if (reconciled !== decoder) setDecoder(reconciled);
+  }, [decoder, decoderOptions, selectedModel, macCapabilitiesAuthoritative]);
+  useEffect(() => {
+    if (decoder !== "native" && usePid) {
+      setUsePid(false);
+    }
+  }, [decoder, usePid, setUsePid]);
   const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
     () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
@@ -1752,6 +1785,7 @@ export function ImageStudio() {
     setTextEncoderModel(rawSettings.textEncoderModel ?? null, recipe.model ?? model);
     setUsePid(rawSettings.usePid === true);
     setPidTarget(rawSettings.pidTarget === "2k" ? "2k" : "4k");
+    setDecoder(typeof rawSettings.decoder === "string" ? rawSettings.decoder : "native");
     setFaceRestore(rawSettings.faceRestore === true);
     setImg2imgStrength(replayNumber(rawSettings.strength, img2imgStrength));
     setTextStyleGain(replayNumber(rawSettings.textStyleGain, textStyleGain));
@@ -2096,6 +2130,7 @@ export function ImageStudio() {
     bf16Precision,
     usePid,
     pidTarget,
+    decoder,
   },
   // Suppress the live writer until the model catalog has loaded (sc-11962), so a
   // transient defaults-reset during the restart-restore/settle window can't be
@@ -2104,7 +2139,9 @@ export function ImageStudio() {
   // ALSO gated on ui-preferences hydration (sc-15425): before the GET lands the localStorage
   // cache may be empty (a relaunched desktop app has a new origin), and persisting through it
   // would overwrite the durable copy with catalog defaults before anything read it.
-  preferencesHydrated && imageModels.length > 0);
+  // A restored alternate decoder also waits for authoritative platform facts. Otherwise the
+  // pending fallback can reconcile it to native and make that transient loss durable.
+  preferencesHydrated && imageModels.length > 0 && !decoderCapabilitiesPending);
 
   // Each stacked run carries its already-resolved completed assets + the
   // expected count, which the WorkerProgressCard image-grid variant uses to
@@ -2135,6 +2172,10 @@ export function ImageStudio() {
     // actual authorization to create a job.
     if (!selectedModelServesMode) {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
+    if (decoderCapabilitiesPending) {
+      setSubmitError("Waiting for engine capabilities before using the restored decoder.");
       return;
     }
     if (dimensionsInvalid || hiresFixTargetInvalid) {
@@ -2357,6 +2398,8 @@ export function ImageStudio() {
       showPidToggle,
       usePid,
       pidTarget,
+      showDecoderPicker,
+      decoder,
       hideReferenceStrength,
       ipAdapterScale,
       identityStructure,
@@ -2407,6 +2450,10 @@ export function ImageStudio() {
     }
     if (!selectedModelServesMode) {
       setBatchError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
+    if (decoderCapabilitiesPending) {
+      setBatchError("Waiting for engine capabilities before using the restored decoder.");
       return;
     }
     const resolved = expandBatch(batchPrompts, batchVariables);
@@ -2576,6 +2623,7 @@ export function ImageStudio() {
       // Width/Height override uses (sc-14058). A native-resolution model narrows the batch check to its
       // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
       dimensionConstraints,
+      decoderCapabilitiesPending,
     }),
     [
       activeProject,
@@ -2585,6 +2633,7 @@ export function ImageStudio() {
       batchGroupIssues,
       batchResolutionIssues,
       dimensionConstraints,
+      decoderCapabilitiesPending,
     ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
@@ -2635,6 +2684,7 @@ export function ImageStudio() {
       // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
       // not only on click. null when the dimensions are valid.
       dimensionError,
+      decoderCapabilitiesPending,
     }),
     [
       activeProject,
@@ -2656,6 +2706,7 @@ export function ImageStudio() {
       selectedModel,
       multiPhaseValidationIssues,
       dimensionError,
+      decoderCapabilitiesPending,
     ],
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
@@ -3488,6 +3539,29 @@ export function ImageStudio() {
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
+          {decoderCapabilitiesPending && macCapabilitiesError ? (
+            <div className="inline-warning decoder-capability-recovery" role="alert">
+              <span>{macCapabilitiesError} The restored decoder has not been changed.</span>
+              <div className="decoder-capability-recovery-actions">
+                <button
+                  className="secondary-action"
+                  disabled={macCapabilitiesLoading || typeof refreshMacCapabilities !== "function"}
+                  onClick={() => refreshMacCapabilities?.()}
+                  type="button"
+                >
+                  {macCapabilitiesLoading ? "Retrying…" : "Retry"}
+                </button>
+                <button
+                  className="secondary-action"
+                  onClick={() => setDecoder("native")}
+                  type="button"
+                >
+                  Use Native VAE
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-15299), the
               same way VideoStudio does it: the submit path blanks the composed negative for a
               CFG-free engine, so previewing "+ negative prompt" would advertise a contribution
@@ -3760,10 +3834,14 @@ export function ImageStudio() {
                     className="checkline pid-decoder-toggle"
                     title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass to 2K or 4K (pick the tier at right — sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
                   >
-                    <input
-                      checked={usePid}
-                      disabled={upscaleEnabled || hiresFixEnabled}
-                      onChange={(event) => setUsePid(event.target.checked)}
+                  <input
+                    checked={usePid}
+                    disabled={upscaleEnabled || hiresFixEnabled}
+                    onChange={(event) => {
+                      const enabled = event.target.checked;
+                      setUsePid(enabled);
+                      if (enabled) setDecoder("native");
+                    }}
                       type="checkbox"
                     />
                     PiD decoder <span className="badge badge-nc">Non-Commercial</span>
@@ -3789,6 +3867,35 @@ export function ImageStudio() {
                     </label>
                   ) : null}
                 </>
+              ) : null}
+              {showDecoderPicker ? (
+                <label className="alternate-decoder-select">
+                  Decoder <span className="badge">Experimental</span>
+                  <select
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      setDecoder(next);
+                      if (next !== "native") setUsePid(false);
+                    }}
+                    value={decoder}
+                  >
+                    <option value="native">Native VAE (default)</option>
+                    {decoderOptions.map((option) => {
+                      const mib = option.estimatedSizeBytes
+                        ? Math.round(option.estimatedSizeBytes / (1024 * 1024))
+                        : null;
+                      return (
+                        <option disabled={!option.available} key={option.id} value={option.id}>
+                          {option.label}{mib ? ` (+${mib} MiB)` : ""}{option.available ? "" : " — install component"}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <span className="field-hint">
+                    Alternate decode only; the model, text encoder, and native VAE remain installed.
+                    Output licensing appends the selected decoder component.
+                  </span>
+                </label>
               ) : null}
               <label
                 className="checkline upscale-toggle"

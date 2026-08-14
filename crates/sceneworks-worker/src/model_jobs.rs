@@ -5568,13 +5568,13 @@ mod co_requisite_tests {
     /// the inference pin (`required_components: &["perth", "voice_embedding"]`).
     fn chatterbox_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "chatterbox_tts",
             family: "chatterbox",
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["perth", "voice_embedding"],
             control_kinds: None,
         }
@@ -5729,13 +5729,13 @@ mod co_requisite_tests {
         let revision = "0123456789abcdef0123456789abcdef01234567";
         stage_snapshot_file(data_dir.path(), repo, revision, "weights/a.bin");
         let descriptor = gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "multi_model",
             family: "multi",
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["bundle"],
             control_kinds: None,
         };
@@ -5789,13 +5789,13 @@ mod co_requisite_tests {
         std::fs::write(&outside, b"secret").expect("plant outside file");
 
         let descriptor = gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "trav_probe",
             family: "chatterbox",
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["voice_embedding"],
             control_kinds: None,
         };
@@ -6012,13 +6012,13 @@ mod co_requisite_tests {
         // Every current image/video model + single-file audio model advertises no components: the
         // resolver must return an empty map WITHOUT touching the filesystem (a nonexistent data_dir).
         let descriptor = gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "kokoro_82m",
             family: "kokoro",
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         };
@@ -6040,13 +6040,13 @@ mod co_requisite_tests {
     /// caller-staged SDXL components the edit / IP-Adapter / InstantID / trainer providers also consume.
     fn sdxl_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "sdxl",
             family: "sdxl",
             backend: "candle",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"],
             control_kinds: None,
         }
@@ -6173,13 +6173,13 @@ mod co_requisite_tests {
     /// from the model's codec coRequisite instead of the provider self-fetching it (sc-13662).
     fn moss_descriptor(id: &'static str, family: &'static str) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id,
             family,
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["codec"],
             control_kinds: None,
         }
@@ -6210,13 +6210,13 @@ mod co_requisite_tests {
 
     fn mage_descriptor(id: &'static str) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id,
             family: "mage-flow",
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["text_encoder", "vae"],
             control_kinds: None,
         }
@@ -6424,13 +6424,13 @@ mod co_requisite_tests {
     /// from `componentId`-tagged coRequisites via the generic `resolve_co_requisites` seam.
     fn mmaudio_descriptor(id: &'static str) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id,
             family: "mmaudio",
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["clip", "synchformer", "dit", "vae", "vocoder"],
             control_kinds: None,
         }

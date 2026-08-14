@@ -2181,13 +2181,13 @@ mod tests {
     // provider inventory. Their ids deliberately cover in-table, unknown, LLM, and trainer cases.
     fn stub_mlx_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "z_image_turbo",
             family: "test",
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }
@@ -2206,13 +2206,13 @@ mod tests {
     // enabled — purely by registering a descriptor with `backend = "candle"`.
     fn stub_candle_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "sdxl",
             family: "test",
             backend: "candle",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }
@@ -2232,13 +2232,13 @@ mod tests {
     // engine id contributes no capability (absence, not a runtime failure).
     fn stub_unknown_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
-            denoiser_output_latent_space: None,
             id: "not_a_sceneworks_engine",
             family: "test",
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }
