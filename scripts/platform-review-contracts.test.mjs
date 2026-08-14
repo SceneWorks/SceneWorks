@@ -2296,3 +2296,445 @@ test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T
   assert.match(arm, /loaded_contract != &contract/);
   assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
 });
+
+// =====================================================================================
+// sc-18921 — macos-mlx.yml's fatal guards, pinned as fatal.
+//
+// sc-18691 closed this on the CANDLE lane by counting PowerShell `throw`s per step
+// ("every failure mode a weights-only dispatch can hit is still fatal", above). The MLX
+// lane had the identical exposure in bash form and nothing closed it: macos-mlx.yml
+// carried 18 `exit 1` guards and this file contained zero occurrences of `exit 1`, so
+// downgrading ANY of them to a bare `echo` left the whole suite green. That lane is the
+// sole producer of config/engine-capabilities/capabilities.mlx.json and of every MLX
+// five-rung / memory-calibration capture, so a silently non-fatal guard there does not
+// merely miss a break — it publishes a wrong measurement as evidence.
+//
+// WHY THIS IS NOT A HAND-COUNTED COPY OF THE CANDLE TEST. That one carries per-step
+// literals (13, 0, 2, 2, 4) beside the predicate they describe, which is the sc-18932
+// defect shape: a literal next to a changed predicate is a new false green. Here NOTHING
+// is counted by hand. The lane's own text supplies both sides:
+//
+//   * fatality  — `exit 1` as a whole statement;
+//   * the guard — a FAILURE DIAGNOSTIC: an `echo` that writes to stderr or emits
+//                 `::error::`. A downgrade removes the exit and LEAVES the diagnostic,
+//                 so "every diagnostic is immediately followed by `exit 1`" goes red on
+//                 the downgrade without any number being maintained anywhere.
+//
+// The enumeration below is therefore not a count. It is the answer to "WHICH failure",
+// one row per guard, and it is cross-checked against the file scan in both directions:
+// a guard deleted outright (diagnostic AND exit together, which the equality above
+// cannot see) drops out of the table lookup, and a guard added anywhere on the lane
+// leaves an `exit 1` no row claims.
+// =====================================================================================
+
+const MLX_LANE = ".github/workflows/macos-mlx.yml";
+
+// THE lane-wide fatality predicate. A whole statement, so `exit 1` inside a quoted
+// message or a comment cannot satisfy it.
+const MLX_FATAL_EXIT = "exit 1";
+
+// THE lane-wide guard predicate, and the one that makes a downgrade visible: a downgrade
+// deletes the exit and keeps the message. Deliberately narrow — `::warning::` and
+// `::notice::` are NOT diagnostics, so a step that genuinely wants to report without
+// failing has a spelling available that this contract does not claim.
+function isMlxFailureDiagnostic(statement) {
+  return /^echo\b/.test(statement) && (/>&2$/.test(statement) || /::error::/.test(statement));
+}
+
+// A job's steps, each reduced to LOGICAL statements: comment lines dropped (both YAML and
+// bash comment with `#`, and this lane's prose quotes its own guards), backslash
+// continuations joined (the two `::error::` messages span four and five lines), blanks
+// dropped, indentation normalised.
+//
+// Scoped to ONE JOB rather than reusing the file-wide `stepBody()` above, because
+// macos-mlx.yml has two jobs and "Fetch the pinned inference release" appears in both —
+// a file-wide lookup by name silently resolves to whichever comes first.
+function mlxJobSteps(workflow, job) {
+  const start = workflow.indexOf(`\n  ${job}:\n`);
+  assert.ok(start >= 0, `${MLX_LANE} must keep a ${job} job`);
+  const rest = workflow.slice(start + 1);
+  // Job keys are the only two-space keys in the file; everything inside a job is deeper.
+  const end = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+  const body = end === -1 ? rest : rest.slice(0, end + 1);
+
+  const steps = [];
+  const marker = "\n      - ";
+  for (let at = body.indexOf(marker); at !== -1; ) {
+    const next = body.indexOf(marker, at + 1);
+    const chunk = body.slice(at, next === -1 ? undefined : next);
+    at = next;
+    const named = chunk.match(/^\n {6}- name: (.*)$/m);
+    const used = chunk.match(/^\n {6}- uses: (.*)$/m);
+    const statements = [];
+    let joined = "";
+    for (const line of chunk.split("\n")) {
+      if (/^\s*#/.test(line)) continue;
+      const text = line.trim();
+      if (text === "") continue;
+      if (text.endsWith("\\")) {
+        joined += (joined ? " " : "") + text.slice(0, -1).trim();
+        continue;
+      }
+      statements.push(joined ? `${joined} ${text}` : text);
+      joined = "";
+    }
+    if (joined) statements.push(joined);
+    steps.push({ name: named ? named[1] : `uses:${used ? used[1].trim() : "?"}`, statements });
+  }
+  return steps;
+}
+
+// ONE ROW PER FATAL GUARD, saying which failure it detects — not merely that the step
+// fails somehow. `branch` is the statement chain that reaches the diagnostic, matched
+// exactly and in order, which is what distinguishes guards whose MESSAGE is identical:
+// "Resolve exact Qwen calibration snapshot" emits the same "not available on this runner"
+// string from an `else` fallthrough and from a following `-d` re-check, and the two
+// "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
+const MLX_FATAL_GUARDS = [
+  {
+    step: "Verify capabilities.mlx.json is a real dump, not a restamp",
+    detects: "the checked-in MLX facts file is a restamp, not a fresh dump at this pin",
+    branch: [
+      'if ! diff -u config/engine-capabilities/capabilities.mlx.json "$scratch/capabilities.mlx.json"; then',
+    ],
+    diagnostic: /^echo "::error::config\/engine-capabilities\/capabilities\.mlx\.json does not match a fresh"/,
+  },
+  {
+    step: "Verify capabilities.mlx.json is a real dump, not a restamp",
+    detects: "the checked-in AUDIO facts file is a restamp — the one dump BOTH lanes write",
+    branch: [
+      'if ! diff -u config/engine-capabilities/audio/capabilities.candle.json "$scratch/audio/capabilities.candle.json"; then',
+    ],
+    diagnostic:
+      /^echo "::error::config\/engine-capabilities\/audio\/capabilities\.candle\.json does not"/,
+  },
+  {
+    step: "Validate Qwen provisioning mode",
+    detects: "a ~57 GiB Qwen download requested by a dispatch that will not calibrate",
+    branch: [
+      'if [[ "$PROVISION_QWEN_SNAPSHOT" == "true" && "$RUN_MEMORY_CALIBRATION" != "true" ]]; then',
+    ],
+    diagnostic: /^echo "provision_qwen_snapshot requires run_memory_calibration=true" >&2$/,
+  },
+  {
+    step: "Validate Z-Image provisioning mode",
+    detects: "a Z-Image download requested by a dispatch that will not capture the reference",
+    branch: [
+      'if [[ "$PROVISION_Z_IMAGE_SNAPSHOT" == "true" && "$RUN_FIVE_RUNG_REFERENCE" != "true" ]]; then',
+    ],
+    diagnostic: /^echo "provision_z_image_snapshot requires run_five_rung_reference=true" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a calibration dispatch whose inference_revision is not an exact 40-hex commit",
+    branch: ['if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "inference_revision must be an exact lowercase 40-hex commit" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a calibration dispatch whose qwen_revision is not an exact 40-hex artifact revision",
+    branch: ['if [[ ! "$QWEN_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "qwen_revision must be an exact lowercase 40-hex artifact revision" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "calibration pointed at some repository other than the fixed Qwen artifact",
+    branch: ['if [[ "$QWEN_REPOSITORY" != "SceneWorks/qwen-image-mlx" ]]; then'],
+    diagnostic:
+      /^echo "qwen_repository must be the fixed SceneWorks\/qwen-image-mlx calibration artifact" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a qwen_tier outside the three declared quantization tiers",
+    branch: [
+      'if [[ "$QWEN_TIER" != "bf16" && "$QWEN_TIER" != "q4" && "$QWEN_TIER" != "q8" ]]; then',
+    ],
+    diagnostic: /^echo "qwen_tier must be one of bf16, q4, or q8" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects:
+      "calibration evidence stamped with a revision the adapter was NOT compiled against",
+    branch: ['if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then'],
+    diagnostic:
+      /^echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "a five-rung dispatch whose inference_revision is not an exact 40-hex commit",
+    branch: ['if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "inference_revision must be an exact lowercase 40-hex commit" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects:
+      "a five-rung dispatch whose z_image_revision is not an exact 40-hex artifact revision",
+    branch: ['if [[ ! "$Z_IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "z_image_revision must be an exact lowercase 40-hex artifact revision" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "a five-rung capture pointed at some repository other than the fixed Z-Image artifact",
+    branch: ['if [[ "$Z_IMAGE_REPOSITORY" != "SceneWorks/z-image-turbo-mlx" ]]; then'],
+    diagnostic:
+      /^echo "z_image_repository must be the fixed SceneWorks\/z-image-turbo-mlx reference artifact" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "five-rung evidence stamped with a revision the adapter was NOT compiled against",
+    branch: ['if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then'],
+    diagnostic:
+      /^echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects: "the Qwen snapshot is in NEITHER the HF cache nor the Application Support cache",
+    branch: [
+      'if [[ -d "$QWEN_HF_ROOT" ]]; then',
+      'QWEN_ROOT="$QWEN_HF_ROOT"',
+      'elif [[ -d "$QWEN_APP_ROOT" ]]; then',
+      'QWEN_ROOT="$QWEN_APP_ROOT"',
+      "else",
+    ],
+    diagnostic:
+      /^echo "the exact Qwen calibration snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects: "the resolved Qwen root — override included — is not a directory",
+    branch: ['if [[ ! -d "$QWEN_ROOT" ]]; then'],
+    diagnostic:
+      /^echo "the exact Qwen calibration snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects:
+      "a real directory that is NOT the requested repository+revision+tier — the dangerous one: " +
+      "downgraded, a per-tier measurement runs against the wrong weights and is published as evidence",
+    branch: ['if [[ "$QWEN_ROOT" != *"$EXPECTED_SUFFIX" ]]; then'],
+    diagnostic:
+      /^echo "the Qwen calibration root does not match the fixed repository and exact revision" >&2$/,
+  },
+  {
+    step: "Resolve exact Z-Image reference snapshot",
+    detects: "the Z-Image snapshot is in NEITHER the HF cache nor the Application Support cache",
+    branch: [
+      'if [[ -d "$Z_IMAGE_HF_ROOT" ]]; then',
+      'Z_IMAGE_ROOT="$Z_IMAGE_HF_ROOT"',
+      'elif [[ -d "$Z_IMAGE_APP_ROOT" ]]; then',
+      'Z_IMAGE_ROOT="$Z_IMAGE_APP_ROOT"',
+      "else",
+    ],
+    diagnostic:
+      /^echo "the exact Z-Image reference snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Z-Image reference snapshot",
+    detects: "a real directory that is NOT the requested Z-Image repository+revision+tier",
+    branch: ['if [[ "$Z_IMAGE_ROOT" != *"$EXPECTED_SUFFIX" ]]; then'],
+    diagnostic:
+      /^echo "the Z-Image reference root does not match the fixed repository and exact revision" >&2$/,
+  },
+];
+
+// Reachability is the sibling of fatality: a guard whose step never runs is exactly as
+// silent as one that never fails. The dispatch-only guards are dispatch-only BY DESIGN, so
+// the contract is the exact expression, not its presence. `null` means the step is
+// unconditional and must stay that way — the restamp check runs on every PR.
+const MLX_GUARD_STEP_REACHABILITY = {
+  "Verify capabilities.mlx.json is a real dump, not a restamp": null,
+  "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "Validate memory-strategy calibration identities":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}",
+  "Validate five-rung reference identities":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}",
+  "Resolve exact Qwen calibration snapshot":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}",
+  "Resolve exact Z-Image reference snapshot":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}",
+};
+
+test("every failure diagnostic on the MLX lane is fatal, derived from the lane's own text", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxJobSteps(workflow, "nax-worker");
+
+  // ANTI-VACUITY. If the splitter stops recognising steps, every loop below is trivially
+  // satisfied and this test means nothing — which is exactly how the sibling audit in this
+  // file silently emptied itself when sc-18691 changed a guard's polarity.
+  assert.ok(
+    steps.length >= 20,
+    `expected the nax-worker job to still split into steps, derived ${steps.length}`,
+  );
+
+  const diagnostics = [];
+  const exits = [];
+  for (const step of steps) {
+    step.statements.forEach((statement, at) => {
+      if (isMlxFailureDiagnostic(statement)) diagnostics.push({ step, statement, at });
+      if (statement === MLX_FATAL_EXIT) exits.push({ step, at });
+    });
+  }
+
+  // The one number in this test, and it is derived on BOTH sides: the enumeration below is
+  // one row per guard, and the scan above is the lane's own text. A guard added without a
+  // row, or a row without a guard, breaks this before any message is compared.
+  assert.equal(
+    diagnostics.length,
+    MLX_FATAL_GUARDS.length,
+    `${MLX_LANE} carries ${diagnostics.length} failure diagnostics but MLX_FATAL_GUARDS ` +
+      `enumerates ${MLX_FATAL_GUARDS.length}. Add or remove the row that says which failure ` +
+      "the guard detects — an unenumerated guard is one nothing pins as fatal.",
+  );
+
+  // THE DOWNGRADE DETECTOR. `exit 1` -> `echo`, `::warning::`, `exit 0` or deletion all
+  // leave the diagnostic standing and remove the exit after it. No count is maintained by
+  // hand anywhere in this assertion; both operands come out of the file.
+  for (const { step, statement, at } of diagnostics) {
+    assert.equal(
+      step.statements[at + 1],
+      MLX_FATAL_EXIT,
+      `${MLX_LANE} / "${step.name}": the diagnostic\n    ${statement}\nmust be followed ` +
+        `immediately by \`${MLX_FATAL_EXIT}\`, found ${JSON.stringify(step.statements[at + 1])}. ` +
+        "A reported-but-not-fatal failure on this lane publishes a wrong capability dump or a " +
+        "wrong memory measurement as evidence. To report without failing, use ::warning::.",
+    );
+  }
+
+  // The mirror direction, so a fatal exit cannot appear with no diagnostic saying WHY, and
+  // so the equality above cannot be satisfied by moving an exit between steps.
+  for (const step of steps) {
+    const stepDiagnostics = step.statements.filter(isMlxFailureDiagnostic).length;
+    const stepExits = step.statements.filter((s) => s === MLX_FATAL_EXIT).length;
+    assert.equal(
+      stepExits,
+      stepDiagnostics,
+      `${MLX_LANE} / "${step.name}": ${stepExits} fatal exit(s) against ${stepDiagnostics} ` +
+        "failure diagnostic(s). Every fatal exit needs a diagnostic saying which failure it is.",
+    );
+  }
+
+  // WHOLE FILE, not just this job. A guard added to the hosted `macos-checks` job — or
+  // anywhere else in the lane — would be invisible to the job-scoped scan above and would
+  // ship unpinned. Comment lines stripped so prose cannot move the number either way.
+  const laneExits = workflow
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .filter((line) => line.trim() === MLX_FATAL_EXIT).length;
+  assert.equal(
+    laneExits,
+    exits.length,
+    `${MLX_LANE} has ${laneExits} fatal exits but only ${exits.length} are inside nax-worker. ` +
+      "A guard outside that job is pinned by nothing here; enumerate it.",
+  );
+});
+
+test("each MLX-lane fatal guard is pinned individually, by which failure it detects", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxJobSteps(workflow, "nax-worker");
+  const byName = new Map(steps.map((step) => [step.name, step]));
+  const claimed = new Set();
+
+  for (const guard of MLX_FATAL_GUARDS) {
+    const step = byName.get(guard.step);
+    assert.ok(step, `${MLX_LANE} must keep a nax-worker step named "${guard.step}"`);
+
+    // Located by the branch chain AND the message together. Either alone is ambiguous on
+    // this lane: two guards share the "not available on this runner" message, and two share
+    // both the INFERENCE_PIN condition and its message across sibling steps.
+    const found = [];
+    step.statements.forEach((statement, at) => {
+      if (!guard.diagnostic.test(statement)) return;
+      const chain = step.statements.slice(at - guard.branch.length, at);
+      if (chain.length !== guard.branch.length) return;
+      if (chain.every((line, i) => line === guard.branch[i])) found.push(at);
+    });
+    assert.equal(
+      found.length,
+      1,
+      `${MLX_LANE} / "${guard.step}": expected exactly one guard against ${guard.detects}, ` +
+        `matched ${found.length}. Its branch chain is\n    ${guard.branch.join("\n    ")}`,
+    );
+
+    const at = found[0];
+    assert.equal(
+      step.statements[at + 1],
+      MLX_FATAL_EXIT,
+      `${MLX_LANE} / "${guard.step}": the guard against ${guard.detects} must stay FATAL. ` +
+        `Found ${JSON.stringify(step.statements[at + 1])} where \`${MLX_FATAL_EXIT}\` belongs.`,
+    );
+    claimed.add(`${guard.step}#${at + 1}`);
+  }
+
+  // Every fatal exit on the lane is claimed by exactly one row. Without this, deleting a
+  // guard outright and adding an unrelated one elsewhere keeps the totals equal.
+  for (const step of steps) {
+    step.statements.forEach((statement, at) => {
+      if (statement !== MLX_FATAL_EXIT) return;
+      assert.ok(
+        claimed.has(`${step.name}#${at}`),
+        `${MLX_LANE} / "${step.name}": a fatal guard at statement ${at} is claimed by no row ` +
+          "in MLX_FATAL_GUARDS. Say which failure it detects, so a downgrade names it.",
+      );
+    });
+  }
+});
+
+test("MLX-lane guard steps stay reachable and cannot be degraded into warnings", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxJobSteps(workflow, "nax-worker");
+  const byName = new Map(steps.map((step) => [step.name, step]));
+
+  // Derived from the guards, not hand-listed beside them: every step that carries a row is
+  // a step this contract must hold for.
+  const guardSteps = [...new Set(MLX_FATAL_GUARDS.map((guard) => guard.step))];
+  assert.deepEqual(
+    guardSteps.slice().sort(),
+    Object.keys(MLX_GUARD_STEP_REACHABILITY).sort(),
+    "every step carrying a fatal guard needs a reachability pin, and vice versa",
+  );
+
+  for (const name of guardSteps) {
+    const step = byName.get(name);
+    assert.ok(step, `${MLX_LANE} must keep a nax-worker step named "${name}"`);
+    const conditions = step.statements.filter((statement) => statement.startsWith("if: "));
+    const expected = MLX_GUARD_STEP_REACHABILITY[name];
+    if (expected === null) {
+      assert.deepEqual(
+        conditions,
+        [],
+        `${MLX_LANE} / "${name}" must stay unconditional — it is the lane's only check that ` +
+          "the checked-in capability dump is real, and it has to run on every PR.",
+      );
+    } else {
+      assert.deepEqual(
+        conditions,
+        [expected],
+        `${MLX_LANE} / "${name}": a guard that never runs is as silent as one that never ` +
+          "fails. Pin the exact condition here when the step's reachability changes.",
+      );
+    }
+
+    // Degrading by SWALLOWING: `continue-on-error` makes every `exit 1` in the step
+    // advisory without touching one of them, and `|| true` does it per command.
+    for (const statement of step.statements) {
+      assert.doesNotMatch(
+        statement,
+        /continue-on-error|always\(\)|\|\| true/,
+        `${MLX_LANE} / "${name}": "${statement}" degrades a guard failure into a warning.`,
+      );
+    }
+  }
+
+  // The restamp check is the one guard step that runs several commands and a `trap`, and it
+  // opts into strictness explicitly. `pipefail` and `-u` are NOT GitHub's defaults (the
+  // default shell is `bash -e {0}`), so this is a real declaration, not a restatement of
+  // one: without it a failing `cargo run` inside a pipeline, or an unset `$scratch`, reaches
+  // the `diff` and the guard compares against nothing.
+  assert.ok(
+    byName
+      .get("Verify capabilities.mlx.json is a real dump, not a restamp")
+      .statements.includes("set -euo pipefail"),
+    `${MLX_LANE}: the restamp check must keep \`set -euo pipefail\``,
+  );
+});

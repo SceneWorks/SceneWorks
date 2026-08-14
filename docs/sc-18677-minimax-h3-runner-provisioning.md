@@ -270,7 +270,7 @@ revision, `provision_subdir` traversal, empty allow-list, absent snapshot, decla
 component among them) each failing at the intended step.
 
 **Pinned so it cannot rot.** Nine tests in `scripts/platform-review-contracts.test.mjs` (inside
-`npm run check`; the file runs 54 tests in total) assert the input defaults and the 10-input cap,
+`npm run check`; the file runs 60 tests in total) assert the input defaults and the 10-input cap,
 the path-construction expressions, the timeout budgets, the surviving five-rung guards, the
 `real-weights` routing, the never-a-whole-repo-fetch guards, the anonymous fetch, the sentinel rule,
 and the containment validation. They are structural rather than prose-matching: the defaults and the
