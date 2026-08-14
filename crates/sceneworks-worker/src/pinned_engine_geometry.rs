@@ -61,7 +61,35 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
     "bernini",
     "scail2_14b",
     "krea_realtime_14b",
+    // MiniMax-H3, both partitions (epic 17137, sc-17158). Neither is tie-able YET — see
+    // [`PinnedAreaCap::NotInThePinnedBundle`].
+    "minimax_h3",
+    "minimax_h3_ref",
 ];
+
+/// What this guard can say about one model's `limits.maxPixels`.
+///
+/// The two-state `Option<u64>` this used to be conflated "the manifest must declare exactly this
+/// pinned value" with "the manifest must declare nothing", and had no way to express the third
+/// case sc-17158 introduced: a model whose engine **is not in the pinned inference bundle at all**,
+/// so there is no const to tie to and `None` would assert the opposite of the truth.
+///
+/// Naming it is the point. A literal quietly returned as `Some(1_032_192)` would look tied and be
+/// a fiction — exactly the failure mode sc-12409 exists to prevent — so the third state is
+/// explicit, carries the id of the story that closes it, and the test says out loud which models
+/// it is currently only counting rather than checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinnedAreaCap {
+    /// The manifest must declare exactly this value, read from the pinned engine's own const.
+    Pinned(u64),
+    /// The engine has no `maxPixels`-expressible area cap, so the manifest must NOT invent one.
+    EngineHasNone,
+    /// The engine is not compiled into the pinned `runtime-*` bundle, so nothing here can be
+    /// verified against it. The manifest value is still guarded — by `ENGINE_GEOMETRY`'s literals
+    /// in `sceneworks-core` and by that crate's `minimax_h3_over_cap_canvas_is_refit_onto_the_area_budget`
+    /// — just not against the shipping binary.
+    NotInThePinnedBundle,
+}
 
 /// The pinned engine area cap a video model's `limits.maxPixels` must equal. Derived from the
 /// engine source (`candle-gen-wan` / `mlx-gen-wan` `config.rs`), NOT read back from the manifest —
@@ -81,17 +109,27 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
 ///   is `None` (key absent) like ltx/svd. This is the axis where "inherit the family's cap"
 ///   would have been wrong.
 ///
+/// * `minimax_h3` / `minimax_h3_ref` declare a real, enforced area budget
+///   (`CANVAS_MAX_PIXELS = 1_032_192 = 768 × 1344`, wired by sc-17152) — but the MiniMax-H3
+///   provider is **not in the pinned inference bundle**: SceneWorks still pins `014134e3…` and
+///   sc-18650 owns the bump, which needs an off-Mac candle capability dump. There is no
+///   `providers::minimax_h3::config` to import, so this guard can only COUNT these two, not check
+///   them, and says so with [`PinnedAreaCap::NotInThePinnedBundle`] rather than transcribing the
+///   number and pretending it is tied. **sc-18650's pin bump must convert both to `Pinned(…)`**
+///   sourced from the engine const — that conversion is the whole reason this state is named.
+///
 /// An unmapped id panics: adding a video model is a deliberate act that must derive its own cap
 /// from its engine, never inherit one by default.
-fn expected_max_pixels(id: &str) -> Option<u64> {
+fn expected_max_pixels(id: &str) -> PinnedAreaCap {
     match id {
         "wan_2_2_t2v_14b"
         | "wan_2_2_i2v_14b"
         | "wan_2_2_vace_fun_14b"
         | "bernini"
-        | "scail2_14b" => Some(MAX_AREA_14B as u64),
-        "wan_2_2" => Some(MAX_AREA_5B as u64),
-        "ltx_2_3" | "ltx_2_3_eros" | "svd" | "krea_realtime_14b" => None,
+        | "scail2_14b" => PinnedAreaCap::Pinned(MAX_AREA_14B as u64),
+        "wan_2_2" => PinnedAreaCap::Pinned(MAX_AREA_5B as u64),
+        "ltx_2_3" | "ltx_2_3_eros" | "svd" | "krea_realtime_14b" => PinnedAreaCap::EngineHasNone,
+        "minimax_h3" | "minimax_h3_ref" => PinnedAreaCap::NotInThePinnedBundle,
         other => panic!(
             "video model {other:?} is not mapped to a pinned engine area cap — derive its \
              MAX_AREA_* from that model's engine `config.rs` and add it to \
@@ -119,6 +157,12 @@ fn expected_max_pixels(id: &str) -> Option<u64> {
 /// spuriously on a model that never consulted it — a guard wrong in both directions is worse than
 /// none. It therefore joins the ltx / svd / mochi "engine lives in another crate" group and stays
 /// covered by `ENGINE_GEOMETRY`'s literal until sc-12587 extends the pinned tie to those crates.
+///
+/// **MiniMax-H3 (sc-17158) falls in the untied `_` arm for two independent reasons**, and both
+/// have to hold for that to be right: its `SIZE_MULTIPLE = 32` is not `SIZE_MULTIPLE_14B`, and its
+/// engine is not in the pinned bundle at all (see [`PinnedAreaCap::NotInThePinnedBundle`]). It
+/// declares no `requiresDimensionsMultipleOf` — 32 IS core's default floor — so "not tied" and
+/// "declares nothing" agree here, which is why this needs no third state the way the area cap did.
 fn pinned_stride(id: &str) -> Option<u64> {
     match id {
         "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "wan_2_2_vace_fun_14b" | "bernini" => {
@@ -180,16 +224,44 @@ fn shipped_video_limits() -> std::collections::HashMap<String, Value> {
 /// manifest, or bump the `runtime-*` pin without the manifest) and this goes RED.
 #[test]
 fn manifest_max_pixels_matches_the_pinned_engine_area_cap() {
+    let mut only_counted: Vec<String> = Vec::new();
     for (id, limits) in shipped_video_limits() {
         let declared = limits.get("maxPixels").and_then(Value::as_u64);
+        let want = match expected_max_pixels(&id) {
+            PinnedAreaCap::Pinned(cap) => Some(cap),
+            PinnedAreaCap::EngineHasNone => None,
+            PinnedAreaCap::NotInThePinnedBundle => {
+                // Not skipped silently: assert the manifest DOES declare a budget (an absent one
+                // would be a real regression this guard would otherwise wave through), then record
+                // the id so the list below stays honest about what is unchecked.
+                assert!(
+                    declared.is_some(),
+                    "{id}: declares no `limits.maxPixels`. Its engine is not in the pinned bundle \
+                     so the value cannot be tied here, but an area budget must still be declared \
+                     — see sceneworks-core's ENGINE_GEOMETRY."
+                );
+                only_counted.push(id.clone());
+                continue;
+            }
+        };
         assert_eq!(
-            declared,
-            expected_max_pixels(&id),
+            declared, want,
             "{id}: manifest `limits.maxPixels` disagrees with the PINNED engine's area cap \
              (this backend: MAX_AREA_14B={MAX_AREA_14B}, MAX_AREA_5B={MAX_AREA_5B}). The catalog \
              and the `runtime-*` tag in Cargo.toml must move together — see sc-12409."
         );
     }
+
+    // The set that is COUNTED but not CHECKED, pinned as a value rather than left implicit: when
+    // sc-18650 bumps the inference pin and the MiniMax-H3 provider becomes importable, this goes
+    // red and forces the mapping to move to `PinnedAreaCap::Pinned`. A guard that quietly shrinks
+    // its own coverage is the thing sc-12409 was written about.
+    only_counted.sort();
+    assert_eq!(
+        only_counted,
+        vec!["minimax_h3".to_owned(), "minimax_h3_ref".to_owned()],
+        "the set of video models whose area cap cannot be tied to the pinned engine changed"
+    );
 }
 
 /// For the wan 14B grid-16 family, `limits.requiresDimensionsMultipleOf` must equal the engine's

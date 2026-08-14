@@ -190,7 +190,8 @@ impl VideoRequest {
 }
 
 /// The frame count `model` will actually render for `raw_frames` requested, coerced onto that
-/// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, everything else (Wan and the families
+/// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, **MiniMax-H3 `17n+5` clamped to the
+/// fourteen rungs of [`MINIMAX_H3_LEGAL_FRAME_COUNTS`]**, everything else (Wan and the families
 /// built on it) `4k+1`.
 ///
 /// THE ONE LADDER (sc-12371). It has two kinds of caller by design: [`VideoRequest::frame_count`],
@@ -220,9 +221,84 @@ pub fn video_frame_count(model: &str, raw_frames: u32) -> u32 {
         ltx_frame_count(raw_frames)
     } else if is_mochi_model(model) {
         mochi_frame_count(raw_frames)
+    } else if is_minimax_h3_model(model) {
+        minimax_h3_frame_count(raw_frames)
     } else {
         wan_frame_count(raw_frames)
     }
+}
+
+/// MiniMax-H3's complete legal frame set — **fourteen** values, 124 through 345 (sc-17158).
+///
+/// ⚠️ The epic's R7 and this story's own title say `4k + 1`. **Both are wrong**, measured false
+/// against the official diffusers reference (`MiniMaxH3`, diffusers `main` PR #14355) by the
+/// sc-17242 spike. The real lattice is `17n + 5` — the video VAE's `clip_length 17` with its
+/// `token_drop 3` — and the two lattices are **not nested**: 22, 39 and 56 are all legal `17n + 5`
+/// counts and none of them is `4k + 1`, so enforcing `4k + 1` would reject most of the legal set
+/// while admitting counts the engine refuses.
+///
+/// The checkpoint then clamps the clip to `5.0 ≤ frames / 24 ≤ 15.0` (`min_duration` /
+/// `max_duration` are hardcoded properties), i.e. `120 ≤ frames ≤ 360`. Intersecting the lattice
+/// with the clamp leaves exactly these fourteen rungs — which is why the manifest advertises a
+/// fourteen-value `limits.durations` MENU rather than a range: only fourteen clip lengths are
+/// renderable, and a slider over 5–15 s would emit requests the engine refuses.
+///
+/// **Neither advertised endpoint is a lattice point.** `345 / 24 = 14.375 s` and the next rung
+/// (362 frames) is 15.083 s, so upstream's advertised 15.0 s ceiling is unreachable — sc-17147 was
+/// silently delivering 14.375 s for a 15 s request. [`MINIMAX_H3_MIN_DURATION`] /
+/// [`MINIMAX_H3_MAX_DURATION`] are derived FROM this table for exactly that reason, and the
+/// manifest's `limits.hardMinDuration` / `limits.hardMaxDuration` are pinned to them, so the app
+/// refuses 15 s rather than quietly shortening it.
+///
+/// Re-derived from the `17n + 5` rule and the 5–15 s clamp by
+/// `minimax_h3_lattice_is_seventeen_n_plus_five_not_four_k_plus_one`, so this table cannot drift
+/// from the rule it encodes.
+pub const MINIMAX_H3_LEGAL_FRAME_COUNTS: [u32; 14] = [
+    124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345,
+];
+
+/// MiniMax-H3's one cadence. Not a menu: the lattice, the duration window and every measured
+/// render are all at 24 fps, and `limits.fps` declares `[24]` alone.
+pub const MINIMAX_H3_FPS: u32 = 24;
+
+/// The shortest renderable MiniMax-H3 clip, in seconds — `124 / 24`, DERIVED from
+/// [`MINIMAX_H3_LEGAL_FRAME_COUNTS`] rather than transcribed, so the floor and the lattice cannot
+/// drift apart. **Not** the reference's advertised 5.0: 5.0 s has no lattice point.
+pub const MINIMAX_H3_MIN_DURATION: f32 =
+    MINIMAX_H3_LEGAL_FRAME_COUNTS[0] as f32 / MINIMAX_H3_FPS as f32;
+
+/// The longest renderable MiniMax-H3 clip, in seconds — `345 / 24 = 14.375`. **Not** the
+/// reference's advertised 15.0, which sits between rungs and is now refused rather than delivered
+/// short.
+pub const MINIMAX_H3_MAX_DURATION: f32 = MINIMAX_H3_LEGAL_FRAME_COUNTS
+    [MINIMAX_H3_LEGAL_FRAME_COUNTS.len() - 1] as f32
+    / MINIMAX_H3_FPS as f32;
+
+/// MiniMax-H3's temporal snap: frames align UP to the next [`MINIMAX_H3_LEGAL_FRAME_COUNTS`] rung,
+/// clamped to the ends of that table — the reference's own `align_num_frames`, which rounds up.
+///
+/// **Aligning up is not the safety gate**, and must not be mistaken for one: the rejection of an
+/// out-of-window clip lives in [`duration_limit_error`], which refuses anything under
+/// [`MINIMAX_H3_MIN_DURATION`] or over [`MINIMAX_H3_MAX_DURATION`] rather than clamping it here.
+/// This function exists for the same reason the other arms do — the asset sidecar's `frameCount`
+/// must equal what the engine renders (sc-12371) — and within the admitted window the reference
+/// aligns up too, so the two agree.
+///
+/// `T = 1` is deliberately unreachable: there is no image lane for this family. `min_duration` is a
+/// hardcoded 5.0 upstream, so a single-frame request does not render at all; it floors to 124.
+pub fn minimax_h3_frame_count(raw_frames: u32) -> u32 {
+    let last = MINIMAX_H3_LEGAL_FRAME_COUNTS[MINIMAX_H3_LEGAL_FRAME_COUNTS.len() - 1];
+    MINIMAX_H3_LEGAL_FRAME_COUNTS
+        .iter()
+        .copied()
+        .find(|legal| *legal >= raw_frames)
+        .unwrap_or(last)
+}
+
+/// Whether `model` is a MiniMax-H3 family id (`minimax_h3`, `minimax_h3_ref`). Both partitions
+/// share one DiT geometry, so both ride [`minimax_h3_frame_count`].
+pub fn is_minimax_h3_model(model: &str) -> bool {
+    model.starts_with("minimax_h3")
 }
 
 /// LTX-2.3 temporal stride: frames snap to the nearest `8k + 1`, minimum 9. Direct
@@ -313,8 +389,30 @@ pub fn hard_max_duration(model_manifest_entry: &JsonObject) -> Option<f32> {
         .filter(|cap| cap.is_finite() && *cap > 0.0)
 }
 
-/// The actionable rejection for a `duration` past the model's declared [`hard_max_duration`], or
-/// `None` to admit. The pure decision, so both enqueue gates assert on one message (sc-12297).
+/// `limits.hardMinDuration` (seconds) from a resolved manifest entry, or `None` for **no floor**.
+///
+/// The mirror of [`hard_max_duration`], added by sc-17158 because a family can have a floor its own
+/// engine refuses below rather than pads up to. MiniMax-H3's shortest renderable clip is
+/// [`MINIMAX_H3_MIN_DURATION`] (124 frames at 24 fps); a 3 s request is not a short clip there, it
+/// is an unrenderable one, and silently lengthening it to 5.1667 s is the same silent-coercion bug
+/// class [`duration_limit_error`] exists to refuse at the other end.
+///
+/// Absent ⇒ no floor, so every model that declares nothing is byte-identical to before this key had
+/// a reader — the same never-block-without-evidence posture, and the same typo'd-manifest tolerance:
+/// a non-positive or non-finite floor is not a constraint anyone could satisfy.
+pub fn hard_min_duration(model_manifest_entry: &JsonObject) -> Option<f32> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("hardMinDuration"))
+        .and_then(Value::as_f64)
+        .map(|floor| floor as f32)
+        .filter(|floor| floor.is_finite() && *floor > 0.0)
+}
+
+/// The actionable rejection for a `duration` outside the model's declared
+/// [`hard_min_duration`]..=[`hard_max_duration`] window, or `None` to admit. The pure decision, so
+/// both enqueue gates assert on one message (sc-12297; floor added by sc-17158).
 ///
 /// **Reject, never clamp.** Quietly rewriting a 30 s request into a 5 s render is the same
 /// silent-coercion bug class B3 exists to fix (the invisible 848→832 dimension rewrite, sc-11993 /
@@ -331,6 +429,15 @@ pub fn duration_limit_error(
     duration: f32,
     model_manifest_entry: &JsonObject,
 ) -> Option<String> {
+    if let Some(floor) = hard_min_duration(model_manifest_entry) {
+        if duration < floor {
+            return Some(format!(
+                "{model} renders clips of at least {floor}s, but this request asks for \
+                 {duration}s. Lengthen the clip to {floor}s or more, or choose a model that \
+                 renders shorter clips."
+            ));
+        }
+    }
     let cap = hard_max_duration(model_manifest_entry)?;
     (duration > cap).then(|| {
         format!(
@@ -1235,6 +1342,18 @@ mod tests {
         // (`max_size: 1280`). So `None` here is the load-bearing half: the manifest must not
         // borrow the 14B family's 921,600 just because the backbone is a Wan 14B.
         ("krea_realtime_14b", Some(16), None),
+        // MiniMax-H3 (epic 17137, sc-17158), both partitions. `SIZE_MULTIPLE = 32` — the VAE's 16x
+        // spatial stride times the DiT's width patch 2 — which core's default floor already
+        // matches, so `None` here is a DECLARATION that the manifest must stay silent: writing 32
+        // into `limits.requiresDimensionsMultipleOf` would read as a per-model choice when it is
+        // the blanket (the same reason wan_2_2 and scail2_14b declare nothing).
+        //
+        // `CANVAS_MAX_PIXELS` = 1,032,192 = 768x1344 IS enforced, and as an AREA budget rather than
+        // a per-edge one: `Capabilities::max_size` bounds each edge independently, so before
+        // sc-17152 wired the area check a 1344x1344 request passed everything at 1.75x the
+        // checkpoint's budget. A cap is declared here because the engine has one.
+        ("minimax_h3", None, Some(1_032_192)),
+        ("minimax_h3_ref", None, Some(1_032_192)),
     ];
 
     /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds.
@@ -1386,6 +1505,13 @@ mod tests {
         // checkpoint runs `sink_size = 0`, so a bounded-window AR clip drifts as it lengthens
         // (sc-15127). 5 s = 10 AR blocks, just past the reference driver's 9-block example.
         ("krea_realtime_14b", 5.0),
+        // MiniMax-H3's ceiling is a LATTICE bound, not a memory or stability one: 345 frames is the
+        // largest `17n + 5` count inside the checkpoint's own 5–15 s clamp, and `345 / 24` is
+        // 14.375. Upstream ADVERTISES 15.0 s and cannot reach it — the next rung, 362 frames, is
+        // 15.083 s — so the manifest must not repeat the advertisement or the engine will refuse
+        // its own dropdown (sc-17152; sc-17147 was silently delivering 14.375 s for a 15 s ask).
+        ("minimax_h3", 14.375),
+        ("minimax_h3_ref", 14.375),
     ];
 
     #[test]
@@ -1602,6 +1728,581 @@ mod tests {
             "the 24fps choice must be load-bearing: at 16fps some advertised duration has to fall \
              off the AR block lattice, else this test proves nothing"
         );
+    }
+
+    /// sc-17158 — **the lattice this family actually has, re-derived from its rule.**
+    ///
+    /// The epic's R7 and sc-17158's own title both say `4k + 1`. Measured against the official
+    /// diffusers `MiniMaxH3` reference on real weights (sc-17242 spike, correction of record on
+    /// sc-17158 activity 18824), the rule is `17n + 5`, clamped by the checkpoint's hardcoded
+    /// `min_duration = 5.0` / `max_duration = 15.0` at 24 fps — i.e. `120 ≤ frames ≤ 360`.
+    ///
+    /// [`MINIMAX_H3_LEGAL_FRAME_COUNTS`] is a transcribed table, so this test re-derives it from the
+    /// rule rather than reading it back: a typo in the table is RED here.
+    ///
+    /// DISCRIMINATING, and that is the whole point: the two candidate lattices are **not nested**,
+    /// so the wrong one is not merely coarser — it admits counts the engine refuses AND refuses
+    /// counts it accepts.
+    #[test]
+    fn minimax_h3_lattice_is_seventeen_n_plus_five_not_four_k_plus_one() {
+        // The reference's own clamp, in frames: `min <= aligned_frames / 24 <= max`.
+        const CLAMP_MIN_FRAMES: u32 = 120; // 5.0 s x 24
+        const CLAMP_MAX_FRAMES: u32 = 360; // 15.0 s x 24
+
+        let derived: Vec<u32> = (0..64)
+            .map(|n| 17 * n + 5)
+            .filter(|frames| (CLAMP_MIN_FRAMES..=CLAMP_MAX_FRAMES).contains(frames))
+            .collect();
+        assert_eq!(
+            derived,
+            MINIMAX_H3_LEGAL_FRAME_COUNTS.to_vec(),
+            "the table must be exactly `17n + 5` intersected with the 5-15 s clamp"
+        );
+        assert_eq!(derived.len(), 14, "exactly fourteen clip lengths render");
+        assert_eq!((derived[0], derived[13]), (124, 345));
+
+        // NOT NESTED — the finding that makes shipping `4k + 1` a bug rather than an
+        // approximation. 22, 39 and 56 are on this lattice and none is `4k + 1`.
+        for off_lattice_for_wan in [22u32, 39, 56] {
+            assert_eq!(
+                (off_lattice_for_wan - 5) % 17,
+                0,
+                "{off_lattice_for_wan} must be a genuine 17n+5 count"
+            );
+            assert_ne!(
+                off_lattice_for_wan % 4,
+                1,
+                "{off_lattice_for_wan} must NOT be 4k+1, or this test proves nothing"
+            );
+        }
+        // …and inside the shipped window the disagreement is the majority case: enforcing `4k + 1`
+        // would reject most of the legal set.
+        let rejected_by_the_wrong_rule = MINIMAX_H3_LEGAL_FRAME_COUNTS
+            .iter()
+            .filter(|frames| *frames % 4 != 1)
+            .count();
+        assert!(
+            rejected_by_the_wrong_rule > MINIMAX_H3_LEGAL_FRAME_COUNTS.len() / 2,
+            "the two rules must disagree on most of the legal set, else the correction is cosmetic"
+        );
+
+        // The derived duration window, and why neither ADVERTISED endpoint may be declared: 5.0 s
+        // and 15.0 s are both off-lattice. Judged from the DERIVED rungs rather than from the
+        // constants, so this is a real comparison rather than a constant-folded tautology (and so
+        // clippy's `assertions_on_constants` has nothing to say about it).
+        let shortest = f64::from(derived[0]) / 24.0;
+        let longest = f64::from(derived[13]) / 24.0;
+        assert_eq!(MINIMAX_H3_MIN_DURATION, shortest as f32);
+        assert_eq!(MINIMAX_H3_MAX_DURATION, longest as f32);
+        assert_eq!(longest, 14.375);
+        assert!(
+            shortest > 5.0,
+            "the reference advertises 5.0 s and has no lattice point there: {shortest}"
+        );
+        assert!(
+            longest < 15.0,
+            "the reference advertises 15.0 s and cannot reach it — the next rung is 362 frames: \
+             {longest}"
+        );
+        // The first rung is `n = 7` (124) and there are 14 of them, so the last is `n = 20` and the
+        // first UNREACHABLE one is `n = 7 + 14 = 21`.
+        let next_rung = 17 * (7 + derived.len() as u32) + 5;
+        assert_eq!(next_rung, 362, "the unreachable next rung");
+        assert!(f64::from(next_rung) / 24.0 > 15.0);
+    }
+
+    /// The snap: frames align UP onto the next rung, clamped to the table's ends — the reference's
+    /// `align_num_frames`. This is the sidecar-parity ladder (sc-12371), NOT the rejection gate;
+    /// out-of-window requests are refused by [`duration_limit_error`], which
+    /// [`minimax_h3_refuses_the_advertised_fifteen_seconds_rather_than_shortening_it`] pins.
+    #[test]
+    fn minimax_h3_frame_count_snaps_up_onto_the_lattice() {
+        // Every rung is a FIXED POINT — advertise it and it renders.
+        for legal in MINIMAX_H3_LEGAL_FRAME_COUNTS {
+            assert_eq!(minimax_h3_frame_count(legal), legal, "{legal} is a rung");
+        }
+        // Between rungs, align UP. 168 (7 s at 24 fps) is deliberately off-lattice.
+        assert_eq!(minimax_h3_frame_count(125), 141);
+        assert_eq!(minimax_h3_frame_count(168), 175);
+        assert_eq!(minimax_h3_frame_count(344), 345);
+        // Below the floor and above the ceiling clamp to the ends; the DURATION gate is what
+        // refuses them, so this must not panic or emit an off-lattice count.
+        assert_eq!(minimax_h3_frame_count(1), 124, "T=1 does not render");
+        assert_eq!(minimax_h3_frame_count(0), 124);
+        assert_eq!(minimax_h3_frame_count(362), 345);
+        assert_eq!(minimax_h3_frame_count(u32::MAX), 345);
+
+        // Dispatch: both partitions ride this arm, and neither falls through to the Wan 4k+1
+        // fallback. 168 discriminates — `wan_frame_count(168) == 165`, which is off `17n + 5`.
+        assert_ne!(wan_frame_count(168), minimax_h3_frame_count(168));
+        for model in ["minimax_h3", "minimax_h3_ref"] {
+            assert!(is_minimax_h3_model(model));
+            assert_eq!(video_frame_count(model, 168), 175, "{model}");
+        }
+        assert!(!is_minimax_h3_model("wan_2_2"));
+        assert!(!is_wan_model("minimax_h3"));
+        assert!(!is_ltx_model("minimax_h3"));
+        assert!(!is_mochi_model("minimax_h3"));
+    }
+
+    /// One lattice rung as the manifest DECLARES it: `frames / 24` rounded to 4 dp, which is the
+    /// menu sc-17152 published and what the studio dropdown shows.
+    ///
+    /// The rounding is why the shipped floor is compared against this rather than against
+    /// [`MINIMAX_H3_MIN_DURATION`]: `124 / 24` is 5.16666…, so the declared 5.1667 sits 8e-4 of a
+    /// frame ABOVE the exact rung. That is deliberate — a request in that sliver is told the exact
+    /// renderable value instead of being silently lengthened to it, which is the whole posture of
+    /// this gate. (`345 / 24 = 14.375` is exact, so the ceiling has no such gap.)
+    fn declared_rung_seconds(frames: u32) -> f64 {
+        (f64::from(frames) / 24.0 * 10_000.0).round() / 10_000.0
+    }
+
+    /// sc-17158 — the manifest's fourteen-value duration MENU is exactly the lattice, and every
+    /// entry round-trips back to its own frame count.
+    ///
+    /// This is the anti-drift gate between a hand-authored JSONC array and the Rust table: the
+    /// expectation is DERIVED from [`MINIMAX_H3_LEGAL_FRAME_COUNTS`], and the manifest is the thing
+    /// under test. Advertising a range instead of a menu, or rounding a rung to 3 dp so it snaps to
+    /// the neighbouring count, is RED here.
+    #[test]
+    fn shipped_minimax_h3_duration_menu_is_exactly_the_fourteen_lattice_rungs() {
+        let models = builtin_video_models();
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+            let limits = entry
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"));
+
+            let advertised: Vec<f64> = limits
+                .get("durations")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{id} advertises durations"))
+                .iter()
+                .map(|d| d.as_f64().expect("numeric duration"))
+                .collect();
+            let derived: Vec<f64> = MINIMAX_H3_LEGAL_FRAME_COUNTS
+                .iter()
+                .copied()
+                .map(declared_rung_seconds)
+                .collect();
+            assert_eq!(
+                advertised, derived,
+                "{id}: the duration menu must be the fourteen lattice rungs at 4 dp"
+            );
+
+            // ROUND TRIP, which is what the 4 dp buys: each advertised second lands back on its own
+            // frame count through the SAME f32 path a real request takes, so the studio's dropdown
+            // cannot emit a duration the engine then aligns somewhere else.
+            for (advertised, frames) in advertised.iter().zip(MINIMAX_H3_LEGAL_FRAME_COUNTS) {
+                let request = VideoRequest::from_payload(&payload(json!({
+                    "projectId": "p", "model": id, "duration": advertised, "fps": 24,
+                    "modelManifestEntry": Value::Object(entry.clone()),
+                })));
+                assert_eq!(
+                    request.raw_frame_count(),
+                    frames,
+                    "{id}: {advertised}s must round to {frames} raw frames"
+                );
+                assert_eq!(
+                    request.frame_count(),
+                    frames,
+                    "{id}: {advertised}s is a rung, so the snap must be the identity"
+                );
+                assert_eq!(
+                    duration_limit_error(id, request.duration, entry),
+                    None,
+                    "{id}: {advertised}s is advertised, so both bounds must admit it"
+                );
+            }
+
+            // The two bounds are the ENDS of the menu, at the same 4 dp.
+            let floor = declared_rung_seconds(MINIMAX_H3_LEGAL_FRAME_COUNTS[0]) as f32;
+            let ceiling = declared_rung_seconds(MINIMAX_H3_LEGAL_FRAME_COUNTS[13]) as f32;
+            assert_eq!(hard_min_duration(entry), Some(floor));
+            assert_eq!(hard_max_duration(entry), Some(ceiling));
+            // …and each is the DECLARED rendering of its lattice rung, not an independent number:
+            // within half a frame of the exact quotient. The ceiling is exact (14.375); the floor
+            // rounds 5.16666… UP by 8e-4 of a frame, which is the correct 4 dp value and the one
+            // sc-17152 published.
+            assert!((f64::from(floor) - 124.0 / 24.0).abs() < 0.5 / 24.0);
+            assert_eq!(ceiling, MINIMAX_H3_MAX_DURATION);
+            assert!(f64::from(floor) > f64::from(MINIMAX_H3_MIN_DURATION));
+            // …and the shipped default is the shortest rung, because the cheapest clip at the
+            // default canvas is already a ~2 hour render (sc-17152).
+            assert_eq!(default_duration(entry), Some(floor));
+            assert_eq!(default_fps(entry), Some(MINIMAX_H3_FPS));
+        }
+    }
+
+    /// Each shipped video model's declared `limits.hardMinDuration`, TRANSCRIBED from the manifest —
+    /// deliberately independent of [`hard_min_duration`], the function under test, for the same
+    /// reason [`DEFAULT_RESOLUTIONS`] is transcribed rather than derived.
+    ///
+    /// `None` is the load-bearing half here: it asserts that a model which declares no floor STILL
+    /// declares none, so sc-17158's new key cannot silently acquire a reader-visible value on a
+    /// family whose engine pads short clips up rather than refusing them.
+    const DURATION_FLOORS: &[(&str, Option<f32>)] = &[
+        ("ltx_2_3", None),
+        ("ltx_2_3_eros", None),
+        ("svd", None),
+        ("wan_2_2", None),
+        ("wan_2_2_t2v_14b", None),
+        ("wan_2_2_i2v_14b", None),
+        ("wan_2_2_vace_fun_14b", None),
+        ("bernini", None),
+        ("scail2_14b", None),
+        ("krea_realtime_14b", None),
+        // 124 / 24. The only family in the catalog whose engine REFUSES below its floor instead of
+        // padding up to it — `resolve_geometry` rejects, so the app must too (sc-17152).
+        ("minimax_h3", Some(5.1667)),
+        ("minimax_h3_ref", Some(5.1667)),
+    ];
+
+    /// sc-17158 — the FLOOR half of `shipped_manifest_duration_caps_admit_everything_they_advertise`.
+    ///
+    /// Same four-part skeleton, against the real manifest bytes: core reads exactly what is
+    /// declared, every advertised bucket and the shipped default are admitted, and the floor
+    /// actually refuses something.
+    #[test]
+    fn shipped_manifest_duration_floors_admit_everything_they_advertise() {
+        let models = builtin_video_models();
+        assert_eq!(
+            models.len(),
+            DURATION_FLOORS.len(),
+            "a video model was added/removed; decide whether its engine REFUSES a too-short clip \
+             or pads it up, and add it to DURATION_FLOORS — an undeclared floor is silently NO floor"
+        );
+
+        for (id, want_floor) in DURATION_FLOORS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+            let limits = entry
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"));
+
+            // 1. Core reads exactly what the manifest declares — including "nothing".
+            assert_eq!(
+                hard_min_duration(entry),
+                *want_floor,
+                "{id}: effective hard min duration"
+            );
+
+            let buckets: Vec<f64> = limits
+                .get("durations")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{id} advertises durations"))
+                .iter()
+                .map(|d| d.as_f64().expect("numeric duration"))
+                .collect();
+            let default_duration = entry
+                .get("defaults")
+                .and_then(Value::as_object)
+                .and_then(|d| d.get("duration"))
+                .and_then(Value::as_f64)
+                .unwrap_or_else(|| panic!("{id} has a default duration"));
+
+            let Some(floor) = want_floor else {
+                continue;
+            };
+
+            // 2. UI PARITY, the mirror of the cap assertion: the floor is exactly the BOTTOM of the
+            //    advertised dropdown. A higher floor would reject the model's own picker; a lower
+            //    one would advertise less than it allows.
+            //    Compared in f32 — the width core actually reads — because the shipped rungs are
+            //    4 dp decimals with no exact binary form (5.1667 is not representable), so an f64
+            //    comparison would fail on the widening alone.
+            let advertised_min = buckets.iter().copied().fold(f64::MAX, f64::min);
+            assert_eq!(
+                *floor, advertised_min as f32,
+                "{id}: hardMinDuration must equal the bottom of its advertised durations"
+            );
+
+            // 3. FIXED POINT: every advertised bucket and the shipped default are ADMITTED. The
+            //    bound is `<`, so an at-floor request passes.
+            for advertised in buckets
+                .iter()
+                .copied()
+                .chain(std::iter::once(default_duration))
+            {
+                assert_eq!(
+                    duration_limit_error(id, advertised as f32, entry),
+                    None,
+                    "{id} advertises {advertised}s; the floor must admit it"
+                );
+            }
+
+            // 4. MUTATION CHECK: the floor actually refuses something, and names the model.
+            let under = floor - 0.5;
+            let message = duration_limit_error(id, under, entry).unwrap_or_else(|| {
+                panic!("{id}: {under}s is under the {floor}s floor and must be rejected")
+            });
+            assert!(message.contains(id), "{id}: names the model: {message}");
+            assert!(
+                message.contains("Lengthen"),
+                "{id}: gives the lever: {message}"
+            );
+        }
+    }
+
+    /// sc-17158 / sc-17152 — **15.0 s is REFUSED, not silently delivered as 14.375 s.**
+    ///
+    /// This is the standing trap the story warns about in its own words: SceneWorks normalization
+    /// can turn an engine geometry gate into a no-op, so the assertion has to be that the request
+    /// is REJECTED, not that some value got coerced onto the lattice. Before sc-17147 the reference
+    /// pipeline happily rendered 345 frames for a 360-frame ask; the app must not reproduce that.
+    ///
+    /// The symmetric case at the bottom matters just as much: a 3 s request is not a short clip for
+    /// this family, it is an unrenderable one.
+    #[test]
+    fn minimax_h3_refuses_the_advertised_fifteen_seconds_rather_than_shortening_it() {
+        let models = builtin_video_models();
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present"))
+                .as_object()
+                .expect("model entry object");
+
+            // The number upstream ADVERTISES, and the number this catalog must refuse.
+            let over = duration_limit_error(id, 15.0, entry)
+                .unwrap_or_else(|| panic!("{id}: 15.0s must be refused, not delivered as 14.375s"));
+            assert!(over.contains("14.375s"), "{id}: states the cap: {over}");
+            assert!(over.contains("15s"), "{id}: states what was asked: {over}");
+
+            // …and the request would otherwise have been quietly satisfied: the snap alone produces
+            // a perfectly legal 345 frames, which is exactly why the snap cannot be the gate.
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "duration": 15.0, "fps": 24,
+                "modelManifestEntry": Value::Object(entry.clone()),
+            })));
+            assert_eq!(request.raw_frame_count(), 360);
+            assert_eq!(
+                request.frame_count(),
+                345,
+                "the snap silently shortens it — the REJECTION above is the real gate"
+            );
+
+            // The floor, same shape. 3 s is under 5.1667 s.
+            let under = duration_limit_error(id, 3.0, entry)
+                .unwrap_or_else(|| panic!("{id}: 3.0s is unrenderable and must be refused"));
+            assert!(under.contains("5.1667s"), "{id}: states the floor: {under}");
+            assert!(under.contains("Lengthen"), "{id}: gives the lever: {under}");
+
+            // T = 1 has no lane at all: `min_duration` is a hardcoded 5.0 upstream, so a
+            // single-frame request is refused rather than rendered as a still.
+            assert!(
+                duration_limit_error(id, 1.0 / 24.0, entry).is_some(),
+                "{id}: a single-frame request must be refused — there is no image lane"
+            );
+        }
+    }
+
+    /// sc-17158 — the two partitions are ONE model geometrically and TWO models in what they
+    /// condition on. Both halves are asserted here so a future edit cannot drift them apart in the
+    /// first sense or collapse them in the second.
+    #[test]
+    fn both_minimax_h3_partitions_declare_one_geometry_and_split_the_reference_caps() {
+        let models = builtin_video_models();
+        let limits = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present"))
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"))
+                .clone()
+        };
+        let base = limits("minimax_h3");
+        let reference = limits("minimax_h3_ref");
+
+        // Same DiT, same VAE, same lattice ⇒ identical geometry on every axis core reads.
+        for key in [
+            "durations",
+            "hardMinDuration",
+            "hardMaxDuration",
+            "recommendedMaxDuration",
+            "fps",
+            "maxPixels",
+            "resolutions",
+            "requiresDimensionsMultipleOf",
+        ] {
+            assert_eq!(
+                base.get(key),
+                reference.get(key),
+                "the two MiniMax-H3 partitions must declare one geometry; {key} differs"
+            );
+        }
+
+        // …but only `transformer_ref` conditions on references. Ref2VA's caps are 9 images, 3 video
+        // clips, 3 audio clips and 12 FILES IN TOTAL — the combined bound is not derivable from the
+        // three per-list ones (9 + 3 + 3 is 15), which is why it is its own key (sc-17160).
+        let base_entry = models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some("minimax_h3"))
+            .expect("minimax_h3 present")
+            .as_object()
+            .expect("object");
+        let ref_entry = models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some("minimax_h3_ref"))
+            .expect("minimax_h3_ref present")
+            .as_object()
+            .expect("object");
+
+        assert_eq!(
+            reference_caps(ref_entry),
+            ReferenceCaps {
+                images: 9,
+                clips: 3,
+                audio: 3,
+                combined: Some(12),
+            }
+        );
+        assert_eq!(
+            reference_limit_error("minimax_h3_ref", 9, 2, 1, ref_entry),
+            None
+        );
+        assert!(
+            reference_limit_error("minimax_h3_ref", 9, 3, 3, ref_entry).is_some(),
+            "15 files must be refused by the combined cap even though every list fits"
+        );
+
+        // The t2va/fl2va partition conditions on `sourceAssetId` / `lastFrameAssetId`, never on the
+        // reference LISTS — and it must DECLARE that rather than inherit the historical 8/8/0, or a
+        // Ref2VA-shaped request would reach a checkpoint that silently ignores it.
+        assert_eq!(
+            reference_caps(base_entry),
+            ReferenceCaps {
+                images: 0,
+                clips: 0,
+                audio: 0,
+                combined: None,
+            }
+        );
+        assert!(
+            reference_limit_error("minimax_h3", 1, 0, 0, base_entry).is_some(),
+            "the base partition takes no image references"
+        );
+        assert!(
+            reference_limit_error("minimax_h3", 0, 0, 1, base_entry).is_some(),
+            "…nor audio references"
+        );
+    }
+
+    /// sc-17158 — the AREA budget is binding, and the per-edge cap alone would not have caught the
+    /// case that motivated it.
+    ///
+    /// `CANVAS_MAX_PIXELS` is 1,032,192 = 768x1344. `Capabilities::max_size` bounds each edge
+    /// INDEPENDENTLY, so 1344x1344 satisfies every per-edge check while sitting at 1.75x the
+    /// checkpoint's budget — which is exactly what shipped until sc-17152 wired the area check.
+    /// Declaring `limits.maxPixels` is what makes the app refit it before it ever reaches an engine.
+    #[test]
+    fn minimax_h3_over_cap_canvas_is_refit_onto_the_area_budget() {
+        let models = builtin_video_models();
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present"));
+
+            // The square that passed every per-edge check.
+            let square = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "width": 1344, "height": 1344,
+                "modelManifestEntry": entry.clone(),
+            })));
+            assert!(
+                u64::from(square.width) * u64::from(square.height) <= 1_032_192,
+                "{id}: 1344x1344 must be refit under the area budget, got {}x{}",
+                square.width,
+                square.height
+            );
+            assert_eq!((square.width % 32, square.height % 32), (0, 0));
+            assert!(
+                (square.width, square.height) != (1344, 1344),
+                "{id}: the refit must actually fire, else the cap is decoration"
+            );
+
+            // …while the advertised 16:9 bucket sits EXACTLY at the budget and is untouched.
+            let widescreen = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "width": 1344, "height": 768,
+                "modelManifestEntry": entry.clone(),
+            })));
+            assert_eq!((widescreen.width, widescreen.height), (1344, 768));
+            assert_eq!(1344 * 768, 1_032_192);
+        }
+    }
+
+    /// The floor's message, held to the same house convention as the cap's: name the model, state
+    /// what was asked and what the limit is, and give the lever.
+    #[test]
+    fn duration_limit_error_names_the_model_the_request_and_the_floor() {
+        let h3 =
+            payload(json!({ "limits": { "hardMinDuration": 5.1667, "hardMaxDuration": 14.375 } }));
+        let message =
+            duration_limit_error("minimax_h3", 2.0, &h3).expect("2s is under the 5.1667s floor");
+        assert!(message.contains("minimax_h3"), "names the model: {message}");
+        assert!(message.contains("5.1667s"), "states the floor: {message}");
+        assert!(message.contains("2s"), "states what was asked: {message}");
+        assert!(message.contains("Lengthen"), "gives the lever: {message}");
+
+        // The floor is checked FIRST, so a request that is under the floor never reports the cap.
+        assert!(
+            !message.contains("Shorten"),
+            "one lever, not both: {message}"
+        );
+        // At the floor admits (`<`, matching every other bound in this module being strict).
+        assert_eq!(duration_limit_error("minimax_h3", 5.1667, &h3), None);
+        // …and the cap still fires at the other end.
+        let over = duration_limit_error("minimax_h3", 15.0, &h3).expect("15s is past the cap");
+        assert!(
+            over.contains("Shorten"),
+            "the cap keeps its own lever: {over}"
+        );
+    }
+
+    /// The infallibility contract [`hard_max_duration`] holds to, applied to the floor: an absent or
+    /// unhonorable value is NO floor, so a model that declares nothing — every video model shipped
+    /// before sc-17158 — is byte-for-byte unchanged.
+    #[test]
+    fn absent_or_unhonorable_hard_min_duration_means_no_floor() {
+        let bare = payload(json!({}));
+        assert_eq!(hard_min_duration(&bare), None);
+        assert_eq!(duration_limit_error("bernini", 0.5, &bare), None);
+
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(f64::NAN),
+            json!("5.1667"),
+            json!(null),
+        ] {
+            let entry = payload(json!({ "limits": { "hardMinDuration": bad } }));
+            assert_eq!(hard_min_duration(&entry), None, "unhonorable floor {bad}");
+            assert_eq!(
+                duration_limit_error("some_model", 0.5, &entry),
+                None,
+                "an unhonorable floor must not brick the model: {bad}"
+            );
+        }
+
+        // A model that declares ONLY a floor still gets one — the two bounds are independent, and
+        // the cap arm must not swallow the floor when `hardMaxDuration` is absent.
+        let floor_only = payload(json!({ "limits": { "hardMinDuration": 5.1667 } }));
+        assert!(duration_limit_error("floor_only", 3.0, &floor_only).is_some());
+        assert_eq!(duration_limit_error("floor_only", 30.0, &floor_only), None);
     }
 
     /// The house message convention (`mlx_fit_gate::too_big_error_names_model_budget_and_optional_staged`):
@@ -1930,7 +2631,10 @@ mod tests {
         // The blanket duration was over-cap for a MAJORITY of shipped models — the same shape as
         // the fps blanket, and the reason this is a generalized invariant rather than two
         // coincidences. Pinned as a number so reintroducing a blanket default fails here.
-        // 7 of 10 as of sc-8444 (krea_realtime_14b joined the 5s-capped group).
+        // 7 of 10 as of sc-8444 (krea_realtime_14b joined the 5s-capped group). Still 7 of 12 after
+        // sc-17158: MiniMax-H3's 14.375 s ceiling is well past the blanket, so neither partition
+        // joins this set — but both are caught by the FLOOR instead (`hardMinDuration` 5.1667 s is
+        // under the blanket 6.0 s, so the blanket is admitted, just off their lattice).
         let over_cap: Vec<&str> = FPS_MENUS
             .iter()
             .filter_map(|(id, ..)| {
@@ -1971,7 +2675,7 @@ mod tests {
             .collect();
         assert_eq!(
             unadvertised.len(),
-            8,
+            10,
             "the blanket {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} is not advertised by these models: \
              {unadvertised:?}"
         );
@@ -2047,6 +2751,11 @@ mod tests {
         // autoregressive block lattice — see
         // [`krea_realtime_durations_are_on_the_ar_block_lattice`].
         ("krea_realtime_14b", &[24], 24),
+        // MiniMax-H3's single cadence. Not a curation choice: the `17n + 5` lattice, the 5–15 s
+        // clamp and every measured render are all at 24 fps, and the duration menu is literally
+        // `frames / 24`, so any other rate puts the whole dropdown off-lattice.
+        ("minimax_h3", &[24], 24),
+        ("minimax_h3_ref", &[24], 24),
     ];
 
     /// The fps the API blanket-defaulted to before sc-12347, kept as a named constant because the
@@ -2080,6 +2789,12 @@ mod tests {
         // The reference bucket: 832x480 is exactly the 52x30 = 1560 tokens/frame the shipped
         // AR config bakes as `frame_seq_length` (the engine still recomputes it per request).
         ("krea_realtime_14b", 832, 480),
+        // Upstream's own default canvas: `resolve_canvas_size` yields 1344x768 for a 16:9 request
+        // with the 768 shorter side the model card specifies. It is EXACTLY the 1,032,192 px area
+        // budget, so it is the largest legal bucket rather than a middle one — which is also why it
+        // is a ~2 hour render at the shortest clip (sc-17152).
+        ("minimax_h3", 1344, 768),
+        ("minimax_h3_ref", 1344, 768),
     ];
 
     /// sc-12347 — the temporal invariant's other half: **what a video model advertises is what it
@@ -2177,7 +2892,7 @@ mod tests {
             .collect();
         assert_eq!(
             rejecting_the_blanket.len(),
-            7,
+            9,
             "the blanket {THE_BLANKET_FPS} fps is off-menu for these models: {rejecting_the_blanket:?} \
              — if this count moved, re-read why resolve_fps consults defaults.fps before changing it"
         );

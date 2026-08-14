@@ -2144,11 +2144,17 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(shippedSvd?.video).toEqual(SVD.video);
 
     // …and the polarity claim the manifest/schema comments make is checked against the real
-    // population rather than trusted: exactly these two entries declare the block, every other
-    // video model declares nothing and therefore keeps both controls.
+    // population rather than trusted: exactly these entries declare the block, every other video
+    // model declares nothing and therefore keeps both controls.
+    //
+    // Both MiniMax-H3 partitions joined in sc-17158: the sc-17242 spike enumerated the reference
+    // pipeline's complete 19-parameter input surface and neither `guidance_scale` nor
+    // `negative_prompt` is on it, so the axes genuinely do not exist. The non-declaring count is
+    // deliberately asserted separately and did NOT move — a new video entry that keeps both
+    // controls has to be a conscious decision, not a side effect of the list growing.
     const videoEntries = models.filter((entry) => entry.type === "video");
     const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
-    expect(declaring).toEqual(["krea_realtime_14b", "svd"]);
+    expect(declaring).toEqual(["krea_realtime_14b", "minimax_h3", "minimax_h3_ref", "svd"]);
     expect(videoEntries.length - declaring.length).toBe(8);
 
     const context = baseContext({ videoModels: [SVD] });

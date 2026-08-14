@@ -838,6 +838,62 @@ const seededFallbackModels = [
       promptGuide: { title: "Wan2.2 VACE-Fun Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
     },
   },
+  // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-17158). ⚠️ A MIRROR of
+  // config/manifests/builtin.models.jsonc, not a source of truth — the catalog is, and editing only
+  // this file ships nothing (sc-4997's fast path changed only the mirror and never took effect).
+  // videoGeometryParity.test.js pins the resolutions + default against the manifest in both
+  // directions.
+  //
+  // The duration menu is the FOURTEEN `17n + 5` lattice rungs, NOT a range and NOT the `4k + 1` the
+  // epic's R7 claims — see MINIMAX_H3_LEGAL_FRAME_COUNTS in
+  // crates/sceneworks-core/src/video_request.rs. Every bucket is on the default ÷32 stride, so no
+  // `requiresDimensionsMultipleOf` travels with them.
+  {
+    id: "minimax_h3",
+    name: "MiniMax-H3",
+    type: "video",
+    capabilities: ["text_to_video", "image_to_video", "first_last_frame"],
+    defaults: { duration: 5.1667, fps: 24, resolution: "1344x768", steps: 50 },
+    limits: {
+      durations: [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+      hardMinDuration: 5.1667,
+      hardMaxDuration: 14.375,
+      recommendedMaxDuration: 14.375,
+      fps: [24],
+      maxPixels: 1032192,
+      resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+    },
+    ui: {
+      description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt.",
+      durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
+      promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
+    },
+  },
+  {
+    id: "minimax_h3_ref",
+    name: "MiniMax-H3 References",
+    type: "video",
+    capabilities: ["reference_to_video"],
+    defaults: { duration: 5.1667, fps: 24, resolution: "1344x768", steps: 50 },
+    limits: {
+      durations: [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+      hardMinDuration: 5.1667,
+      hardMaxDuration: 14.375,
+      recommendedMaxDuration: 14.375,
+      fps: [24],
+      maxPixels: 1032192,
+      resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+      maxReferenceAssets: 9,
+      maxSourceClipAssets: 3,
+      maxReferenceAudioAssets: 3,
+      maxCombinedReferenceAssets: 12,
+    },
+    ui: {
+      description: "MiniMax-H3 reference-driven video: up to 9 images, 3 clips and 3 audio references (12 files total), with synchronized stereo audio.",
+      durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, and the same canvas-driven cost.",
+      promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
+    },
+  },
   // Audio models (epic 13400 A2/A3) — this mirrors the `type:"audio"` catalog entries so the
   // Audio Studio still has a model list when the live catalog (/api/v1/models) is unavailable. Each
   // entry carries only the `audio` capability fields the UI / eligibility predicates read: `voices`

@@ -12922,6 +12922,488 @@
         }
       }
     },
+    // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-17158): a flow-matching DiT that generates video AND
+    // synchronized stereo audio JOINTLY — the render delivers one muxed mp4, the audio is not a
+    // separate pass. Two DiT partitions ship, and they are two manifest entries (sc-17139 AC4):
+    // `minimax_h3` (the `transformer` checkpoint — t2va + fl2va) and `minimax_h3_ref` (the
+    // `transformer_ref` checkpoint — Ref2VA). They share one hosted repo and one shared component
+    // floor; only the primary `files` predicate differs.
+    //
+    // ⚠️ GEOMETRY: the epic's R7 and sc-17158's own TITLE say frames are `4k + 1`. THAT IS WRONG and
+    // measured false (sc-17242 spike, against the official diffusers `MiniMaxH3` on real weights;
+    // correction of record on sc-17158 activity 18824 and epic activity 19108). The lattice is
+    // `17n + 5`, the two are NOT nested, and the 5–15 s clamp leaves exactly FOURTEEN legal frame
+    // counts, 124…345 — see `MINIMAX_H3_LEGAL_FRAME_COUNTS` in
+    // crates/sceneworks-core/src/video_request.rs, which is where the app enforces it.
+    //
+    // ⚠️ COST: this is the most expensive video model in the catalog by a wide margin. Measured
+    // 50-step projections on real weights (sc-17152, sc-17150 activity 19106):
+    //     576x320  @ 124 f (5.1667 s)  →  16.26 s/step  →   813 s   (13.5 min)
+    //     576x320  @ 345 f (14.375 s)  →  51.59 s/step  →  2 579 s  (43 min)
+    //     1344x768 @ 124 f (5.1667 s)  → 147.87 s/step  →  7 394 s  (2.05 HOURS)
+    //     1344x768 @ 345 f (14.375 s)  →  ~8.4 hours of attention alone
+    // The binding constraint is a canvas x duration PRODUCT and no scalar limit can express it, so
+    // `recommendedMaxDuration` stays at the hard bound and the pairing is surfaced in `ui`
+    // (sc-17153 owns the fit gate that can actually reason about it).
+    //
+    // ⚠️ NOT SHIPPED UPSTREAM (do not imply otherwise in copy — sc-17162): `H3-Context-IR` (hosted
+    // prompt refinement, so prompt adherence differs from the Hailuo API), `H3-Regenerate-2K` (so
+    // "up to 2K" is NOT reachable from these weights), and the sparse-attention inference path
+    // (so the open weights run DENSE attention, which is why the cost table above looks like that).
+    //
+    // ⚠️ NO IMAGE LANE. `min_duration = 5.0` is hardcoded upstream, so `T = 1` does not render at
+    // all. The epic's image-lane premise ("T=1 collapses ~31k tokens to ~1k") has no basis;
+    // sc-17240 / sc-17241 / sc-18666 are in Backlog and must not be revived from this entry.
+    {
+      "id": "minimax_h3",
+      "name": "MiniMax-H3",
+      "family": "minimax-h3",
+      "type": "video",
+      "adapter": "minimax_h3",
+      // t2va (text → audio+video) and fl2va (first and/or last frame conditioning, 0/1/2 images).
+      // Ref2VA lives on `minimax_h3_ref`, which is the only partition whose checkpoint conditions
+      // on multi-modal references. Reachability (VIDEO_UI_MODES eligibility, the
+      // `validate_video_job` allow-list, the worker's routing) is sc-17159 — declaration is NOT
+      // reachability (GH #2074), and this entry deliberately claims only what the checkpoint does.
+      "capabilities": ["text_to_video", "image_to_video", "first_last_frame"],
+      // sc-17242 spike, measured against the official diffusers reference: the pipeline's ENTIRE
+      // input surface is 19 params — `prompt`, `image`, `last_image`, `references`, `num_frames`,
+      // `height`, `width`, `num_inference_steps`, `generator`, `latents`, `audio_latents`,
+      // `output_type`, `attention_kwargs` and 6 intermediates. There is **no `guidance_scale` and no
+      // `negative_prompt`**, so both axes are declared false and Video Studio hides the controls
+      // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
+      // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
+      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      "downloads": [
+        // Quant matrix (sc-17150, epic 8506 shape): each tier is a SEPARATE user-selectable
+        // artifact tagged with a `variant`; q4 (default) installs when no tier is chosen. Sizes are
+        // the EXACT hosted directory bytes measured post-upload (sc-17150 activity 19106); the six
+        // artifacts plus 1,519 B of repo-root files reconcile to the repo total 240,725,488,299 B
+        // to the byte.
+        //
+        // ONLY THE DiT IS TIERED (sc-17139): three self-contained tiers would repeat the 62 GB text
+        // encoder and the 11 GB VAE floor per tier and cost ~250 GB. The text encoder and both VAEs
+        // are shared `coRequisite` rows below, byte-identical between this entry and
+        // `minimax_h3_ref`, so the floor downloads ONCE for both.
+        //
+        // ⚠️ QUANT BUYS DISK, AND ALSO MEMORY — but not where the process peak is. Measured
+        // (sc-17150 activity 19121): DiT denoise-resident drops 40.43 GB (bf16) → 11.63 GB (q4), a
+        // 28.80 GB reduction. The ~53 GB generate peak is the DENSE Qwen3-VL-32B text encoder,
+        // which runs BEFORE the DiT loads and is dense in every tier, so it masks the DiT stages
+        // and makes the process peak look tier-independent. It is removable, not intrinsic:
+        // sc-19120 (packed TE tier) + sc-18662 (block streaming) are the pair that lowers it.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18780109783,
+          "footprint": { "diskSizeBytes": 18780109783, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "variant": "q8",
+          "files": ["q8/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35302064357,
+          "footprint": { "diskSizeBytes": 35302064357, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "variant": "bf16",
+          "files": ["bf16/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250,
+          "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // --- the shared floor: three tier-agnostic co-requisites, all from MiniMax's OWN upstream
+        // repo at one pinned snapshot. NOT re-hosted (sc-17150 activity 18712 decided against a
+        // rehost): the 14 text-encoder shards are byte-for-byte identical to
+        // Qwen/Qwen3-VL-32B-Instruct (14/14 SHA-256, 66,714,912,872 B both sides, sc-17143), so a
+        // mirror would add nothing but bytes. Sourcing the component from `MiniMaxAI/MiniMax-H3`
+        // rather than from Qwen directly is deliberate: `text_encoder/tokenizer_config.json` is the
+        // ONE file MiniMax changed (it adds the 7 `additional_special_tokens` whose ids the engine
+        // assigns BY LIST ORDER), and taking the whole component from one repo keeps a single
+        // pinned revision covering all three shared components with no tokenizer overlay.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          // ⚠️ SHARD 13 IS DELIBERATELY OMITTED — 4,875,990,584 B (7.3 %) saved. The engine reads
+          // decoder layers 0..=49 from shards 1..=12 and the vision tower from shard 14
+          // (`TE_SHARDS` / `VISION_SHARD`); only the trimmable tail — decoder layers 50..=63, the
+          // final norm and `lm_head` — lives in shard 13, and the real-weight forward smoke runs
+          // with it absent (sc-17143, epic activity 19108). Shards are listed individually rather
+          // than globbed because the downloader hard-fails a pattern matching zero remote files, so
+          // an explicit list is the auditable form. The DiT context is `hidden_states[50]`, proven
+          // bit-identical with the tail removed (mutation + physical-removal, sc-17143).
+          "files": [
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors.index.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/vocab.json",
+            "text_encoder/merges.txt",
+            "text_encoder/chat_template.json",
+            "text_encoder/preprocessor_config.json",
+            "text_encoder/video_preprocessor_config.json",
+            "text_encoder/model-00001-of-00014.safetensors",
+            "text_encoder/model-00002-of-00014.safetensors",
+            "text_encoder/model-00003-of-00014.safetensors",
+            "text_encoder/model-00004-of-00014.safetensors",
+            "text_encoder/model-00005-of-00014.safetensors",
+            "text_encoder/model-00006-of-00014.safetensors",
+            "text_encoder/model-00007-of-00014.safetensors",
+            "text_encoder/model-00008-of-00014.safetensors",
+            "text_encoder/model-00009-of-00014.safetensors",
+            "text_encoder/model-00010-of-00014.safetensors",
+            "text_encoder/model-00011-of-00014.safetensors",
+            "text_encoder/model-00012-of-00014.safetensors",
+            "text_encoder/model-00014-of-00014.safetensors"
+          ],
+          "platforms": ["macos"],
+          // 66,726,510,529 B for the whole component, minus the 4,875,990,584 B shard 13.
+          "estimatedSizeBytes": 61850519945
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "video_vae",
+          "subdir": "vae",
+          "files": ["vae/*"],
+          "platforms": ["macos"],
+          // Dense bf16 in EVERY tier (the Wan precedent) — no `variant`, because this is a floor no
+          // tier shrinks. Say so here so nobody later "optimizes" a tier expecting it to move. Its
+          // decoder is a 36-layer TRANSFORMER, not a conv stack, which is why decode is unusually
+          // expensive for a VAE.
+          "estimatedSizeBytes": 10415634127
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "audio_vae",
+          "subdir": "audio_vae",
+          "files": ["audio_vae/*"],
+          "platforms": ["macos"],
+          // 32 kHz stereo, 40 Hz token rate. Also dense in every tier.
+          "estimatedSizeBytes": 605431611
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
+      },
+      "defaults": {
+        // The shortest rung (124 frames) rather than the middle of the menu, because the cost table
+        // above makes the default canvas a 2-hour render at 5.1667 s and worse at every longer one.
+        // `limits.durations[0]` is NOT what makes this the default — `defaults.duration` is; the two
+        // agreeing here is a deliberate choice, not an ordering dependency.
+        "duration": 5.1667,
+        "fps": 24,
+        // Upstream's own default canvas: 16:9 with the 768 shorter side the model card specifies.
+        // `resolve_canvas_size` produces exactly this for a 16:9 request and it is EXACTLY the
+        // 1,032,192 px area budget, so it is the largest legal bucket rather than a happy medium.
+        "resolution": "1344x768",
+        "steps": 50,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // ⚠️ The FOURTEEN legal clip lengths, and the reason this is a MENU rather than a range:
+        // frames must land on `17n + 5` and only 124…345 satisfy the checkpoint's own 5–15 s clamp,
+        // so a slider would emit durations the engine refuses. Each value is `frames / 24` to 4 dp
+        // and each rounds back to its own frame count exactly (5.1667 x 24 = 124.0008 → 124).
+        // Derived from MINIMAX_H3_LEGAL_FRAME_COUNTS by
+        // `shipped_minimax_h3_duration_menu_is_exactly_the_fourteen_lattice_rungs`, so the menu and
+        // the lattice cannot drift.
+        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+        // 124 / 24. The reference ADVERTISES 5.0 s but has no lattice point there, and a shorter
+        // request is refused rather than lengthened (sc-17152).
+        "hardMinDuration": 5.1667,
+        // 345 / 24. The reference ADVERTISES 15.0 s and CANNOT reach it — the next rung is 362
+        // frames = 15.083 s — so 15 s is REFUSED here rather than silently delivered as 14.375 s,
+        // which is exactly what sc-17147 was doing.
+        "hardMaxDuration": 14.375,
+        // Stays at the hard bound deliberately: the real constraint is canvas x duration and a
+        // scalar cannot express it. The full range is comfortable at 576x320; the SHORTEST clip at
+        // the default canvas is already two hours. Recommending a shorter scalar would falsely
+        // imply long clips are infeasible everywhere (sc-17152).
+        "recommendedMaxDuration": 14.375,
+        // One cadence. The lattice, the duration window and every measured render are 24 fps.
+        "fps": [24],
+        // `CANVAS_MAX_PIXELS` = 1,032,192 = 768 x 1344, and it is ENFORCED as an AREA budget. It had
+        // been declared and unused, and `Capabilities::max_size` bounds each edge INDEPENDENTLY, so
+        // 1344x1344 previously passed every check at 1.75x the checkpoint's budget (sc-17152). Every
+        // advertised bucket below satisfies the AREA, not merely the per-edge cap.
+        "maxPixels": 1032192,
+        // NO `requiresDimensionsMultipleOf`. `SIZE_MULTIPLE` is 32 (the VAE's 16x spatial stride x
+        // the DiT's width patch 2), which is already core's default floor — the same reason
+        // wan_2_2 and scail2_14b declare nothing. Declaring 32 would be a no-op that reads as a
+        // per-model choice; `dimension_multiple_of` is pinned at 32 for this id by
+        // `shipped_manifest_matches_each_engines_real_geometry`.
+        //
+        // There is NO `aspect_ratio` parameter upstream — the canvas derives from the first
+        // keyframe's ratio, or defaults to 16:9 with no keyframe, and bounds are 1:4 to 4:1. These
+        // buckets are the MEASURED `resolve_canvas_size` outputs (21:9 → 1536x672, 16:9 → 1344x768,
+        // 1:1 → 768x768, 9:16 → 768x1344, 4:3 → 1024x768) plus their transposes, and the 576x320
+        // pair sc-17152 rendered on. The 4:1 edge case resolves to 2016x512, which is past the app's
+        // own 1920 px per-side clamp, so it is deliberately NOT advertised — an advertised bucket
+        // must be a fixed point. A keyframe is STRETCHED onto the canvas, not letterboxed, and the
+        // resolved ratio drifts slightly (a 4:1 request comes back 3.938:1).
+        "resolutions": ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+        // t2va and fl2va condition on `sourceAssetId` / `lastFrameAssetId`, never on the reference
+        // LISTS — this partition's checkpoint has no reference-conditioning path at all, so all
+        // three are 0 and an engine can never be handed conditioning it would silently ignore
+        // (which is invisible in the output). `minimax_h3_ref` is where 9 / 3 / 3 / 12 lives.
+        "maxReferenceAssets": 0,
+        "maxSourceClipAssets": 0,
+        "maxReferenceAudioAssets": 0,
+        // Default-only until the engine descriptor is reachable from this repo: the inference pin is
+        // still 014134e3 (sc-18650 owns the bump), so the sampler/scheduler drift guard in
+        // engines.rs cannot yet compare a curated menu against MiniMax-H3's real capabilities. A
+        // curated menu is additive once the descriptor is visible.
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "mlx": {
+        // MEASURED MLX peak is 52.81–53.07 GB across all three tiers (sc-17150 activity 19106),
+        // and activity 19121 attributes it precisely: the DENSE Qwen3-VL-32B text encoder, measured
+        // in isolation at 53.07 GB, which runs before the DiT loads and sets the process high-water.
+        // 96, not 64: the wired ceiling is `recommendedMaxWorkingSetSize` (~75 % of unified memory),
+        // so a 64 GB Mac offers ~48 GB and cannot hold a 53 GB peak; 96 GB offers ~72 GB and fits.
+        // Same derivation scail2_14b's 96 uses.
+        //
+        // ⚠️ This is the honest floor TODAY, not a property of the model: people run MiniMax-H3 on
+        // 12 GB GPUs in ComfyUI by streaming blocks. Nothing here is on the memory ladder yet.
+        // sc-19120 (packed text-encoder tier) removes the larger half of the gap and sc-18662
+        // (rung-4 block streaming) the rest; sc-17153 owns the measured fit gate that replaces this
+        // scalar. Do NOT read 96 as intrinsic.
+        "minMemoryGb": 96,
+        "repo": "SceneWorks/minimax-h3-mlx",
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      // NO `candle` block, and the downloads are `macos` only. That is a statement about the LANE,
+      // not about VRAM: the candle MiniMax-H3 provider has no end-to-end path yet (sc-19008 →
+      // sc-17156 → sc-17157), and the hosted tiers are MLX-packed. sc-17156 measures the candle
+      // ceilings and adds `candle` + the windows/linux platforms; the weights-floor table on
+      // sc-17158 activity 18683 is explicitly NOT to be backfilled here (it is a weights floor, not
+      // a generate peak).
+      "ui": {
+        "label": "MiniMax-H3",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — which is why renders are measured in hours at the default canvas. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. macOS native MLX only, and it needs a large-memory Mac.",
+        "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
+        "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
+        "promptGuide": {
+          "title": "MiniMax-H3 Prompt Guide",
+          "path": "/prompt-guides/minimax-h3.md",
+          "sources": [
+            { "label": "MiniMax-H3 model card", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3" },
+            { "label": "Hailuo 3.0 prompting guide", "url": "https://hailuoai.video/" },
+            { "label": "MiniMax platform video generation docs", "url": "https://platform.minimax.io/docs/api-reference/video-generation" }
+          ]
+        }
+      }
+    },
+    // The Ref2VA partition. Same architecture, same geometry, same shared floor — a DIFFERENT
+    // checkpoint (`transformer_ref`), which is the only one that conditions on multi-modal
+    // references. A second ENTRY rather than a co-requisite of the first (sc-17139 AC4): a hard
+    // co-requisite would force +18.78 GB on every q4 text-to-video user, a soft one would pin
+    // `update_available: true` forever, and `variant` is a closed quant enum with no
+    // "which checkpoint" axis. Same shape as the wan_2_2_t2v_14b / wan_2_2_i2v_14b pair.
+    //
+    // The two entries share the primary repo `SceneWorks/minimax-h3-mlx` and differ only in the
+    // per-tier `files` predicate, so a per-tier delete on one reclaims exactly its own subtree.
+    // (Whole-model delete resolves the repo cache path, so removing either entry can strand the
+    // other's bytes — a pre-existing, repo-wide characteristic of the twelve shared-repo groups
+    // already in this catalog, e.g. bernini / bernini_image, not something this pair introduces.)
+    {
+      "id": "minimax_h3_ref",
+      "name": "MiniMax-H3 References",
+      "family": "minimax-h3",
+      "type": "video",
+      "adapter": "minimax_h3",
+      // Ref2VA only: up to 9 images, 3 video clips and 3 audio clips, 12 files in total. It is not
+      // a text-to-video or first/last-frame checkpoint — those are `minimax_h3`.
+      "capabilities": ["reference_to_video"],
+      // sc-17242 spike, measured against the official diffusers reference: the pipeline's ENTIRE
+      // input surface is 19 params — `prompt`, `image`, `last_image`, `references`, `num_frames`,
+      // `height`, `width`, `num_inference_steps`, `generator`, `latents`, `audio_latents`,
+      // `output_type`, `attention_kwargs` and 6 intermediates. There is **no `guidance_scale` and no
+      // `negative_prompt`**, so both axes are declared false and Video Studio hides the controls
+      // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
+      // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
+      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/transformer_ref/*"],
+          "platforms": ["macos"],
+          // `transformer_ref` is byte-for-byte the same SIZE as `transformer` at every tier — the
+          // two carry identical `config.json` and the same 638 tensor names, so a name-comparison
+          // check cannot tell them apart; they are different WEIGHTS.
+          "estimatedSizeBytes": 18780109783,
+          "footprint": { "diskSizeBytes": 18780109783, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "variant": "q8",
+          "files": ["q8/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35302064357,
+          "footprint": { "diskSizeBytes": 35302064357, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "variant": "bf16",
+          "files": ["bf16/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250,
+          "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // BYTE-IDENTICAL to `minimax_h3`'s co-requisite rows — same repo, same pinned revision, same
+        // component ids, same file predicates. That identity is what makes the 72.9 GB shared floor
+        // download ONCE for both entries instead of twice; a co-requisite is never removed when one
+        // of the models that references it is deleted.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          "files": [
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors.index.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/vocab.json",
+            "text_encoder/merges.txt",
+            "text_encoder/chat_template.json",
+            "text_encoder/preprocessor_config.json",
+            "text_encoder/video_preprocessor_config.json",
+            "text_encoder/model-00001-of-00014.safetensors",
+            "text_encoder/model-00002-of-00014.safetensors",
+            "text_encoder/model-00003-of-00014.safetensors",
+            "text_encoder/model-00004-of-00014.safetensors",
+            "text_encoder/model-00005-of-00014.safetensors",
+            "text_encoder/model-00006-of-00014.safetensors",
+            "text_encoder/model-00007-of-00014.safetensors",
+            "text_encoder/model-00008-of-00014.safetensors",
+            "text_encoder/model-00009-of-00014.safetensors",
+            "text_encoder/model-00010-of-00014.safetensors",
+            "text_encoder/model-00011-of-00014.safetensors",
+            "text_encoder/model-00012-of-00014.safetensors",
+            "text_encoder/model-00014-of-00014.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 61850519945
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "video_vae",
+          "subdir": "vae",
+          "files": ["vae/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 10415634127
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "audio_vae",
+          "subdir": "audio_vae",
+          "files": ["audio_vae/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 605431611
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
+      },
+      "defaults": {
+        "duration": 5.1667,
+        "fps": 24,
+        "resolution": "1344x768",
+        "steps": 50,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Identical geometry to `minimax_h3` — same DiT architecture, same VAE, same lattice. See
+        // that entry for the derivations; the two are asserted equal by
+        // `both_minimax_h3_partitions_declare_one_geometry`.
+        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+        "hardMinDuration": 5.1667,
+        "hardMaxDuration": 14.375,
+        "recommendedMaxDuration": 14.375,
+        "fps": [24],
+        "maxPixels": 1032192,
+        "resolutions": ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+        // Ref2VA's real caps. The per-list numbers do NOT multiply out to the combined one — 9 + 3
+        // + 3 is 15 files against a 12-file ceiling — which is why `maxCombinedReferenceAssets` is
+        // its own key rather than something derived: it is the only cap that can refuse a request in
+        // which every individual list fits (sc-17160).
+        "maxReferenceAssets": 9,
+        "maxSourceClipAssets": 3,
+        "maxReferenceAudioAssets": 3,
+        "maxCombinedReferenceAssets": 12,
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "mlx": {
+        // Same peak, same derivation as `minimax_h3` — the text-encoder stage dominates and is
+        // shared, and the ref DiT is the same size as the base one at every tier.
+        "minMemoryGb": 96,
+        "repo": "SceneWorks/minimax-h3-mlx",
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      "ui": {
+        "label": "MiniMax-H3 References",
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. Same open-weights caveats as MiniMax-H3: no hosted prompt refinement, no native 2K, dense attention, and no guidance or negative-prompt axis.",
+        "recommendedFor": ["reference_to_video"],
+        "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps, and the same canvas-dominated cost — start at 576x320.",
+        "promptGuide": {
+          "title": "MiniMax-H3 Prompt Guide",
+          "path": "/prompt-guides/minimax-h3.md",
+          "sources": [
+            { "label": "MiniMax-H3 model card", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3" },
+            { "label": "Hailuo 3.0 prompting guide", "url": "https://hailuoai.video/" },
+            { "label": "MiniMax platform video generation docs", "url": "https://platform.minimax.io/docs/api-reference/video-generation" }
+          ]
+        }
+      }
+    },
     {
       "id": "real_esrgan",
       "recommended": true,

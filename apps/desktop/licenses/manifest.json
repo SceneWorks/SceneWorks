@@ -918,6 +918,31 @@
       ]
     },
     {
+      "id": "minimax-h3",
+      "models": [
+        "minimax_h3",
+        "minimax_h3_ref"
+      ],
+      "name": "MiniMax-H3 (Hailuo 3.0) + Qwen3-VL-32B",
+      "publisher": "Nanonoble Pte. Ltd. (MiniMax-H3) · Alibaba Qwen (Qwen3-VL-32B)",
+      "license": "MiniMax H3 Community License · Apache-2.0",
+      "homepage": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      "platforms": [
+        "macos"
+      ],
+      "usage": "Joint video + audio generation model, in two entries sharing one component set: MiniMax-H3 (text-to-video and first/last-frame) and MiniMax-H3 References (reference-driven). On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the two diffusion transformers, re-hosted at SceneWorks/minimax-h3-mlx, plus the text encoder and both autoencoders fetched directly from the upstream MiniMaxAI/MiniMax-H3 repository (not re-hosted). The transformer and autoencoder weights are governed by the MiniMax H3 Community License Agreement, a RESTRICTED licence and not a permissive one: it permits commercial use subject to an Acceptable Use Policy, requires attribution on redistribution, and expressly limits its Applicable Territory to the world EXCLUDING the European Union, the United Kingdom, the Republic of Korea and the United States of America. Read the full text below before use. The text encoder is byte-for-byte identical to Qwen/Qwen3-VL-32B-Instruct and remains under Apache-2.0; both notices apply.",
+      "documents": [
+        {
+          "label": "MiniMax H3 Community License Agreement",
+          "key": "minimax-h3-community-license"
+        },
+        {
+          "label": "Apache License 2.0 (Qwen3-VL-32B text encoder)",
+          "key": "minimax-h3-qwen-apache"
+        }
+      ]
+    },
+    {
       "id": "svd",
       "models": [
         "svd"

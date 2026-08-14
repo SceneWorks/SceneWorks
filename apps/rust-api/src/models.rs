@@ -4525,9 +4525,18 @@ mod model_size_concurrency_tests {
         // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
+        //
+        // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
+        // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
+        // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
+        // `(repo, files)` still separates them and macOS gains exactly two: 87 → 89. Windows/Linux
+        // gain NOTHING and stay at 84: every MiniMax-H3 download row is `platforms: ["macos"]`
+        // (the candle lane has no H3 provider yet — sc-19008 → sc-17156), so
+        // `retain_downloads_for_os` empties both entries there and `model_download_context`
+        // yields `None`. That asymmetry is the point of running this loop per OS.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 89_usize), ("windows", 84), ("linux", 84)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
