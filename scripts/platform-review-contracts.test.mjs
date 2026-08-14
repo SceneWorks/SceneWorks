@@ -285,18 +285,18 @@ test("Rust Docker builders copy every production generated embed from sceneworks
         .matchAll(/include_str!\("\.\.\/\.\.\/\.\.\/(docs\/generated\/[^"\n]+)"\)/g),
     ].map((match) => match[1]),
   );
-  assert.deepEqual(
-    [...generatedEmbeds].sort(),
-    [
-      "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
-      "docs/generated/memory-calibration-evidence.json",
-      "docs/generated/video-memory-curves.json",
-    ],
+  assert(generatedEmbeds.has("docs/generated/memory-calibration-evidence.json"));
+  assert(generatedEmbeds.has("docs/generated/video-memory-curves.json"));
+  assert(
+    [...generatedEmbeds].some((path) => path.startsWith("docs/generated/ltx-mlx-")),
+    "the promoted video-memory curve must compile at least one immutable LTX evidence source",
   );
 
   const dockerfile = await source("docker/rust.Dockerfile");
   for (const path of generatedEmbeds) {
-    const copy = `COPY ${path} ./docs/generated/`;
+    const copy = path.startsWith("docs/generated/ltx-mlx-")
+      ? "COPY docs/generated/ltx-mlx-*.json ./docs/generated/"
+      : `COPY ${path} ./docs/generated/`;
     assert.equal(
       dockerfile.split(copy).length - 1,
       2,
@@ -841,6 +841,19 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
     // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
     // the point — nothing else would notice an unconditional step being appended later.
     for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+      if (
+        path.endsWith("windows-candle.yml") &&
+        block.startsWith("name: Preserve fresh Candle capability facts after a pin mismatch")
+      ) {
+        assert.match(
+          block,
+          /if: \$\{\{ always\(\) && steps\.verify-candle-facts\.outcome == 'failure' \}\}/,
+        );
+        assert.match(block, /candle-engine-capability-facts-\$\{\{ github\.run_id \}\}/);
+        assert.match(block, /engine-capability-facts-verify\\capabilities\.candle\.json/);
+        assert.match(block, /engine-capability-facts-verify\\audio\\capabilities\.candle\.json/);
+        continue;
+      }
       assert.match(
         block,
         /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,

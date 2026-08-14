@@ -1,0 +1,391 @@
+{
+  "_comment": "SC-18946 predeclared single-pass host-risk probes. Their coverage state must distinguish captured, attempted/aborted, arithmetic-unmeasurable, and never planned. This unscored bundle is not a curve source.",
+  "story": "sc-18946",
+  "campaignIdentity": {
+    "inferenceRevision": "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
+    "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+    "seed": 18946
+  },
+  "providers": [
+    {
+      "name": "mlx-ltx-2-3-q8-768x512-f449-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_host_risk",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 21888,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 176553984,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f449-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f241-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_host_risk",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 27280,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 217169920,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f241-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f297-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_write_cap",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 267632640,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f297-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-768x512-f449-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_host_risk",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 21888,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 176553984,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q4-768x512-f449-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f241-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_host_risk",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 27280,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 217169920,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f241-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f297-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_write_cap",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 267632640,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f297-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-768x512-f449-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_host_risk",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 21888,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 176553984,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f449-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f241-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_host_risk",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 27280,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 217169920,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f241-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f297-fps30-staged_residency",
+      "_role": "planned_host_risk",
+      "_campaignPhase": "single_pass_write_cap",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 267632640,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f297-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-768x512-f145-fps24-staged_residency",
+      "_role": "reproduction_probe",
+      "_campaignPhase": "sc18809_reproduction",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 7296,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 57016320,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f145-fps24-seed18946",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    }
+  ]
+}

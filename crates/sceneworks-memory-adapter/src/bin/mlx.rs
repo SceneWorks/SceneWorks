@@ -1288,9 +1288,34 @@ fn krea_request(width: u32, height: u32, steps: u32) -> GenerationRequest {
 
 fn scoped_generate(
     generator: &dyn Generator,
+    request: GenerationRequest,
+    context: &MemoryRunContext,
+    error_phase: Option<MemoryPhase>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<GenerationOutput, String> {
+    let mut observed_failure = None;
+    scoped_generate_observed(
+        generator,
+        request,
+        context,
+        error_phase,
+        &mut observed_failure,
+        on_progress,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopedGenerationFailureKind {
+    Canceled,
+    Error,
+}
+
+fn scoped_generate_observed(
+    generator: &dyn Generator,
     mut request: GenerationRequest,
     context: &MemoryRunContext,
     error_phase: Option<MemoryPhase>,
+    observed_failure: &mut Option<ScopedGenerationFailureKind>,
     on_progress: &mut dyn FnMut(Progress),
 ) -> Result<GenerationOutput, String> {
     if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(context)
@@ -1355,20 +1380,30 @@ fn scoped_generate(
     }
     let outcome = match &result {
         Ok(_) => MemoryRunOutcome::Complete,
-        Err(mlx_gen::gen_core::Error::Canceled) => MemoryRunOutcome::Canceled,
-        Err(error) => MemoryRunOutcome::Error {
-            message: error.to_string(),
-        },
+        Err(mlx_gen::gen_core::Error::Canceled) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Canceled);
+            MemoryRunOutcome::Canceled
+        }
+        Err(error) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Error);
+            MemoryRunOutcome::Error {
+                message: error.to_string(),
+            }
+        }
     };
     let finish = scope.finish(outcome);
     if let Some(error) = phase_error {
+        *observed_failure = Some(ScopedGenerationFailureKind::Error);
         finish.map_err(|finish| format!("{error}; finish calibrated request: {finish}"))?;
         return Err(error);
     }
     match (result, finish) {
         (Ok(output), Ok(())) => Ok(output),
         (Err(error), _) => Err(error.to_string()),
-        (Ok(_), Err(error)) => Err(format!("finish calibrated request: {error}")),
+        (Ok(_), Err(error)) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Error);
+            Err(format!("finish calibrated request: {error}"))
+        }
     }
 }
 
@@ -5827,21 +5862,36 @@ fn verify_ltx_lifecycle(
     let cancelled = ltx_request(geometry, fps, seed);
     let cancel_signal = cancelled.cancel.clone();
     let mut cancel_triggered = false;
-    let cancel_error = scoped_generate(generator, cancelled, context, None, &mut |progress| {
-        let at_boundary = match fault_phase {
-            MemoryPhase::Denoise => matches!(progress, Progress::Step { current: 1, .. }),
-            MemoryPhase::Decode => matches!(progress, Progress::Decoding),
-            _ => false,
-        };
-        if at_boundary && !cancel_triggered {
-            cancel_triggered = true;
-            cancel_signal.cancel();
+    let mut cancel_failure = None;
+    let cancel_result = scoped_generate_observed(
+        generator,
+        cancelled,
+        context,
+        None,
+        &mut cancel_failure,
+        &mut |progress| {
+            let at_boundary = match fault_phase {
+                MemoryPhase::Denoise => matches!(progress, Progress::Step { current: 1, .. }),
+                MemoryPhase::Decode => matches!(progress, Progress::Decoding),
+                _ => false,
+            };
+            if at_boundary && !cancel_triggered {
+                cancel_triggered = true;
+                cancel_signal.cancel();
+            }
+        },
+    );
+    let cancel_error = match cancel_result {
+        Ok(_) => {
+            return Err(format!(
+                "LTX-2.3 cancellation completed successfully at {fault_phase:?} instead of returning the typed canceled outcome"
+            ));
         }
-    })
-    .expect_err("in-flight LTX cancellation must fail");
-    if !cancel_triggered || !cancel_error.to_ascii_lowercase().contains("cancel") {
+        Err(error) => error,
+    };
+    if !cancel_triggered || cancel_failure != Some(ScopedGenerationFailureKind::Canceled) {
         return Err(format!(
-            "LTX-2.3 cancellation did not return the typed path at {fault_phase:?}: triggered={cancel_triggered}, error={cancel_error}"
+            "LTX-2.3 cancellation did not return the typed path at {fault_phase:?}: triggered={cancel_triggered}, failure={cancel_failure:?}, error={cancel_error}"
         ));
     }
     clear_cache();
@@ -5882,17 +5932,28 @@ fn verify_ltx_lifecycle(
         return Err("LTX-2.3 cancellation cleanup changed the warm recovery clip".to_owned());
     }
 
-    let injected = scoped_generate(
+    let mut injected_failure = None;
+    let injected_result = scoped_generate_observed(
         generator,
         ltx_request(geometry, fps, seed),
         context,
         Some(fault_phase),
+        &mut injected_failure,
         &mut |_| {},
-    )
-    .expect_err("injected LTX error must fail");
-    if !injected.contains("injected memory-strategy calibration error") {
+    );
+    let injected = match injected_result {
+        Ok(_) => {
+            return Err(format!(
+                "LTX-2.3 fault injection completed successfully at {fault_phase:?} instead of returning an error"
+            ));
+        }
+        Err(error) => error,
+    };
+    if injected_failure != Some(ScopedGenerationFailureKind::Error)
+        || !injected.contains("injected memory-strategy calibration error")
+    {
         return Err(format!(
-            "LTX-2.3 error injection returned the wrong error at {fault_phase:?}: {injected}"
+            "LTX-2.3 error injection returned the wrong outcome at {fault_phase:?}: failure={injected_failure:?}, error={injected}"
         ));
     }
     clear_cache();
