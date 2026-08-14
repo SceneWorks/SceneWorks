@@ -6959,3 +6959,532 @@ async fn styles_endpoint_serves_the_builtin_catalog() {
         "gentle hand-painted"
     );
 }
+
+/// **THE CLASS GUARD, API half (sc-17159, GH #2074).** Every video mode a shipped model advertises
+/// in `capabilities` must be a mode `POST /api/v1/video/jobs` will actually ACCEPT.
+///
+/// `validate_video_job`'s allow-list is a SEPARATE reachability gate from the catalog: a mode
+/// missing from it 400s with "Unsupported video mode" no matter how completely the rest of the
+/// stack is wired. That is exactly how SCAIL-2's `animate_character` shipped — catalog,
+/// `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate, the worker's
+/// `generate_scail2` AND the Video Studio tab, all correct, and every submission rejected.
+///
+/// Read off BOTH real sources so it cannot go stale: the advertisement comes from the shipped
+/// `builtin.models.jsonc` bytes and the admission from [`crate::VIDEO_JOB_MODES`], the constant
+/// `validate_video_job` itself consults. A guard that re-typed the mode list would assert against
+/// its own copy and stay green through exactly the drift it exists to catch.
+///
+/// The routing half of the same class is
+/// `every_declared_video_capability_is_claimable_by_some_lane` (sceneworks-core routing/catalog.rs),
+/// which proves some lane will CLAIM each of these once submitted.
+#[test]
+fn every_declared_video_capability_is_submittable() {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    let videos: Vec<&Value> = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter(|entry| entry["type"] == "video")
+        .collect();
+    assert!(
+        videos.len() >= 12,
+        "only {} shipped video models were read — the manifest parse is wrong and this guard is \
+         vacuous",
+        videos.len()
+    );
+
+    let mut checked = 0_usize;
+    for entry in &videos {
+        let id = entry["id"].as_str().expect("every model row has an id");
+        let capabilities = entry["capabilities"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: every shipped video model declares capabilities"));
+        assert!(!capabilities.is_empty(), "{id}: declares no capability");
+        for capability in capabilities {
+            let mode = capability
+                .as_str()
+                .unwrap_or_else(|| panic!("{id}: capabilities entries are strings"));
+            checked += 1;
+            assert!(
+                crate::VIDEO_JOB_MODES.contains(&mode),
+                "{id} advertises `{mode}` in builtin.models.jsonc — the Video Studio builds a tab \
+                 for it — but `validate_video_job`'s allow-list does not admit it, so every \
+                 submission 400s with \"Unsupported video mode\" and the mode is unreachable from \
+                 the moment it ships (GH #2074). Add it to VIDEO_JOB_MODES with its per-mode \
+                 required-asset arm, or stop advertising it."
+            );
+        }
+    }
+    assert!(
+        checked >= 30,
+        "only {checked} (model, capability) pairs were checked — this guard is vacuous"
+    );
+
+    // …and the converse, so the allow-list cannot quietly accumulate modes nothing serves: every
+    // admitted mode is advertised by at least one shipped video model.
+    let advertised: std::collections::BTreeSet<&str> = videos
+        .iter()
+        .filter_map(|entry| entry["capabilities"].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    for mode in crate::VIDEO_JOB_MODES {
+        assert!(
+            advertised.contains(mode),
+            "`{mode}` is admitted by validate_video_job but no shipped video model advertises it \
+             — either a model lost the capability or the allow-list has a dead entry"
+        );
+    }
+}
+
+/// Seed the SHIPPED manifests into a temp config dir and return a live app + project id, so a
+/// video-jobs test drives the real `minimax_h3` / `minimax_h3_ref` entries rather than a fixture
+/// whose numbers the test itself chose (sc-17159 — a seeded probe would prove the ROUTE works, not
+/// that the shipped family is reachable).
+async fn shipped_manifest_app(temp_dir: &tempfile::TempDir) -> (axum::Router, String) {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let settings = test_settings(temp_dir);
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .expect("builtin manifests seed");
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "MiniMax-H3 Reachability" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    (app, project_id)
+}
+
+/// sc-17159 (epic 17137) — every mode MiniMax-H3 DECLARES is submittable end to end against the
+/// SHIPPED manifest, and the enqueued payload carries what the worker needs.
+///
+/// "Declaration is not enforcement is not reachability." sc-17158 declared the two entries and
+/// their geometry; this asserts a caller can actually get each of the four declared modes past
+/// EVERY gate on the enqueue path — the allow-list, the per-mode required-asset arm, the three
+/// reference-list blankets, the payload-sanity duration/fps/dimension bounds, and then the
+/// per-model `duration_limit_error` / `fps_limit_error` / `reference_limit_error` that only fire
+/// once the manifest entry is resolved. A `201` here is the whole point: asserting the mode string
+/// appears in a list is what GH #2074 already passed.
+#[tokio::test]
+async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+
+    // (label, model, the mode-specific half of the payload). One case per declared capability:
+    // `minimax_h3` = [text_to_video, image_to_video, first_last_frame], `minimax_h3_ref` =
+    // [reference_to_video]. fl2va is "0, 1 or 2 images", which is three payload shapes across two
+    // modes, so all three are driven.
+    let cases = [
+        ("t2va", "minimax_h3", json!({ "mode": "text_to_video" })),
+        (
+            "fl2va first frame only",
+            "minimax_h3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "asset-first" }),
+        ),
+        (
+            "fl2va both frames",
+            "minimax_h3",
+            json!({
+                "mode": "first_last_frame",
+                "sourceAssetId": "asset-first",
+                "lastFrameAssetId": "asset-last"
+            }),
+        ),
+        (
+            "Ref2VA images + clips + audio",
+            "minimax_h3_ref",
+            json!({
+                "mode": "reference_to_video",
+                "referenceAssetIds": ["img-0", "img-1", "img-2", "img-3", "img-4", "img-5", "img-6", "img-7", "img-8"],
+                "sourceClipAssetIds": ["clip-0", "clip-1"],
+                "referenceAudioAssetIds": ["aud-0"]
+            }),
+        ),
+        // The shape that was 400'd until sc-17159: `validate_video_job`'s r2v arm required a
+        // reference IMAGE, but sc-17149's acceptance is that all three reference modalities bind
+        // "individually", so an audio-only reference set is a shape the checkpoint serves.
+        (
+            "Ref2VA audio references only",
+            "minimax_h3_ref",
+            json!({
+                "mode": "reference_to_video",
+                "referenceAudioAssetIds": ["aud-0", "aud-1", "aud-2"]
+            }),
+        ),
+        (
+            "Ref2VA video clips only",
+            "minimax_h3_ref",
+            json!({
+                "mode": "reference_to_video",
+                "sourceClipAssetIds": ["clip-0", "clip-1", "clip-2"]
+            }),
+        ),
+    ];
+
+    for (label, model, extra) in cases {
+        let mut body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse keeper hums while the storm rolls in"
+        });
+        body.as_object_mut()
+            .expect("body object")
+            .extend(extra.as_object().expect("case object").clone());
+        let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{label}: a mode the manifest declares must be accepted: {job}"
+        );
+        // All four modes map to the base job type, which is what routes to `run_video_generate_job`
+        // — none of them is an extend/bridge/replace shape.
+        assert_eq!(job["type"], "video_generate", "{label}");
+        // The resolved geometry the worker will read: the model's own declared defaults, not the
+        // route's historical blankets (6.0 s / 25 fps / 768x512 — none of which is on this
+        // family's lattice, menu or bucket list).
+        assert_eq!(
+            job["payload"]["duration"], 5.1667,
+            "{label}: defaults.duration is the shortest lattice rung"
+        );
+        assert_eq!(job["payload"]["fps"], 24, "{label}: the one cadence");
+        assert_eq!(job["payload"]["width"], 1344, "{label}");
+        assert_eq!(job["payload"]["height"], 768, "{label}");
+        // The entry actually resolved — the worker reads geometry off this, so a job enqueued
+        // without it silently loses the lattice and the area budget.
+        assert_eq!(
+            job["payload"]["modelManifestEntry"]["id"], model,
+            "{label}: the resolved manifest entry must be the one the caller asked for"
+        );
+    }
+
+    // The conditioning media reaches the worker verbatim rather than merely validating.
+    let (status, ref2va) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "minimax_h3_ref",
+            "mode": "reference_to_video",
+            "prompt": "the subject speaks over the rain",
+            "referenceAssetIds": ["img-0", "img-1"],
+            "sourceClipAssetIds": ["clip-0"],
+            "referenceAudioAssetIds": ["aud-0"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        ref2va["payload"]["referenceAssetIds"],
+        json!(["img-0", "img-1"])
+    );
+    assert_eq!(ref2va["payload"]["sourceClipAssetIds"], json!(["clip-0"]));
+    assert_eq!(
+        ref2va["payload"]["referenceAudioAssetIds"],
+        json!(["aud-0"])
+    );
+
+    // A named duration ON the lattice is honoured verbatim — the accepting side of the menu, so
+    // the refusals below are not just "everything is rejected".
+    let (status, on_rung) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id, "model": "minimax_h3", "mode": "text_to_video",
+            "prompt": "a fox", "duration": 14.375
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{on_rung}");
+    assert_eq!(on_rung["payload"]["duration"], 14.375);
+}
+
+/// sc-17159 — the refusals sc-17158 established are INTACT after the family is made reachable, and
+/// each one names its OWN reason.
+///
+/// Pinning the exact `detail` matters more than the status here: a bare "it 400'd" assertion goes
+/// inert the moment the request would have been rejected for some other reason (sc-19488). Each
+/// case below is constructed to be legal in every respect but the one under test, and the message
+/// is compared in full.
+#[tokio::test]
+async fn minimax_h3_refusals_each_name_their_own_reason() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+
+    let submit = |model: &str, extra: Value| {
+        let app = app.clone();
+        let project_id = project_id.clone();
+        let model = model.to_owned();
+        async move {
+            let mut body = json!({
+                "projectId": project_id, "model": model, "mode": "text_to_video",
+                "prompt": "a fox runs"
+            });
+            body.as_object_mut()
+                .expect("body object")
+                .extend(extra.as_object().expect("case object").clone());
+            request(app, "POST", "/api/v1/video/jobs", body).await
+        }
+    };
+
+    // 15.0 s: the reference ADVERTISES it and the lattice cannot reach it (the next rung, 362
+    // frames, is 15.083 s). Refused rather than silently delivered as 14.375 — which is exactly
+    // what sc-17147 was doing.
+    let (status, over) = submit("minimax_h3", json!({ "duration": 15.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        over["detail"],
+        "minimax_h3 renders clips up to 14.375s, but this request asks for 15s. Shorten the clip \
+         to 14.375s or less, or choose a model that renders longer clips."
+    );
+
+    // 3.0 s: under `hardMinDuration`. The floor is checked FIRST, so the message offers the
+    // lengthen lever and never the shorten one.
+    let (status, under) = submit("minimax_h3", json!({ "duration": 3.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        under["detail"],
+        "minimax_h3 renders clips of at least 5.1667s, but this request asks for 3s. Lengthen the \
+         clip to 5.1667s or more, or choose a model that renders shorter clips."
+    );
+
+    // T = 1. There is NO image lane for this family — `min_duration` is a hardcoded 5.0 upstream,
+    // so a single-frame request does not render at all. Both spellings are refused, and they are
+    // refused by DIFFERENT gates, so both messages are pinned rather than assumed:
+    //   * 1/24 s is below the route's payload-sanity blanket and never reaches the model's floor;
+    //   * 1.0 s clears the blanket and is refused by the model's own declared floor.
+    let (status, single_frame) = submit("minimax_h3", json!({ "duration": 1.0 / 24.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(single_frame["detail"], "duration must be between 1 and 30");
+    let (status, one_second) = submit("minimax_h3", json!({ "duration": 1.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        one_second["detail"],
+        "minimax_h3 renders clips of at least 5.1667s, but this request asks for 1s. Lengthen the \
+         clip to 5.1667s or more, or choose a model that renders shorter clips."
+    );
+
+    // fps: the family declares ONE cadence. 30 is off-menu.
+    let (status, fps) = submit("minimax_h3", json!({ "fps": 30 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        fps["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("minimax_h3 renders at 24 fps"),
+        "the fps refusal must name the model's own menu: {fps}"
+    );
+
+    // Canvas. The AREA budget is 1,032,192 px and it is NOT an enqueue refusal — an over-cap
+    // canvas is REFIT by `normalized_dimensions` at the worker, so the route accepts it. What the
+    // route refuses is the per-edge blanket. Both halves are pinned so "over-cap canvas" is never
+    // read as "rejected at enqueue".
+    let (status, square) = submit(
+        "minimax_h3",
+        json!({ "width": 1344, "height": 1344, "duration": 5.1667 }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "1344x1344 is accepted at enqueue and refit at the worker: {square}"
+    );
+    let entry = square["payload"]["modelManifestEntry"].clone();
+    assert_eq!(entry["limits"]["maxPixels"], 1_032_192);
+    let refit = sceneworks_core::video_request::VideoRequest::from_payload(
+        square["payload"].as_object().expect("payload object"),
+    );
+    assert!(
+        u64::from(refit.width) * u64::from(refit.height) <= 1_032_192,
+        "the enqueued payload must refit under the area budget, got {}x{}",
+        refit.width,
+        refit.height
+    );
+    assert_ne!(
+        (refit.width, refit.height),
+        (1344, 1344),
+        "the refit must actually fire, else the cap is decoration"
+    );
+    let (status, too_wide) = submit("minimax_h3", json!({ "width": 2016, "height": 512 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(too_wide["detail"], "width must be between 256 and 1920");
+
+    // Reference caps. The base partition declares 0/0/0 precisely because its checkpoint has no
+    // reference path — a Ref2VA-shaped request must not reach a checkpoint that would ignore it.
+    let (status, base_images) = submit(
+        "minimax_h3",
+        json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-0"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        base_images["detail"],
+        "minimax_h3 takes no reference images, but this request supplies 1. Remove \
+         referenceAssetIds, or choose a model that conditions on reference images."
+    );
+    let (status, base_audio) =
+        submit("minimax_h3", json!({ "referenceAudioAssetIds": ["aud-0"] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        base_audio["detail"],
+        "minimax_h3 takes no audio references, but this request supplies 1. Remove \
+         referenceAudioAssetIds, or choose a model that conditions on audio references."
+    );
+
+    // The reference partition's own caps: 9 / 3 / 3 per list and 12 combined. 15 files clears
+    // every per-list cap and is refused only by the combined budget.
+    let ids = |prefix: &str, count: usize| -> Value {
+        (0..count)
+            .map(|i| Value::String(format!("{prefix}-{i}")))
+            .collect::<Vec<_>>()
+            .into()
+    };
+    let (status, combined) = submit(
+        "minimax_h3_ref",
+        json!({
+            "mode": "reference_to_video",
+            "referenceAssetIds": ids("img", 9),
+            "sourceClipAssetIds": ids("clip", 3),
+            "referenceAudioAssetIds": ids("aud", 3)
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        combined["detail"],
+        "minimax_h3_ref takes up to 12 reference files in total, but this request supplies 15 \
+         (9 reference images + 3 source clips + 3 audio references). Remove 3 of them."
+    );
+    // A 10th image is over the payload-sanity blanket, which is one layer ABOVE the per-model cap,
+    // so it names the field rather than the model — a different gate, a different message.
+    let (status, tenth) = submit(
+        "minimax_h3_ref",
+        json!({ "mode": "reference_to_video", "referenceAssetIds": ids("img", 10) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        tenth["detail"],
+        "referenceAssetIds must contain at most 9 ids"
+    );
+    // A 4th audio reference is inside the blanket (3 is the blanket AND the model's cap here, so
+    // drive the model's cap through the clips list instead: 4 clips against its declared 3, well
+    // inside the blanket 8).
+    let (status, clips) = submit(
+        "minimax_h3_ref",
+        json!({ "mode": "reference_to_video", "sourceClipAssetIds": ids("clip", 4) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        clips["detail"],
+        "minimax_h3_ref takes up to 3 source clips, but this request supplies 4. Reduce \
+         sourceClipAssetIds to 3 or fewer, or choose a model that takes more."
+    );
+
+    // fl2va's required media is still required: `first_last_frame` means BOTH frames.
+    let (status, one_frame) = submit(
+        "minimax_h3",
+        json!({ "mode": "first_last_frame", "sourceAssetId": "asset-first" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        one_frame["detail"],
+        "First/Last Frame requires first and last image assets."
+    );
+    // …and a reference-driven request with NO reference of any kind is still refused. sc-17159
+    // loosened this arm from "at least one reference IMAGE" to "at least one reference", not to
+    // "no reference needed".
+    let (status, no_refs) = submit("minimax_h3_ref", json!({ "mode": "reference_to_video" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        no_refs["detail"],
+        "Reference to Video requires at least one reference image, video clip or audio clip."
+    );
+    // Bernini's engine takes image references alone, so the loosened arm must not become a way to
+    // hand its r2v path a clips-only conditioning set. The API admits it (the arm is
+    // model-independent by design) and the worker's own `resolve_bernini_conditioning` refuses it,
+    // naming bernini — the model-specific half of the requirement lives with the model.
+    let (status, bernini_clips) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id, "model": "bernini", "mode": "reference_to_video",
+            "prompt": "a fox", "sourceClipAssetIds": ["clip-0"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the enqueue arm is model-independent: {bernini_clips}"
+    );
+    let (status, bernini_bare) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id, "model": "bernini", "mode": "reference_to_video",
+            "prompt": "a fox"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        bernini_bare["detail"],
+        "Reference to Video requires at least one reference image, video clip or audio clip."
+    );
+}
+
+/// sc-17159 — the resolved-default write-back preserves the manifest's own decimal.
+///
+/// `contract_number`'s fractional branch had never carried a shipped value: every video model
+/// before MiniMax-H3 declares a whole-number `defaults.duration`, so the branch existed only for
+/// the integral case's sake. The first fractional default exposed it — `Value::from(5.1667_f32)`
+/// widens to `f64` and enqueues `5.1666998863220215`, which is not equal to ANY of the fourteen
+/// entries in that model's `limits.durations`. The duration dropdown preselects by comparing
+/// against that menu and a recipe replay is compared against the enqueued row, so the value has to
+/// be the declared one, not merely a number that rounds to it.
+#[test]
+fn a_fractional_resolved_duration_keeps_the_manifests_own_decimal() {
+    // The value under test, and the assertion that makes it load-bearing: it must equal the
+    // manifest's own number, which the f64-widened form does not.
+    assert_eq!(crate::generation::contract_number(5.1667), json!(5.1667));
+    assert_ne!(json!(5.1666998863220215), json!(5.1667));
+    // Every other lattice rung the menu offers.
+    for rung in [
+        5.875_f32, 6.5833, 7.2917, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583,
+        13.6667, 14.375,
+    ] {
+        let enqueued = crate::generation::contract_number(rung);
+        assert_eq!(
+            enqueued.as_f64().map(|v| v as f32),
+            Some(rung),
+            "{rung}: the enqueued row must read back as the same f32"
+        );
+        assert!(
+            enqueued.to_string().len() <= rung.to_string().len(),
+            "{rung}: enqueued as {enqueued}, which is longer than the declared decimal"
+        );
+    }
+    // The integral branch is untouched: a whole-number default stays an INT on the wire, because
+    // `duration` is a `ContractNumber` that carries int-vs-float across it (the sc-12400 contract).
+    assert_eq!(crate::generation::contract_number(5.0), json!(5));
+    assert_eq!(crate::generation::contract_number(6.0), json!(6));
+    assert!(crate::generation::contract_number(4.0).is_i64());
+}

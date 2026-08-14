@@ -1,7 +1,12 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import {
   AUDIO_MODES,
+  VIDEO_MODES,
   angleModelUsable,
   audioModelServesMode,
   audioModelUsable,
@@ -15,6 +20,7 @@ import {
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
+  videoModelServesMode,
   videoModelUsable,
   visionCaptionModelUsable,
 } from "./modelEligibility.js";
@@ -424,5 +430,89 @@ describe("missingRequiredModels", () => {
   it("tolerates missing arguments", () => {
     expect(missingRequiredModels(undefined, undefined)).toEqual([]);
     expect(missingRequiredModels(catalog, undefined)).toEqual([]);
+  });
+});
+
+// THE CLASS GUARD, web half (sc-17159, GH #2074). `VIDEO_MODES` is a reachability gate, not a
+// display list: `videoModelUsable` requires a model to serve at least one mode IN THIS ARRAY, and
+// `VideoStudio.jsx` falls a recipe back to `text_to_video` for any mode it does not contain. So a
+// capability the shipped manifest advertises but this array omits makes the model unusable in the
+// Video Studio however completely the server is wired.
+//
+// Read off BOTH real sources, like its Rust siblings — the advertisement from the shipped
+// `builtin.models.jsonc` bytes, the admission from the real exported `VIDEO_MODES`:
+//   * `every_declared_video_capability_is_submittable` (apps/rust-api) — the API allow-list;
+//   * `every_declared_video_capability_is_claimable_by_some_lane` (sceneworks-core) — the lanes.
+// The `fallbackModels` mirror is checked too, because App.jsx serves it to the real picker before
+// the catalog loads, and a mirror that drops a capability hides a mode for that whole window.
+describe("declared video capabilities are all offerable", () => {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const manifestPath = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
+  const manifest = JSON5.parse(readFileSync(manifestPath, "utf8"));
+  const shipped = (Array.isArray(manifest) ? manifest : manifest.models).filter(
+    (entry) => entry.type === "video",
+  );
+
+  it("reads a real video catalog, so the assertions below are not vacuous", () => {
+    expect(shipped.length).toBeGreaterThanOrEqual(12);
+    expect(shipped.flatMap((entry) => entry.capabilities ?? []).length).toBeGreaterThanOrEqual(30);
+  });
+
+  it("VIDEO_MODES admits every capability the shipped manifest advertises", () => {
+    for (const entry of shipped) {
+      expect(Array.isArray(entry.capabilities), `${entry.id} declares capabilities`).toBe(true);
+      for (const mode of entry.capabilities) {
+        expect(
+          VIDEO_MODES,
+          `${entry.id} advertises "${mode}" but VIDEO_MODES omits it, so videoModelServesMode can ` +
+            `never return true for it and the model is dropped from the Video Studio entirely`,
+        ).toContain(mode);
+      }
+    }
+  });
+
+  it("the fallbackModels mirror declares the same capabilities as the manifest", () => {
+    for (const entry of shipped) {
+      const mirrored = fallbackModels.find((model) => model.id === entry.id);
+      if (!mirrored) continue; // the mirror is deliberately partial; only drift is the defect.
+      expect(
+        [...(mirrored.capabilities ?? [])].sort(),
+        `${entry.id}: the constants.js mirror the picker uses before the catalog loads must not ` +
+          `drop or invent a capability`,
+      ).toEqual([...entry.capabilities].sort());
+    }
+  });
+
+  it("both MiniMax-H3 partitions are usable in the Video Studio, each on its own modes", () => {
+    // The regression this pins: the family installs on macOS ONLY, so if the server ever answers
+    // `macSupport.supported: false` for it again (it did until sc-17159 added the VIDEO_MODEL_CAPS
+    // rows), `macModelBlock` drops it from the picker on the only platform it runs on.
+    const gating = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" };
+    for (const [id, served] of [
+      ["minimax_h3", ["text_to_video", "image_to_video", "first_last_frame"]],
+      ["minimax_h3_ref", ["reference_to_video"]],
+    ]) {
+      const entry = shipped.find((model) => model.id === id);
+      const model = {
+        ...entry,
+        macSupport: {
+          supported: true,
+          features: {
+            videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, served.includes(m)])),
+          },
+        },
+      };
+      expect(videoModelUsable(model, gating), `${id} must be usable on a Mac`).toBe(true);
+      for (const mode of VIDEO_MODES) {
+        expect(videoModelServesMode(model, mode, gating), `${id} serves ${mode}?`).toBe(
+          served.includes(mode),
+        );
+      }
+      // …and blocked outright the moment the server says the Mac lane does not serve it, which is
+      // what makes the assertion above about routing rather than about the manifest alone.
+      expect(
+        videoModelUsable({ ...model, macSupport: { supported: false, reason: null } }, gating),
+      ).toBe(false);
+    }
   });
 });
