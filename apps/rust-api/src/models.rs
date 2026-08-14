@@ -1300,8 +1300,11 @@ pub(crate) async fn delete_model(
         state.settings.data_dir.join("models"),
         huggingface_hub_cache_dir(&state.settings.data_dir),
     ];
-    let removal = match remove_owned_artifacts(
-        model_artifact_paths(cleanup_source, &state.settings.data_dir),
+    let removal = match remove_whole_model_artifacts(
+        catalogs.models(&state).await?,
+        &model_id,
+        cleanup_source,
+        &state.settings.data_dir,
         &allowed_roots,
         permanent,
     )
@@ -1363,6 +1366,135 @@ pub(crate) async fn delete_model(
         "warnings": warnings,
         "policy": policy,
     })))
+}
+
+/// The file scopes `model` claims inside `repo` — the union of every one of its download entries
+/// (quant tiers AND co-requisites) that points at `repo`. `None` when ANY of them declares no `files`
+/// filter: that is a claim on the WHOLE repo, which cannot be expressed as a scoped removal, so the
+/// caller keeps the blanket path removal rather than silently reclaiming less than the user asked for.
+fn model_repo_file_scopes(model: &Value, repo: &str) -> Option<Vec<String>> {
+    let mut scopes = Vec::new();
+    for download in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
+    {
+        let files = string_array_field(download, "files");
+        if files.is_empty() {
+            return None;
+        }
+        for file in files {
+            if !scopes.contains(&file) {
+                scopes.push(file);
+            }
+        }
+    }
+    (!scopes.is_empty()).then_some(scopes)
+}
+
+/// The file scopes every catalog entry OTHER than `model_id` claims inside `repo` (sc-19078).
+///
+/// Thirteen catalog groups put two or more entries in ONE Hugging Face repo, and a whole-model delete
+/// resolves that repo's cache path ([`model_artifact_paths`]) — so removing one entry took the SIBLING
+/// entry's bytes with it. For most of those groups the two entries name the same `files`, so the
+/// removal at least matched what both wanted. MiniMax-H3 is the group where it becomes destructive:
+/// `minimax_h3` owns `{tier}/transformer` and `minimax_h3_ref` owns `{tier}/transformer_ref` inside
+/// `SceneWorks/minimax-h3-mlx` — DIFFERENT weights, up to 66.3 GB per tier — so deleting the
+/// text-to-video entry wiped an installed reference model the user never asked to remove.
+///
+/// Co-requisite rows are included: a sibling's shared component living in the same repo is still bytes
+/// that sibling needs. Nothing here is conditioned on the sibling being INSTALLED — an installed
+/// sibling is exactly the case that matters, and for a sibling that is absent every one of these
+/// patterns matches no file on disk, so retaining them costs the delete nothing.
+fn other_entries_repo_file_scopes(catalog: &[Value], model_id: &str, repo: &str) -> Vec<String> {
+    let mut scopes = Vec::new();
+    for entry in catalog
+        .iter()
+        .filter(|entry| entry.get("id").and_then(Value::as_str) != Some(model_id))
+    {
+        for download in entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| download.get("repo").and_then(Value::as_str) == Some(repo))
+        {
+            for file in string_array_field(download, "files") {
+                if !scopes.contains(&file) {
+                    scopes.push(file);
+                }
+            }
+        }
+    }
+    scopes
+}
+
+/// Remove a whole model's owned artifacts for [`delete_model`], keeping a shared-repo sibling's bytes.
+///
+/// The default path is unchanged: every path in [`model_artifact_paths`] is removed wholesale, which
+/// is right for the ~80 catalog entries that own their download repo outright. When the primary repo is
+/// ALSO claimed by another catalog entry, the repo's two storage locations (the app-managed mirror dir
+/// and the Hugging Face hub cache) are removed SCOPED instead — via the same
+/// [`remove_tier_artifacts`] machinery the per-tier delete uses, with the sibling's declared files as
+/// the retained set — so this entry's own subtrees and their exclusive blobs go and the sibling's stay.
+/// Every other artifact path (a manifest `paths.model`, an imported `source.path`) is entry-exclusive
+/// and still removed wholesale.
+///
+/// An entry that declares NO file scope inside a shared repo ([`model_repo_file_scopes`] → `None`)
+/// keeps the blanket removal: it claims the whole repo, so there is no honest narrower scope, and
+/// today's behavior is preserved rather than quietly reclaiming nothing.
+async fn remove_whole_model_artifacts(
+    catalog: &[Value],
+    model_id: &str,
+    cleanup_source: &Value,
+    data_dir: &FsPath,
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<ArtifactRemoval, ApiError> {
+    let all_paths = model_artifact_paths(cleanup_source, data_dir);
+    let shared = model_download(cleanup_source)
+        .and_then(|download| {
+            download
+                .get("repo")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|repo| {
+            let siblings = other_entries_repo_file_scopes(catalog, model_id, &repo);
+            let own = model_repo_file_scopes(cleanup_source, &repo)?;
+            (!siblings.is_empty()).then_some((repo, own, siblings))
+        });
+    let Some((repo, own_files, sibling_files)) = shared else {
+        return remove_owned_artifacts(all_paths, allowed_roots, permanent).await;
+    };
+
+    let managed_dir = data_dir.join("models").join(safe_download_dir(&repo));
+    let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
+    // Everything that is NOT the shared repo's storage: still this entry's alone, still removed whole.
+    let exclusive = all_paths
+        .into_iter()
+        .filter(|path| {
+            // `is_some_and` rather than `is_none_or`: the latter is stable only since 1.82 and the
+            // workspace MSRV is 1.80 (`clippy::incompatible_msrv` is denied).
+            path != &managed_dir && !repo_cache.as_ref().is_some_and(|cache| path == cache)
+        })
+        .collect::<Vec<_>>();
+    let mut removal = remove_owned_artifacts(exclusive, allowed_roots, permanent).await?;
+    let scoped = remove_tier_artifacts(
+        repo_cache,
+        Some(managed_dir),
+        &own_files,
+        &sibling_files,
+        allowed_roots,
+        permanent,
+    )
+    .await?;
+    removal.removed_paths.extend(scoped.removed_paths);
+    removal.retained_paths.extend(scoped.retained_paths);
+    removal.trash_failed_paths.extend(scoped.trash_failed_paths);
+    Ok(removal)
 }
 
 /// Delete ONE installed quant tier of a model and reclaim its disk, leaving the other tiers
@@ -3806,6 +3938,13 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
         // resolver uses, so an id the worker would not tighten is not tightened here either.
         "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
+        // sc-19078: the MiniMax-H3 tiers ship two DiT partition dirs (`{tier}/transformer` and
+        // `{tier}/transformer_ref`) and NO `model_index.json` at either level, so the coarse
+        // `q4/transformer/*` glob is satisfied by a single landed file out of fourteen shards. Like
+        // SenseNova the id — not the family — picks the predicate: the two catalog entries share the
+        // `minimax-h3` family but own DIFFERENT partitions of one repo, so a family-only predicate
+        // would have to demand both and report a reference-only install as torn forever.
+        "minimax-h3" => tc::minimax_h3_tier_predicate(model_id),
         _ => None,
     }
 }
@@ -7847,6 +7986,334 @@ mod variant_delete_tests {
         assert!(components
             .join("snapshots/rev/q4/text_encoder/model.safetensors")
             .exists());
+    }
+
+    /// The `SceneWorks/minimax-h3-mlx` shape (sc-17150 / sc-17158): ONE repo holding two DiT
+    /// partitions per tier, each owned by a DIFFERENT catalog entry. Seeds `tier`'s `transformer/`
+    /// (owned by `minimax_h3`) and `transformer_ref/` (owned by `minimax_h3_ref`).
+    ///
+    /// The two partitions ship a BYTE-IDENTICAL `config.json` (they carry the same architecture and
+    /// the same 638 tensor names; only the weights differ), so the hub cache stores it as ONE blob
+    /// that both snapshot entries symlink to. That shared blob is the trap: unlinking it with the base
+    /// partition would leave the reference partition's `config.json` dangling.
+    fn seed_minimax_tier(repo: &FsPath, tier: &str, base_etag: &str, ref_etag: &str, size: usize) {
+        let shared_config = blob(repo, &format!("{tier}-config"), b"{}");
+        link(
+            repo,
+            &format!("{tier}/transformer/config.json"),
+            &shared_config,
+        );
+        link(
+            repo,
+            &format!("{tier}/transformer_ref/config.json"),
+            &shared_config,
+        );
+        for partition in ["transformer", "transformer_ref"] {
+            let etag = if partition == "transformer" {
+                base_etag
+            } else {
+                ref_etag
+            };
+            seed(
+                repo,
+                &format!("{tier}/{partition}/diffusion_pytorch_model.safetensors.index.json"),
+                &format!("{etag}-index"),
+                1,
+            );
+            seed(
+                repo,
+                &format!("{tier}/{partition}/diffusion_pytorch_model-00001-of-00001.safetensors"),
+                etag,
+                size,
+            );
+        }
+    }
+
+    /// sc-19078 — a MiniMax-H3 per-tier delete reclaims that tier's own partition and NOTHING else.
+    ///
+    /// Mirrors `mage_flow_per_tier_delete_reclaims_only_that_tiers_dit`, which is the shipping
+    /// physical-per-tier precedent. H3 adds a dimension Mage does not have: the sibling that must
+    /// survive is not only another TIER of the same entry but another CATALOG ENTRY's partition inside
+    /// the same tier of the same repo — and the two partitions share a blob.
+    ///
+    /// Four things must hold at once, each a distinct way this could fail:
+    ///   - the deleted tier's own partition bytes are actually reclaimed (not 0);
+    ///   - the OTHER tier of the same entry survives (the tier predicates are disjoint);
+    ///   - the SIBLING ENTRY's partition in the SAME tier survives (the partition predicates are
+    ///     disjoint) — the case sc-17139's follow-ups flagged as reachable here for the first time;
+    ///   - the blob the two partitions SHARE survives, so the sibling's `config.json` still resolves.
+    #[tokio::test]
+    async fn minimax_h3_per_tier_delete_reclaims_only_that_entrys_partition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--SceneWorks--minimax-h3-mlx");
+        // Real hosted per-partition sizes scaled down by 1e6 (18,780,109,783 B q4 / 35,302,064,357 B
+        // q8). The RATIO and the disjointness are what the assertions are about.
+        const Q4_DIT: usize = 18780;
+        const Q8_DIT: usize = 35302;
+        seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", Q4_DIT);
+        seed_minimax_tier(&repo, "q8", "q8dit", "q8refdit", Q8_DIT);
+
+        // Delete `minimax_h3`'s q4 tier. `retained` carries the surviving tiers of THAT entry, exactly
+        // as `delete_model_variant` builds it from the entry's own `downloads`.
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &["q4/transformer/*".to_owned()],
+            &[
+                "q8/transformer/*".to_owned(),
+                "bf16/transformer/*".to_owned(),
+            ],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // 1. Real bytes: the q4 base partition's shard + its index, and nothing else. The shared
+        //    `config.json` blob is NOT counted — it never left disk.
+        assert_eq!(
+            removal.reclaimed_bytes,
+            (Q4_DIT + 1) as u64,
+            "a MiniMax-H3 tier delete must reclaim that entry's own partition bytes"
+        );
+        assert!(!repo.join("blobs/q4dit").exists());
+        assert!(!repo
+            .join("snapshots/rev/q4/transformer/diffusion_pytorch_model-00001-of-00001.safetensors")
+            .exists());
+
+        // 2. The same entry's OTHER tier is untouched.
+        assert!(repo.join("blobs/q8dit").exists());
+        assert!(repo
+            .join("snapshots/rev/q8/transformer/diffusion_pytorch_model-00001-of-00001.safetensors")
+            .exists());
+
+        // 3. The SIBLING ENTRY's partition inside the deleted tier is untouched — `minimax_h3_ref`
+        //    stays installed at q4 even though its bytes live in the tier just deleted.
+        assert!(repo.join("blobs/q4refdit").exists());
+        assert!(repo
+            .join(
+                "snapshots/rev/q4/transformer_ref/diffusion_pytorch_model-00001-of-00001.safetensors"
+            )
+            .exists());
+
+        // 4. The blob the two partitions SHARE survives and the sibling's link still resolves through
+        //    it — a dangling `config.json` would make the reference entry unloadable while still
+        //    reading installed.
+        assert!(repo.join("blobs/q4-config").exists());
+        let sibling_config = repo.join("snapshots/rev/q4/transformer_ref/config.json");
+        assert!(
+            std::fs::read(&sibling_config).is_ok(),
+            "sibling config resolves"
+        );
+    }
+
+    /// sc-19078 — the WHOLE-model delete is scoped when the download repo is shared.
+    ///
+    /// This is the destructive half. `model_artifact_paths` resolves the repo's cache dir, so before
+    /// this the blanket `remove_dir_all` on `models--SceneWorks--minimax-h3-mlx` took every
+    /// `transformer_ref/` tier with it — up to 132.6 GB of an installed model the user never asked to
+    /// delete. `remove_whole_model_artifacts` removes the entry's own `files` scopes instead, with the
+    /// sibling entry's scopes retained.
+    #[tokio::test]
+    async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "SceneWorks/minimax-h3-mlx";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", 18780);
+        seed_minimax_tier(&repo, "bf16", "bf16dit", "bf16refdit", 66280);
+
+        let downloads = |partition: &str| {
+            json!(["q4", "q8", "bf16"]
+                .iter()
+                .map(|tier| json!({
+                    "provider": "huggingface",
+                    "repo": repo_name,
+                    "variant": tier,
+                    "files": [format!("{tier}/{partition}/*")],
+                }))
+                .collect::<Vec<_>>())
+        };
+        let base = json!({ "id": "minimax_h3", "downloads": downloads("transformer") });
+        let reference =
+            json!({ "id": "minimax_h3_ref", "downloads": downloads("transformer_ref") });
+        let catalog = vec![base.clone(), reference];
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        let removal = remove_whole_model_artifacts(
+            &catalog,
+            "minimax_h3",
+            &base,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Every tier of the deleted entry's own partition is gone…
+        assert!(!removal.removed_paths.is_empty());
+        for etag in ["q4dit", "bf16dit"] {
+            assert!(!repo.join("blobs").join(etag).exists(), "{etag} removed");
+        }
+        assert!(!repo.join("snapshots/rev/q4/transformer").exists());
+        assert!(!repo.join("snapshots/rev/bf16/transformer").exists());
+
+        // …and every tier of the SIBLING entry's partition survives, blobs and links alike.
+        for etag in ["q4refdit", "bf16refdit", "q4-config", "bf16-config"] {
+            assert!(repo.join("blobs").join(etag).exists(), "{etag} retained");
+        }
+        for tier in ["q4", "bf16"] {
+            let sibling = repo.join(format!("snapshots/rev/{tier}/transformer_ref"));
+            assert!(sibling.join("config.json").exists(), "{tier} ref config");
+            assert!(std::fs::read(sibling.join("config.json")).is_ok());
+            assert!(sibling
+                .join("diffusion_pytorch_model-00001-of-00001.safetensors")
+                .exists());
+        }
+        // The repo cache dir itself must NOT be pruned — the sibling still lives in it.
+        assert!(repo.is_dir(), "shared repo cache survives a scoped delete");
+    }
+
+    /// The exclusive-repo case is UNCHANGED: with no sibling claiming the repo, a whole-model delete
+    /// still removes the repo cache wholesale, including files no `files` scope names.
+    ///
+    /// This is the non-vacuity partner of the test above — without it, scoping could silently become
+    /// the universal path and quietly stop reclaiming the ~80 entries that own their repo outright.
+    #[tokio::test]
+    async fn whole_model_delete_on_an_exclusive_repo_still_removes_the_repo_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "Org/solo-model";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed(&repo, "q4/transformer/model.safetensors", "q4dit", 100);
+        // A file NO declared scope names — only a blanket removal reaches it.
+        seed(&repo, "README.md", "readme", 10);
+
+        let model = json!({
+            "id": "solo_model",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo_name,
+                "variant": "q4",
+                "files": ["q4/transformer/*"],
+            }],
+        });
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        remove_whole_model_artifacts(
+            std::slice::from_ref(&model),
+            "solo_model",
+            &model,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !repo.exists(),
+            "an exclusively-owned repo cache is removed whole"
+        );
+    }
+
+    /// A shared-repo entry that declares NO `files` scope keeps the blanket removal (`SceneWorks/bernini`
+    /// is the shipping example — both entries claim the whole repo with `files: []`). There is no
+    /// honest narrower scope for a whole-repo claim, so the documented behavior is preserved rather
+    /// than quietly reclaiming nothing.
+    #[tokio::test]
+    async fn whole_model_delete_keeps_the_blanket_path_for_an_unscoped_shared_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "SceneWorks/whole-repo-pair";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed(&repo, "model.safetensors", "dit", 100);
+
+        let entry = |id: &str| {
+            json!({
+                "id": id,
+                "downloads": [{ "provider": "huggingface", "repo": repo_name, "files": [] }],
+            })
+        };
+        let first = entry("pair_a");
+        let catalog = vec![first.clone(), entry("pair_b")];
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        remove_whole_model_artifacts(&catalog, "pair_a", &first, data_dir, &allowed_roots, true)
+            .await
+            .unwrap();
+
+        assert!(!repo.exists());
+    }
+
+    #[test]
+    fn repo_file_scopes_union_tiers_and_reject_a_whole_repo_claim() {
+        let model = json!({
+            "id": "minimax_h3",
+            "downloads": [
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q4", "files": ["q4/transformer/*"] },
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q8", "files": ["q8/transformer/*"] },
+                { "repo": "MiniMaxAI/MiniMax-H3", "coRequisite": true, "files": ["vae/*"] },
+            ],
+        });
+        // Only the named repo's rows, unioned across tiers — the co-requisite repo is a different repo
+        // and contributes nothing to this repo's scope.
+        assert_eq!(
+            model_repo_file_scopes(&model, "SceneWorks/minimax-h3-mlx"),
+            Some(vec![
+                "q4/transformer/*".to_owned(),
+                "q8/transformer/*".to_owned()
+            ])
+        );
+        // A repo this entry does not claim at all has no scope.
+        assert_eq!(model_repo_file_scopes(&model, "Org/unrelated"), None);
+        // One unscoped row poisons the whole repo's scope: it is a claim on everything.
+        let unscoped = json!({
+            "id": "bernini",
+            "downloads": [{ "repo": "SceneWorks/bernini", "files": [] }],
+        });
+        assert_eq!(
+            model_repo_file_scopes(&unscoped, "SceneWorks/bernini"),
+            None
+        );
+        // …and it poisons it even when a SCOPED sibling row is present in the same repo. This is the
+        // case the empty-scopes fallback alone cannot express: without the early return the entry
+        // would scope its delete to `q4/*` and strand everything else the unscoped row claims.
+        let mixed = json!({
+            "id": "mixed_claim",
+            "downloads": [
+                { "repo": "Org/mixed", "variant": "q4", "files": ["q4/*"] },
+                { "repo": "Org/mixed", "files": [] },
+            ],
+        });
+        assert_eq!(model_repo_file_scopes(&mixed, "Org/mixed"), None);
+
+        // Sibling scopes exclude the entry itself and INCLUDE a sibling's co-requisite in that repo.
+        let sibling = json!({
+            "id": "minimax_h3_ref",
+            "downloads": [
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q4", "files": ["q4/transformer_ref/*"] },
+                { "repo": "SceneWorks/minimax-h3-mlx", "coRequisite": true, "files": ["shared/*"] },
+            ],
+        });
+        let catalog = vec![model.clone(), sibling];
+        assert_eq!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3", "SceneWorks/minimax-h3-mlx"),
+            vec!["q4/transformer_ref/*".to_owned(), "shared/*".to_owned()]
+        );
+        // Viewed from the sibling, the base entry's scopes are the ones retained.
+        assert_eq!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3_ref", "SceneWorks/minimax-h3-mlx"),
+            vec!["q4/transformer/*".to_owned(), "q8/transformer/*".to_owned()]
+        );
+        // A repo only this entry claims has no sibling scopes at all — the discriminator that keeps
+        // the blanket path in force for the entries that own their repo outright.
+        assert!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3", "MiniMaxAI/MiniMax-H3")
+                .is_empty()
+        );
     }
 
     // Convert-at-install (Anima) tiers are real `<converted>/<tier>/` dirs with a packed DiT plus

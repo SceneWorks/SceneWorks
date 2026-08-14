@@ -11721,3 +11721,76 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
     assert_no_person_track_strings(&upscaled, "the upscaled clip");
     assert_no_person_track_strings(&upscaled.with_extension("poster.jpg"), "its poster");
 }
+
+/// sc-17159 (epic 17137) — a MiniMax-H3 job NEVER degrades to a procedural fake clip.
+///
+/// The family is MLX-routed from sc-17159 (`VIDEO_MODEL_CAPS` + `video_mode_is_mlx_eligible`), so
+/// the mlx worker now claims its jobs — but the mlx engine is not in the pinned inference revision,
+/// so no arm of `resolve_video_route` matches its ids and every job lands on [`VideoRoute::Stub`].
+/// Without the fail-loud arm the Stub path calls `generate_stub_video` and returns a synthesized
+/// clip AT THE REQUESTED GEOMETRY — indistinguishable from a real render until watched. That is the
+/// silent degradation sc-4176 added `ensure_video_engine_weights` to prevent, and the arm Mochi
+/// (sc-11992) and Krea (sc-8443) each needed on arrival.
+///
+/// The refusal is asserted by ITS OWN reason, not by `is_err()`: a bare error check here would go
+/// inert the moment the request were rejected for some unrelated cause (sc-19488).
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_never_degrades_to_a_fake_video() {
+    let data_dir_guard = tempfile::Builder::new()
+        .prefix("minimax_h3_route_")
+        .tempdir()
+        .expect("temp dir");
+    let settings = Settings {
+        data_dir: data_dir_guard.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+    // Every declared mode of BOTH partitions, so no shape slips past on a route the ladder happens
+    // to match for another reason.
+    for (model, mode) in [
+        ("minimax_h3", "text_to_video"),
+        ("minimax_h3", "image_to_video"),
+        ("minimax_h3", "first_last_frame"),
+        ("minimax_h3_ref", "reference_to_video"),
+    ] {
+        let req = request(json!({
+            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums"
+        }));
+        assert_eq!(
+            resolve_video_route(&req, &settings),
+            VideoRoute::Stub,
+            "{model}/{mode}: no native arm matches MiniMax-H3 at the pinned inference revision"
+        );
+        let err = ensure_video_engine_weights(&req, &settings)
+            .expect_err("a MiniMax-H3 job MUST fail loudly, never render a fake video");
+        let WorkerError::Engine(message) = err else {
+            panic!("{model}/{mode}: expected a WorkerError::Engine, got a different variant");
+        };
+        assert!(
+            message.contains(model),
+            "{model}/{mode}: the error must name the model: {message}"
+        );
+        assert!(
+            message.contains("not in the pinned inference revision"),
+            "{model}/{mode}: the error must name the real cause — no engine, not missing weights: \
+             {message}"
+        );
+        assert!(
+            message.contains("No output was produced"),
+            "{model}/{mode}: the error must say nothing was rendered, so the failure cannot be \
+             mistaken for a finished job: {message}"
+        );
+    }
+
+    // The arm is keyed on the MiniMax-H3 family alone: a model that legitimately falls through to
+    // the stub (a test/unknown id with no engine family) is untouched, so this refusal did not
+    // become a blanket "every stub job errors".
+    let unknown = request(json!({
+        "projectId": "p", "model": "totally_unknown_model", "mode": "text_to_video", "prompt": "p"
+    }));
+    assert_eq!(resolve_video_route(&unknown, &settings), VideoRoute::Stub);
+    assert!(
+        ensure_video_engine_weights(&unknown, &settings).is_ok(),
+        "a non-engine model id keeps the stub as its intended path"
+    );
+}

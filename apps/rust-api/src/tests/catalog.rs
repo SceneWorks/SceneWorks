@@ -2997,6 +2997,427 @@ async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
     }
 }
 
+/// The two MiniMax-H3 catalog entries (sc-17158) as the shipped manifest declares them: ONE repo,
+/// three tiers each, disjoint per-partition `files`, and the same three shared co-requisites. Written
+/// without `platforms` so the fixture is not stripped by `retain_downloads_for_os` on the candle CI
+/// lanes — the download/delete logic under test is OS-independent.
+#[cfg(test)]
+fn minimax_h3_manifest() -> String {
+    let tiers = |partition: &str| {
+        ["q4", "q8", "bf16"]
+            .iter()
+            .map(|tier| {
+                format!(
+                    r#"{{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "{tier}"{}, "files": ["{tier}/{partition}/*"] }}"#,
+                    if *tier == "q4" { ", \"default\": true" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n")
+    };
+    let co_requisites = r#"
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "text_encoder", "subdir": "text_encoder", "files": ["text_encoder/config.json", "text_encoder/model.safetensors.index.json"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "video_vae", "subdir": "vae", "files": ["vae/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "audio_vae", "subdir": "audio_vae", "files": ["audio_vae/*"] }"#;
+    format!(
+        r#"
+        {{
+          "schemaVersion": 1,
+          "models": [
+            {{
+              "id": "minimax_h3",
+              "name": "MiniMax-H3",
+              "type": "video",
+              "family": "minimax-h3",
+              "downloads": [
+{},
+{}
+              ]
+            }},
+            {{
+              "id": "minimax_h3_ref",
+              "name": "MiniMax-H3 References",
+              "type": "video",
+              "family": "minimax-h3",
+              "downloads": [
+{},
+{}
+              ]
+            }}
+          ]
+        }}
+        "#,
+        tiers("transformer"),
+        co_requisites,
+        tiers("transformer_ref"),
+        co_requisites
+    )
+}
+
+/// Seed ONE MiniMax-H3 DiT partition into a repo snapshot: `config.json`, the shard index, and the
+/// shards in `present`. Files are real (not blob symlinks) so the fixture is portable; the blob-level
+/// semantics are covered by the unix-gated `variant_delete_tests`.
+#[cfg(test)]
+fn seed_minimax_partition(
+    snapshot: &std::path::Path,
+    tier: &str,
+    partition: &str,
+    present: &[&str],
+) {
+    let dir = snapshot.join(tier).join(partition);
+    std::fs::create_dir_all(&dir).expect("partition dir creates");
+    std::fs::write(dir.join("config.json"), "{}").expect("config writes");
+    std::fs::write(
+        dir.join("diffusion_pytorch_model.safetensors.index.json"),
+        json!({
+            "weight_map": {
+                "blocks.0.weight": "diffusion_pytorch_model-00001-of-00002.safetensors",
+                "blocks.1.weight": "diffusion_pytorch_model-00002-of-00002.safetensors",
+            }
+        })
+        .to_string(),
+    )
+    .expect("index writes");
+    for shard in present {
+        std::fs::write(dir.join(shard), b"weights").expect("shard writes");
+    }
+}
+
+#[cfg(test)]
+const MINIMAX_SHARDS: [&str; 2] = [
+    "diffusion_pytorch_model-00001-of-00002.safetensors",
+    "diffusion_pytorch_model-00002-of-00002.safetensors",
+];
+
+/// Seed the three shared co-requisite components from `MiniMaxAI/MiniMax-H3` (the tier-agnostic
+/// weights floor a render needs regardless of which DiT tier is installed).
+#[cfg(test)]
+fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
+    let snapshot =
+        data_dir.join("cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc");
+    for (dir, files) in [
+        (
+            "text_encoder",
+            vec!["config.json", "model.safetensors.index.json"],
+        ),
+        ("vae", vec!["config.json"]),
+        ("audio_vae", vec!["config.json"]),
+    ] {
+        let component = snapshot.join(dir);
+        std::fs::create_dir_all(&component).expect("component dir creates");
+        for file in files {
+            std::fs::write(component.join(file), "{}").expect("component file writes");
+        }
+    }
+}
+
+#[tokio::test]
+async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_floor() {
+    // sc-19078 — the on-demand tier fetch, per entry and per tier. `SceneWorks/minimax-h3-mlx` is
+    // 240.7 GB in total, so a tier install must pull exactly ONE partition of ONE tier: q8 here is
+    // 35.3 GB against 240.7 GB for the repo. The three co-requisites are the tier-agnostic weights
+    // FLOOR — dense in every tier — and must be queued alongside it, at their own pinned revision;
+    // without them the entry installs as a model that cannot render.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "variant": "q8" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // The primary job fetches THIS entry's partition of THAT tier — not the tier, not the repo.
+    assert_eq!(primary["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+    assert_eq!(primary["payload"]["variant"], "q8");
+    assert_eq!(primary["payload"]["files"], json!(["q8/transformer/*"]));
+    assert_eq!(
+        primary["payload"]["revision"], "f22bc294f46894584645aec59a513ee411450c96",
+        "the tier fetch is pinned, never main"
+    );
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .expect("jobs is an array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        download_jobs.len(),
+        4,
+        "one partition job plus all three shared co-requisites: {download_jobs:?}"
+    );
+    let floor = download_jobs
+        .iter()
+        .filter(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3")
+        .collect::<Vec<_>>();
+    assert_eq!(floor.len(), 3, "text encoder + both VAEs");
+    for component in floor {
+        // A DIFFERENT pin than the tier row's: the shared floor comes from MiniMax's own upstream
+        // snapshot, so asserting the tier's SHA here would have passed on a plain copy-through.
+        assert_eq!(
+            component["payload"]["revision"], "939557dc319dd91227e30195a763f272ba7f8765",
+            "a co-requisite carries its OWN pinned revision, not the tier row's"
+        );
+        assert!(
+            component["payload"]
+                .get("family")
+                .map_or(true, Value::is_null),
+            "a shared component is a different artifact than the DiT and must not carry its family"
+        );
+    }
+    // NOTHING pulls the sibling entry's partition or another tier — the whole point of per-tier fetch.
+    for job in download_jobs {
+        let files = job["payload"]["files"].to_string();
+        assert!(
+            !files.contains("transformer_ref"),
+            "a minimax_h3 install must not pull the reference checkpoint: {files}"
+        );
+        assert!(
+            !files.contains("q4/") && !files.contains("bf16/"),
+            "a q8 install must not pull another tier: {files}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() {
+    // sc-19078: `SceneWorks/minimax-h3-mlx` ships no `model_index.json`, so the coarse
+    // `q4/transformer/*` glob is satisfied by a SINGLE landed file out of fourteen shards. Without the
+    // family predicate a torn tier read `installed` and then died at load — the "complete but
+    // unloadable" class. The two entries own disjoint partitions of one repo, so each must be judged
+    // on its OWN partition: here `minimax_h3`'s q4 is complete while `minimax_h3_ref`'s q4 is torn.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    // `minimax_h3` q4: complete. `minimax_h3_ref` q4: index + config landed, ONE of two shards missing.
+    seed_minimax_partition(&snapshot, "q4", "transformer", &MINIMAX_SHARDS);
+    seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS[..1]);
+    seed_minimax_shared_floor(&data_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entry = |id: &str| {
+        models
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap_or_else(|| panic!("{id} present"))
+            .clone()
+    };
+    let tier_state = |model: &Value, name: &str| {
+        model["variants"]
+            .as_array()
+            .expect("variants array")
+            .iter()
+            .find(|variant| variant["variant"] == name)
+            .unwrap_or_else(|| panic!("variant {name} present"))
+            .clone()
+    };
+
+    let base = entry("minimax_h3");
+    assert_eq!(base["hasVariantMatrix"], true);
+    assert_eq!(base["installState"], "installed");
+    assert_eq!(tier_state(&base, "q4")["installState"], "installed");
+    for absent in ["q8", "bf16"] {
+        assert_eq!(
+            tier_state(&base, absent)["installState"],
+            "missing",
+            "{absent} was never fetched"
+        );
+    }
+
+    // The torn sibling: NOT installed, and flagged as repairable so the card offers a re-fetch rather
+    // than a green badge over a tier that cannot load.
+    let reference = entry("minimax_h3_ref");
+    assert_eq!(reference["installState"], "missing");
+    assert_eq!(reference["repairAvailable"], true);
+    let torn = tier_state(&reference, "q4");
+    assert_eq!(torn["installState"], "missing");
+    assert_eq!(torn["cacheState"], "incomplete");
+    assert!(
+        torn["missingRequiredFiles"]
+            .as_array()
+            .expect("missing files array")
+            .iter()
+            .any(|file| file.as_str() == Some("q4/ (incomplete: missing model components)")),
+        "the torn tier must name itself: {torn:?}"
+    );
+}
+
+#[tokio::test]
+async fn minimax_h3_is_not_installed_without_its_shared_component_floor() {
+    // A co-requisite is a WEIGHTS FLOOR, not an optional extra: the Qwen3-VL-32B text encoder and both
+    // VAEs are dense in every tier and must be present before any render, whatever tier is installed.
+    // A tier fetch that landed the DiT alone would otherwise advertise a model that cannot run.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    seed_minimax_partition(&snapshot, "q4", "transformer", &MINIMAX_SHARDS);
+    // The floor is seeded, then the audio VAE is taken back out — one MISSING component of three.
+    seed_minimax_shared_floor(&data_dir);
+    std::fs::remove_dir_all(
+        data_dir.join(
+            "cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc/audio_vae",
+        ),
+    )
+    .expect("audio vae removes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let base = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "minimax_h3")
+        .expect("minimax_h3 present")
+        .clone();
+
+    // The q4 DiT tier itself is complete — this is specifically the co-requisite gate, not a torn tier.
+    let q4 = base["variants"]
+        .as_array()
+        .expect("variants array")
+        .iter()
+        .find(|variant| variant["variant"] == "q4")
+        .expect("q4 present")
+        .clone();
+    assert_eq!(
+        q4["installState"], "installed",
+        "the DiT tier itself landed"
+    );
+    // …yet the entry is not installed, and names the component repo it is still waiting on.
+    assert_eq!(base["installState"], "missing");
+    assert_eq!(base["repairAvailable"], true);
+    assert!(
+        base["missingRequiredFiles"]
+            .as_array()
+            .expect("missing files array")
+            .iter()
+            .any(|file| file
+                .as_str()
+                .is_some_and(|file| file.starts_with("MiniMaxAI/MiniMax-H3"))),
+        "the missing co-requisite must be named: {:?}",
+        base["missingRequiredFiles"]
+    );
+}
+
+#[tokio::test]
+async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
+    // sc-19078 — the shared-repo trap. Both entries live in ONE repo cache dir, and a whole-model
+    // delete resolves that dir, so the blanket `remove_dir_all` took `transformer_ref/` (a different
+    // checkpoint, up to 66.3 GB per tier) with it. After the delete `minimax_h3_ref` must still read
+    // installed at every tier it had.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    // Both entries installed: `minimax_h3` at q4 + bf16, `minimax_h3_ref` at q4.
+    for tier in ["q4", "bf16"] {
+        seed_minimax_partition(&snapshot, tier, "transformer", &MINIMAX_SHARDS);
+    }
+    seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS);
+    seed_minimax_shared_floor(&data_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // permanent=true keeps the assertions deterministic (the OS-trash path depends on the host).
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/minimax_h3?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["removedLocalArtifacts"], true);
+    // A built-in entry stays catalogued; only its files go.
+    assert_eq!(deleted["removedManifestEntry"], false);
+
+    // The deleted entry's partitions are gone from EVERY tier…
+    for tier in ["q4", "bf16"] {
+        assert!(
+            !snapshot.join(tier).join("transformer").exists(),
+            "{tier}/transformer removed"
+        );
+    }
+    // …the sibling's partition survives, file for file…
+    let sibling = snapshot.join("q4/transformer_ref");
+    assert!(sibling.join("config.json").is_file());
+    for shard in MINIMAX_SHARDS {
+        assert!(sibling.join(shard).is_file(), "{shard} retained");
+    }
+    // …and the shared component floor is untouched (it is a co-requisite of BOTH entries).
+    assert!(data_dir
+        .join("cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc/vae/config.json")
+        .is_file());
+
+    // The catalog agrees: the reference entry still reads installed at q4, the deleted one does not.
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let state_of = |id: &str| {
+        models
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap_or_else(|| panic!("{id} present"))["installState"]
+            .clone()
+    };
+    assert_eq!(state_of("minimax_h3_ref"), "installed");
+    assert_eq!(state_of("minimax_h3"), "missing");
+}
+
 #[tokio::test]
 async fn quant_matrix_empty_cache_skeleton_reads_missing_not_incomplete() {
     // sc-9909: a tier that isn't published upstream resolves ZERO files, leaving an empty HF cache

@@ -622,15 +622,26 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     // Mochi (text_to_video only — `conditioning: []` on both descriptors, sc-11991);
     // text_to_video on every routed model EXCEPT SVD (image-conditioned only, sc-3523) and
     // SCAIL-2 (animate_character only — sc-5448).
+    // The models with their OWN arm, which the two generic-arm assertions below must exclude:
+    // bernini / scail2_14b / mochi_1 (as above), `wan_2_2_vace_fun_14b` (replace_person ONLY — the
+    // dual-expert control checkpoint, sc-3458) and `minimax_h3_ref` (reference_to_video ONLY — the
+    // `transformer_ref` partition, sc-17159). `minimax_h3` itself DOES serve both generic modes, so
+    // it is deliberately absent from these lists and is asserted by the generic arm.
     for model in VIDEO_MLX_ROUTED_MODELS {
         assert_eq!(
             video_mode_is_mlx_eligible(model, "image_to_video"),
-            *model != "bernini" && *model != "scail2_14b" && *model != "mochi_1",
+            !matches!(
+                *model,
+                "bernini" | "scail2_14b" | "mochi_1" | "wan_2_2_vace_fun_14b" | "minimax_h3_ref"
+            ),
             "image_to_video eligibility for {model}"
         );
         assert_eq!(
             video_mode_is_mlx_eligible(model, "text_to_video"),
-            *model != "svd" && *model != "scail2_14b",
+            !matches!(
+                *model,
+                "svd" | "scail2_14b" | "wan_2_2_vace_fun_14b" | "minimax_h3_ref"
+            ),
             "text_to_video eligibility for {model}"
         );
     }
@@ -696,6 +707,15 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
             "multi_video_to_video",
             "ads2v",
         ] {
+            // `reference_to_video` is Bernini-plus-one since sc-17159, for the same reason
+            // `video_to_video` is: MiniMax-H3's `transformer_ref` partition is a real Ref2VA
+            // checkpoint, so `minimax_h3_ref` genuinely serves it. The OTHER three stay
+            // Bernini-only, and `minimax_h3_ref` is asserted to refuse them by
+            // `minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabilities`
+            // — so this relaxation cannot widen into "the reference family serves everything".
+            if *model == "minimax_h3_ref" && mode == "reference_to_video" {
+                continue;
+            }
             assert!(
                 !video_mode_is_mlx_eligible(model, mode),
                 "{mode} should be Bernini-only, not eligible on {model}"
@@ -764,6 +784,15 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
         "first_last_frame"
     ));
     assert!(video_mode_is_mlx_eligible("wan_2_2", "first_last_frame"));
+    // …and on MiniMax-H3's t2va/fl2va partition (sc-17159): fl2va is `first_last_frame` with 0, 1
+    // or 2 keyframes, and the generic arm's LTX/Wan-only list would have refused a mode this
+    // family's `capabilities` and `ui.recommendedFor` both advertise.
+    assert!(video_mode_is_mlx_eligible("minimax_h3", "first_last_frame"));
+    // The REFERENCE partition is a different checkpoint and must NOT inherit it.
+    assert!(!video_mode_is_mlx_eligible(
+        "minimax_h3_ref",
+        "first_last_frame"
+    ));
     // FLF remains queued on the 14B Wan MoE engines (no native engine Keyframe path).
     assert!(!video_mode_is_mlx_eligible(
         "wan_2_2_t2v_14b",
@@ -787,6 +816,19 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     assert!(video_mode_is_mlx_eligible("ltx_2_3", "replace_person"));
     assert!(video_mode_is_mlx_eligible("ltx_2_3_eros", "replace_person"));
     assert!(video_mode_is_mlx_eligible("wan_2_2", "replace_person"));
+    // …and on `wan_2_2_vace_fun_14b`, which routes to its OWN dual-expert engine
+    // (`VideoRoute::ReplacePersonWanVaceFun`, sc-3459) rather than to single-expert `wan_vace`.
+    // It advertises `replace_person` and nothing else, so this arm being false made its ONLY
+    // capability unreachable on its ONLY lane (sc-17159).
+    assert!(video_mode_is_mlx_eligible(
+        "wan_2_2_vace_fun_14b",
+        "replace_person"
+    ));
+    // Neither MiniMax-H3 partition serves replace_person — it declares no such capability, and
+    // routing it would hand a Wan-VACE request to a MiniMax checkpoint.
+    for id in ["minimax_h3", "minimax_h3_ref"] {
+        assert!(!video_mode_is_mlx_eligible(id, "replace_person"));
+    }
     // Unknown modes are never eligible.
     assert!(!video_mode_is_mlx_eligible("ltx_2_3", "nonsense"));
 }
@@ -883,4 +925,239 @@ fn krea_realtime_is_mlx_routed_and_serves_exactly_its_advertised_modes() {
             "Video Studio must disable {mode} for krea_realtime_14b"
         );
     }
+}
+
+/// A queued `video_generate` job for the MLX claim gate ([`video_job_is_mlx_eligible`], via
+/// [`worker_supports_job`]) — the predicate that decides whether the in-process mlx worker picks
+/// the job up at all. Asserting `video_mode_is_mlx_eligible` alone would skip the
+/// `VIDEO_MLX_ROUTED_MODELS` membership half, which is exactly the half MiniMax-H3 was missing.
+/// The in-process mlx worker on the VIDEO lane. `gpu_id: "mlx"` is what selects the mlx arm of
+/// `worker_supports_job`, and `video_generate` is the advertised capability the final check
+/// requires — the shared [`mlx_worker`] fixture advertises `image_generate` only.
+fn mlx_video_worker() -> WorkerSnapshot {
+    serde_json::from_value(json!({
+        "id": "worker_mlx_video",
+        "gpuId": "mlx",
+        "status": "idle",
+        "capabilities": ["gpu", "video_generate"],
+        "loadedModels": [],
+        "registeredAt": "2026-08-14T00:00:00Z",
+        "lastSeenAt": "2026-08-14T00:00:00Z"
+    }))
+    .expect("valid MLX video worker")
+}
+
+fn video_generate_job(payload: Value) -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job_video",
+        "type": "video_generate",
+        "status": "queued",
+        "payload": payload,
+        "result": {},
+        "requestedGpu": "auto",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-08-14T00:00:00Z",
+        "updatedAt": "2026-08-14T00:00:00Z"
+    }))
+    .expect("valid video job")
+}
+
+/// sc-17159 (epic 17137) — MiniMax-H3 is MLX-ROUTED on both partitions, and each serves EXACTLY
+/// the modes its own manifest entry advertises.
+///
+/// Three separate regressions, all of them silent, and the family had all three before this story:
+///
+/// 1. **Neither id was in [`VIDEO_MODEL_CAPS`]** ⇒ `video_job_is_mlx_eligible` refused every job
+///    (queued forever, never claimed) AND `video_model_mac_support` answered `supported: false`
+///    carrying `classify_video_gap`'s "this video model has no MLX engine". Every MiniMax-H3
+///    download row is `platforms: ["macos"]`, so the Video Studio hid the family on the ONLY
+///    platform it installs on.
+/// 2. **No arm in `video_mode_is_mlx_eligible`** ⇒ `minimax_h3`'s `first_last_frame` (fl2va) fell
+///    to the generic arm's LTX/Wan-only list and was refused — a mode both `capabilities` and
+///    `ui.recommendedFor` advertise.
+/// 3. **The generic arm was WRONG for the reference partition in the other direction** ⇒ it would
+///    have granted `minimax_h3_ref` the `text_to_video | image_to_video` its `transformer_ref`
+///    checkpoint cannot do while refusing `reference_to_video`, the only thing it can. The two
+///    partitions are separate 18.78 GB DiTs, so that is a wrong-checkpoint load, not a spare mode.
+///
+/// Discriminating in both directions on purpose: it pins what each partition must NOT serve, so a
+/// future "fix" that widens the generic arm fails on the partition that has to keep refusing.
+#[test]
+fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabilities() {
+    for id in ["minimax_h3", "minimax_h3_ref"] {
+        assert!(
+            VIDEO_MLX_ROUTED_MODELS.contains(&id),
+            "{id} must be MLX-routed — macOS is its only platform, so an absent row makes the app \
+             claim it has no engine and hides it from the picker"
+        );
+    }
+
+    // t2va + fl2va on the `transformer` partition. `image_to_video` is fl2va with a FIRST frame
+    // only; `first_last_frame` is fl2va with both.
+    for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+        assert!(
+            video_mode_is_mlx_eligible("minimax_h3", mode),
+            "minimax_h3 advertises {mode} and must serve it"
+        );
+    }
+    // Ref2VA on the `transformer_ref` partition — and NOT t2v/i2v/flf, which would load the wrong
+    // checkpoint for the request.
+    assert!(video_mode_is_mlx_eligible(
+        "minimax_h3_ref",
+        "reference_to_video"
+    ));
+    for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+        assert!(
+            !video_mode_is_mlx_eligible("minimax_h3_ref", mode),
+            "minimax_h3_ref is the reference checkpoint and must not claim {mode}"
+        );
+    }
+    // …and `reference_to_video` must NOT leak onto the base partition, whose `limits` declare
+    // `maxReferenceAssets: 0` precisely because its checkpoint has no reference path.
+    assert!(!video_mode_is_mlx_eligible(
+        "minimax_h3",
+        "reference_to_video"
+    ));
+    // Neither partition serves anything else. `nonsense` is in the list so the arms are proven to
+    // be allow-lists rather than "true for everything I did not think of".
+    for id in ["minimax_h3", "minimax_h3_ref"] {
+        for mode in [
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+            "animate_character",
+            "video_to_video",
+            "reference_video_to_video",
+            "multi_video_to_video",
+            "ads2v",
+            "nonsense",
+        ] {
+            assert!(
+                !video_mode_is_mlx_eligible(id, mode),
+                "{id} does not implement {mode} and must not claim it"
+            );
+        }
+    }
+
+    // The CLAIM gate, not just the mode predicate: a queued job in each declared mode must be
+    // eligible for the in-process mlx worker. This is the half `VIDEO_MODEL_CAPS` membership
+    // decides, and the half that was missing.
+    for (model, mode, extra) in [
+        ("minimax_h3", "text_to_video", json!({})),
+        (
+            "minimax_h3",
+            "image_to_video",
+            json!({ "sourceAssetId": "img-1" }),
+        ),
+        (
+            "minimax_h3",
+            "first_last_frame",
+            json!({ "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "minimax_h3_ref",
+            "reference_to_video",
+            json!({ "referenceAssetIds": ["img-1"], "referenceAudioAssetIds": ["aud-1"] }),
+        ),
+    ] {
+        let mut payload = object(json!({ "model": model, "mode": mode }));
+        payload.extend(object(extra));
+        assert!(
+            worker_supports_job(
+                &mlx_video_worker(),
+                &video_generate_job(Value::Object(payload))
+            ),
+            "the mlx worker must claim a {model} / {mode} job"
+        );
+    }
+    // A Ref2VA job on the BASE partition is refused by the claim gate — the wrong-checkpoint case,
+    // caught before any weights load.
+    assert!(!worker_supports_job(
+        &mlx_video_worker(),
+        &video_generate_job(json!({
+            "model": "minimax_h3", "mode": "reference_to_video", "referenceAssetIds": ["img-1"]
+        }))
+    ));
+
+    // The UI gating oracle — the surface the user actually meets. `supported: false` is what hid
+    // the family from the picker and printed the false "no MLX engine" reason.
+    for (id, served) in [
+        (
+            "minimax_h3",
+            ["text_to_video", "image_to_video", "first_last_frame"].as_slice(),
+        ),
+        ("minimax_h3_ref", ["reference_to_video"].as_slice()),
+    ] {
+        let support = model_mac_support(id, "video", None);
+        assert!(
+            support.supported,
+            "{id} must be Mac-supported: {:?}",
+            support.reason
+        );
+        assert!(support.reason.is_none());
+        let modes = &support.features.video_modes;
+        assert!(
+            !modes.is_empty(),
+            "{id}: an empty videoModes map would gate nothing"
+        );
+        for (mode, enabled) in modes {
+            assert_eq!(
+                *enabled,
+                served.contains(&mode.as_str()),
+                "{id}: Video Studio gating for {mode}"
+            );
+        }
+    }
+}
+
+/// sc-17159 — `wan_2_2_vace_fun_14b` is MLX-routed and serves the ONE mode it advertises.
+///
+/// A live instance of the GH #2074 class, found by
+/// `every_declared_video_capability_is_claimable_by_some_lane`: the dual-expert VACE-Fun control
+/// checkpoint shipped with a manifest row (`capabilities: ["replace_person"]`, a macOS MLX
+/// download) and a dedicated worker arm (`VideoRoute::ReplacePersonWanVaceFun` →
+/// `generate_wan_vace_fun`, sc-3459) — but NO [`VIDEO_MODEL_CAPS`] row and no mention in
+/// `video_mode_is_mlx_eligible`'s `replace_person` arm. It is in none of the `CANDLE_VIDEO_*` sets
+/// either, so the MLX lane is its only lane, and its only capability was unreachable on it.
+#[test]
+fn wan_vace_fun_is_mlx_routed_and_serves_its_only_advertised_mode() {
+    assert!(
+        VIDEO_MLX_ROUTED_MODELS.contains(&"wan_2_2_vace_fun_14b"),
+        "wan_2_2_vace_fun_14b must be MLX-routed — its dispatch arm has existed since sc-3459"
+    );
+    assert!(video_mode_is_mlx_eligible(
+        "wan_2_2_vace_fun_14b",
+        "replace_person"
+    ));
+    // Only that one: the control checkpoint has no generic T2V/I2V (the manifest says so too, and
+    // `builtin_manifest_registers_the_wan_vace_fun_model` pins it).
+    for mode in [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "animate_character",
+        "nonsense",
+    ] {
+        assert!(
+            !video_mode_is_mlx_eligible("wan_2_2_vace_fun_14b", mode),
+            "wan_2_2_vace_fun_14b is a replace_person control checkpoint and must not claim {mode}"
+        );
+    }
+    let support = model_mac_support("wan_2_2_vace_fun_14b", "video", None);
+    assert!(
+        support.supported,
+        "wan_2_2_vace_fun_14b must be Mac-supported: {:?}",
+        support.reason
+    );
+    assert_eq!(
+        support.features.video_modes.get("replace_person"),
+        Some(&true),
+        "Video Studio must enable replace_person for wan_2_2_vace_fun_14b"
+    );
 }

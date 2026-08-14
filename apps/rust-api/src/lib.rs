@@ -4087,6 +4087,45 @@ fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), Api
     Ok(())
 }
 
+/// Every `mode` a `POST /api/v1/video/jobs` request may name — the enqueue allow-list, and a
+/// SEPARATE reachability gate from the catalog: a mode absent HERE 400s with "Unsupported video
+/// mode" no matter what the model's manifest `capabilities` declare, what `VIDEO_UI_MODES` offers,
+/// or what the worker can render.
+///
+/// It is a named `const` rather than the inline array literal it was so a test can enumerate the
+/// REAL list. A guard that retypes the modes asserts against its own copy and stays green while
+/// this list drifts — the false-green shape that let GH #2074 ship. `every_declared_video_capability_is_submittable`
+/// (tests/jobs.rs) reads this constant and the shipped manifest, so a new family's capability that
+/// is not admitted here is RED at the source.
+///
+/// ⚠️ Adding a family means checking SIX surfaces, not one (sc-17159): manifest `capabilities`,
+/// [`sceneworks_core::jobs_store::routing`]'s `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible` +
+/// `VIDEO_MODEL_CAPS`, the candle claim gate, THIS list plus the per-mode required-asset `match`
+/// below it, and the worker's dispatch arm.
+pub(crate) const VIDEO_JOB_MODES: &[&str] = &[
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    // Bernini editing / reference-driven video modes (sc-4703).
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
+    // and ads2v (source video + reference video + reference images).
+    "multi_video_to_video",
+    "ads2v",
+    // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
+    // character image + driving video → animated clip. It was wired end-to-end — catalog
+    // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
+    // the worker's `generate_scail2` — and offered in the Video Studio, but never added
+    // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
+    // unreachable from the moment it shipped (GH #2074).
+    "animate_character",
+];
+
 fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
@@ -4104,31 +4143,7 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             sceneworks_core::lora_family::MAX_JOB_LORAS
         )));
     }
-    if ![
-        "image_to_video",
-        "text_to_video",
-        "first_last_frame",
-        "extend_clip",
-        "video_bridge",
-        "replace_person",
-        // Bernini editing / reference-driven video modes (sc-4703).
-        "video_to_video",
-        "reference_to_video",
-        "reference_video_to_video",
-        // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
-        // and ads2v (source video + reference video + reference images).
-        "multi_video_to_video",
-        "ads2v",
-        // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
-        // character image + driving video → animated clip. It was wired end-to-end — catalog
-        // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
-        // the worker's `generate_scail2` — and offered in the Video Studio, but never added
-        // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
-        // unreachable from the moment it shipped (GH #2074).
-        "animate_character",
-    ]
-    .contains(&payload.mode.as_str())
-    {
+    if !VIDEO_JOB_MODES.contains(&payload.mode.as_str()) {
         return Err(ApiError::bad_request("Unsupported video mode"));
     }
     if payload
@@ -4247,9 +4262,29 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "video_to_video" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
             "Video to Video requires a source clip.",
         )),
-        "reference_to_video" if payload.reference_asset_ids.is_empty() => Err(
-            ApiError::bad_request("Reference to Video requires at least one reference image."),
-        ),
+        // `reference_to_video` requires at least one reference of ANY kind, not specifically an
+        // IMAGE (sc-17159). Bernini was the only model serving this mode when the arm was written
+        // and its engine takes image references alone, so "at least one reference image" and "at
+        // least one reference" were the same sentence. MiniMax-H3 Ref2VA broke that identity: it
+        // conditions on images AND video clips AND audio clips, and sc-17149's acceptance is that
+        // all three modalities bind "individually and combined" — so an audio-only or clip-only
+        // reference set is a shape the model serves, and the image-only spelling 400'd it here,
+        // one layer above the per-model caps that admit it.
+        //
+        // This gate exists so the worker never falls through to an unconditioned t2v render, and a
+        // non-empty reference set of any kind satisfies that. It does NOT loosen Bernini: its own
+        // conditioning assembly (`resolve_bernini_conditioning`, both lanes) still refuses an r2v
+        // with no `referenceAssetIds`, naming bernini — the model-specific half of the requirement
+        // belongs with the model, exactly like `limits.maxReferenceAssets`.
+        "reference_to_video"
+            if payload.reference_asset_ids.is_empty()
+                && payload.source_clip_asset_ids.is_empty()
+                && payload.reference_audio_asset_ids.is_empty() =>
+        {
+            Err(ApiError::bad_request(
+                "Reference to Video requires at least one reference image, video clip or audio clip.",
+            ))
+        }
         "reference_video_to_video" if payload.source_clip_asset_id.is_none() => Err(
             ApiError::bad_request("Reference + Video requires a source clip."),
         ),
