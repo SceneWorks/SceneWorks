@@ -1,5 +1,5 @@
 //! Per-family tier-completeness predicates for the MLX turnkeys that ship NO `model_index.json`
-//! (Anima / Boogu / SANA / Wan / SenseNova-U1).
+//! (Anima / Boogu / SANA / Wan / SenseNova-U1 / MiniMax-H3).
 //!
 //! These families lay their weights out in a bespoke tree rather than a diffusers `model_index.json`
 //! pipeline, so the generic `<tier>/*` presence checks — the worker's `tier_components_present`
@@ -152,21 +152,15 @@ fn sensenova_tokenizer_resolvable(dir: &Path) -> bool {
     })
 }
 
-/// Whether the SenseNova backbone under `dir` is fully on disk: either the packed single-file
-/// `model.safetensors` (every q4/q8 tier, and the `*-fast-mlx` bf16, which the packer emits pre-merged
-/// as one file) or a sharded `model.safetensors.index.json` with EVERY shard its `weight_map` names
-/// (the base/infographic bf16 tiers ship 8 shards / ~35 GB).
+/// Whether EVERY shard the safetensors index `index_file` in `dir` names is on disk, resolved against
+/// `dir` itself (the same rule `verify_model_snapshot.py` applies to an `expected_files` index).
 ///
 /// The shard set is read from the index rather than settling for "some `.safetensors` is here": the
-/// engine's `Weights::from_dir` merges whatever shards it finds WITHOUT consulting the index, then
-/// fails much later on missing tensor keys — so a download interrupted after 1 of 8 shards would
-/// otherwise read complete. A malformed / unreadable index is treated as incomplete.
-fn sensenova_backbone_present(dir: &Path) -> bool {
-    if dir.join("model.safetensors").is_file() {
-        return true;
-    }
-    let index = dir.join("model.safetensors.index.json");
-    let Ok(contents) = std::fs::read_to_string(&index) else {
+/// MLX loaders merge whatever shards they find WITHOUT consulting the index, then fail much later on
+/// missing tensor keys — so a download interrupted after 1 of N shards would otherwise read complete.
+/// An index naming no shards, or a malformed / unreadable one, is treated as incomplete.
+fn index_shards_present(dir: &Path, index_file: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(dir.join(index_file)) else {
         return false;
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&contents) else {
@@ -180,6 +174,15 @@ fn sensenova_backbone_present(dir: &Path) -> bool {
         .filter_map(serde_json::Value::as_str)
         .peekable();
     shards.peek().is_some() && shards.all(|shard| dir.join(shard).is_file())
+}
+
+/// Whether the SenseNova backbone under `dir` is fully on disk: either the packed single-file
+/// `model.safetensors` (every q4/q8 tier, and the `*-fast-mlx` bf16, which the packer emits pre-merged
+/// as one file) or a sharded `model.safetensors.index.json` with EVERY shard its `weight_map` names
+/// (the base/infographic bf16 tiers ship 8 shards / ~35 GB), per [`index_shards_present`].
+fn sensenova_backbone_present(dir: &Path) -> bool {
+    dir.join("model.safetensors").is_file()
+        || index_shards_present(dir, "model.safetensors.index.json")
 }
 
 /// Whether a SenseNova-U1 tier `dir` is COMPLETE and loadable. The `SceneWorks/sensenova-u1-8b*-mlx`
@@ -257,6 +260,66 @@ pub fn sensenova_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
     } else {
         sensenova_tier_complete
     })
+}
+
+/// The DiT partition directory each MiniMax-H3 catalog entry owns inside a `SceneWorks/minimax-h3-mlx`
+/// tier (sc-19078). `minimax_h3` (t2va + fl2va) is the base `transformer/` checkpoint; `minimax_h3_ref`
+/// (Ref2VA) is `transformer_ref/`. The names mirror `DIT_COMPONENT` / `REFERENCE_DIT_PARTITION` in
+/// inference's `mlx-gen-minimax-h3::model`, which is what the loader actually opens.
+///
+/// The two partitions are the ONLY things a tier of that repo holds: the Qwen3-VL-32B text encoder,
+/// both VAEs and the tokenizer are dense in every tier and ship as shared co-requisites from upstream
+/// `MiniMaxAI/MiniMax-H3`, so they are deliberately NOT part of this predicate — the catalog gates them
+/// separately as co-requisites (`install_state_for`), which is what keeps a q4 install from demanding
+/// the bf16 tier's floor.
+pub const MINIMAX_H3_PARTITIONS: [(&str, &str); 2] = [
+    ("minimax_h3", "transformer"),
+    ("minimax_h3_ref", "transformer_ref"),
+];
+
+/// The sharded-weight index inference's `mlx-gen-minimax-h3::convert` writes into every MiniMax-H3 DiT
+/// partition. It is the file that makes a 14-shard partition checkable at all: without it the predicate
+/// would need fourteen hand-maintained shard names per partition and would silently stop covering a
+/// re-shard.
+const MINIMAX_H3_DIT_INDEX: &str = "diffusion_pytorch_model.safetensors.index.json";
+
+/// Whether ONE MiniMax-H3 DiT `partition` (`transformer` / `transformer_ref`) under tier dir `dir` is
+/// COMPLETE and loadable. `SceneWorks/minimax-h3-mlx` ships no `model_index.json` at either the tier
+/// root or inside a partition, so rust-api's coarse `<tier>/<partition>/*` glob is satisfied by a
+/// SINGLE landed file: a download interrupted after one of fourteen shards read `installed` and then
+/// died at load. A partition is complete when its `config.json` is present (the engine's config parse
+/// errors without it) and every shard its [`MINIMAX_H3_DIT_INDEX`] names is on disk.
+fn minimax_h3_partition_complete(dir: &Path, partition: &str) -> bool {
+    let partition = dir.join(partition);
+    partition.join("config.json").is_file()
+        && index_shards_present(&partition, MINIMAX_H3_DIT_INDEX)
+}
+
+/// Whether a `minimax_h3` (t2va + fl2va) tier `dir` is complete — its `transformer/` partition.
+pub fn minimax_h3_tier_complete(dir: &Path) -> bool {
+    minimax_h3_partition_complete(dir, MINIMAX_H3_PARTITIONS[0].1)
+}
+
+/// Whether a `minimax_h3_ref` (Ref2VA) tier `dir` is complete — its `transformer_ref/` partition.
+///
+/// Deliberately independent of [`minimax_h3_tier_complete`]: the two partitions are separate catalog
+/// entries with disjoint `files` predicates, so a user who installed only the reference checkpoint has
+/// a complete `minimax_h3_ref` tier and NO `transformer/` at all. Requiring both would report that
+/// working install as torn and prompt an endless repair.
+pub fn minimax_h3_ref_tier_complete(dir: &Path) -> bool {
+    minimax_h3_partition_complete(dir, MINIMAX_H3_PARTITIONS[1].1)
+}
+
+/// The per-tier completeness predicate for a MiniMax-H3 `model_id`, or `None` for an id outside
+/// [`MINIMAX_H3_PARTITIONS`]. Dispatched on the id rather than the shared `minimax-h3` family because
+/// the two entries own DIFFERENT partition dirs of the same repo — a family-only predicate could not
+/// tell them apart and would have to demand both, which is exactly the false-torn case above.
+pub fn minimax_h3_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
+    match model_id {
+        id if id == MINIMAX_H3_PARTITIONS[0].0 => Some(minimax_h3_tier_complete),
+        id if id == MINIMAX_H3_PARTITIONS[1].0 => Some(minimax_h3_ref_tier_complete),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -686,6 +749,182 @@ mod tests {
         assert!(sensenova_tier_predicate("sana_1600m").is_none());
     }
 
+    /// Write ONE MiniMax-H3 DiT partition under tier dir `dir`: `config.json` plus a shard index naming
+    /// `shards`, of which only `present` actually land. The real repo ships 14 shards per partition; the
+    /// fixture keeps the COUNT small and the index-vs-disk relationship exact, which is what the
+    /// predicate reads.
+    fn seed_minimax_partition(dir: &Path, partition: &str, shards: &[&str], present: &[&str]) {
+        let partition = dir.join(partition);
+        let weight_map = shards
+            .iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                (
+                    format!("blocks.{index}.attn.to_q.weight"),
+                    serde_json::Value::String((*shard).to_owned()),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        fs::create_dir_all(&partition).unwrap();
+        fs::write(
+            partition.join(MINIMAX_H3_DIT_INDEX),
+            serde_json::json!({ "weight_map": weight_map }).to_string(),
+        )
+        .unwrap();
+        touch(&partition.join("config.json"));
+        for shard in present {
+            touch(&partition.join(shard));
+        }
+    }
+
+    const MINIMAX_SHARDS: [&str; 3] = [
+        "diffusion_pytorch_model-00001-of-00003.safetensors",
+        "diffusion_pytorch_model-00002-of-00003.safetensors",
+        "diffusion_pytorch_model-00003-of-00003.safetensors",
+    ];
+
+    /// Write a COMPLETE `minimax_h3` tier (the base `transformer/` partition only).
+    fn seed_minimax_h3(dir: &Path) {
+        seed_minimax_partition(dir, "transformer", &MINIMAX_SHARDS, &MINIMAX_SHARDS);
+    }
+
+    /// Write a COMPLETE `minimax_h3_ref` tier (the `transformer_ref/` partition only).
+    fn seed_minimax_h3_ref(dir: &Path) {
+        seed_minimax_partition(dir, "transformer_ref", &MINIMAX_SHARDS, &MINIMAX_SHARDS);
+    }
+
+    #[test]
+    fn minimax_h3_complete_true_each_file_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q4");
+        seed_minimax_h3(&dir);
+        assert!(
+            minimax_h3_tier_complete(&dir),
+            "fully-seeded transformer partition is complete"
+        );
+
+        // Mutation check, applied to EACH file on its own: the config, the index, and every one of the
+        // shards it names must independently flip the verdict. A tier that clears the coarse
+        // `q4/transformer/*` glob on a single landed file is exactly the "installed but unloadable"
+        // shape this predicate exists to catch.
+        let mut files = vec!["config.json".to_owned(), MINIMAX_H3_DIT_INDEX.to_owned()];
+        files.extend(MINIMAX_SHARDS.iter().map(|shard| (*shard).to_owned()));
+        for file in files {
+            let torn = tmp.path().join("torn");
+            seed_minimax_h3(&torn);
+            fs::remove_file(torn.join("transformer").join(&file)).unwrap();
+            assert!(
+                !minimax_h3_tier_complete(&torn),
+                "removing transformer/{file} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn minimax_h3_ref_complete_true_each_file_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q4");
+        seed_minimax_h3_ref(&dir);
+        assert!(minimax_h3_ref_tier_complete(&dir));
+
+        let mut files = vec!["config.json".to_owned(), MINIMAX_H3_DIT_INDEX.to_owned()];
+        files.extend(MINIMAX_SHARDS.iter().map(|shard| (*shard).to_owned()));
+        for file in files {
+            let torn = tmp.path().join("torn");
+            seed_minimax_h3_ref(&torn);
+            fs::remove_file(torn.join("transformer_ref").join(&file)).unwrap();
+            assert!(
+                !minimax_h3_ref_tier_complete(&torn),
+                "removing transformer_ref/{file} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn minimax_h3_partitions_are_judged_independently_of_each_other() {
+        // The two catalog entries own DISJOINT partition dirs of ONE repo, so each tier verdict must
+        // read only its own partition. A user who installed just the reference checkpoint has no
+        // `transformer/` at all; demanding both would report that working install as torn forever.
+        let tmp = tempfile::tempdir().unwrap();
+        let base_only = tmp.path().join("base-only");
+        seed_minimax_h3(&base_only);
+        assert!(minimax_h3_tier_complete(&base_only));
+        assert!(!minimax_h3_ref_tier_complete(&base_only));
+
+        let ref_only = tmp.path().join("ref-only");
+        seed_minimax_h3_ref(&ref_only);
+        assert!(minimax_h3_ref_tier_complete(&ref_only));
+        assert!(!minimax_h3_tier_complete(&ref_only));
+
+        // Both installed side by side in one tier — the shipped shape once a user owns both entries.
+        let both = tmp.path().join("both");
+        seed_minimax_h3(&both);
+        seed_minimax_h3_ref(&both);
+        assert!(minimax_h3_tier_complete(&both));
+        assert!(minimax_h3_ref_tier_complete(&both));
+    }
+
+    #[test]
+    fn minimax_h3_partition_needs_every_shard_the_index_names() {
+        // 2 of 3 shards landed: the coarse glob is satisfied, the index is not.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bf16");
+        seed_minimax_partition(&dir, "transformer", &MINIMAX_SHARDS, &MINIMAX_SHARDS[..2]);
+        assert!(!minimax_h3_tier_complete(&dir));
+
+        // Mutation check: landing the last shard flips it, so the assertion above discriminates on the
+        // MISSING shard rather than on some unrelated absence.
+        touch(&dir.join("transformer").join(MINIMAX_SHARDS[2]));
+        assert!(minimax_h3_tier_complete(&dir));
+    }
+
+    #[test]
+    fn minimax_h3_ignores_appledouble_shard_sidecars_and_empty_indexes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q8");
+        seed_minimax_partition(&dir, "transformer", &MINIMAX_SHARDS, &MINIMAX_SHARDS[..2]);
+        // A hidden `._` sidecar has a different name than the shard the index maps to, so an exact-path
+        // check rejects it (SceneWorks#1333).
+        touch(
+            &dir.join("transformer")
+                .join(format!("._{}", MINIMAX_SHARDS[2])),
+        );
+        assert!(!minimax_h3_tier_complete(&dir));
+
+        // An index whose `weight_map` names NOTHING is incomplete rather than vacuously complete: a
+        // truncated/placeholder index must never certify a partition with no weights at all.
+        let empty = tmp.path().join("empty-index");
+        seed_minimax_partition(&empty, "transformer", &[], &[]);
+        assert!(!minimax_h3_tier_complete(&empty));
+    }
+
+    #[test]
+    fn minimax_h3_predicate_dispatch_is_keyed_on_the_entry_id() {
+        // Behavioural probe (fn pointers don't compare reliably): a tier holding ONLY the base
+        // partition separates the two predicates the dispatcher can return.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q4");
+        seed_minimax_h3(&dir);
+
+        let base = minimax_h3_tier_predicate("minimax_h3").expect("base id has a predicate");
+        assert!(base(&dir), "minimax_h3 must take the transformer predicate");
+        let reference =
+            minimax_h3_tier_predicate("minimax_h3_ref").expect("reference id has a predicate");
+        assert!(
+            !reference(&dir),
+            "minimax_h3_ref must take the transformer_ref predicate"
+        );
+
+        // Ids outside the pair get no predicate, so a future MiniMax entry with a different on-disk
+        // shape is left alone rather than mis-tightened. `minimax_h3_ref` is a PREFIX extension of
+        // `minimax_h3`, so a prefix match here would silently mis-dispatch — assert exact keying.
+        assert!(minimax_h3_tier_predicate("minimax_h3_2k").is_none());
+        assert!(minimax_h3_tier_predicate("minimax_h3_refiner").is_none());
+        assert!(minimax_h3_tier_predicate("wan_2_2").is_none());
+    }
+
     #[test]
     fn missing_tier_dir_is_incomplete_for_every_family() {
         // A tier subdir that does not exist at all (never converted / never downloaded) is incomplete,
@@ -697,5 +936,7 @@ mod tests {
         assert!(!sana_tier_complete(&absent));
         assert!(!wan_tier_complete(&absent));
         assert!(!sensenova_tier_complete(&absent));
+        assert!(!minimax_h3_tier_complete(&absent));
+        assert!(!minimax_h3_ref_tier_complete(&absent));
     }
 }
