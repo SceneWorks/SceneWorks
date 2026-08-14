@@ -5443,14 +5443,12 @@ const LTX_UNLOCKED_SMOKE_GEOMETRY: (u32, u32, u32) = (768, 512, 97);
 /// **What it guarantees:** two *lock takers* never overlap. No injected-budget resolve observes
 /// another's budget, and each restore pairs with its own swap.
 ///
-/// 🔴 **What it does NOT guarantee, though an earlier revision of this comment claimed it did:**
-/// that no test can observe an injected budget. The MLX memory limit is process-GLOBAL, and
-/// `run_ltx` resolves its decode plan through `LtxDecodePlan::resolve`, which reads that limit
-/// **without taking this lock**. The `run_ltx` refusal tests
-/// (`the_ltx_arm_fails_closed_on_a_non_t2v_target_before_weight_work`,
-/// `the_ltx_arm_refuses_a_malformed_plan_before_it_consults_the_host_budget`) reach exactly that
-/// call, and a budget small enough to make the engine refuse their geometry would replace the
-/// message they assert with the engine's refusal.
+/// 🔴 **What it does NOT guarantee:** that no future valid `run_ltx` test can observe an injected
+/// budget. The MLX memory limit is process-GLOBAL, and production decode-plan resolution cannot
+/// take this test-only lock. Cheap malformed-plan tests are deliberately ordered before that
+/// selector and one holds an injected tiling budget while asserting the ordering, but any future
+/// test that reaches physical resolution must either accept the host-dependent result or take this
+/// lock around its own observation.
 ///
 /// Those tests are safe only because every injected budget leaves `LTX_UNLOCKED_SMOKE_GEOMETRY`'s
 /// full-output accumulators affordable — 4.49 GiB against a lowest safe budget of 6.8 GiB, a 1.51x
@@ -6141,8 +6139,6 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         );
     }
     let selection = planned_selection(request)?;
-    let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
-    decode_plan.validate_selected_strategy(&selection)?;
     let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
     if !matches!(tier, "q4" | "q8" | "bf16") {
         return Err(format!(
@@ -6205,6 +6201,11 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
+    // Host-dependent and process-global: resolve only after every cheap target, fixture,
+    // fingerprint, and provider-contract check has passed, so an injected test budget cannot mask
+    // a deterministic malformed-plan error. This remains before generator load or capture.
+    let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
+    decode_plan.validate_selected_strategy(&selection)?;
     let generator = registry
         .load(LTX_PROVIDER, &spec)
         .map_err(|error| format!("load real LTX-2.3 {tier} provider: {error}"))?;
@@ -7787,6 +7788,10 @@ mod ltx_tests {
     /// Pure request malformations must still fail before environment or weight resolution.
     #[test]
     fn the_ltx_arm_refuses_a_malformed_plan_before_it_consults_the_host_budget() {
+        // Force the smoke geometry onto the provider's auto-tiled path. Every mutation below must
+        // still report its own deterministic input error; consulting the live selector first made
+        // this test intermittently report a decode-budget outcome under default-parallel tests.
+        let _constrained_budget = LtxInjectedBudget::install(8.0);
         for (pointer, value, expected) in [
             (
                 "/planned/fixture",
