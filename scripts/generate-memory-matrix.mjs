@@ -666,7 +666,23 @@ function canonicalParameters(parameters) {
   return Object.fromEntries(Object.entries(parameters).sort(([left], [right]) => left.localeCompare(right)));
 }
 
-export function calibrationBinding(record, cell) {
+function isTemporalVideoCell(cell, modality) {
+  if (modality !== "video") return false;
+  const envelope = cell.geometryEnvelope ?? {};
+  return (
+    (Array.isArray(envelope.durations) && envelope.durations.length > 0) ||
+    Number.isFinite(envelope.defaultDuration) ||
+    Number.isFinite(envelope.hardMaxDuration) ||
+    (Array.isArray(envelope.fps) && envelope.fps.length > 0) ||
+    Number.isFinite(envelope.defaultFps)
+  );
+}
+
+export function calibrationBinding(
+  record,
+  cell,
+  { exactPlanEntries = [], modality = null } = {},
+) {
   const reasons = [];
   if (!["complete", "runtime_complete"].includes(record.status)) reasons.push("record-not-complete");
   if (record.quality.result !== "passed") reasons.push("quality-not-passed");
@@ -692,7 +708,12 @@ export function calibrationBinding(record, cell) {
   const resolution = `${record.target.geometry.width}x${record.target.geometry.height}`;
   if (!cell.geometryEnvelope.resolutions?.includes(resolution)) reasons.push("geometry-out-of-envelope");
   if (record.target.geometry.batch !== 1) reasons.push("batch-out-of-envelope");
-  if (record.target.geometry.frames !== 1) reasons.push("frames-out-of-envelope");
+  if (record.target.geometry.frames !== 1) {
+    if (!isTemporalVideoCell(cell, modality)) reasons.push("frames-out-of-envelope");
+    if (
+      !exactPlanEntries.some((entry) => planEntryMatchesEvidenceRecord(entry, record))
+    ) reasons.push("capture-geometry-unplanned");
+  }
   if (
     !cell.evidence.loadability.some(
       (artifact) =>
@@ -845,6 +866,43 @@ export function planEntryTargetsCoordinate(entry, coordinate) {
     entry.target.mode === coordinate.mode &&
     matrixOverlayFor(entry.target.overlay) === coordinate.overlay &&
     entry.rung === coordinate.rung
+  );
+}
+
+/**
+ * Does one calibration-plan entry describe this exact physical evidence receipt?
+ *
+ * This is intentionally separate from `planEntryTargetsCoordinate`. A matrix coordinate is
+ * geometry-independent: planning any capture for a rung publishes that rung's cell. Binding a
+ * multi-frame receipt is the opposite claim and must match the complete capture identity, including
+ * the explicit frame count. Keeping the predicates separate prevents a planned `f121` capture from
+ * blessing an unplanned `f241` receipt while preserving the historical one-frame publication rule.
+ *
+ * Duration and FPS are deliberately absent. The harness records output frames directly, and no
+ * consumer may reverse-engineer that observed axis from request duration or FPS.
+ */
+export function planEntryMatchesEvidenceRecord(entry, record) {
+  return (
+    entry.backend === record.backend &&
+    entry.target.modelId === record.target.modelId &&
+    entry.target.provider === record.target.provider &&
+    entry.target.tier === record.target.tier &&
+    entry.target.mode === record.target.mode &&
+    entry.target.overlay === record.target.overlay &&
+    entry.rung === record.strategy.rung &&
+    entry.target.geometry.width === record.target.geometry.width &&
+    entry.target.geometry.height === record.target.geometry.height &&
+    entry.target.geometry.batch === record.target.geometry.batch &&
+    entry.target.geometry.frames === record.target.geometry.frames &&
+    entry.loadShape === record.loadShape &&
+    entry.calibrationFingerprint === record.calibrationFingerprint &&
+    JSON.stringify(entry.engagedRungs) === JSON.stringify(record.strategy.engagedRungs)
+  );
+}
+
+function exactPlanEntriesForRecord(calibrationPlan, record) {
+  return calibrationPlan.providers.filter((entry) =>
+    planEntryMatchesEvidenceRecord(entry, record),
   );
 }
 
@@ -1219,17 +1277,17 @@ export function parseVideoRoutes(bodies, unionOnlyMlxRoutes = UNION_ONLY_MLX_ROU
   return routes;
 }
 
-// sc-16268: anchored on CODE, not on the `/// An id with no registered generator` doc comment that
-// used to terminate the region. Provenance now hashes these sources with their inert comments
-// stripped, so a parse that reads comment text would let a semantic change slip past the staleness
-// tripwire. The negative control (`assert!(!engine_supports_sequential(...)`) is the real end of the
-// positive sweep and was already the split point, so the parsed set is unchanged.
-function parseMlxSequentialEngines(source) {
+// sc-16268: anchored on CODE, not on a doc comment. Provenance hashes these sources with inert
+// comments stripped, so a parse that reads comment text would let a semantic change slip past the
+// staleness tripwire. SC-18816 deliberately parses the broader staged-residency sweep rather than
+// the selectable-Sequential sweep: unconditional staging is real rung-1 availability even though
+// it does not authorize setting OffloadPolicy::Sequential.
+function parseMlxStagedResidencyEngines(source) {
   const test = source.match(
-    /fn engine_supports_sequential_is_derived_from_the_registered_capability\(\)\s*\{([\s\S]*?)assert!\(!engine_supports_sequential/,
+    /fn engine_engages_staged_residency_is_derived_from_the_registered_capability\(\)\s*\{([\s\S]*?)assert!\(!engine_engages_staged_residency/,
   );
   if (!test) {
-    throw new Error("could not locate the MLX sequential-capability registry sweep");
+    throw new Error("could not locate the MLX staged-residency registry sweep");
   }
   return new Set([...test[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]));
 }
@@ -2019,15 +2077,16 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
  * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
  * reporting rung 4 as unreachable.
  */
-function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }) {
+function stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById }) {
   const declaredModel =
     model.id === "z_image_edit" && route.engine === "z_image_turbo"
       ? manifestById.get("z_image_turbo")
       : model;
   return backend === "mlx"
-    // The MLX provider id specifically: `engine_supports_sequential` is a claim about the MLX
-    // registry, and a video entry's candle provider is a different id (sc-18815).
-    ? sequentialEngines.has(route.engineFor("mlx"))
+    // The MLX provider id specifically: `engine_engages_staged_residency` is a claim about the MLX
+    // registry, and a video entry's candle provider is a different id (sc-18815). The predicate is
+    // deliberately wider than selectable Sequential: SC-18816 made unconditional staging visible.
+    ? stagedResidencyEngines.has(route.engineFor("mlx"))
     : declaredModel.candle?.supportsSequentialOffload === true ||
         declaredModel.candle?.sequentialPeakGb !== undefined ||
         declaredModel.candle?.turboFit !== undefined;
@@ -2130,7 +2189,7 @@ function strategyStatus({
   rung,
   route,
   provider,
-  sequentialEngines,
+  stagedResidencyEngines,
   model,
   tier,
   mode,
@@ -2168,7 +2227,7 @@ function strategyStatus({
     rung !== "bounded_transformer_residency" ||
     (["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
       staticRung4Implementation !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }));
+      stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById }));
   const staticImplementation = staticContractCoversProvider(staticMemoryContract, provider)
     ? staticMemoryContract.implementations.find(
         (implementation) =>
@@ -2298,13 +2357,13 @@ function strategyStatus({
     !(model.id === "krea_2_turbo" && backend === "candle") &&
     (backend !== "candle" ||
       staticCandleOverlayIsAvailable({ model, route, overlay, manifestById })) &&
-    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
+    stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById })
   ) {
     return {
       state: "Implemented/unverified",
       source:
         backend === "mlx"
-          ? "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          ? "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
           : `config/manifests/builtin.models.jsonc#models/${model.id}/candle`,
       parameters: { phaseOrder: ["conditioning", "denoise", "decode"] },
     };
@@ -2418,7 +2477,7 @@ function strategyStatus({
     );
     const implementedHere =
       implementationParameters !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById });
+      stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById });
     if (verdict.structuralApplicability === "none") {
       return {
         state: "Structurally N/A",
@@ -3113,7 +3172,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     routingCandle: bodies.routingCandle,
     routingMlx: bodies.routingMlx,
   });
-  const sequentialEngines = parseMlxSequentialEngines(mlxFitBody);
+  const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
   const pin = inferencePin(cargoBody);
   // NUL-separated (sc-16268): normalisation strips each body's trailing newline, so concatenating
@@ -3231,7 +3290,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 rung,
                 route,
                 provider,
-                sequentialEngines,
+                stagedResidencyEngines,
                 model,
                 tier,
                 mode,
@@ -3284,7 +3343,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                   source: `docs/generated/memory-calibration-evidence.json#${record.id}`,
                   hardware: record.backend === "candle" ? record.hardware.name : record.hardware.chip,
                   tier: record.target.tier,
-                  geometry: `${record.target.geometry.width}x${record.target.geometry.height}`,
+                  geometry: measuredGeometryKey(record.target.geometry),
                   capturedAt: record.capturedAt,
                   harnessVersion: record.harnessVersion,
                   recordStatus: record.status,
@@ -3306,8 +3365,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 };
               };
               const eligibleRuns = calibrationRuns.filter(
-                (record) => calibrationBinding(record, {
-                  ...{
+                (record) => calibrationBinding(
+                  record,
+                  {
                     calibrationFingerprint: fingerprint,
                     engagedRungs,
                     strategyParameters: status.parameters,
@@ -3316,7 +3376,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                       : geometryFor(model, backend),
                     evidence: { loadability: artifactEvidence(model, route, tier) },
                   },
-                }).eligible,
+                  {
+                    exactPlanEntries: exactPlanEntriesForRecord(calibrationPlan, record),
+                    modality: model.type,
+                  },
+                ).eligible,
               );
               const semantics = (record) =>
                 evidenceSemantics(record, {
@@ -3437,9 +3501,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         candidate.rung === record.strategy.rung,
     );
     if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
+    const modality = manifestById.get(record.target.modelId)?.type ?? null;
     return {
       cellId: cell.id,
-      binding: calibrationBinding(record, cell),
+      binding: calibrationBinding(record, cell, {
+        exactPlanEntries: exactPlanEntriesForRecord(calibrationPlan, record),
+        modality,
+      }),
       semantics: cell.evidence.currentEnvironmentVerification.some(
         (evidence) => evidence.source === `docs/generated/memory-calibration-evidence.json#${record.id}`,
       )

@@ -2,10 +2,11 @@
 //! `sceneworks-core` transcribed from gen-core still match the pinned bundle.
 
 use gen_core::{
-    LoadShape, MemoryBackendRealization, MemoryCalibrationIdentity, MemoryLifecycleCapabilities,
-    MemoryParameterRanges, MemoryPhase, MemoryStrategyCapability, MemoryStrategySupport,
-    MemoryWindowMaterialization, Precision, Quant, VaeTiling,
+    LoadShape, LoadSpec, MemoryBackendRealization, MemoryCalibrationIdentity,
+    MemoryLifecycleCapabilities, MemoryParameterRanges, MemoryPhase, MemoryStrategyCapability,
+    MemoryStrategySupport, MemoryWindowMaterialization, Precision, Quant, VaeTiling, WeightsSource,
 };
+use sceneworks_core::video_memory_curves::VideoCurveHullPoint;
 use sceneworks_core::video_request::{
     single_pass_decode_frame_cap, vae_full_res_channels, video_admission, VideoAdmission,
     VideoAdmissionGeometry, VideoDecodePass, VideoGeometryRole,
@@ -14,6 +15,19 @@ use sceneworks_core::video_request::{
 use super::*;
 
 const GIB: u64 = 1024 * 1024 * 1024;
+
+#[test]
+fn candle_post_load_snapshot_preserves_committed_pressure_under_a_cap() {
+    let budget = candle_budget_from_total_free(24 * GIB, 10 * GIB, Some(16 * GIB))
+        .expect("valid CUDA snapshot");
+    assert_eq!(budget.total_bytes, 16 * GIB);
+    assert_eq!(budget.committed_bytes, 14 * GIB);
+    assert_eq!(budget.reclaimable_bytes, 0);
+    assert_eq!(budget.reserved_headroom_bytes, 2 * GIB);
+    assert!(candle_budget_from_total_free(24 * GIB, 25 * GIB, None).is_none());
+}
+const FITTED_CURVE_CLOSURE: &str =
+    "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3";
 
 fn tier() -> MemoryNumericTier {
     MemoryNumericTier {
@@ -55,8 +69,7 @@ fn fixture_contract_with_realization(
     rungs: &[MemoryStrategy],
     realization: MemoryBackendRealization,
 ) -> MemoryProviderContract {
-    let mut contract =
-        MemoryProviderContract::compatibility_default("video_admission_fixture", realization);
+    let mut contract = MemoryProviderContract::compatibility_default("ltx_2_3", realization);
     contract.asset_facts.base_bytes = base_gib * GIB;
     contract.asset_facts.conditioning_bytes = conditioning_gib * GIB;
     contract.asset_facts.transformer_bytes = (base_gib - conditioning_gib) * GIB;
@@ -64,7 +77,7 @@ fn fixture_contract_with_realization(
     contract.load_shape = LoadShape::EagerMaterialization;
     contract.calibration = Some(MemoryCalibrationIdentity {
         abi: gen_core::MEMORY_CALIBRATION_ABI,
-        fingerprint: "video-admission-fixture-v1".to_owned(),
+        fingerprint: "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1".to_owned(),
         load_shape: LoadShape::EagerMaterialization,
     });
     contract.lifecycle = MemoryLifecycleCapabilities {
@@ -157,10 +170,41 @@ fn geometry(frames: u32, role: VideoGeometryRole) -> VideoAdmissionGeometry {
         width: 1280,
         height: 704,
         frames,
+        decode_pass_frames: frames,
         batch: 1,
         decode_pass: VideoDecodePass::SinglePass,
         role,
     }
+}
+
+fn tiered_decode_profile(
+    _lane: VideoLane,
+    _provider_id: &str,
+    _geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+) -> Result<Option<ResolvedVideoDecodeProfile>, String> {
+    let (working_set_bytes, evidence_revision) = match selection.strategy {
+        MemoryStrategy::BoundedDecode => (4 * GIB, "video-provider-selected-decode-profile-v1"),
+        _ => (35 * GIB, "video-provider-conservative-decode-profile-v1"),
+    };
+    Ok(Some(ResolvedVideoDecodeProfile {
+        profile: VideoDecodeMemoryProfile::new(working_set_bytes, 0)
+            .expect("fixture decode profile is internally consistent"),
+        evidence_revision,
+    }))
+}
+
+fn decoder_substitution_profile(
+    _lane: VideoLane,
+    _provider_id: &str,
+    _geometry: VideoAdmissionGeometry,
+    _selection: MemorySelection,
+) -> Result<Option<ResolvedVideoDecodeProfile>, String> {
+    Ok(Some(ResolvedVideoDecodeProfile {
+        profile: VideoDecodeMemoryProfile::new(10 * GIB, 4 * GIB)
+            .expect("fixture decode profile is internally consistent"),
+        evidence_revision: "video-provider-conservative-decode-profile-v1",
+    }))
 }
 
 // --------------------------------------------------------------------------------------------
@@ -224,7 +268,7 @@ fn shipped_video_model_ids() -> Vec<String> {
 ///
 /// The assignments cite the decode path each engine takes; see `vae_full_res_channels`' doc for
 /// the citations and for what these tests do NOT pin (sc-19117).
-fn expected_vae_tiling(id: &str) -> Option<VaeTiling> {
+fn expected_vae_tiling(id: &str, lane: VideoLane) -> Option<VaeTiling> {
     match id {
         "ltx_2_3" | "ltx_2_3_eros" => Some(VaeTiling::LTX),
         // The dense TI2V-5B is welded to the z48 vae22 (`mlx-gen-wan/src/pipeline.rs:235`).
@@ -236,9 +280,15 @@ fn expected_vae_tiling(id: &str) -> Option<VaeTiling> {
         | "bernini"
         | "scail2_14b"
         | "krea_realtime_14b" => Some(VaeTiling::WAN),
-        // SVD's bound is `candle-gen-svd`'s PRIVATE `SVD_VAE_TILING` with no MLX sibling to pin a
-        // second value against, so core reports it unmodelled rather than guessing.
-        "svd" => None,
+        "svd" => match lane {
+            VideoLane::Mlx => None,
+            VideoLane::Candle => Some(VaeTiling {
+                spatial_scale: 8,
+                temporal_scale: 1,
+                causal_temporal: false,
+                full_res_channels: 256,
+            }),
+        },
         other => panic!(
             "shipped video model {other:?} is not mapped to a pinned VaeTiling — read the \
              VaeTiling its decoder passes to `budgeted_plan` out of that engine's crate and add \
@@ -249,33 +299,35 @@ fn expected_vae_tiling(id: &str) -> Option<VaeTiling> {
 
 #[test]
 fn core_transcribes_the_pinned_vae_write_bounds() {
-    let mut modelled = 0_usize;
-    let mut unmodelled = 0_usize;
-    for model in shipped_video_model_ids() {
-        match expected_vae_tiling(&model) {
-            Some(vae) => {
-                assert_eq!(
-                    vae_full_res_channels(&model),
-                    Some(vae.full_res_channels as u32),
-                    "{model}: core's transcribed channel count must equal the pinned \
-                     gen_core::VaeTiling constant its decoder runs"
-                );
-                modelled += 1;
-            }
-            None => {
-                assert_eq!(
-                    vae_full_res_channels(&model),
-                    None,
-                    "{model} is deliberately unmodelled; core must report None rather than a \
-                     number nothing can pin"
-                );
-                unmodelled += 1;
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let mut modelled = 0_usize;
+        let mut unmodelled = 0_usize;
+        for model in shipped_video_model_ids() {
+            match expected_vae_tiling(&model, lane) {
+                Some(vae) => {
+                    assert_eq!(
+                        vae_full_res_channels(&model, lane),
+                        Some(vae.full_res_channels as u32),
+                        "{lane:?}/{model}: core's transcribed channel count must equal the \
+                         pinned gen_core::VaeTiling constant its decoder runs"
+                    );
+                    modelled += 1;
+                }
+                None => {
+                    assert_eq!(
+                        vae_full_res_channels(&model, lane),
+                        None,
+                        "{lane:?}/{model} is deliberately unmodelled; core must report None \
+                         rather than a number nothing can pin"
+                    );
+                    unmodelled += 1;
+                }
             }
         }
+        assert_eq!(modelled + unmodelled, EXPECTED_SHIPPED_VIDEO_COUNT);
+        assert!(modelled > 0);
+        assert_eq!(unmodelled, usize::from(lane == VideoLane::Mlx));
     }
-    // Both arms are genuinely exercised, so neither is vacuous.
-    assert_eq!(modelled + unmodelled, EXPECTED_SHIPPED_VIDEO_COUNT);
-    assert!(modelled > 0 && unmodelled > 0);
 
     // The three constants are genuinely different, so the per-family loop above is not comparing
     // one value against itself.
@@ -289,6 +341,32 @@ fn core_transcribes_the_pinned_vae_write_bounds() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_svd_remains_unmodelled_in_core() {
+    assert_eq!(vae_full_res_channels("svd", VideoLane::Mlx), None);
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_svd_transcription_is_pinned_to_the_provider_owned_runtime_authority() {
+    let provider = runtime_cuda::vae_tiling("svd_xt")
+        .expect("advance the SceneWorks inference pin to the sc-19104 Candle SVD authority");
+    assert_eq!(
+        provider,
+        VaeTiling {
+            spatial_scale: 8,
+            temporal_scale: 1,
+            causal_temporal: false,
+            full_res_channels: 256,
+        }
+    );
+    assert_eq!(
+        vae_full_res_channels("svd", VideoLane::Candle),
+        Some(provider.full_res_channels as u32)
+    );
+}
+
 #[test]
 fn the_core_frame_cap_equals_gen_cores_writable_frame_cap() {
     for (width, height) in [(1280_u32, 704_u32), (768, 512), (512, 512), (1920, 1080)] {
@@ -299,14 +377,20 @@ fn the_core_frame_cap_equals_gen_cores_writable_frame_cap() {
         ] {
             let engine = vae.writable_frame_cap(height as i32, width as i32);
             assert_eq!(
-                single_pass_decode_frame_cap(model, width, height),
+                single_pass_decode_frame_cap(model, VideoLane::Mlx, width, height),
                 Some(u32::try_from(engine).unwrap()),
                 "{model} @ {width}x{height}: core must agree with VaeTiling::writable_frame_cap"
             );
         }
     }
-    // A family core deliberately does not model returns None rather than a wrong number.
-    assert_eq!(single_pass_decode_frame_cap("svd", 1024, 576), None);
+    assert_eq!(
+        single_pass_decode_frame_cap("svd", VideoLane::Mlx, 1024, 576),
+        None
+    );
+    assert_eq!(
+        single_pass_decode_frame_cap("svd", VideoLane::Candle, 1024, 576),
+        Some(14)
+    );
 }
 
 // --------------------------------------------------------------------------------------------
@@ -324,17 +408,80 @@ fn select_once(
 ) {
     let mut selector = LadderVideoSelector::new(
         VideoRequestIdentity {
-            route: "video_admission_fixture",
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
         contract,
         budget,
         headroom_bytes,
+        0,
     );
     let verdict = selector.select(geometry);
-    (verdict, selector.selections)
+    (
+        verdict,
+        selector
+            .selections
+            .into_iter()
+            .map(|candidate| (candidate.binding_geometry, candidate.selection))
+            .collect(),
+    )
+}
+
+/// The promoted sc-18810 curve used as a historical, structurally valid fixture. The fixture
+/// contract above adopts the artifact's exact provider/fingerprint identity; mutating the bundle's
+/// identity would correctly sever its immutable source-record handshake and make `evaluate` fail
+/// closed before these selector tests reached the coefficient under test.
+fn fixture_curve_bundle() -> VideoMemoryCurveBundle {
+    let bundle = sceneworks_core::video_memory_curves::packaged_video_memory_curves()
+        .expect("packaged video curve")
+        .clone();
+    assert_eq!(bundle.curves.len(), 1);
+    assert_eq!(bundle.curves[0].closure_digest, FITTED_CURVE_CLOSURE);
+    bundle
+}
+
+fn select_once_with_curves(
+    contract: &MemoryProviderContract,
+    curves: &VideoMemoryCurveBundle,
+    budget: Option<Budget>,
+    geometry: VideoAdmissionGeometry,
+) -> VideoRungSelection {
+    let mut selector = selector_with_curves(contract, Some(curves), budget);
+    selector.select(geometry)
+}
+
+fn selector_with_curves<'a>(
+    contract: &'a MemoryProviderContract,
+    curves: Option<&'a VideoMemoryCurveBundle>,
+    budget: Option<Budget>,
+) -> LadderVideoSelector<'a> {
+    LadderVideoSelector::with_curve_bundle(
+        VideoRequestIdentity {
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
+            lane: VideoLane::Mlx,
+            tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            expected_closure_digest: FITTED_CURVE_CLOSURE,
+        },
+        contract,
+        budget,
+        18 * GIB,
+        0,
+        curves,
+    )
 }
 
 #[test]
@@ -413,7 +560,7 @@ struct FixtureGenerator {
 fn fixture_generator(contract: Option<MemoryProviderContract>) -> FixtureGenerator {
     FixtureGenerator {
         descriptor: gen_core::ModelDescriptor {
-            id: "video_admission_fixture",
+            id: "ltx_2_3",
             family: "ltx",
             backend: "mlx",
             modality: gen_core::Modality::Video,
@@ -454,13 +601,30 @@ fn inputs<'a>(
 ) -> VideoAdmissionInputs<'a> {
     VideoAdmissionInputs {
         model_id: "ltx_2_3",
-        route: "video_admission_fixture",
+        model_family: "ltx-video",
+        route: "ltx_2_3",
+        mode: "text_to_video",
+        reference_count: 0,
+        overlay: None,
         lane: VideoLane::Mlx,
         tier: tier(),
         width: 1280,
         height: 704,
         frames,
-        budget,
+        decode_chunk_size: None,
+        fps: 24,
+        runtime: budget.map(|budget| VideoRuntimeMemoryState {
+            budget: gen_core::MemoryBudget {
+                total_bytes: (budget.total_gb * GIB as f64).round() as u64,
+                committed_bytes: ((budget.total_gb - budget.available_gb).max(0.0) * GIB as f64)
+                    .round() as u64,
+                reclaimable_bytes: (budget.reclaimable_gb * GIB as f64).round() as u64,
+                reserved_headroom_bytes: (budget.reserved_headroom_gb * GIB as f64).round() as u64,
+            },
+            cache_state: gen_core::MemoryCacheState::Cold,
+            load_policy: gen_core::OffloadPolicy::Resident,
+            provider_resident_bytes: 0,
+        }),
         headroom_bytes,
         expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
     }
@@ -483,13 +647,20 @@ fn a_selected_resident_rung_leaves_the_request_byte_identical() {
         4,
         &[MemoryStrategy::StagedResidency],
     )));
-    let outcome = admit_video_generation(&generator, inputs(241, budget(128.0), 18 * GIB));
-    assert_eq!(
-        outcome,
-        VideoAdmissionOutcome::default(),
-        "resident engages nothing, so emitting explicit all-false knobs would replace the \
-         provider's own defaults"
+    let outcome =
+        admit_video_generation_with_curves(&generator, inputs(241, budget(128.0), 18 * GIB), None);
+    assert!(
+        outcome.memory.is_none(),
+        "resident preserves provider defaults"
     );
+    assert!(outcome.refusal.is_none());
+    let context = outcome
+        .context
+        .expect("contract-backed Resident still carries the provider handshake");
+    assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+    assert_eq!(context.mode.as_key(), "text_to_video");
+    assert_eq!(context.geometry.frames, 241);
+    assert!(!context.has_phases);
 }
 
 #[test]
@@ -499,63 +670,362 @@ fn a_selected_optimized_rung_reaches_the_generation_request() {
         4,
         &[MemoryStrategy::StagedResidency],
     )));
-    let outcome = admit_video_generation(&generator, inputs(241, budget(40.0), 18 * GIB));
+    let outcome =
+        admit_video_generation_with_curves(&generator, inputs(241, budget(40.0), 18 * GIB), None);
     let memory = outcome.memory.expect("staged residency was selected");
     assert!(memory.stage_residency, "{memory:?}");
     assert!(outcome.refusal.is_none());
 }
 
+#[test]
+fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::BoundedDecode],
+    )));
+    // The conservative resident profile is 20 + 35 = 55 GiB, which cannot fit. The exact
+    // bounded carrier retains the generic 20 + 18 = 38 GiB lower bound and fits after the shared
+    // 10% estimate margin. Without consuming the selected profile, Resident would win first.
+    let outcome = admit_video_generation_with_curves_and_profiles(
+        &generator,
+        inputs(241, budget(42.0), 18 * GIB),
+        None,
+        tiered_decode_profile,
+    );
+    let memory = outcome
+        .memory
+        .expect("the provider-selected bounded decode carrier must reach the request");
+    assert!(memory.tile_vae_decode, "{memory:?}");
+    assert_eq!(memory.decode_tile_edge, Some(256));
+    assert_eq!(memory.decode_overlap, Some(32));
+    let context = outcome
+        .context
+        .expect("selected profile carries run context");
+    assert_eq!(context.selection.strategy, MemoryStrategy::BoundedDecode);
+    assert_eq!(context.predicted_peak_bytes, 38 * GIB);
+    assert_eq!(
+        context.evidence_revision,
+        "video-provider-selected-decode-profile-v1"
+    );
+    assert!(outcome.refusal.is_none());
+}
+
+#[test]
+fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
+    // The historical generic floor (38 GiB) fits this host, but the provider-owned resident
+    // profile (55 GiB) does not. Refusal suppression must compare the exact profiled candidate,
+    // not reconstruct the smaller generic floor after the selector returns.
+    let outcome = admit_video_generation_with_curves_and_profiles(
+        &generator,
+        inputs(241, budget(39.0), 18 * GIB),
+        None,
+        tiered_decode_profile,
+    );
+    let refusal = outcome
+        .refusal
+        .expect("a provider profile that does not fit is a real refusal");
+    assert!(refusal.contains("needs about 60.5 GB"), "{refusal}");
+    assert!(outcome.memory.is_none());
+    assert!(outcome.context.is_none());
+}
+
+#[test]
+fn provider_profile_composition_and_warm_residency_are_each_accounted_once() {
+    let mut contract = fixture_contract(20, 4, &[]);
+    contract.asset_facts.transformer_bytes = 12 * GIB;
+    contract.asset_facts.decoder_bytes = 4 * GIB;
+    let generator = fixture_generator(Some(contract));
+    let mut request = inputs(241, budget(30.0), 0);
+    request.runtime = Some(VideoRuntimeMemoryState {
+        budget: MemoryBudget {
+            total_bytes: 30 * GIB,
+            committed_bytes: 20 * GIB,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        cache_state: MemoryCacheState::Warm,
+        load_policy: OffloadPolicy::Resident,
+        provider_resident_bytes: 20 * GIB,
+    });
+
+    let outcome = admit_video_generation_with_curves_and_profiles(
+        &generator,
+        request,
+        None,
+        decoder_substitution_profile,
+    );
+    let context = outcome.context.expect("the 6 GiB incremental peak fits");
+    // 20 GiB contract composition + (10 GiB decode profile - 4 GiB decoder already included)
+    // = 26 GiB absolute peak. The post-load snapshot then credits the provider's 20 GiB exactly
+    // once, leaving 6 GiB of incremental demand.
+    assert_eq!(context.predicted_peak_bytes, 6 * GIB);
+    assert_eq!(context.budget.committed_bytes, 20 * GIB);
+    assert_eq!(
+        context.evidence_revision,
+        "video-provider-conservative-decode-profile-v1"
+    );
+    assert!(outcome.memory.is_none());
+    assert!(outcome.refusal.is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn packaged_mlx_wan_profiles_expose_conservative_and_selected_sources() {
+    let geometry = VideoAdmissionGeometry {
+        width: 480,
+        height: 480,
+        frames: 1,
+        decode_pass_frames: 1,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    };
+    let resident = packaged_video_decode_profile(
+        VideoLane::Mlx,
+        "wan2_2_ti2v_5b",
+        geometry,
+        MemorySelection {
+            strategy: MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier: tier(),
+        },
+    )
+    .expect("conservative profile lookup succeeds")
+    .expect("MLX Wan publishes a conservative decode profile");
+    assert_eq!(
+        resident.evidence_revision,
+        "video-provider-conservative-decode-profile-v1"
+    );
+
+    let selected = packaged_video_decode_profile(
+        VideoLane::Mlx,
+        "wan2_2_ti2v_5b",
+        geometry,
+        MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: gen_core::MemoryStrategyParameters {
+                decode_tile_edge: Some(448),
+                decode_overlap: Some(64),
+                ..Default::default()
+            },
+            tier: tier(),
+        },
+    )
+    .expect("selected profile lookup succeeds")
+    .expect("MLX Wan publishes the exact bounded-decode carrier profile");
+    assert_eq!(
+        selected.evidence_revision,
+        "video-provider-selected-decode-profile-v1"
+    );
+    assert!(
+        selected.profile.working_set_bytes() <= resident.profile.working_set_bytes(),
+        "the selected bounded carrier must not exceed the conservative single-pass profile"
+    );
+}
+
+#[test]
+fn a_curve_cannot_be_relabelled_to_manufacture_bounded_decode_parameters() {
+    let contract = fixture_contract(
+        60,
+        20,
+        &[
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+        ],
+    );
+    let generator = fixture_generator(Some(contract));
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].rung = StrategyRung::BoundedDecode;
+    let mut request = inputs(121, budget(40.0), 0);
+    request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+
+    let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
+    assert!(
+        outcome.memory.is_none(),
+        "relabeling staged source records as bounded-decode evidence must not mint provider knobs"
+    );
+    assert!(
+        outcome.context.is_none(),
+        "the source-selector mismatch must fail closed before a lifecycle context is built"
+    );
+    assert!(
+        outcome.refusal.is_some(),
+        "the honest 60 GiB fallback cannot fit this 40 GiB fixture"
+    );
+}
+
+#[test]
+fn unsupported_video_surfaces_fail_open_before_contract_selection() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    let assert_open = |label: &str, request| {
+        assert_eq!(
+            admit_video_generation(&generator, request),
+            VideoAdmissionOutcome::default(),
+            "{label} must preserve legacy direct generation"
+        );
+    };
+
+    let mut request = inputs(121, budget(128.0), 18 * GIB);
+    request.mode = "image_to_video";
+    request.reference_count = 1;
+    assert_open("I2V", request);
+
+    let mut request = inputs(121, budget(128.0), 18 * GIB);
+    request.overlay = Some("enhancer");
+    assert_open("enhancer", request);
+
+    for fps in [0, 1, 23, 31, 60] {
+        let mut request = inputs(121, budget(128.0), 18 * GIB);
+        request.fps = fps;
+        assert_open("out-of-envelope FPS", request);
+    }
+
+    let mut request = inputs(121, budget(128.0), 18 * GIB);
+    request.runtime = None;
+    assert_open("missing canonical post-load budget", request);
+}
+
+#[test]
+fn provider_residency_is_credited_once_and_unrelated_memory_stays_charged() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    // Deliberately grow then shrink the unrelated portion across warm requests. A historical
+    // pre-load baseline would turn the 27 -> 2 transition into bogus provider credit; the retained
+    // cold-load delta must leave the incremental request prediction invariant in both directions.
+    for unrelated_gib in [7, 27, 2, 19] {
+        let mut request = inputs(241, budget(128.0), 18 * GIB);
+        request.runtime = Some(VideoRuntimeMemoryState {
+            budget: MemoryBudget {
+                total_bytes: 128 * GIB,
+                committed_bytes: (20 + unrelated_gib) * GIB,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            cache_state: MemoryCacheState::Warm,
+            load_policy: OffloadPolicy::Resident,
+            provider_resident_bytes: 20 * GIB,
+        });
+
+        let outcome = admit_video_generation_with_curves(&generator, request, None);
+        let context = outcome.context.expect("resident selection carries context");
+        // The provider's cold-load delta stays fixed while unrelated live pressure shrinks and
+        // grows. Incremental demand remains 18 GiB; the live committed budget does not.
+        assert_eq!(context.predicted_peak_bytes, 18 * GIB);
+        assert_eq!(context.budget.committed_bytes, (20 + unrelated_gib) * GIB);
+        assert_eq!(context.cache_state, MemoryCacheState::Warm);
+        assert_eq!(context.geometry.frames, 241);
+        assert!(
+            outcome.memory.is_none(),
+            "Resident preserves provider defaults"
+        );
+    }
+}
+
+#[test]
+fn resident_attribution_above_a_modeled_rung_fails_closed() {
+    let generator = fixture_generator(Some(fixture_contract(
+        60,
+        20,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    let curves = fixture_curve_bundle();
+    let mut request = inputs(121, budget(79.0), 18 * GIB);
+    request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    request.runtime = Some(VideoRuntimeMemoryState {
+        budget: MemoryBudget {
+            total_bytes: 79 * GIB,
+            committed_bytes: 60 * GIB,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        cache_state: MemoryCacheState::Warm,
+        load_policy: OffloadPolicy::Resident,
+        provider_resident_bytes: 60 * GIB,
+    });
+
+    let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
+    let refusal = outcome
+        .refusal
+        .expect("60 GiB attribution cannot be subtracted from a ~34 GiB fitted peak");
+    assert!(refusal.contains("exceeds modeled total peak"), "{refusal}");
+    assert!(outcome.memory.is_none());
+    assert!(outcome.context.is_none());
+}
+
 /// A request above the single-pass cap grades the **cap geometry too**, through the real selector.
 ///
-/// The name says what is actually checked. It deliberately does NOT claim the cap *binds* the
-/// selection: with today's `floor_phase_peaks` the peak is geometry-blind — the same
-/// weights+headroom floor for every geometry — so the two graded geometries cannot land on
-/// different rungs no matter how the fixture is shaped, and a test named for the cap binding would
-/// pass identically with the cap geometry never graded at all (sc-18814 review).
-///
-/// What IS provable here, and is: both geometries reach `select_strategy`, the second is the
-/// 297-frame cap, and the request runs. The rung-level consequence of the cap is proved where it
-/// can be — `sceneworks-core`'s `grading_only_the_request_would_have_understated_the_rung` and
-/// `video_admission_selects_the_deepest_rung_the_graded_set_requires`, which drive the selector
-/// seam directly. sc-18829's per-phase fit is what makes the peak geometry-dependent; this test's
-/// `assert_ne!` on the two peaks is the tripwire that says so.
+/// This fixture deliberately presents no current curve (the sentinel closure cannot match the
+/// packaged one), so it pins the established fallback behavior: both geometries are graded and use
+/// the identical weights-plus-headroom floor. `the_single_pass_cap_geometry_can_bind_the_graded_set`
+/// separately proves the fitted path at the cap with an explicitly synthetic test-only envelope.
 #[test]
 fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let mut selector = LadderVideoSelector::new(
         VideoRequestIdentity {
-            route: "video_admission_fixture",
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
         &contract,
         budget(40.0),
         18 * GIB,
+        0,
     );
     // f305 at 1280x704 is past LTX's 297-frame single-pass cap, so both geometries are graded.
-    let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+    let verdict = video_admission(
+        "ltx_2_3",
+        VideoLane::Mlx,
+        1280,
+        704,
+        305,
+        None,
+        &mut selector,
+    );
     assert!(
         matches!(verdict, VideoAdmission::Admitted { .. }),
         "{verdict:?}"
     );
     assert_eq!(selector.selections.len(), 2, "{:?}", selector.selections);
-    assert_eq!(selector.selections[0].0.frames, 305);
-    assert_eq!(selector.selections[0].0.role, VideoGeometryRole::Requested);
-    assert_eq!(selector.selections[1].0.frames, 297);
+    assert_eq!(selector.selections[0].binding_geometry.frames, 305);
     assert_eq!(
-        selector.selections[1].0.role,
+        selector.selections[0].binding_geometry.role,
+        VideoGeometryRole::Requested
+    );
+    assert_eq!(selector.selections[1].binding_geometry.frames, 305);
+    assert_eq!(
+        selector.selections[1].binding_geometry.decode_pass_frames,
+        297
+    );
+    assert_eq!(
+        selector.selections[1].binding_geometry.estimate_frames(),
+        297
+    );
+    assert_eq!(
+        selector.selections[1].binding_geometry.role,
         VideoGeometryRole::SinglePassDecodeCap
     );
 
-    // And the reason the two cannot yet differ, as a live assertion rather than a comment, so it
-    // goes RED the moment sc-18829 makes the peak geometry-dependent.
+    // No current curve means both retain the exact historical floor decision.
     assert_eq!(
-        selector.selections[0].1.strategy, selector.selections[1].1.strategy,
-        "`floor_phase_peaks` takes no geometry, so two graded geometries necessarily select the \
-         same rung — which is precisely why this test cannot assert that the cap BINDS. When \
-         sc-18829's per-phase fit makes this RED, re-derive the test to assert the binding rung \
-         and re-run M21 (see the `peak_bytes()` comment in video_admission.rs)"
+        selector.selections[0].selection.strategy, selector.selections[1].selection.strategy,
+        "the no-current-curve path must retain its phase-uniform floor"
     );
 }
 
@@ -567,7 +1037,8 @@ fn a_refusal_inside_the_estimate_margin_band_is_suppressed() {
     // is `Missing` beyond resident, so the ladder has nowhere to go; at 39 GiB the unwidened floor
     // FITS while 38 * 1.10 = 41.8 does not, which is exactly the band.
     let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
-    let banded = admit_video_generation(&generator, inputs(241, budget(39.0), 18 * GIB));
+    let banded =
+        admit_video_generation_with_curves(&generator, inputs(241, budget(39.0), 18 * GIB), None);
     assert_eq!(
         banded,
         VideoAdmissionOutcome::default(),
@@ -576,7 +1047,8 @@ fn a_refusal_inside_the_estimate_margin_band_is_suppressed() {
 
     // Below the unwidened floor the refusal IS emitted, so the suppression above is a band
     // property and not a blanket "never refuse".
-    let refused = admit_video_generation(&generator, inputs(241, budget(30.0), 18 * GIB));
+    let refused =
+        admit_video_generation_with_curves(&generator, inputs(241, budget(30.0), 18 * GIB), None);
     let message = refused.refusal.expect("30 GiB cannot hold a 38 GiB floor");
     assert!(message.starts_with("ltx_2_3: "), "{message}");
     assert!(message.contains("1280x704 x 241 frames"), "{message}");
@@ -586,15 +1058,13 @@ fn a_refusal_inside_the_estimate_margin_band_is_suppressed() {
 /// **The suppression is SCOPED to the shape it claims, and this is the test that says so.**
 ///
 /// The guard exists to swallow one specific refusal: the estimate margin applied to a peak that IS
-/// the weights+headroom floor. Comparing only "does the floor fit the budget" is correct today —
-/// `floor_phase_peaks` makes every peak be that floor — and becomes a **planted OOM** the moment
-/// sc-18829 lands a fitted per-phase peak: this epic's own measured LTX figures are ~94.3 GB at
-/// decode against a ~38 GB weights floor, so on a host that fits 38 but not 94.3, an unscoped
-/// guard would suppress a genuine all-rungs-reject and run the job resident into an OOM.
+/// the weights+headroom floor. Comparing only "does the floor fit the budget" becomes a **planted
+/// OOM** on a fitted per-phase peak: the measured LTX decode can sit far above the weights floor,
+/// so on a host that fits the floor but not the phase peak, an unscoped guard would suppress a
+/// genuine all-rungs-reject and run the job resident into an OOM.
 ///
-/// Driven at the pure predicate because the peak cannot yet be made to exceed the floor through
-/// the real selector — that is the whole hazard. The numbers are the epic's measured ones so the
-/// case under test is the real future one, not an invented shape.
+/// The pure predicate pins the exact suppression boundary; the fitted selector tests below drive
+/// both the floor and above-floor outcomes end to end.
 #[test]
 fn a_rejection_whose_peak_exceeds_the_floor_beyond_the_margin_is_not_suppressed() {
     const MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
@@ -608,7 +1078,7 @@ fn a_rejection_whose_peak_exceeds_the_floor_beyond_the_margin_is_not_suppressed(
     let host_gb = 100.0;
     assert!(floor_gb < host_gb, "{floor_gb} vs {host_gb}");
 
-    // sc-18829's shape: the rejected peak is the fitted DECODE peak, far above the floor.
+    // The fitted shape: the rejected peak is the DECODE peak, far above the floor.
     let fitted_decode_reject_gb = 94.3 * (1.0 + MARGIN);
     assert!(
         fitted_decode_reject_gb > host_gb,
@@ -621,9 +1091,9 @@ fn a_rejection_whose_peak_exceeds_the_floor_beyond_the_margin_is_not_suppressed(
          must survive — suppressing it runs the job into an OOM"
     );
 
-    // Today's shape, on the identical floor/host/margin: the rejected peak IS the widened floor,
-    // so the suppression still applies. Without this the assertion above could be satisfied by a
-    // guard that never suppresses anything.
+    // The fallback shape, on the identical floor/host/margin: the rejected peak IS the widened
+    // floor, so the suppression still applies. Without this the assertion above could be satisfied
+    // by a guard that never suppresses anything.
     assert!(
         refusal_is_a_margin_artifact(widened_floor_gb, floor_bytes, MARGIN, Some(host_gb)),
         "a rejection at exactly the widened floor is the margin artifact this guard exists for"
@@ -711,7 +1181,7 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
         &contract,
         gen_core::MemoryBackend::Candle,
         tier(),
-        VIDEO_MODE_KEY,
+        "text_to_video",
         None,
         MemoryGeometry {
             width: 1280,
@@ -734,14 +1204,21 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let mut selector = LadderVideoSelector::new(
         VideoRequestIdentity {
-            route: "video_admission_fixture",
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
         &contract,
         budget(8.0),
         18 * GIB,
+        0,
     );
     assert_eq!(
         video_admission(
@@ -750,6 +1227,7 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
             1280,
             704,
             241,
+            None,
             &mut selector
         ),
         VideoAdmission::NotRouted
@@ -757,11 +1235,11 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
     assert!(selector.selections.is_empty());
 }
 
-/// M15's target. `frames` is what makes a video evidence cell distinguishable from every other
-/// frame count at the same resolution, and it is the field sc-18829's temporal term multiplies.
+/// Requested evidence identity keeps the exact output clip length, while a synthetic cap row uses
+/// the interior estimate geometry. Decode chunking must not collapse distinct planned captures.
 #[test]
-fn the_gen_core_geometry_carries_the_real_frame_count() {
-    let mapped = video_memory_geometry(geometry(241, VideoGeometryRole::Requested));
+fn the_gen_core_geometry_carries_the_role_aware_estimate_frame_count() {
+    let mapped = video_memory_geometry(geometry(241, VideoGeometryRole::Requested), 0);
     assert_eq!(mapped.frames, 241);
     assert_eq!(mapped.width, 1280);
     assert_eq!(mapped.height, 704);
@@ -769,13 +1247,47 @@ fn the_gen_core_geometry_carries_the_real_frame_count() {
     // A different frame count maps to a different cell, so the assertion above is not satisfied by
     // any constant.
     assert_eq!(
-        video_memory_geometry(geometry(305, VideoGeometryRole::Requested)).frames,
+        video_memory_geometry(geometry(305, VideoGeometryRole::Requested), 0).frames,
         305
     );
     // Degenerate zero frames floor to one rather than producing an unkeyable cell.
     assert_eq!(
-        video_memory_geometry(geometry(0, VideoGeometryRole::Requested)).frames,
+        video_memory_geometry(geometry(0, VideoGeometryRole::Requested), 0).frames,
         1
+    );
+
+    let chunked = VideoAdmissionGeometry {
+        frames: 25,
+        decode_pass_frames: 8,
+        ..geometry(25, VideoGeometryRole::Requested)
+    };
+    assert_eq!(
+        video_memory_geometry(chunked, 0).frames,
+        25,
+        "calibration/evidence identity must describe the exact 25-frame capture"
+    );
+
+    let shorter_same_chunk = VideoAdmissionGeometry {
+        frames: 9,
+        decode_pass_frames: 8,
+        ..geometry(9, VideoGeometryRole::Requested)
+    };
+    assert_ne!(
+        video_memory_geometry(shorter_same_chunk, 0),
+        video_memory_geometry(chunked, 0),
+        "f9/chunk8 and f25/chunk8 must remain distinct evidence/cache coordinates"
+    );
+
+    let cap = VideoAdmissionGeometry {
+        frames: 25,
+        decode_pass_frames: 14,
+        role: VideoGeometryRole::SinglePassDecodeCap,
+        ..geometry(25, VideoGeometryRole::Requested)
+    };
+    assert_eq!(
+        video_memory_geometry(cap, 0).frames,
+        14,
+        "the synthetic cap row must evaluate and key the interior peak"
     );
 }
 
@@ -809,17 +1321,32 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
     // host therefore refuses resident and admits staged.
     let mut selector = LadderVideoSelector::new(
         VideoRequestIdentity {
-            route: "video_admission_fixture",
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
         &candle_contract,
         budget(38.0),
         18 * GIB,
+        0,
     );
     // `ltx_2_3` is candle-routed, so core's gate reaches the selector rather than short-circuiting.
-    let verdict = video_admission("ltx_2_3", VideoLane::Candle, 1280, 704, 241, &mut selector);
+    let verdict = video_admission(
+        "ltx_2_3",
+        VideoLane::Candle,
+        1280,
+        704,
+        241,
+        None,
+        &mut selector,
+    );
     let VideoAdmission::Admitted { rung, .. } = verdict else {
         panic!("expected a candle-lane admission, got {verdict:?}");
     };
@@ -829,14 +1356,21 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
     assert_eq!(
         LadderVideoSelector::new(
             VideoRequestIdentity {
-                route: "video_admission_fixture",
+                model_id: "ltx_2_3",
+                model_family: "ltx-video",
+                route: "ltx_2_3",
+                mode: "text_to_video",
+                reference_count: 0,
+                overlay: None,
                 lane: VideoLane::Candle,
                 tier: tier(),
+                calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
                 expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
             },
             &candle_contract,
             budget(38.0),
             18 * GIB,
+            0,
         )
         .backend(),
         gen_core::MemoryBackend::Candle
@@ -848,14 +1382,21 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
     let mlx_contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let mut mismatched = LadderVideoSelector::new(
         VideoRequestIdentity {
-            route: "video_admission_fixture",
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
         &mlx_contract,
         budget(38.0),
         18 * GIB,
+        0,
     );
     assert_eq!(
         video_admission(
@@ -864,6 +1405,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             1280,
             704,
             241,
+            None,
             &mut mismatched
         ),
         VideoAdmission::Undecidable,
@@ -880,14 +1422,21 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
     let selector = |lane| {
         LadderVideoSelector::new(
             VideoRequestIdentity {
-                route: "video_admission_fixture",
+                model_id: "ltx_2_3",
+                model_family: "ltx-video",
+                route: "ltx_2_3",
+                mode: "text_to_video",
+                reference_count: 0,
+                overlay: None,
                 lane,
                 tier: tier(),
+                calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
                 expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
             },
             &contract,
             budget(128.0),
             18 * GIB,
+            0,
         )
         .backend()
     };
@@ -950,7 +1499,7 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
 }
 
 // --------------------------------------------------------------------------------------------
-// The seam sc-18829 substitutes into: per-phase peaks, reduced to a scalar as late as possible.
+// Per-phase peaks, reduced to a scalar as late as possible.
 // --------------------------------------------------------------------------------------------
 
 /// The admission number is a MAX over phases, not an aggregate. sc-18810 measured every candidate
@@ -1021,9 +1570,8 @@ fn the_binding_phase_varies_and_ties_resolve_to_the_later_phase() {
     );
 }
 
-/// The floor is phase-blind today, and its scalar is byte-identical to the pre-seam number — so
-/// introducing the phase shape changed no prediction. That is the point: sc-18829 changes what the
-/// three values ARE, not where the scalar is taken.
+/// The fallback floor remains phase-blind, and its scalar is byte-identical to the pre-curve
+/// number. Fitted curves change the three values, not where the scalar is taken.
 #[test]
 fn the_floor_is_phase_uniform_and_its_peak_is_the_unchanged_scalar() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
@@ -1053,4 +1601,501 @@ fn the_floor_is_phase_uniform_and_its_peak_is_the_unchanged_scalar() {
         floor_phase_peaks(&contract, &engaged, 0).peak_bytes() + 18 * GIB,
         scalar
     );
+}
+
+// --------------------------------------------------------------------------------------------
+// sc-18829 / sc-19020 — fitted cross curves at the real video-selector seam.
+// --------------------------------------------------------------------------------------------
+
+#[test]
+fn fitted_frames_change_the_selected_outcome_inside_the_measured_hull() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let curves = fixture_curve_bundle();
+
+    let at_121 = select_once_with_curves(
+        &contract,
+        &curves,
+        budget(40.0),
+        geometry(121, VideoGeometryRole::Requested),
+    );
+    assert!(
+        matches!(
+            at_121,
+            VideoRungSelection::Selected {
+                rung: StrategyRung::StagedResidency,
+                ..
+            }
+        ),
+        "the f121 fitted staged peak still fits 40 GiB: {at_121:?}"
+    );
+
+    let at_145 = select_once_with_curves(
+        &contract,
+        &curves,
+        budget(40.0),
+        geometry(145, VideoGeometryRole::Requested),
+    );
+    assert!(
+        matches!(at_145, VideoRungSelection::Reject { .. }),
+        "the cross term raises the f145 fitted peak past the same budget: {at_145:?}"
+    );
+}
+
+#[test]
+fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let curves = fixture_curve_bundle();
+    let selector = selector_with_curves(&contract, Some(&curves), budget(128.0));
+    let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
+
+    let small = VideoAdmissionGeometry {
+        width: 768,
+        height: 512,
+        frames: 121,
+        decode_pass_frames: 121,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    };
+    let (small_peaks, small_basis, closure, curve_id, _) =
+        fitted_or_floor_phase_peaks(&selector, small, MemoryStrategy::StagedResidency, &engaged);
+    assert_eq!(small_basis, CandidateBasis::EstimateFittedCurve);
+    assert_eq!(closure, FITTED_CURVE_CLOSURE);
+    assert_eq!(
+        curve_id,
+        Some("ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
+    );
+    assert_eq!(small_peaks.binding_phase(), VideoBindingPhase::Conditioning);
+    assert_eq!(small_peaks.peak_bytes(), small_peaks.conditioning_bytes);
+
+    let large = geometry(145, VideoGeometryRole::Requested);
+    let (large_peaks, large_basis, ..) =
+        fitted_or_floor_phase_peaks(&selector, large, MemoryStrategy::StagedResidency, &engaged);
+    assert_eq!(large_basis, CandidateBasis::EstimateFittedCurve);
+    assert_eq!(large_peaks.binding_phase(), VideoBindingPhase::Decode);
+    assert_eq!(large_peaks.peak_bytes(), large_peaks.decode_bytes);
+    assert!(large_peaks.decode_bytes > small_peaks.decode_bytes);
+    assert!(large_peaks.denoise_bytes > small_peaks.denoise_bytes);
+    assert!(large_peaks.conditioning_bytes > small_peaks.conditioning_bytes);
+}
+
+#[test]
+fn mutating_the_ratified_cross_coefficient_changes_selector_outcome() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let original = fixture_curve_bundle();
+    let geometry = geometry(145, VideoGeometryRole::Requested);
+    let original_verdict = select_once_with_curves(&contract, &original, budget(41.0), geometry);
+    assert!(
+        matches!(original_verdict, VideoRungSelection::Reject { .. }),
+        "the generated decode cross coefficient must bind: {original_verdict:?}"
+    );
+
+    let mut mutated = original.clone();
+    mutated.curves[0].phases.decode.per_mpx_frame_gb = 0.0;
+    let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(41.0), geometry);
+    assert!(
+        matches!(
+            mutated_verdict,
+            VideoRungSelection::Selected {
+                rung: StrategyRung::StagedResidency,
+                ..
+            }
+        ),
+        "removing the decode cross term must change the admission result: {mutated_verdict:?}"
+    );
+}
+
+#[test]
+fn mutating_a_phase_residual_changes_the_admission_decision() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let original = fixture_curve_bundle();
+    let request = geometry(121, VideoGeometryRole::Requested);
+    let original_verdict = select_once_with_curves(&contract, &original, budget(40.0), request);
+    assert!(
+        matches!(original_verdict, VideoRungSelection::Selected { .. }),
+        "the shipped residual-bounded curve must fit the bracket: {original_verdict:?}"
+    );
+
+    let mut mutated = original.clone();
+    mutated.curves[0].phases.decode.max_residual_gb += 12.0;
+    let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(40.0), request);
+    assert!(
+        matches!(mutated_verdict, VideoRungSelection::Reject { .. }),
+        "the residual is admission evidence, not report-only metadata: {mutated_verdict:?}"
+    );
+}
+
+#[test]
+fn historical_q8_curve_fixture_is_tier_exact_while_q4_and_bf16_keep_an_honest_floor() {
+    // Structural old-closure fixture only. The final SC-19109 provider fingerprint/closure must
+    // fail this SC-18808 artifact closed until SC-18946 physically reseeds and refits it.
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let curves = fixture_curve_bundle();
+    let request = geometry(145, VideoGeometryRole::Requested);
+    for (quant, expected_basis) in [
+        (Some(Quant::Q8), CandidateBasis::EstimateFittedCurve),
+        (Some(Quant::Q4), CandidateBasis::EstimateFloor),
+        (None, CandidateBasis::EstimateFloor),
+    ] {
+        let mut selector = selector_with_curves(&contract, Some(&curves), budget(128.0));
+        selector.identity.tier.quant = quant;
+        let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
+        let (_, basis, ..) = fitted_or_floor_phase_peaks(
+            &selector,
+            request,
+            MemoryStrategy::StagedResidency,
+            &engaged,
+        );
+        assert_eq!(basis, expected_basis, "checkpoint tier {quant:?}");
+    }
+
+    let generator = fixture_generator(Some(contract));
+    for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
+        for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+            let mut request = inputs(121, budget(40.0), 18 * GIB);
+            request.tier.quant = quant;
+            request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+            request.runtime.as_mut().unwrap().cache_state = cache_state;
+            let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
+            assert!(
+                outcome.refusal.is_none(),
+                "tier {quant:?} {cache_state:?} must pass safety admission"
+            );
+            let context = outcome
+                .context
+                .expect("a selected tier carries safety context");
+            assert_eq!(context.cache_state, cache_state);
+            if quant == Some(Quant::Q8) {
+                assert!(context.evidence_revision.contains("single_pass"));
+            } else {
+                assert_eq!(context.evidence_revision, "video-estimate-floor-v1");
+            }
+        }
+    }
+}
+
+#[test]
+fn checkpoint_bound_ltx_tiers_drive_curve_or_floor_safety_on_cold_and_warm_requests() {
+    // This deliberately joins the two production seams the focused resolver test keeps separate:
+    // the same tiny on-disk split manifest that determines the provider load determines the tier
+    // submitted to admission, while `LoadSpec.quantize` remains absent as it does for LTX jobs.
+    let checkpoint = tempfile::tempdir().expect("ltx split fixture");
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let generator = fixture_generator(Some(contract));
+    let curves = fixture_curve_bundle();
+    for (label, manifest, expected_quant, expected_revision) in [
+        (
+            "q8",
+            Some(r#"{"quantized":true,"quantization_bits":8}"#),
+            Some(Quant::Q8),
+            "single_pass",
+        ),
+        (
+            "q4",
+            Some(r#"{"quantized":true,"quantization_bits":4}"#),
+            Some(Quant::Q4),
+            "video-estimate-floor-v1",
+        ),
+        ("bf16", None, None, "video-estimate-floor-v1"),
+    ] {
+        let split = checkpoint.path().join("split_model.json");
+        match manifest {
+            Some(raw) => std::fs::write(&split, raw).expect("write split manifest"),
+            None if split.exists() => std::fs::remove_file(&split).expect("remove split manifest"),
+            None => {}
+        }
+        let spec = LoadSpec::new(WeightsSource::Dir(checkpoint.path().to_owned()));
+        assert_eq!(spec.quantize, None, "{label} has no request-side tier hint");
+        let resolved = crate::mlx_fit_gate::resolved_video_numeric_tier("ltx_2_3", &spec)
+            .unwrap_or_else(|error| panic!("{label} checkpoint tier resolves: {error}"));
+        assert_eq!(resolved.quant, expected_quant, "{label}");
+
+        for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+            let mut request = inputs(121, budget(40.0), 18 * GIB);
+            request.tier = resolved;
+            request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+            request.runtime.as_mut().unwrap().cache_state = cache_state;
+            let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
+            assert!(
+                outcome.refusal.is_none(),
+                "{label}/{cache_state:?} must survive selector and provider safety"
+            );
+            let context = outcome
+                .context
+                .unwrap_or_else(|| panic!("{label}/{cache_state:?} carries safety context"));
+            assert_eq!(context.cache_state, cache_state);
+            if expected_quant == Some(Quant::Q8) {
+                assert!(context.evidence_revision.contains(expected_revision));
+            } else {
+                assert_eq!(context.evidence_revision, expected_revision);
+            }
+        }
+    }
+
+    std::fs::write(
+        checkpoint.path().join("split_model.json"),
+        r#"{"quantized":true,"quantization_bits":8}"#,
+    )
+    .expect("write mismatch split manifest");
+    let mismatched =
+        LoadSpec::new(WeightsSource::Dir(checkpoint.path().to_owned())).with_quant(Quant::Q4);
+    for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+        let error = crate::mlx_fit_gate::resolved_video_numeric_tier("ltx_2_3", &mismatched)
+            .expect_err("an explicit q4 assertion cannot price a loaded q8 checkpoint")
+            .to_string();
+        assert!(
+            error.contains("disagrees"),
+            "mismatch must fail closed on {cache_state:?}: {error}"
+        );
+    }
+}
+
+fn assert_curve_mismatch_falls_back(
+    label: &str,
+    contract: &MemoryProviderContract,
+    curves: &VideoMemoryCurveBundle,
+    geometry: VideoAdmissionGeometry,
+) {
+    let expected = {
+        let mut selector = selector_with_curves(contract, None, budget(40.0));
+        selector.select(geometry)
+    };
+    let actual = select_once_with_curves(contract, curves, budget(40.0), geometry);
+    assert_eq!(
+        actual, expected,
+        "{label}: an inapplicable fitted curve must preserve the prior floor decision"
+    );
+    assert!(
+        matches!(
+            actual,
+            VideoRungSelection::Selected {
+                rung: StrategyRung::StagedResidency,
+                ..
+            }
+        ),
+        "{label}: the fallback must be a real floor selection, not merely undecidable: {actual:?}"
+    );
+}
+
+#[test]
+fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let inside = geometry(145, VideoGeometryRole::Requested);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].backend = VideoCurveBackend::Candle;
+    assert_curve_mismatch_falls_back("foreign lane", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].closure_digest = "0".repeat(64);
+    assert_curve_mismatch_falls_back("stale closure", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].calibration_abi += 1;
+    assert_curve_mismatch_falls_back("foreign calibration ABI", &contract, &curves, inside);
+
+    let curves = fixture_curve_bundle();
+    let mut selector = selector_with_curves(&contract, Some(&curves), budget(40.0));
+    selector.identity.calibration_abi += 1;
+    let live_abi_mismatch = selector.select(inside);
+    let mut no_curves = selector_with_curves(&contract, None, budget(40.0));
+    assert_eq!(
+        live_abi_mismatch,
+        no_curves.select(inside),
+        "a pinned gen-core ABI bump must stale the old curve even if the fixture contract's own \
+         calibration identity still says 3"
+    );
+
+    let mut stale_contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    stale_contract.calibration.as_mut().unwrap().abi += 1;
+    let selector = selector_with_curves(&stale_contract, Some(&curves), budget(40.0));
+    let engaged = stale_contract.engaged_composition(MemoryStrategy::StagedResidency);
+    let (_, basis, ..) =
+        fitted_or_floor_phase_peaks(&selector, inside, MemoryStrategy::StagedResidency, &engaged);
+    assert_eq!(
+        basis,
+        CandidateBasis::EstimateFloor,
+        "a contract identity minted under another ABI must not match the pinned ABI merely because \
+         its fingerprint string remained the same"
+    );
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].calibration_fingerprint = "stale-fixture".to_owned();
+    assert_curve_mismatch_falls_back("stale fingerprint", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].tier = "bf16".to_owned();
+    assert_curve_mismatch_falls_back("unsupported tier", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].model_id = "ltx_2_3_eros".to_owned();
+    assert_curve_mismatch_falls_back("unsupported model", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].model_family = "ltx-custom".to_owned();
+    assert_curve_mismatch_falls_back("unsupported family", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].mode = "image_to_video".to_owned();
+    assert_curve_mismatch_falls_back("unsupported mode", &contract, &curves, inside);
+
+    let curves = fixture_curve_bundle();
+    let mut tiled = inside;
+    tiled.decode_pass = VideoDecodePass::Tiled;
+    assert_curve_mismatch_falls_back("tiling discontinuity", &contract, &curves, tiled);
+
+    assert_curve_mismatch_falls_back(
+        "outside measured voxel hull",
+        &contract,
+        &curves,
+        geometry(241, VideoGeometryRole::Requested),
+    );
+
+    let outside_area = VideoAdmissionGeometry {
+        width: 1920,
+        height: 1080,
+        frames: 121,
+        decode_pass_frames: 121,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    };
+    assert_curve_mismatch_falls_back(
+        "outside measured area hull",
+        &contract,
+        &curves,
+        outside_area,
+    );
+}
+
+#[test]
+fn the_single_pass_cap_geometry_can_bind_the_graded_set() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let mut curves = fixture_curve_bundle();
+    // Structural wiring fixture only: the committed campaign did NOT measure 1280x704 f297. Extend
+    // the test copy's convex hull to that cap so this test can prove core passes the cap's exact
+    // geometry/regime into the fitted selector without claiming production evidence for it.
+    curves.curves[0].measured_geometry_hull = vec![
+        VideoCurveHullPoint {
+            pixels: 393_216,
+            voxels: 393_216 * 121,
+        },
+        VideoCurveHullPoint {
+            pixels: 901_120,
+            voxels: 901_120 * 121,
+        },
+        VideoCurveHullPoint {
+            pixels: 901_120,
+            voxels: 901_120 * 297,
+        },
+        VideoCurveHullPoint {
+            pixels: 393_216,
+            voxels: 393_216 * 361,
+        },
+    ];
+
+    let requested = VideoAdmissionGeometry {
+        decode_pass: VideoDecodePass::Tiled,
+        ..geometry(305, VideoGeometryRole::Requested)
+    };
+    assert!(
+        matches!(
+            select_once_with_curves(&contract, &curves, budget(40.0), requested),
+            VideoRungSelection::Selected {
+                rung: StrategyRung::StagedResidency,
+                ..
+            }
+        ),
+        "the tiled request itself falls back to the 37.4 GiB staged floor"
+    );
+
+    let mut selector = selector_with_curves(&contract, Some(&curves), budget(40.0));
+    let verdict = video_admission(
+        "ltx_2_3",
+        VideoLane::Mlx,
+        1280,
+        704,
+        305,
+        None,
+        &mut selector,
+    );
+    let VideoAdmission::Refused { geometry, .. } = verdict else {
+        panic!("the fitted f297 cap must reject the graded set: {verdict:?}");
+    };
+    assert_eq!(geometry.frames, 305);
+    assert_eq!(geometry.decode_pass_frames, 297);
+    assert_eq!(geometry.estimate_frames(), 297);
+    assert_eq!(geometry.decode_pass, VideoDecodePass::SinglePass);
+    assert_eq!(geometry.role, VideoGeometryRole::SinglePassDecodeCap);
+    assert_eq!(
+        selector.selections.len(),
+        1,
+        "only the tiled request selected"
+    );
+}
+
+#[test]
+fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
+    let contract = fixture_contract(90, 45, &[MemoryStrategy::StagedResidency]);
+    let generator = fixture_generator(Some(contract.clone()));
+    let mut curves = fixture_curve_bundle();
+    // Structural fixture only: extend the copy to the 297-frame cap. Production remains bounded by
+    // the generated campaign hull and makes no claim at this geometry.
+    curves.curves[0].measured_geometry_hull = vec![
+        VideoCurveHullPoint {
+            pixels: 393_216,
+            voxels: 393_216 * 121,
+        },
+        VideoCurveHullPoint {
+            pixels: 901_120,
+            voxels: 901_120 * 121,
+        },
+        VideoCurveHullPoint {
+            pixels: 901_120,
+            voxels: 901_120 * 297,
+        },
+        VideoCurveHullPoint {
+            pixels: 393_216,
+            voxels: 393_216 * 361,
+        },
+    ];
+    let cap = VideoAdmissionGeometry {
+        width: 1280,
+        height: 704,
+        frames: 305,
+        decode_pass_frames: 297,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::SinglePassDecodeCap,
+    };
+    let expected_peak = {
+        let selector = selector_with_curves(&contract, Some(&curves), budget(95.0));
+        let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
+        fitted_or_floor_phase_peaks(&selector, cap, MemoryStrategy::StagedResidency, &engaged)
+            .0
+            .peak_bytes()
+    };
+
+    let mut request = inputs(305, budget(95.0), 0);
+    request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
+    let context = outcome
+        .context
+        .expect("requested and cap geometries both select staged");
+    assert_eq!(context.selection.strategy, MemoryStrategy::StagedResidency);
+    assert_eq!(
+        context.predicted_peak_bytes, expected_peak,
+        "same-rung tie must retain the cap's higher raw fitted peak"
+    );
+    assert_eq!(
+        context.geometry.frames, 305,
+        "provider scope validates the actual request, never the binding cap geometry"
+    );
+    assert_eq!(context.geometry.width, 1280);
+    assert_eq!(context.geometry.height, 704);
+    assert_eq!(
+        context.evidence_revision,
+        "ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+    );
+    assert!(outcome.refusal.is_none());
 }

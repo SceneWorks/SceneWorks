@@ -932,6 +932,39 @@ the `cross` form sc-18812 actually adopts spans **0.019–0.44 GiB** (0.0185 / 0
 0.019–0.30 as `cross`'s own accuracy is the mis-read that shipped once already, in the
 `perMpxFrameGb` schema description. Add the temporal term *per phase*; never to the aggregate.
 
+**Admission-margin verdict (SC-18829): keep the ratified constants unchanged.** Runtime adds each
+phase's maximum fit/held-out absolute residual before taking the maximum over all three phases, and
+only then applies the ordinary backend estimate margin. This construction is explicitly exempt from
+the measured-binding-phase pin: it does not assume that one phase remains binding, because every
+phase is independently represented and residual-bounded at the request geometry. The largest
+adopted q8 `cross` residual is 0.4438 GiB; the 10% MLX estimate margin over the observed 33–40 GiB
+phase envelope contributes roughly 3.3–4.0 GiB on top of that bound. The residual is therefore not
+being spent as margin, and the margin is not being used to conceal a missing phase. Candle has no
+promoted temporal curve yet, so this verdict changes no Candle constant or evidence claim.
+
+**Currency at the final provider-contract pin:** the SC-18808 q8 curve is historical by design.
+SC-19109 changes the loaded provider contract/carrier fingerprint and the final inference feature
+closure changes the provider digest, so runtime must reject the old fingerprint/`87a27d…` closure
+instead of making that artifact reachable by alias. SC-18946 owns the frozen-closure q8 reseed/refit
+and the first q4, bf16, and rung-2 captures. The schema-v2 producer groups those new records by their
+complete identity and can promote them without code changes; until those physical captures exist,
+the final atomic inference pin will route q8, q4, and bf16 through the provider-owned conservative
+geometry/temporal fallback. The historical capture pin `b965641e` had neither the loaded LTX
+contract nor that profile API. This branch's frozen preparation pin `b4a29108` contains both and
+exercises the fallback, but it is not the permanent inference-`main` pin and carries no replacement
+physical captures yet; this checkpoint therefore must not be reported as production-complete.
+
+**Multi-curve promotion is selector-complete, not tier-pooled.** The fit report's canonical
+`selectorFits` partitions records by model, catalog family, provider, backend, tier, mode, rung,
+load shape, batch, inference closure, calibration ABI/fingerprint, and decode pass before fitting
+any coefficient. Its legacy `fits.<phase>.<tier>` view is emitted only when that tier maps to one
+complete selector; a campaign containing (for example) q8 staged and q8 bounded-decode records
+omits the ambiguous q8 legacy slice instead of pooling them. `video-memory-curves.json` consumes the
+matching selector fit and exact sorted record IDs. Its `sourceCatalog` hashes every immutable source
+file's exact bytes, and each curve separately names the path, digest, and record subset it consumed;
+the Rust loader recomputes those source handshakes and rejects missing, extra, cross-curve-reused, or
+selector-mismatched records before any curve can evaluate.
+
 **2. The phase coefficients are the right order of magnitude for the staged components, and the
 per-voxel one matches the engine's own fit to 0.3%.** 🔴 Every coefficient below is fitted on **four
 q8 geometries (seven records) of the six declared `fit` rows** — one was attempted and killed, one
@@ -1059,6 +1092,19 @@ than continuing. The safe ceiling therefore *moves with free disk*, and degraded
 snapshots pinned the churn. Check `df -h /System/Volumes/Data` before AND during, and treat any
 single-pass decode above ~150M output voxels as needing tens of GiB of headroom. This is a HOST
 verdict, not a model verdict.
+
+**Candle adoption/measurement state (explicitly not a fitted-curve claim).** No Candle LTX or Wan
+geometry sweep has been promoted into `video-memory-curves.json`; the only fitted curve in this
+section remains historical MLX LTX q8. SceneWorks now has the synchronous post-load CUDA
+`mem_get_info` snapshot and fixed cold-load provider attribution needed for a truthful live budget.
+At the historical `b965641e` capture pin the provider-owned geometry/frames decode profile and the
+loaded Candle generator contract were absent, so Candle failed open before selection. The frozen
+preparation pin `b4a29108` includes the reviewed SC-19117 profile and SC-19223 contract: unmeasured
+Candle routes now use the provider-owned decode working set plus each contract component exactly
+once and the ordinary 4% estimate margin. This is schema-capable estimate fallback, **not** a fitted
+curve, an optimization claim, or Candle calibration; the permanent inference-`main` pin must still
+consume the same APIs. A fitted Candle curve remains blocked on a real GPU sweep with the same
+fit/held-out, per-phase, closure-bound evidence discipline above.
 
 **Coverage is derived, not asserted.** `scripts/fit-ltx-temporal-form.mjs` buckets every planned entry
 from two artifacts — the dataset (was a record captured?) and the driver logs (was it ever begun, and

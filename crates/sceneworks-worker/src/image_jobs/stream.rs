@@ -326,7 +326,11 @@ where
             engine_id,
             spec,
             load_error_context,
-            move |generator, cache_state, load_policy, external_committed_bytes| {
+            move |generator,
+                  cache_state,
+                  load_policy,
+                  external_committed_bytes,
+                  _provider_resident_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,

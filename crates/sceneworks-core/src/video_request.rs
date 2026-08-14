@@ -131,7 +131,7 @@ impl VideoRequest {
         );
         Self {
             project_id: nonempty_string_or(payload, "projectId", ""),
-            mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
+            mode: payload_video_mode(payload),
             prompt: nonempty_string_or(payload, "prompt", ""),
             negative_prompt: nonempty_string_or(payload, "negativePrompt", ""),
             model: payload_model_id(payload),
@@ -192,6 +192,12 @@ impl VideoRequest {
 /// the two ids grade different families through `video_admission_surface` (sc-18814 review).
 pub fn payload_model_id(payload: &JsonObject) -> String {
     nonempty_string_or(payload, "model", DEFAULT_MODEL)
+}
+
+/// The exact mode a payload renders under — the value [`VideoRequest::mode`] resolves to,
+/// available to the pre-generation admission funnel without constructing a second request.
+pub fn payload_video_mode(payload: &JsonObject) -> String {
+    nonempty_string_or(payload, "mode", DEFAULT_MODE)
 }
 
 /// The frame count `model` will actually render for `raw_frames` requested, coerced onto that
@@ -867,7 +873,7 @@ pub fn video_admission_surface(model: &str, lane: VideoLane) -> VideoAdmissionSu
             VideoLane::Mlx => crate::jobs_store::video_model_is_mlx_video_routed(model),
             VideoLane::Candle => crate::jobs_store::video_model_has_candle_video_route(model),
         },
-        decode_cap_modelled: vae_full_res_channels(model).is_some(),
+        decode_cap_modelled: vae_full_res_channels(model, lane).is_some(),
     }
 }
 
@@ -876,13 +882,15 @@ pub fn video_admission_surface(model: &str, lane: VideoLane) -> VideoAdmissionSu
 /// against the real constant by `sceneworks-worker`'s `video_admission` tests.
 const MAX_WRITABLE_ELEMS: u64 = i32::MAX as u64;
 
-/// The full-resolution channel count of a video family's VAE — the divisor in gen-core's
+/// The full-resolution channel count of a video family's VAE on one backend lane — the divisor in
+/// gen-core's
 /// `VaeTiling::writable_frame_cap` — or `None` for a family whose VAE this gate does not model.
 ///
-/// Transcribed from the inference bundle pinned by `sceneworks-worker/Cargo.toml`
-/// (`b965641e388f4db646e4c60ab3f75219737e2cc8`) and pinned against `gen_core::VaeTiling` by
-/// `sceneworks-worker`'s `video_admission` tests, so a pin bump that moves a channel count is red
-/// there rather than silently wrong here:
+/// Originally transcribed from the historical capture bundle at
+/// `b965641e388f4db646e4c60ab3f75219737e2cc8`. This branch compiles the frozen preparation pin
+/// `b4a29108e1eaf873bae3aa85262cd0849c24b311`, and `sceneworks-worker`'s `video_admission` tests
+/// pin these values against that bundle's `gen_core::VaeTiling`, so a pin bump that moves a channel
+/// count is red there rather than silently wrong here:
 ///
 /// * LTX (`VaeTiling::LTX`) — 8. `mlx-gen-ltx/src/vae.rs`, `candle-gen-ltx/src/vae.rs`.
 /// * Wan2.2 z48 / `vae22` (`VaeTiling::WAN22`) — 64. Only `wan_2_2` (the dense TI2V-5B) uses it:
@@ -893,13 +901,14 @@ const MAX_WRITABLE_ELEMS: u64 = i32::MAX as u64;
 ///   `mlx-gen-scail2/src/generate.rs:49` and `mlx-gen-krea-realtime/src/t2v.rs:287` (both
 ///   `auto_tiling_budgeted_z16_quality_overlap`).
 ///
-/// **`svd` and `mochi_1` are deliberately unmodelled.** SVD's write bound lives in
-/// `candle-gen-svd/src/vae.rs`'s PRIVATE `SVD_VAE_TILING` (256 full-res channels, non-causal
-/// `temporal_scale: 1`) and there is no `mlx-gen-svd` crate in the pinned bundle to read a second
-/// value from, so a transcription here could not be pinned on either lane — exactly the
-/// lockstep-drift class `pinned_engine_geometry` exists to prevent. Mochi-1 is frozen. Both
-/// return `None`, which makes [`video_admission_surface`] report `decode_cap_modelled: false`
-/// rather than let the gate imply an envelope it did not cover. Tracked as a follow-up.
+/// **SVD is deliberately lane-specific.** Candle's concrete `SvdVae` owns and consumes
+/// `{ spatial_scale: 8, temporal_scale: 1, causal_temporal: false, full_res_channels: 256 }` in
+/// both its budget planner and tiled decode driver. The Candle catalog exports that provider-owned
+/// authority under `svd_xt`, and `sceneworks-worker` pins this 256 transcription against it. MLX's
+/// SVD decoder only splits the clip into temporal `decode_chunk_size` calls; it consumes neither a
+/// `VaeTiling` nor the shared spatial planner. The MLX catalog therefore exposes an explicit
+/// unmodelled reason and this function returns `None` for `(svd, Mlx)` rather than copying a number
+/// no MLX path enforces. Mochi-1 remains frozen and unmodelled on both lanes.
 ///
 /// # The `_ => None` fallthrough, and what it does and does NOT cost
 ///
@@ -921,12 +930,13 @@ const MAX_WRITABLE_ELEMS: u64 = i32::MAX as u64;
 /// # What the tests pin, and what they do NOT (sc-19117)
 ///
 /// They pin the channel VALUES against gen-core's constants, and that a shipped id is not silently
-/// unmapped. They do **not** pin the family→VAE **assignment**: nothing at pin `b965641e` exposes
-/// which `VaeTiling` a provider decodes through — `budgeted_plan(vae, …)` takes it as a parameter
-/// chosen at each engine's own private call site, and there is no `pub fn … -> VaeTiling` anywhere
-/// in the bundle. So a mis-assignment (bernini through `WAN22` rather than `WAN`) would agree with
-/// itself on both sides and pass. The assignments below are transcribed from the decode paths, and
-/// the citations are the evidence a reviewer can check:
+/// unmapped. The gap was identified at the historical `b965641e` capture pin: no API exposed which
+/// `VaeTiling` a provider decodes through, because `budgeted_plan(vae, …)` took it from each
+/// engine's private call site. The frozen `b4a29108` bundle adds provider-owned decode profiles
+/// consumed by the worker, but these core tests still do **not** independently prove every
+/// family→VAE assignment. A mis-assignment (bernini through `WAN22` rather than `WAN`) could agree
+/// with itself on both sides and pass. The assignments below therefore remain transcribed from the
+/// decode paths, and the citations are the evidence a reviewer can check:
 ///
 /// * `bernini` → `mlx_gen_wan::WanVae` (`mlx-gen-bernini/src/bernini.rs:57`) and
 ///   `candle_gen_wan::vae16::WanVae16` (`candle-gen-bernini/src/components.rs:11`) — the z16 VAE.
@@ -935,9 +945,10 @@ const MAX_WRITABLE_ELEMS: u64 = i32::MAX as u64;
 /// * `krea_realtime_14b` → `auto_tiling_budgeted_z16_quality_overlap`
 ///   (`mlx-gen-krea-realtime/src/t2v.rs:287`); MLX-only, no candle engine exists.
 ///
-/// Closing that gap needs an inference-side per-provider accessor plus a pin bump, filed as
-/// **sc-19117** and sequenced with the sc-18946 campaign. It is a real hole, not a non-goal.
-pub fn vae_full_res_channels(model: &str) -> Option<u32> {
+/// SC-19117 owns the provider-side profile authority, and the SC-18946 permanent-pin integration
+/// must preserve it. The remaining distinction between profile coverage and a direct assignment
+/// proof is explicit here; it is not silently treated as calibration evidence.
+pub fn vae_full_res_channels(model: &str, lane: VideoLane) -> Option<u32> {
     if is_ltx_model(model) {
         return Some(8);
     }
@@ -951,6 +962,10 @@ pub fn vae_full_res_channels(model: &str) -> Option<u32> {
         | "bernini"
         | "scail2_14b"
         | "krea_realtime_14b" => Some(96),
+        "svd" => match lane {
+            VideoLane::Mlx => None,
+            VideoLane::Candle => Some(256),
+        },
         _ => None,
     }
 }
@@ -965,8 +980,13 @@ pub fn vae_full_res_channels(model: &str) -> Option<u32> {
 /// (sc-18812, activity-19042). It is one-sided machine-independent — no host renders more than
 /// this many single-pass frames, while a smaller host tiles earlier because the memory bound in
 /// gen-core's `budgeted_plan` fires first.
-pub fn single_pass_decode_frame_cap(model: &str, width: u32, height: u32) -> Option<u32> {
-    let channels = u64::from(vae_full_res_channels(model)?);
+pub fn single_pass_decode_frame_cap(
+    model: &str,
+    lane: VideoLane,
+    width: u32,
+    height: u32,
+) -> Option<u32> {
+    let channels = u64::from(vae_full_res_channels(model, lane)?);
     let per_frame = channels
         .checked_mul(u64::from(width))?
         .checked_mul(u64::from(height))?;
@@ -976,18 +996,26 @@ pub fn single_pass_decode_frame_cap(model: &str, width: u32, height: u32) -> Opt
     u32::try_from(MAX_WRITABLE_ELEMS / per_frame).ok()
 }
 
-/// Which decode regime a geometry executes in.
+/// The largest number of frames the provider sends through one VAE decode invocation.
 ///
-/// gen-core's `budgeted_plan` takes the single pass only when `out_frames <= writable_frame_cap`
-/// **and** the estimated single-pass peak fits the budget; otherwise it tiles. A gate that grades
-/// a tiled request with a single-pass cost model under-predicts, and the epic's whole measured
-/// corpus is single-pass (`decodeTilingEngaged: false` on all 13 LTX records), so the regime has
-/// to travel with the geometry rather than be assumed.
+/// A request-level `decode_chunk_size` bounds each invocation; it does not change the clip's total
+/// frame count. Zero is normalized to one exactly as both SVD providers normalize it, and a chunk
+/// larger than the clip collapses to the clip. Callers that do not expose a chunk pass `None`,
+/// which means the whole clip is the largest known pass.
+pub fn largest_decode_pass_frames(frames: u32, decode_chunk_size: Option<u32>) -> u32 {
+    frames.min(decode_chunk_size.unwrap_or(frames).max(1))
+}
+
+/// Which machine-independent VAE write-cap regime a geometry occupies.
+///
+/// The write cap is one input to gen-core's `budgeted_plan`: above it spatial tiling is mandatory;
+/// at or below it a monolithic pass is legal but the live-memory budget may still choose spatial
+/// tiles. The enum deliberately does not claim to predict that budget-dependent choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoDecodePass {
-    /// At or under the write cap: one pass, and peak rises monotonically with frames up to here.
+    /// At or under the write cap: a monolithic pass is permitted. The budget may still tile.
     SinglePass,
-    /// Past the write cap: gen-core forces tiling, so the decode transient drops.
+    /// Past the write cap: the provider's planner must spatially tile this invocation.
     Tiled,
     /// The family's VAE is unmodelled ([`vae_full_res_channels`] is `None`), so this gate does
     /// not claim to know the regime.
@@ -999,7 +1027,7 @@ pub enum VideoDecodePass {
 pub enum VideoGeometryRole {
     /// The geometry the caller asked for.
     Requested,
-    /// The single-pass write cap, which is a **local maximum strictly inside** the request's
+    /// The single-pass write cap, which is a **local maximum strictly inside** the decode-pass
     /// frame envelope. See [`video_admission_geometries`].
     SinglePassDecodeCap,
 }
@@ -1009,7 +1037,12 @@ pub enum VideoGeometryRole {
 pub struct VideoAdmissionGeometry {
     pub width: u32,
     pub height: u32,
+    /// Total frames in the requested output clip. This remains the user-visible quantity in
+    /// diagnostics even when the VAE decodes it in smaller temporal chunks.
     pub frames: u32,
+    /// Largest number of frames presented to one VAE decode invocation. Write-cap classification
+    /// uses this value; request evidence identity remains keyed to [`Self::frames`].
+    pub decode_pass_frames: u32,
     /// Always 1 on this lane: a video job produces a single clip (unlike images, which batch
     /// `count`). Carried so the selector's geometry type is total.
     pub batch: u32,
@@ -1018,10 +1051,28 @@ pub struct VideoAdmissionGeometry {
 }
 
 impl VideoAdmissionGeometry {
-    /// Output voxels — the regressor the temporal coefficient multiplies, and the unit the write
-    /// bound is expressed in.
+    /// Frame coordinate evaluated by the memory selector.
+    ///
+    /// A requested row keeps the actual output clip length so calibration/evidence identity can
+    /// bind an exact planned capture. The synthetic single-pass-cap row instead evaluates the
+    /// interior cap whose peak may bind the request. The eventual provider run context still uses
+    /// the actual request geometry.
+    pub const fn estimate_frames(self) -> u32 {
+        match self.role {
+            VideoGeometryRole::Requested => self.frames,
+            VideoGeometryRole::SinglePassDecodeCap => self.decode_pass_frames,
+        }
+    }
+
+    /// Total output voxels in the requested clip.
     pub const fn output_voxels(self) -> u64 {
         (self.width as u64) * (self.height as u64) * (self.frames as u64)
+    }
+
+    /// Output voxels materialized by the largest actual VAE decode pass — the regressor the
+    /// temporal coefficient multiplies and the unit the write bound is expressed in.
+    pub const fn decode_pass_voxels(self) -> u64 {
+        (self.width as u64) * (self.height as u64) * (self.decode_pass_frames as u64)
     }
 }
 
@@ -1047,30 +1098,35 @@ impl VideoAdmissionGeometry {
 /// [`VideoDecodePass::Unmodelled`].
 pub fn video_admission_geometries(
     model: &str,
+    lane: VideoLane,
     width: u32,
     height: u32,
     frames: u32,
+    decode_chunk_size: Option<u32>,
 ) -> Vec<VideoAdmissionGeometry> {
-    let cap = single_pass_decode_frame_cap(model, width, height);
+    let decode_pass_frames = largest_decode_pass_frames(frames, decode_chunk_size);
+    let cap = single_pass_decode_frame_cap(model, lane, width, height);
     let requested = VideoAdmissionGeometry {
         width,
         height,
         frames,
+        decode_pass_frames,
         batch: 1,
         decode_pass: match cap {
             None => VideoDecodePass::Unmodelled,
-            Some(cap) if frames <= cap => VideoDecodePass::SinglePass,
+            Some(cap) if decode_pass_frames <= cap => VideoDecodePass::SinglePass,
             Some(_) => VideoDecodePass::Tiled,
         },
         role: VideoGeometryRole::Requested,
     };
     let mut geometries = vec![requested];
     if let Some(cap) = cap {
-        if cap > 0 && cap < frames {
+        if cap > 0 && cap < decode_pass_frames {
             geometries.push(VideoAdmissionGeometry {
                 width,
                 height,
-                frames: cap,
+                frames,
+                decode_pass_frames: cap,
                 batch: 1,
                 decode_pass: VideoDecodePass::SinglePass,
                 role: VideoGeometryRole::SinglePassDecodeCap,
@@ -1107,11 +1163,12 @@ pub enum VideoRungSelection {
 /// `memory_strategy::select_strategy`. The trait exists because `sceneworks-core` has no gen-core
 /// dependency, not because the selection is pluggable policy — there is exactly one selector.
 ///
-/// **The seam sc-18829 attaches to.** The frames-aware MLX term is a change to how a peak is
-/// computed for a geometry that this trait already hands over complete: `frames` and
-/// `decode_pass` are on [`VideoAdmissionGeometry`], and `mlx_fit_gate::collect_estimate_bases`
-/// already carries per-phase peaks (`mlx_fit_gate.rs:1359-1360`) for the binding-phase question
-/// `KreaTurboPhasePeaks::binding_phase()` answers on the candle side. Nothing here has to move.
+/// **The seam sc-18829 attaches to.** The frames-aware term is a change to how a peak is computed
+/// for a geometry that this trait already hands over complete: clip frames, decode-pass frames,
+/// role, and regime are all on [`VideoAdmissionGeometry`]. The worker maps
+/// [`VideoAdmissionGeometry::estimate_frames`] into `gen_core::MemoryGeometry.frames`: requested
+/// evidence retains exact clip identity, while a synthetic cap row evaluates the interior peak it
+/// represents.
 pub trait VideoStrategySelector {
     /// Grade one geometry through the shared selector.
     fn select(&mut self, geometry: VideoAdmissionGeometry) -> VideoRungSelection;
@@ -1159,6 +1216,7 @@ pub fn video_admission(
     width: u32,
     height: u32,
     frames: u32,
+    decode_chunk_size: Option<u32>,
     selector: &mut dyn VideoStrategySelector,
 ) -> VideoAdmission {
     if !video_admission_surface(model, lane).routed {
@@ -1166,15 +1224,23 @@ pub fn video_admission(
     }
     let mut admitted: Option<(StrategyRung, VideoAdmissionGeometry, f64, f64)> = None;
     let mut rejected: Option<(VideoAdmissionGeometry, f64, f64)> = None;
-    for geometry in video_admission_geometries(model, width, height, frames) {
+    for geometry in
+        video_admission_geometries(model, lane, width, height, frames, decode_chunk_size)
+    {
         match selector.select(geometry) {
             VideoRungSelection::Selected {
                 rung,
                 needed_gb,
                 available_gb,
             } => {
+                debug_assert!(
+                    needed_gb.is_finite() && available_gb.is_finite(),
+                    "video selectors must return finite budget values"
+                );
                 let deeper = match admitted {
-                    Some((best, ..)) => rung > best,
+                    Some((best, _, best_needed_gb, _)) => {
+                        rung > best || (rung == best && needed_gb > best_needed_gb)
+                    }
                     None => true,
                 };
                 if deeper {
@@ -1185,6 +1251,10 @@ pub fn video_admission(
                 needed_gb,
                 available_gb,
             } => {
+                debug_assert!(
+                    needed_gb.is_finite() && available_gb.is_finite(),
+                    "video selectors must return finite budget values"
+                );
                 let worse = match rejected {
                     Some((_, worst, _)) => needed_gb > worst,
                     None => true,
@@ -1238,7 +1308,7 @@ pub fn video_too_big_error(
         ),
         VideoGeometryRole::SinglePassDecodeCap => format!(
             "{}x{} at the {}-frame single-pass decode limit inside this clip",
-            geometry.width, geometry.height, geometry.frames
+            geometry.width, geometry.height, geometry.decode_pass_frames
         ),
     };
     format!(
@@ -1311,6 +1381,25 @@ mod tests {
             payload_model_id(&named),
             VideoRequest::from_payload(&named).model
         );
+    }
+
+    #[test]
+    fn the_admission_mode_resolves_exactly_as_the_parse_does() {
+        for raw in [
+            json!({ "projectId": "p" }),
+            json!({ "projectId": "p", "mode": "" }),
+            json!({ "projectId": "p", "mode": "   " }),
+            json!({ "projectId": "p", "mode": 7 }),
+            json!({ "projectId": "p", "mode": " text_to_video " }),
+            json!({ "projectId": "p", "mode": "first_last_frame" }),
+        ] {
+            let payload = payload(raw.clone());
+            assert_eq!(
+                payload_video_mode(&payload),
+                VideoRequest::from_payload(&payload).mode,
+                "the funnel's mode and the parse's mode must never differ: {raw}"
+            );
+        }
     }
 
     #[test]
@@ -3194,7 +3283,7 @@ mod tests {
             self.seen.push(geometry);
             self.answers
                 .iter()
-                .find(|(frames, _)| *frames == geometry.frames)
+                .find(|(frames, _)| *frames == geometry.estimate_frames())
                 .map(|(_, answer)| *answer)
                 .unwrap_or(VideoRungSelection::Undecidable)
         }
@@ -3446,16 +3535,20 @@ mod tests {
     fn single_pass_decode_frame_cap_is_a_constant_voxel_surface() {
         // 1280x704 = 901,120 px, the shipped 14B/LTX landscape bucket.
         assert_eq!(
-            single_pass_decode_frame_cap("ltx_2_3", 1280, 704),
+            single_pass_decode_frame_cap("ltx_2_3", VideoLane::Mlx, 1280, 704),
             Some(297)
         );
         // 768x512 = 393,216 px, the blanket default geometry.
-        assert_eq!(single_pass_decode_frame_cap("ltx_2_3", 768, 512), Some(682));
+        assert_eq!(
+            single_pass_decode_frame_cap("ltx_2_3", VideoLane::Mlx, 768, 512),
+            Some(682)
+        );
 
         // Both caps sit just under the same 268,435,455-output-voxel surface for LTX's 8 channels,
         // and one more frame at either area would cross it.
         for (width, height) in [(1280_u32, 704_u32), (768, 512)] {
-            let cap = single_pass_decode_frame_cap("ltx_2_3", width, height).unwrap();
+            let cap =
+                single_pass_decode_frame_cap("ltx_2_3", VideoLane::Mlx, width, height).unwrap();
             let voxels = u64::from(width) * u64::from(height) * u64::from(cap);
             assert!(
                 voxels * 8 <= MAX_WRITABLE_ELEMS,
@@ -3472,7 +3565,7 @@ mod tests {
         // A denser VAE caps far earlier at the same area — the bound is per-model, never a
         // hardcoded LTX number.
         assert_eq!(
-            single_pass_decode_frame_cap("krea_realtime_14b", 768, 512),
+            single_pass_decode_frame_cap("krea_realtime_14b", VideoLane::Mlx, 768, 512),
             Some(56),
             "the Wan z16 VAE's 96 full-res channels cap 12x earlier than LTX's 8"
         );
@@ -3483,29 +3576,33 @@ mod tests {
     #[test]
     fn the_decode_cap_joins_the_graded_set_only_when_it_is_interior() {
         // Below the cap: one geometry, single-pass, and it IS the interior maximum.
-        let under = video_admission_geometries("ltx_2_3", 1280, 704, 241);
+        let under = video_admission_geometries("ltx_2_3", VideoLane::Mlx, 1280, 704, 241, None);
         assert_eq!(under.len(), 1);
         assert_eq!(under[0].role, VideoGeometryRole::Requested);
         assert_eq!(under[0].decode_pass, VideoDecodePass::SinglePass);
 
         // Exactly at the cap: still single-pass, still one geometry.
-        let at = video_admission_geometries("ltx_2_3", 1280, 704, 297);
+        let at = video_admission_geometries("ltx_2_3", VideoLane::Mlx, 1280, 704, 297, None);
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].decode_pass, VideoDecodePass::SinglePass);
 
         // Above the cap: the request is tiled (cheaper), and the cap — the expensive interior
         // maximum — is added.
-        let over = video_admission_geometries("ltx_2_3", 1280, 704, 305);
+        let over = video_admission_geometries("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, None);
         assert_eq!(over.len(), 2, "the cap must join the set: {over:?}");
         assert_eq!(over[0].frames, 305);
+        assert_eq!(over[0].decode_pass_frames, 305);
+        assert_eq!(over[0].estimate_frames(), 305);
         assert_eq!(over[0].decode_pass, VideoDecodePass::Tiled);
-        assert_eq!(over[1].frames, 297);
+        assert_eq!(over[1].frames, 305);
+        assert_eq!(over[1].decode_pass_frames, 297);
+        assert_eq!(over[1].estimate_frames(), 297);
         assert_eq!(over[1].role, VideoGeometryRole::SinglePassDecodeCap);
         assert_eq!(over[1].decode_pass, VideoDecodePass::SinglePass);
         assert!(
-            over[1].output_voxels() < over[0].output_voxels(),
-            "the cap geometry has FEWER voxels than the request, which is exactly why grading \
-             only the request would miss it"
+            over[1].decode_pass_voxels() < over[0].decode_pass_voxels(),
+            "the cap geometry has FEWER per-pass voxels than the request, which is exactly why \
+             grading only the requested decode regime would miss it"
         );
     }
 
@@ -3521,52 +3618,83 @@ mod tests {
     /// uncovered decode envelope.
     #[test]
     fn every_shipped_video_family_is_mapped_or_named_unmodelled() {
-        /// Shipped video ids this gate deliberately does NOT model, with the reason on
-        /// [`vae_full_res_channels`]. Each must genuinely return `None`.
-        const DELIBERATELY_UNMODELLED: &[&str] = &["svd"];
-
-        let mut modelled = 0_usize;
-        for model in shipped_video_model_ids() {
-            match vae_full_res_channels(&model) {
-                Some(channels) => {
-                    assert!(
-                        !DELIBERATELY_UNMODELLED.contains(&model.as_str()),
-                        "{model} is listed as deliberately unmodelled but now declares \
-                         {channels} channels — reconcile the list with the table"
-                    );
-                    assert!(channels > 0, "{model} declares a zero channel count");
-                    modelled += 1;
+        for (lane, deliberately_unmodelled) in
+            [(VideoLane::Mlx, &["svd"][..]), (VideoLane::Candle, &[][..])]
+        {
+            let mut modelled = 0_usize;
+            for model in shipped_video_model_ids() {
+                match vae_full_res_channels(&model, lane) {
+                    Some(channels) => {
+                        assert!(
+                            !deliberately_unmodelled.contains(&model.as_str()),
+                            "{lane:?}/{model} is listed as deliberately unmodelled but now \
+                             declares {channels} channels — reconcile the list with the table"
+                        );
+                        assert!(channels > 0, "{lane:?}/{model} declares zero channels");
+                        modelled += 1;
+                    }
+                    None => assert!(
+                        deliberately_unmodelled.contains(&model.as_str()),
+                        "shipped video model {lane:?}/{model} fell through \
+                         vae_full_res_channels' `_ => None` arm"
+                    ),
                 }
-                None => assert!(
-                    DELIBERATELY_UNMODELLED.contains(&model.as_str()),
-                    "shipped video model {model} fell through vae_full_res_channels' `_ => None` \
-                     arm: give it the full-res channel count of the VAE its decoder actually runs \
-                     (cite the engine file, as the existing entries do), or add it to \
-                     DELIBERATELY_UNMODELLED with the reason it cannot be pinned"
-                ),
             }
+            assert_eq!(
+                modelled,
+                EXPECTED_SHIPPED_VIDEO_COUNT - deliberately_unmodelled.len()
+            );
+            assert!(modelled > 0);
         }
-        // Both outcomes are genuinely present, so neither arm above is vacuous.
-        assert_eq!(
-            modelled,
-            EXPECTED_SHIPPED_VIDEO_COUNT - DELIBERATELY_UNMODELLED.len()
-        );
-        assert!(modelled > 0);
     }
 
-    /// An unmodelled family is labelled, not silently assumed single-pass.
+    /// SVD is modelled only where a provider-owned write bound is load-bearing, and classification
+    /// follows the largest actual decode call rather than the total clip length.
     #[test]
-    fn an_unmodelled_vae_grades_one_geometry_and_says_so() {
-        assert_eq!(vae_full_res_channels("svd"), None);
+    fn svd_is_lane_specific_and_uses_the_resolved_decode_chunk() {
+        assert_eq!(vae_full_res_channels("svd", VideoLane::Mlx), None);
+        assert_eq!(vae_full_res_channels("svd", VideoLane::Candle), Some(256));
         assert!(!video_admission_surface("svd", VideoLane::Mlx).decode_cap_modelled);
         assert!(
-            video_admission_surface("ltx_2_3", VideoLane::Mlx).decode_cap_modelled,
-            "LTX IS modelled, so the svd answer is a per-family fact rather than the gate being \
-             off everywhere"
+            video_admission_surface("svd", VideoLane::Candle).decode_cap_modelled,
+            "the Candle decoder consumes its exported authority"
         );
-        let geometries = video_admission_geometries("svd", 1024, 576, 1_000);
-        assert_eq!(geometries.len(), 1);
-        assert_eq!(geometries[0].decode_pass, VideoDecodePass::Unmodelled);
+        for (width, height) in [(1024, 576), (576, 1024)] {
+            assert_eq!(
+                single_pass_decode_frame_cap("svd", VideoLane::Candle, width, height),
+                Some(14),
+                "{width}x{height}"
+            );
+        }
+
+        let mlx = video_admission_geometries("svd", VideoLane::Mlx, 1024, 576, 25, Some(8));
+        assert_eq!(mlx.len(), 1);
+        assert_eq!(mlx[0].frames, 25);
+        assert_eq!(mlx[0].decode_pass_frames, 8);
+        assert_eq!(mlx[0].decode_pass, VideoDecodePass::Unmodelled);
+
+        let product_default =
+            video_admission_geometries("svd", VideoLane::Candle, 1024, 576, 25, Some(8));
+        assert_eq!(product_default.len(), 1);
+        assert_eq!(product_default[0].frames, 25);
+        assert_eq!(product_default[0].decode_pass_frames, 8);
+        assert_eq!(product_default[0].estimate_frames(), 25);
+        assert_eq!(product_default[0].decode_pass, VideoDecodePass::SinglePass);
+
+        let library_default =
+            video_admission_geometries("svd", VideoLane::Candle, 1024, 576, 25, None);
+        assert_eq!(library_default.len(), 2);
+        assert_eq!(library_default[0].decode_pass_frames, 25);
+        assert_eq!(library_default[0].estimate_frames(), 25);
+        assert_eq!(library_default[0].decode_pass, VideoDecodePass::Tiled);
+        assert_eq!(library_default[1].frames, 25);
+        assert_eq!(library_default[1].decode_pass_frames, 14);
+        assert_eq!(library_default[1].estimate_frames(), 14);
+        assert_eq!(library_default[1].decode_pass, VideoDecodePass::SinglePass);
+
+        assert_eq!(largest_decode_pass_frames(25, Some(0)), 1);
+        assert_eq!(largest_decode_pass_frames(25, Some(64)), 25);
+        assert_eq!(largest_decode_pass_frames(25, None), 25);
     }
 
     /// The request runs at ONE rung, so the answer is the deepest any graded geometry required.
@@ -3576,7 +3704,15 @@ mod tests {
             (305, selected(StrategyRung::Resident, 40.0)),
             (297, selected(StrategyRung::BoundedDecode, 92.0)),
         ]);
-        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+        let verdict = video_admission(
+            "ltx_2_3",
+            VideoLane::Mlx,
+            1280,
+            704,
+            305,
+            None,
+            &mut selector,
+        );
         let VideoAdmission::Admitted { rung, geometry, .. } = verdict else {
             panic!("expected admission, got {verdict:?}");
         };
@@ -3587,6 +3723,60 @@ mod tests {
             "the CAP bound the choice, not the frame count the caller typed"
         );
         assert_eq!(selector.seen.len(), 2);
+    }
+
+    #[test]
+    fn video_admission_same_rung_is_bound_by_the_higher_peak_geometry() {
+        let mut selector = ScriptedSelector::new(vec![
+            (305, selected(StrategyRung::StagedResidency, 63.8)),
+            (297, selected(StrategyRung::StagedResidency, 94.3)),
+        ]);
+        let verdict = video_admission(
+            "ltx_2_3",
+            VideoLane::Mlx,
+            1280,
+            704,
+            305,
+            None,
+            &mut selector,
+        );
+        let VideoAdmission::Admitted {
+            rung,
+            geometry,
+            needed_gb,
+            ..
+        } = verdict
+        else {
+            panic!("expected admission, got {verdict:?}");
+        };
+        assert_eq!(rung, StrategyRung::StagedResidency);
+        assert_eq!(needed_gb, 94.3);
+        assert_eq!(geometry.role, VideoGeometryRole::SinglePassDecodeCap);
+    }
+
+    #[test]
+    fn video_admission_exact_tie_keeps_the_canonical_first_geometry() {
+        let mut selector = ScriptedSelector::new(vec![
+            (305, selected(StrategyRung::StagedResidency, 63.8)),
+            (297, selected(StrategyRung::StagedResidency, 63.8)),
+        ]);
+        let verdict = video_admission(
+            "ltx_2_3",
+            VideoLane::Mlx,
+            1280,
+            704,
+            305,
+            None,
+            &mut selector,
+        );
+        let VideoAdmission::Admitted { geometry, .. } = verdict else {
+            panic!("expected admission, got {verdict:?}");
+        };
+        assert_eq!(
+            geometry.role,
+            VideoGeometryRole::Requested,
+            "exact finite ties keep video_admission_geometries' canonical first entry"
+        );
     }
 
     /// The same request graded WITHOUT the cap geometry would have been admitted resident — the
@@ -3612,7 +3802,15 @@ mod tests {
         // `svd`'s VAE is deliberately unmodelled, so `video_admission_geometries` yields the
         // request alone — the counterfactual "grade only what the caller typed".
         let mut request_only = script();
-        let understated = video_admission("svd", VideoLane::Mlx, 1280, 704, 305, &mut request_only);
+        let understated = video_admission(
+            "svd",
+            VideoLane::Mlx,
+            1280,
+            704,
+            305,
+            None,
+            &mut request_only,
+        );
         assert_eq!(request_only.seen.len(), 1, "{:?}", request_only.seen);
         assert_eq!(request_only.seen[0].role, VideoGeometryRole::Requested);
         let VideoAdmission::Admitted { rung, .. } = understated else {
@@ -3627,7 +3825,15 @@ mod tests {
         // LTX at the same geometry DOES model its VAE, so the interior cap joins the set and the
         // answer changes — with nothing else about the request or the selector different.
         let mut with_cap = script();
-        let correct = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut with_cap);
+        let correct = video_admission(
+            "ltx_2_3",
+            VideoLane::Mlx,
+            1280,
+            704,
+            305,
+            None,
+            &mut with_cap,
+        );
         assert_eq!(with_cap.seen.len(), 2, "{:?}", with_cap.seen);
         let VideoAdmission::Admitted { rung, geometry, .. } = correct else {
             panic!("expected admission, got {correct:?}");
@@ -3648,7 +3854,15 @@ mod tests {
                 },
             ),
         ]);
-        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+        let verdict = video_admission(
+            "ltx_2_3",
+            VideoLane::Mlx,
+            1280,
+            704,
+            305,
+            None,
+            &mut selector,
+        );
         let VideoAdmission::Refused {
             message, geometry, ..
         } = verdict
@@ -3684,7 +3898,15 @@ mod tests {
                 available_gb: 60.0,
             },
         )]);
-        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 241, &mut selector);
+        let verdict = video_admission(
+            "ltx_2_3",
+            VideoLane::Mlx,
+            1280,
+            704,
+            241,
+            None,
+            &mut selector,
+        );
         let VideoAdmission::Refused { message, .. } = verdict else {
             panic!("expected refusal, got {verdict:?}");
         };
@@ -3697,7 +3919,15 @@ mod tests {
     fn video_admission_is_undecidable_when_nothing_is_gradable() {
         let mut selector = ScriptedSelector::new(Vec::new());
         assert_eq!(
-            video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 241, &mut selector),
+            video_admission(
+                "ltx_2_3",
+                VideoLane::Mlx,
+                1280,
+                704,
+                241,
+                None,
+                &mut selector,
+            ),
             VideoAdmission::Undecidable
         );
         assert_eq!(selector.seen.len(), 1, "the geometry was still offered");
@@ -3708,7 +3938,15 @@ mod tests {
     fn one_undecidable_geometry_does_not_veto_a_decided_one() {
         let mut selector =
             ScriptedSelector::new(vec![(297, selected(StrategyRung::StagedResidency, 70.0))]);
-        let verdict = video_admission("ltx_2_3", VideoLane::Mlx, 1280, 704, 305, &mut selector);
+        let verdict = video_admission(
+            "ltx_2_3",
+            VideoLane::Mlx,
+            1280,
+            704,
+            305,
+            None,
+            &mut selector,
+        );
         let VideoAdmission::Admitted { rung, geometry, .. } = verdict else {
             panic!("expected admission, got {verdict:?}");
         };
@@ -3730,6 +3968,7 @@ mod tests {
                 768,
                 512,
                 49,
+                None,
                 &mut selector,
             ),
             VideoAdmission::NotRouted
@@ -3747,6 +3986,7 @@ mod tests {
                 768,
                 512,
                 49,
+                None,
                 &mut selector,
             ),
             VideoAdmission::Admitted {
@@ -3763,7 +4003,8 @@ mod tests {
     fn the_graded_frame_count_is_the_engine_snapped_one() {
         let snapped = ltx_frame_count(305);
         assert_eq!(snapped, 305, "305 = 8*38 + 1 is already on the LTX lattice");
-        let geometries = video_admission_geometries("ltx_2_3", 1280, 704, snapped);
+        let geometries =
+            video_admission_geometries("ltx_2_3", VideoLane::Mlx, 1280, 704, snapped, None);
         assert_eq!(geometries[0].frames, snapped);
         // And the cap itself is on the same lattice, so admitting at it is a geometry the engine
         // could actually be asked for.

@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   FORMS,
+  buildReport,
+  buildVideoMemoryCurveBundle,
   coverageOf,
   driverStatesFrom,
   fitSlice,
+  geometryHull,
   latentTemporalDepth,
   latentTokens,
   leastSquares,
@@ -16,7 +22,10 @@ import {
   pointsFrom,
   rolesFromPlan,
   sessionsFrom,
+  VIDEO_MEMORY_CURVE_CALIBRATION_ABI,
+  videoCurveSchemaErrors,
 } from "./fit-ltx-temporal-form.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLAN = JSON.parse(
@@ -36,12 +45,95 @@ const [PRECRASH_LOG, DRIVER_LOG] = DRIVER_LOGS;
 const FIXTURE_BY_NAME = new Map(
   PLAN.providers.map((provider) => [provider.name, provider.fixture]),
 );
-const DATASET = JSON.parse(
-  readFileSync(
-    path.join(ROOT, "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
-    "utf8",
+const DATASET_RAW = readFileSync(
+  path.join(ROOT, "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
+  "utf8",
+);
+const DATASET = JSON.parse(DATASET_RAW);
+const DATASET_SOURCES = [{
+  path: "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+  raw: DATASET_RAW,
+}];
+const MANIFEST = JSON.parse(
+  stripJsoncComments(
+    readFileSync(path.join(ROOT, "config/manifests/builtin.models.jsonc"), "utf8"),
   ),
 );
+
+function mixedCurveInputs() {
+  const scaleActiveBytes = (record, factor) => {
+    for (const phase of Object.values(record.observedMemory)) {
+      if (Number.isSafeInteger(phase?.activeBytes)) phase.activeBytes *= factor;
+    }
+  };
+  const cloneGroup = (suffix, mutateRecord) => {
+    const records = structuredClone(DATASET.records).map((record) => {
+      record.id = `imc-${createHash("sha256").update(`${record.id}:${suffix}`).digest("hex").slice(0, 20)}`;
+      mutateRecord(record);
+      return record;
+    });
+    return { records };
+  };
+  const q4 = cloneGroup(
+    "q4",
+    (record) => {
+      record.target.tier = "q4";
+      scaleActiveBytes(record, 2);
+    },
+  );
+  const bounded = cloneGroup(
+    "bounded",
+    (record) => {
+      record.strategy.rung = "bounded_decode";
+      scaleActiveBytes(record, 3);
+    },
+  );
+  const records = [...DATASET.records, ...q4.records, ...bounded.records];
+  const mixedReport = buildReport(pointsFrom(records, rolesFromPlan(PLAN), MANIFEST));
+  const sources = [
+    { path: "evidence/a.json", raw: `${JSON.stringify({ records: DATASET.records.slice(0, 6) }, null, 2)}\n` },
+    { path: "evidence/b.json", raw: `${JSON.stringify({ records: [...DATASET.records.slice(6), ...q4.records.slice(0, 5)] }, null, 2)}\n` },
+    { path: "evidence/c.json", raw: `${JSON.stringify({ records: [...q4.records.slice(5), ...bounded.records] }, null, 2)}\n` },
+  ];
+  return { bounded, mixedReport, q4, records, sources };
+}
+
+test("video curve generation leaves the image calibration corpus byte-identical", () => {
+  const imageCorpus = path.join(ROOT, "docs/generated/memory-calibration-evidence.json");
+  const before = createHash("sha256").update(readFileSync(imageCorpus)).digest("hex");
+  assert.equal(
+    before,
+    "3fa473dad3b109fb889444348770439b1e985f32e3499331ce182cf45059bbcb",
+    "the explicit pre-video image evidence outcome remains the reviewed corpus",
+  );
+  const output = mkdtempSync(path.join(tmpdir(), "sceneworks-video-curves-"));
+  try {
+    const run = spawnSync(
+      process.execPath,
+      [
+        path.join(ROOT, "scripts/fit-ltx-temporal-form.mjs"),
+        "--write", path.join(output, "fit.json"),
+        "--curve-write", path.join(output, "curves.json"),
+      ],
+      { cwd: ROOT, encoding: "utf8" },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    const after = createHash("sha256").update(readFileSync(imageCorpus)).digest("hex");
+    assert.equal(after, before, "the video-only producer must not rewrite the image evidence corpus");
+  } finally {
+    rmSync(output, { recursive: true, force: true });
+  }
+});
+
+test("the committed report and curve pass the producer's --check round trip", () => {
+  const run = spawnSync(
+    process.execPath,
+    [path.join(ROOT, "scripts/fit-ltx-temporal-form.mjs"), "--check"],
+    { cwd: ROOT, encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /video-memory-curves\.json are current/);
+});
 
 const geometry = (width, height, frames, fps = 30) => ({
   width,
@@ -82,6 +174,332 @@ test("the LTX temporal handles match the x8 causal VAE", () => {
   assert.equal(latentTemporalDepth(449), 57);
   // 1280x704 -> 40 x 22 latent cells.
   assert.equal(latentTokens({ width: 1280, height: 704, frames: 449 }), 57 * 40 * 22);
+});
+
+test("the promoted curve container is derived from the exact sc-18810 identity and cross fits", () => {
+  const report = JSON.parse(
+    readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
+  );
+  const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
+  assert.equal(bundle.schemaVersion, 2);
+  assert.equal(bundle.curves.length, 1);
+  const curve = bundle.curves[0];
+  assert.deepEqual(
+    {
+      modelId: curve.modelId,
+      modelFamily: curve.modelFamily,
+      provider: curve.provider,
+      backend: curve.backend,
+      tier: curve.tier,
+      mode: curve.mode,
+      rung: curve.rung,
+      loadShape: curve.loadShape,
+      batch: curve.batch,
+      closureDigest: curve.closureDigest,
+      calibrationAbi: curve.calibrationAbi,
+      calibrationFingerprint: curve.calibrationFingerprint,
+      decodePass: curve.decodePass,
+    },
+    {
+      modelId: "ltx_2_3",
+      modelFamily: "ltx-video",
+      provider: "ltx_2_3",
+      backend: "mlx",
+      tier: "q8",
+      mode: "text_to_video",
+      rung: "staged_residency",
+      loadShape: "eager_materialization",
+      batch: 1,
+      closureDigest: DATASET.records[0].repositories.inference.closureDigest,
+      calibrationAbi: VIDEO_MEMORY_CURVE_CALIBRATION_ABI,
+      calibrationFingerprint: DATASET.records[0].calibrationFingerprint,
+      decodePass: "single_pass",
+    },
+  );
+  assert.deepEqual(
+    {
+      text: report.fits.text.q8.chosen,
+      denoise: report.fits.denoise.q8.chosen,
+      decode: report.fits.decode.q8.chosen,
+    },
+    { text: "area_only", denoise: "latent_tokens", decode: "cross" },
+    "the fit report's generic winner is deliberately not the ratified cross-curve selector",
+  );
+  for (const [wirePhase, fitPhase] of [
+    ["conditioning", "text"],
+    ["denoise", "denoise"],
+    ["decode", "decode"],
+  ]) {
+    assert.deepEqual(
+      Object.fromEntries(
+        Object.entries(curve.phases[wirePhase]).filter(([key]) => key !== "maxResidualGb"),
+      ),
+      report.fits[fitPhase].q8.candidates.cross.coefficients,
+      `${wirePhase} must carry the ratified cross coefficients verbatim`,
+    );
+  }
+  assert.equal(curve.evidence.records, DATASET.records.length);
+  assert.deepEqual(
+    curve.evidence.sources[0].recordIds,
+    DATASET.records.map((record) => record.id).sort(),
+    "the runtime artifact must name every immutable source record",
+  );
+  assert.equal(
+    curve.evidence.sources[0].sha256,
+    createHash("sha256").update(DATASET_RAW).digest("hex"),
+    "the evidence digest must bind every byte of the committed source evidence",
+  );
+});
+
+test("the video curve ABI stays pinned to SceneWorks' gen-core mirror", () => {
+  const source = readFileSync(
+    path.join(ROOT, "crates/sceneworks-core/src/memory_calibration.rs"),
+    "utf8",
+  );
+  const abi = source.match(/pub const MEMORY_CALIBRATION_ABI: u32 = (\d+);/);
+  assert.ok(abi, "SceneWorks memory calibration ABI constant exists");
+  assert.equal(Number(abi[1]), VIDEO_MEMORY_CURVE_CALIBRATION_ABI);
+});
+
+test("the persisted video curve has an explicit strict schema contract", () => {
+  const schema = JSON.parse(
+    readFileSync(path.join(ROOT, "packages/schemas/video-memory-curves.schema.json"), "utf8"),
+  );
+  const bundle = JSON.parse(
+    readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
+  );
+  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+  assert.equal(schema.properties.schemaVersion.const, 2);
+  assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
+  assert.equal(
+    schema.properties.sourceFit.const,
+    "docs/generated/ltx-temporal-form-fit-sc-18810.json",
+  );
+  assert.deepEqual(schema.required, [
+    "schemaVersion",
+    "generatedBy",
+    "sourceFit",
+    "sourceCatalog",
+    "curves",
+  ]);
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(videoCurveSchemaErrors(schema, bundle), []);
+
+  const unknown = structuredClone(bundle);
+  unknown.curves[0].phases.decode.perFrameGb = 1;
+  assert.match(videoCurveSchemaErrors(schema, unknown).join("\n"), /unknown property "perFrameGb"/);
+  const staleAbi = structuredClone(bundle);
+  staleAbi.curves[0].calibrationAbi += 1;
+  assert.match(videoCurveSchemaErrors(schema, staleAbi).join("\n"), /expected constant 3/);
+});
+
+test("the applicability hull is the convex measured area-by-voxel hull, not a loose bounding box", () => {
+  const hull = geometryHull([
+    { width: 768, height: 512, frames: 121 },
+    { width: 768, height: 512, frames: 241 },
+    { width: 512, height: 768, frames: 361 },
+    { width: 640, height: 640, frames: 177 },
+    { width: 1280, height: 704, frames: 121 },
+    { width: 1280, height: 704, frames: 145 },
+    { width: 704, height: 1280, frames: 177 },
+  ]);
+  assert.deepEqual(hull, [
+    { pixels: 393216, voxels: 47579136 },
+    { pixels: 901120, voxels: 109035520 },
+    { pixels: 901120, voxels: 159498240 },
+    { pixels: 393216, voxels: 141950976 },
+  ]);
+  assert.ok(
+    !hull.some(({ pixels, voxels }) => pixels === 409600 && voxels === 72499200),
+    "the held-out 640-square point is inside the hull, not a redundant vertex",
+  );
+  assert.throws(
+    () => geometryHull([
+      { width: Number.MAX_SAFE_INTEGER, height: 2, frames: 1 },
+      { width: 1, height: 1, frames: 1 },
+      { width: 2, height: 2, frames: 2 },
+    ]),
+    /exceeds exact JSON integer arithmetic/,
+  );
+});
+
+test("mixed complete selectors and sources produce deterministic independent curves", () => {
+  const { bounded, mixedReport, q4, records, sources } = mixedCurveInputs();
+  const forward = buildVideoMemoryCurveBundle(mixedReport, records, MANIFEST, sources);
+  const reversed = buildVideoMemoryCurveBundle(
+    { ...mixedReport, observations: mixedReport.observations.slice().reverse() },
+    records.slice().reverse(),
+    MANIFEST,
+    sources.slice().reverse(),
+  );
+  assert.deepEqual(reversed, forward, "record and source order must not affect emitted bytes");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(forward)),
+    forward,
+    "the multi-curve artifact must round-trip through its wire representation",
+  );
+  assert.equal(forward.curves.length, 3);
+  assert.deepEqual(forward.sourceCatalog.map(({ path }) => path), ["evidence/a.json", "evidence/b.json", "evidence/c.json"]);
+  const original = forward.curves.find((curve) => curve.tier === "q8" && curve.rung === "staged_residency");
+  const q4Curve = forward.curves.find((curve) => curve.tier === "q4");
+  const boundedCurve = forward.curves.find((curve) => curve.rung === "bounded_decode");
+  assert.deepEqual(original.evidence.sources.map(({ path }) => path), ["evidence/a.json", "evidence/b.json"]);
+  assert.deepEqual(q4Curve.evidence.sources.map(({ path }) => path), ["evidence/b.json", "evidence/c.json"]);
+  assert.deepEqual(boundedCurve.evidence.sources.map(({ path }) => path), ["evidence/c.json"]);
+  assert.deepEqual(
+    q4Curve.evidence.sources.flatMap(({ recordIds }) => recordIds).sort(),
+    q4.records.map(({ id }) => id).sort(),
+  );
+  assert.ok(
+    Math.abs(
+      q4Curve.phases.decode.perMpxFrameGb - original.phases.decode.perMpxFrameGb * 2,
+    ) < 1e-12,
+    "q4 is fitted from its own scaled records rather than a tier/rung mixture",
+  );
+  assert.ok(
+    Math.abs(
+      boundedCurve.phases.decode.perMpxFrameGb - original.phases.decode.perMpxFrameGb * 3,
+    ) < 1e-12,
+    "bounded decode is fitted independently even though it shares q8 tier identity",
+  );
+  assert.equal(mixedReport.selectorFits.length, 3);
+  assert.deepEqual(
+    mixedReport.legacyFitsOmittedForTiers,
+    ["q8"],
+    "the legacy tier-only view may not pool two complete q8 selectors",
+  );
+});
+
+test("multi-dataset CLI output stays current when source order is reversed", () => {
+  const { records, sources } = mixedCurveInputs();
+  const target = path.join(ROOT, "target");
+  mkdirSync(target, { recursive: true });
+  const output = mkdtempSync(path.join(target, "sceneworks-mixed-video-curves-"));
+  try {
+    const datasetPaths = sources.map((source, index) => {
+      const file = path.join(output, `${index}.json`);
+      writeFileSync(file, source.raw);
+      return file;
+    });
+    const providerNameByFixture = new Map(
+      PLAN.providers.map((provider) => [provider.fixture, provider.name]),
+    );
+    const logPath = path.join(output, "mixed.log");
+    const capturedLines = records.flatMap((record) => {
+      const name = providerNameByFixture.get(record.fixture);
+      assert.ok(name, `plan provider exists for ${record.fixture}`);
+      return [`BEGIN ${name} tier=${record.target.tier} free=512GiB 10:00:00`, `OK ${name} 1s`];
+    });
+    const failedHostLines = PLAN.providers
+      .filter((provider) => provider._role === "attempted_failed_host_limit")
+      .flatMap((provider) => [
+        `BEGIN ${provider.name} tier=${provider.target.tier} free=1GiB 10:00:00`,
+        `FAIL ${provider.name} 1s :: synthetic host limit`,
+      ]);
+    writeFileSync(
+      logPath,
+      [...capturedLines, ...failedHostLines].join("\n") + "\n",
+    );
+    const reportPath = path.join(output, "fit.json");
+    const curvePath = path.join(output, "curves.json");
+    const args = (orderedPaths, check = false) => [
+      path.join(ROOT, "scripts/fit-ltx-temporal-form.mjs"),
+      ...orderedPaths.flatMap((file) => ["--dataset", file]),
+      "--driver-log", logPath,
+      "--write", reportPath,
+      "--curve-write", curvePath,
+      ...(check ? ["--check"] : []),
+    ];
+    const generated = spawnSync(process.execPath, args(datasetPaths), {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+    assert.equal(generated.status, 0, generated.stderr);
+    const checked = spawnSync(process.execPath, args(datasetPaths.slice().reverse(), true), {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+    assert.equal(checked.status, 0, checked.stderr);
+    assert.match(checked.stdout, /curves\.json are current/);
+    assert.equal(JSON.parse(readFileSync(curvePath, "utf8")).curves.length, 3);
+    const generatedReport = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.equal(generatedReport.selectorFits.length, 3);
+    assert.deepEqual(generatedReport.legacyFitsOmittedForTiers, ["q8"]);
+    assert.equal(
+      generatedReport.noiseFloors.decode.replicatedGeometries,
+      12,
+      "four replicate geometries in each of three selectors stay twelve same-cell groups",
+    );
+  } finally {
+    rmSync(output, { recursive: true, force: true });
+  }
+});
+
+test("duplicate or malformed source record identities cannot be promoted", () => {
+  const report = JSON.parse(
+    readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
+  );
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_RAW),
+    /one or more exact source evidence inputs/,
+    "raw bytes without their immutable source path may not inherit a guessed legacy path",
+  );
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, [{
+      path: "../detached.json",
+      raw: DATASET_RAW,
+    }]),
+    /canonical repository-relative path/,
+    "source paths must be stable artifact identities rather than host-relative escapes",
+  );
+  const records = structuredClone(DATASET.records);
+  records[0].id = records[1].id;
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(report, records, MANIFEST, DATASET_SOURCES),
+    /unique immutable imc ids/,
+  );
+
+  const duplicateObservation = structuredClone(report);
+  duplicateObservation.observations[0] = duplicateObservation.observations[1];
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(duplicateObservation, DATASET.records, MANIFEST, DATASET_SOURCES),
+    /observations do not match the immutable promoted record ids/,
+  );
+
+  const detachedObservation = structuredClone(report);
+  detachedObservation.observations[0].activeGib.decode += 1;
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(detachedObservation, DATASET.records, MANIFEST, DATASET_SOURCES),
+    /does not match its immutable source record/,
+    "report-only phase mutations must not alter a curve detached from source evidence",
+  );
+
+  const detachedSelectorSubset = structuredClone(report);
+  detachedSelectorSubset.selectorFits[0].recordIds.pop();
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(detachedSelectorSubset, DATASET.records, MANIFEST, DATASET_SOURCES),
+    /fit report record subset is detached/,
+    "a selector fit must name exactly the immutable records its coefficients consume",
+  );
+
+  const wrongLegacyFit = structuredClone(report);
+  wrongLegacyFit.selectorFits[0].legacyFitTier = "q4";
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(wrongLegacyFit, DATASET.records, MANIFEST, DATASET_SOURCES),
+    /malformed or duplicate complete selector/,
+    "a selector may not borrow another tier's compatibility fit",
+  );
+
+  const missingDecodeIdentity = structuredClone(DATASET.records);
+  missingDecodeIdentity[0].diagnostics.measurements = missingDecodeIdentity[0].diagnostics.measurements
+    .filter(({ name }) => name !== "decodeTilingEngaged");
+  assert.throws(
+    () => buildVideoMemoryCurveBundle(report, missingDecodeIdentity, MANIFEST, [{
+      path: "evidence/missing-decode.json",
+      raw: `${JSON.stringify({ records: missingDecodeIdentity }, null, 2)}\n`,
+    }]),
+    /exact decodeTilingEngaged measurement/,
+  );
 });
 
 test("least squares recovers an exactly-linear generator on every candidate form", () => {

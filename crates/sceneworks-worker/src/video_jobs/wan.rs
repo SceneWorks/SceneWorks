@@ -1294,6 +1294,10 @@ pub(super) struct VideoGenInput {
     /// existed. The image lane's equivalent is `mlx_fit_gate::evaluate_request`'s
     /// `MlxRequestEvaluation::memory`.
     pub(super) memory: Option<gen_core::GenerationMemory>,
+    /// Contract/evidence handshake for provider safety and the request-scoped lifecycle. Kept
+    /// separate from `memory`: a Resident selection still carries context while preserving the
+    /// provider's request defaults with `memory == None`.
+    pub(super) memory_context: Option<gen_core::MemoryRunContext>,
 }
 
 #[cfg(any(
@@ -1304,6 +1308,7 @@ impl Default for VideoGenInput {
     fn default() -> Self {
         Self {
             memory: None,
+            memory_context: None,
             engine_id: "",
             model_dir: PathBuf::new(),
             quant: None,
@@ -1385,6 +1390,44 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     }
 }
 
+/// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
+/// This check runs before the live-budget probe and before contract selection, so unsupported
+/// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
+/// historical direct-generate path instead of reaching provider safety with invented coverage.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn calibrated_video_memory_surface(input: &VideoGenInput, mode: &str) -> bool {
+    mode == "text_to_video"
+        && input.conditioning.is_empty()
+        && input.adapters.is_empty()
+        && !input.enhance_prompt
+        && !input.use_uncensored_enhancer
+        && input.uncensored_enhancer_dir.is_none()
+        && input.video_mode.is_none()
+        && (24..=30).contains(&input.fps)
+}
+
+/// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
+/// lifecycle context in one operation makes it impossible for the generation request to carry an
+/// optimized rung while silently bypassing its safety/begin/configure/finish contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn apply_video_admission_outcome(
+    input: &mut VideoGenInput,
+    outcome: crate::video_admission::VideoAdmissionOutcome,
+) -> WorkerResult<()> {
+    if let Some(refusal) = outcome.refusal {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
+    input.memory = outcome.memory;
+    input.memory_context = outcome.context;
+    Ok(())
+}
+
 /// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
 /// loaded video generator, streaming denoise progress via `on_progress` and honoring `cancel`.
 /// The engine fills the audio track (LTX) or leaves it `None` (Wan).
@@ -1398,7 +1441,8 @@ pub(super) fn run_loaded_video_generation(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<DecodedVideo> {
-    let req = GenerationRequest {
+    let memory_context = input.memory_context;
+    let mut req = GenerationRequest {
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
         width: input.width,
@@ -1432,9 +1476,13 @@ pub(super) fn run_loaded_video_generation(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&req, on_progress)
-        .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut req,
+        memory_context.as_ref(),
+        on_progress,
+    )
+    .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
     match output {
         GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
             frames: frames
@@ -1801,7 +1849,6 @@ pub(super) async fn generate_video_using(
     // generator (and therefore the provider's memory contract) is in scope. That is the same
     // position the image lane calls `mlx_fit_gate::evaluate_request` from: after the load, before
     // `generate`.
-    let admission_budget = crate::video_admission::live_video_budget(settings).await;
     // The catalog model id, read straight off the payload rather than by re-parsing the whole
     // request into a throwaway `VideoRequest` (F-118, the same reason `advanced` arrives by
     // reference). Read through the SAME function `VideoRequest::from_payload` resolves `model`
@@ -1809,6 +1856,28 @@ pub(super) async fn generate_video_using(
     // `model` as `""` while the parse resolved it to `ltx_2_3`, and the two ids grade different
     // families through `video_admission_surface`.
     let admission_model_id = sceneworks_core::video_request::payload_model_id(&job.payload);
+    // The fitted-curve identity uses the catalog family, not the provider descriptor's internal
+    // family. Resolve it exactly like the asset path's `resolve_family`, without re-parsing the
+    // entire payload into another `VideoRequest` merely for this admission-only key.
+    let admission_manifest_entry = job
+        .payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let admission_model_family =
+        super::resolve_catalog_video_family(&admission_model_id, &admission_manifest_entry);
+    // Bind fitted curves to the same request mode `VideoRequest::from_payload` resolves. The
+    // promoted LTX curve is T2V; every other mode falls back until its own curve exists.
+    let admission_mode = sceneworks_core::video_request::payload_video_mode(&job.payload);
+    // Curve currency is the provider's live packaged compile closure, independent of whether an
+    // exact per-cell calibration binding exists in the manifest (sc-19020). An undeclared provider
+    // keeps the established sentinel and therefore cannot match a closure-bound fitted curve.
+    let admission_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
+        crate::video_admission::LANE.as_key(),
+        input.engine_id,
+    )
+    .unwrap_or_else(|| crate::mlx_fit_gate::UNCALIBRATED_CLOSURE.to_owned());
 
     let cancel = CancelFlag::new();
     let stall_timeout = video_stall_timeout();
@@ -1843,37 +1912,87 @@ pub(super) async fn generate_video_using(
         // executes on the generator cache thread — the same position the image lane derives its
         // own from, inside the blocking closure.
         let admission_spec = spec.clone();
-        let admission_geometry = (input.width, input.height, input.frames);
+        let admission_geometry = (
+            input.width,
+            input.height,
+            input.frames,
+            input.decode_chunk_size,
+        );
         tokio::spawn(async move {
-            let run = move |generator: &dyn Generator| {
+            let run = move |generator: &dyn Generator,
+                            cache_state: gen_core::MemoryCacheState,
+                            load_policy: gen_core::OffloadPolicy,
+                            _external_committed_bytes: u64,
+                            provider_resident_bytes: u64| {
                 let mut input = input;
                 let admission_tier =
-                    crate::mlx_fit_gate::spec_numeric_tier(engine_id, &admission_spec);
-                let admission_headroom_bytes =
+                    crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
+                let spec_headroom_bytes =
                     crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
+                let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
+                let mut overlays = Vec::new();
+                if !input.adapters.is_empty() {
+                    overlays.push(format!("adapters:{}", input.adapters.len()));
+                }
+                if input.enhance_prompt
+                    || input.use_uncensored_enhancer
+                    || input.uncensored_enhancer_dir.is_some()
+                {
+                    overlays.push("enhancer".to_owned());
+                }
+                let admission_overlay = (!overlays.is_empty()).then(|| overlays.join("+"));
+                let exact_promoted_surface =
+                    calibrated_video_memory_surface(&input, &admission_mode);
+                // No contract means no declared lifecycle/selection seam. Preserve direct
+                // generation without even asking for a live budget; a budget-probe failure must
+                // not turn contract absence into a new refusal.
+                let admission_runtime =
+                    if exact_promoted_surface && generator.memory_strategy_contract().is_some() {
+                        crate::video_admission::live_video_runtime_state(
+                            engine_id,
+                            cache_state,
+                            load_policy,
+                            provider_resident_bytes,
+                        )?
+                    } else {
+                        None
+                    };
+                let admission_headroom_bytes = match admission_runtime {
+                    Some(runtime) => spec_headroom_bytes
+                        .checked_sub(runtime.budget.reserved_headroom_bytes)
+                        .ok_or_else(|| {
+                            WorkerError::InvalidPayload(format!(
+                                "{engine_id} live memory reserve {} exceeds fallback headroom {}; \
+                                 refusing an inconsistent video budget",
+                                runtime.budget.reserved_headroom_bytes, spec_headroom_bytes,
+                            ))
+                        })?,
+                    // Unsupported surfaces and lanes without a canonical post-load snapshot fail
+                    // open before selection, so this value is observationally inert there.
+                    None => spec_headroom_bytes,
+                };
                 let outcome = crate::video_admission::admit_video_generation(
                     generator,
                     crate::video_admission::VideoAdmissionInputs {
                         model_id: &admission_model_id,
+                        model_family: &admission_model_family,
                         route: engine_id,
+                        mode: &admission_mode,
+                        reference_count,
+                        overlay: admission_overlay.as_deref(),
                         lane: crate::video_admission::LANE,
                         tier: admission_tier,
                         width: admission_geometry.0,
                         height: admission_geometry.1,
                         frames: admission_geometry.2,
-                        budget: admission_budget,
+                        decode_chunk_size: admission_geometry.3,
+                        fps: input.fps,
+                        runtime: admission_runtime,
                         headroom_bytes: admission_headroom_bytes,
-                        // No video route carries a calibration binding yet (epic 18803 R2/R4,
-                        // sc-18817), so there is no measured closure for currency to be graded
-                        // against. Both sides of the comparison carry the sentinel, which states
-                        // that rather than naming a revision nothing was measured at (sc-17774).
-                        expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+                        expected_closure_digest: &admission_closure_digest,
                     },
                 );
-                if let Some(refusal) = outcome.refusal {
-                    return Err(WorkerError::InvalidPayload(refusal));
-                }
-                input.memory = outcome.memory;
+                apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard
@@ -1907,7 +2026,7 @@ pub(super) async fn generate_video_using(
                     .await
                 }
                 None => {
-                    crate::generator_cache::with_cached_generator_using(
+                    crate::generator_cache::with_cached_generator_for_request_using(
                         engine_id,
                         spec,
                         "video load failed",
@@ -1920,7 +2039,7 @@ pub(super) async fn generate_video_using(
             #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
             let result = {
                 let _ = comfyui_load;
-                crate::generator_cache::with_cached_generator_using(
+                crate::generator_cache::with_cached_generator_for_request_using(
                     engine_id,
                     spec,
                     "video load failed",

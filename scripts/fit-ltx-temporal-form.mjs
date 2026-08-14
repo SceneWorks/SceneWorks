@@ -30,16 +30,110 @@
  * fit reported beside it. The measured replicate spread is reported as the noise floor, so "fits
  * within the noise floor" is a comparison against a number this dataset produced.
  *
- * Usage: node scripts/fit-ltx-temporal-form.mjs [--dataset <bundle.json>] [--plan <plan.json>]
- *                                               [--driver-log <sweep-run.log>]
- *                                               [--write <report.json>] [--check]
+ * Usage: node scripts/fit-ltx-temporal-form.mjs [--dataset <bundle.json>]... [--plan <plan.json>]
+ *                                               [--driver-log <sweep-run.log>]...
+ *                                               [--write <report.json>]
+ *                                               [--curve-write <curves.json>] [--check]
  */
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GIB = 1024 ** 3;
+// Artifact ordering must not depend on the host's ICU locale. All persisted identifiers and paths
+// are UTF-8 protocol strings, so compare their JavaScript code-unit order directly.
+const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+const repoRelativePath = (file) => path.relative(ROOT, file).split(path.sep).join("/");
+const isCanonicalRepoPath = (value) =>
+  value !== "." &&
+  !value.startsWith("/") &&
+  !value.startsWith("../") &&
+  !value.includes("\\") &&
+  path.posix.normalize(value) === value;
+// Kept in lockstep with `sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI`, whose
+// worker-side parity test in turn pins it to `gen_core::MEMORY_CALIBRATION_ABI`. A pin bump cannot
+// make an old curve look current: the runtime query carries the provider contract's live ABI.
+export const VIDEO_MEMORY_CURVE_CALIBRATION_ABI = 3;
+
+/**
+ * Dependency-free validator for the JSON-Schema keywords used by
+ * `packages/schemas/video-memory-curves.schema.json`. This repo intentionally has no npm
+ * dependencies; applying the checked-in schema here keeps it an executable producer contract
+ * instead of editor-only documentation.
+ */
+export function videoCurveSchemaErrors(schema, value, root = schema, at = "$") {
+  const errors = [];
+  if (!schema || typeof schema !== "object") return errors;
+  if (typeof schema.$ref === "string") {
+    const target = schema.$ref
+      .replace(/^#\//, "")
+      .split("/")
+      .reduce((node, key) => node?.[key], root);
+    return videoCurveSchemaErrors(target, value, root, at);
+  }
+  if (Object.hasOwn(schema, "const") && value !== schema.const) {
+    errors.push(`${at}: expected constant ${JSON.stringify(schema.const)}`);
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    errors.push(`${at}: ${JSON.stringify(value)} is outside ${JSON.stringify(schema.enum)}`);
+  }
+  const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+  const typeMatches =
+    !schema.type ||
+    schema.type === actual ||
+    (schema.type === "object" && actual === "object") ||
+    (schema.type === "integer" && typeof value === "number" && Number.isInteger(value));
+  if (!typeMatches) {
+    errors.push(`${at}: expected ${schema.type}, got ${actual}`);
+    return errors;
+  }
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.length < schema.minLength) {
+      errors.push(`${at}: shorter than minLength ${schema.minLength}`);
+    }
+    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) {
+      errors.push(`${at}: does not match ${schema.pattern}`);
+    }
+  }
+  if (typeof value === "number" && typeof schema.minimum === "number" && value < schema.minimum) {
+    errors.push(`${at}: ${value} is below minimum ${schema.minimum}`);
+  }
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) {
+      errors.push(`${at}: fewer than minItems ${schema.minItems}`);
+    }
+    if (
+      schema.uniqueItems === true &&
+      new Set(value.map((item) => JSON.stringify(item))).size !== value.length
+    ) {
+      errors.push(`${at}: array items are not unique`);
+    }
+    value.forEach((item, index) => {
+      errors.push(...videoCurveSchemaErrors(schema.items, item, root, `${at}[${index}]`));
+    });
+  } else if (actual === "object") {
+    for (const key of schema.required ?? []) {
+      if (!(key in value)) errors.push(`${at}: missing required property ${JSON.stringify(key)}`);
+    }
+    const properties = schema.properties ?? {};
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) {
+        if (!(key in properties)) errors.push(`${at}: unknown property ${JSON.stringify(key)}`);
+      }
+    }
+    for (const [key, child] of Object.entries(properties)) {
+      if (key in value) {
+        errors.push(...videoCurveSchemaErrors(child, value[key], root, `${at}.${key}`));
+      }
+    }
+  }
+  return errors;
+}
 
 /** LTX's video VAE is x32 spatial and x8 causal temporal: `out_f = 1 + (T_lat - 1) * 8`. */
 export function latentTemporalDepth(frames) {
@@ -262,7 +356,7 @@ const SERIES = Object.freeze({
     ),
 });
 
-export function pointsFrom(records, roleByFixture) {
+export function pointsFrom(records, roleByFixture, manifest = null) {
   return records.map((record) => {
     const { width, height, frames } = record.target.geometry;
     const measurements = Object.fromEntries(
@@ -271,15 +365,49 @@ export function pointsFrom(records, roleByFixture) {
     const fps = measurements.outputFps;
     const role = roleByFixture.get(record.fixture);
     if (!role) throw new Error(`record fixture ${record.fixture} has no role in the sweep plan`);
+    const modelFamily = manifest?.models?.find((model) => model.id === record.target.modelId)?.family;
+    if (manifest && typeof modelFamily !== "string") {
+      throw new Error(`model ${record.target.modelId} is absent from builtin.models.jsonc`);
+    }
     return {
+      recordId: record.id,
       fixture: record.fixture,
       capturedAt: record.capturedAt,
+      modelId: record.target.modelId,
+      modelFamily,
+      provider: record.target.provider,
+      backend: record.backend,
       tier: record.target.tier,
+      mode: record.target.mode,
       role,
       rung: record.strategy.rung,
+      loadShape: record.loadShape,
+      batch: record.target.geometry.batch,
+      closureDigest: record.repositories.inference.closureDigest,
+      calibrationFingerprint: record.calibrationFingerprint,
+      calibrationAbi: VIDEO_MEMORY_CURVE_CALIBRATION_ABI,
       decodeTilingEngaged: measurements.decodeTilingEngaged === 1,
       sceneWorksRevision: record.repositories.sceneWorks.revision,
-      replicateKey: `${record.target.tier}:${width}x${height}:f${frames}:fps${fps}`,
+      // A repeat is same-CELL evidence, not merely the same tier/geometry. Keeping every selector
+      // axis here prevents a multi-curve campaign from calling a rung/provider/closure change
+      // capture noise.
+      replicateKey: JSON.stringify([
+        record.target.modelId,
+        record.target.provider,
+        record.backend,
+        record.target.tier,
+        record.target.mode,
+        record.strategy.rung,
+        record.loadShape,
+        record.target.geometry.batch,
+        record.repositories.inference.closureDigest,
+        record.calibrationFingerprint,
+        measurements.decodeTilingEngaged,
+        width,
+        height,
+        frames,
+        fps,
+      ]),
       geometry: {
         width,
         height,
@@ -299,6 +427,31 @@ export function pointsFrom(records, roleByFixture) {
       },
     };
   });
+}
+
+function persistedObservation(point) {
+  return {
+    recordId: point.recordId,
+    fixture: point.fixture,
+    modelId: point.modelId,
+    modelFamily: point.modelFamily,
+    provider: point.provider,
+    backend: point.backend,
+    tier: point.tier,
+    mode: point.mode,
+    role: point.role,
+    rung: point.rung,
+    loadShape: point.loadShape,
+    batch: point.batch,
+    closureDigest: point.closureDigest,
+    calibrationFingerprint: point.calibrationFingerprint,
+    calibrationAbi: point.calibrationAbi,
+    decodeTilingEngaged: point.decodeTilingEngaged,
+    sceneWorksRevision: point.sceneWorksRevision,
+    geometry: point.geometry,
+    activeGib: point.series,
+    cacheGib: point.cacheGib,
+  };
 }
 
 /**
@@ -435,7 +588,7 @@ export function sessionsFrom(logs, points, fixtureByName) {
     const records = byFixture.get(fixtureByName.get(name)) ?? [];
     records
       .slice()
-      .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt))
+      .sort((left, right) => compareText(left.capturedAt, right.capturedAt))
       .forEach((record, index) => {
         const order = orders[index];
         if (order === undefined) return;
@@ -575,82 +728,472 @@ export function coverageOf(plan, points, driverStates = new Map()) {
   };
 }
 
-export function buildReport(points, plan = null, driverStates = new Map(), sourceSessions = []) {
-  const tiers = [...new Set(points.map((point) => point.tier))].sort();
-  const bySeries = {};
+function completeSelectorOfPoint(point) {
+  const selector = {
+    modelId: point.modelId,
+    modelFamily: point.modelFamily,
+    provider: point.provider,
+    backend: point.backend,
+    tier: point.tier,
+    mode: point.mode,
+    rung: point.rung,
+    loadShape: point.loadShape,
+    batch: point.batch,
+    closureDigest: point.closureDigest,
+    calibrationAbi: point.calibrationAbi,
+    calibrationFingerprint: point.calibrationFingerprint,
+    decodePass: point.decodeTilingEngaged ? "tiled" : "single_pass",
+  };
+  if (
+    Object.entries(selector).some(([, value]) => value === undefined || value === null || value === "")
+  ) {
+    throw new Error(`record ${point.recordId} has an incomplete video-curve selector`);
+  }
+  return selector;
+}
+
+function selectorFitReport(scopedPoints) {
+  const fits = {};
   for (const series of Object.keys(SERIES)) {
-    bySeries[series] = {};
-    for (const tier of tiers) {
-      const scoped = points
-        .filter((point) => point.tier === tier)
-        .map((point) => ({ ...point, value: point.series[series] }));
-      // `role` decides membership and lives in the committed PLAN, not in the records, so the
-      // fit/held-out split cannot be redrawn after seeing residuals. A replicate of a fit geometry
-      // is training data; a replicate of a held-out geometry stays held out.
-      const fitPoints = scoped.filter((point) => point.role === "fit");
-      const heldOutPoints = scoped.filter((point) => point.role.startsWith("held_out"));
-      // Everything else is carried but NOT scored. `rung2_boundary` points decode through a TILED
-      // VAE pass — a different rung and a different memory regime, so scoring them against a rung-1
-      // curve would report a capability change as fit error. `reproduction_probe` exists to compare
-      // against a withdrawn external number, not to test the form.
-      const unscoredPoints = scoped.filter(
-        (point) => point.role !== "fit" && !point.role.startsWith("held_out"),
-      );
-      if (fitPoints.length === 0) continue;
-      const slice = fitSlice(fitPoints, heldOutPoints);
-      bySeries[series][tier] = {
-        fitPoints: fitPoints.length,
-        heldOutPoints: heldOutPoints.length,
-        unscoredPoints: unscoredPoints.length,
-        ...slice,
-        unscored: Object.fromEntries(
-          Object.entries(slice.candidates)
-            .filter(([, candidate]) => !candidate.singular)
-            .map(([name, candidate]) => [
-              name,
-              residuals(unscoredPoints, name, Object.values(candidate.coefficients)),
-            ]),
-        ),
-      };
+    const valued = scopedPoints.map((point) => ({ ...point, value: point.series[series] }));
+    // `role` decides membership and lives in the committed PLAN, not in the records, so the
+    // fit/held-out split cannot be redrawn after seeing residuals. A replicate of a fit geometry
+    // is training data; a replicate of a held-out geometry stays held out.
+    const fitPoints = valued.filter((point) => point.role === "fit");
+    const heldOutPoints = valued.filter((point) => point.role.startsWith("held_out"));
+    // Everything else is carried but NOT scored. A tiled/rung-boundary point belongs to another
+    // complete selector and never contaminates this fit merely because its tier is the same.
+    const unscoredPoints = valued.filter(
+      (point) => point.role !== "fit" && !point.role.startsWith("held_out"),
+    );
+    if (fitPoints.length === 0) continue;
+    const slice = fitSlice(fitPoints, heldOutPoints);
+    fits[series] = {
+      fitPoints: fitPoints.length,
+      heldOutPoints: heldOutPoints.length,
+      unscoredPoints: unscoredPoints.length,
+      ...slice,
+      unscored: Object.fromEntries(
+        Object.entries(slice.candidates)
+          .filter(([, candidate]) => !candidate.singular)
+          .map(([name, candidate]) => [
+            name,
+            residuals(unscoredPoints, name, Object.values(candidate.coefficients)),
+          ]),
+      ),
+    };
+  }
+  return fits;
+}
+
+export function buildReport(points, plan = null, driverStates = new Map(), sourceSessions = []) {
+  const orderedPoints = points
+    .slice()
+    .sort((left, right) => compareText(left.recordId ?? "", right.recordId ?? ""));
+  const tiers = [...new Set(orderedPoints.map((point) => point.tier))].sort();
+  const grouped = new Map();
+  for (const point of orderedPoints) {
+    const selector = completeSelectorOfPoint(point);
+    const key = JSON.stringify(Object.values(selector));
+    if (!grouped.has(key)) grouped.set(key, { key, selector, points: [] });
+    grouped.get(key).points.push(point);
+  }
+  const completeSelectorFits = [...grouped.values()]
+    .map(({ key, selector, points: scopedPoints }) => ({
+      key,
+      selector,
+      recordIds: scopedPoints.map((point) => point.recordId).sort(compareText),
+      fits: selectorFitReport(scopedPoints),
+    }))
+    .sort((left, right) => compareText(left.key, right.key));
+
+  // Preserve the v1 tier-indexed view only where a tier maps to exactly one complete selector.
+  // In a mixed-rung/provider campaign, omitting that tier is more truthful than pooling records
+  // across selectors. `selectorFits` is the canonical source for every promoted runtime curve.
+  const selectorFitsByTier = new Map();
+  for (const entry of completeSelectorFits) {
+    if (!selectorFitsByTier.has(entry.selector.tier)) selectorFitsByTier.set(entry.selector.tier, []);
+    selectorFitsByTier.get(entry.selector.tier).push(entry);
+  }
+  const bySeries = Object.fromEntries(Object.keys(SERIES).map((series) => [series, {}]));
+  const legacyFitsOmittedForTiers = [];
+  for (const tier of tiers) {
+    const entries = selectorFitsByTier.get(tier) ?? [];
+    if (entries.length !== 1) {
+      legacyFitsOmittedForTiers.push(tier);
+      continue;
+    }
+    for (const series of Object.keys(SERIES)) {
+      if (entries[0].fits[series]) bySeries[series][tier] = entries[0].fits[series];
     }
   }
+  // Avoid duplicating the large residual tables on the ordinary one-selector-per-tier artifact:
+  // that selector references the exact legacy slice just populated above. Only ambiguous tiers
+  // carry their fit inline, because no truthful tier-only slice exists for them.
+  const selectorFits = completeSelectorFits.map((entry) => {
+    if ((selectorFitsByTier.get(entry.selector.tier) ?? []).length !== 1) return entry;
+    const { fits: _fits, ...identity } = entry;
+    return { ...identity, legacyFitTier: entry.selector.tier };
+  });
   const noiseFloors = Object.fromEntries(
     Object.keys(SERIES).map((series) => [
       series,
-      noiseFloor(points.map((point) => ({ ...point, value: point.series[series] }))),
+      noiseFloor(orderedPoints.map((point) => ({ ...point, value: point.series[series] }))),
     ]),
   );
   return {
     schemaVersion: 1,
     story: "sc-18810",
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
-    capturedRecords: points.length,
+    capturedRecords: orderedPoints.length,
     tiers,
     // Which driver session produced which record, and under which SceneWorks revision. The evidence
     // BUNDLE's own `sourceSessions` is `[]` for this lane (as it is for sc-18808): the harness only
     // populates it on its capture path, and these records were ingested without it. This block is
     // the provenance that does exist, derived from the committed logs rather than typed.
     sourceSessions,
-    ...(plan ? { coverage: coverageOf(plan, points, driverStates) } : {}),
+    ...(plan ? { coverage: coverageOf(plan, orderedPoints, driverStates) } : {}),
     noiseFloors,
-    observations: points
-      .map((point) => ({
-        fixture: point.fixture,
-        tier: point.tier,
-        role: point.role,
-        rung: point.rung,
-        decodeTilingEngaged: point.decodeTilingEngaged,
-        sceneWorksRevision: point.sceneWorksRevision,
-        geometry: point.geometry,
-        activeGib: point.series,
-        cacheGib: point.cacheGib,
-      }))
+    selectorFits,
+    ...(legacyFitsOmittedForTiers.length > 0 ? { legacyFitsOmittedForTiers } : {}),
+    observations: orderedPoints
+      .map(persistedObservation)
       .sort(
         (left, right) =>
-          left.fixture.localeCompare(right.fixture) ||
-          left.sceneWorksRevision.localeCompare(right.sceneWorksRevision),
+          compareText(left.fixture, right.fixture) ||
+          compareText(left.sceneWorksRevision, right.sceneWorksRevision) ||
+          compareText(left.recordId, right.recordId),
       ),
     fits: bySeries,
+  };
+}
+
+function hullCross(origin, left, right) {
+  return (
+    (left.pixels - origin.pixels) * (right.voxels - origin.voxels) -
+    (left.voxels - origin.voxels) * (right.pixels - origin.pixels)
+  );
+}
+
+/**
+ * Convex hull in the exact regressor plane the adopted curve evaluates in:
+ * `(pixels, pixels * frames)`. Keeping integer coordinates avoids a floating-point boundary gap
+ * between generation and consumption. Collinear interior points are discarded; boundary vertices
+ * remain ordered counter-clockwise and the evaluator accepts their edges.
+ */
+export function geometryHull(geometries) {
+  const points = [
+    ...new Map(
+      geometries.map(({ width, height, frames }) => {
+        if (
+          !Number.isSafeInteger(width) || width <= 0 ||
+          !Number.isSafeInteger(height) || height <= 0 ||
+          !Number.isSafeInteger(frames) || frames <= 0
+        ) {
+          throw new Error("fitted video curve geometry requires positive safe integers");
+        }
+        const pixels = width * height;
+        const voxels = pixels * frames;
+        if (!Number.isSafeInteger(pixels) || !Number.isSafeInteger(voxels)) {
+          throw new Error("fitted video curve geometry exceeds exact JSON integer arithmetic");
+        }
+        return [`${pixels}:${voxels}`, { pixels, voxels }];
+      }),
+    ).values(),
+  ].sort((left, right) => left.pixels - right.pixels || left.voxels - right.voxels);
+  if (points.length < 3) {
+    throw new Error(`a fitted video curve needs at least three distinct geometry points, got ${points.length}`);
+  }
+  const half = (ordered) => {
+    const result = [];
+    for (const point of ordered) {
+      while (
+        result.length >= 2 &&
+        hullCross(result[result.length - 2], result[result.length - 1], point) <= 0
+      ) {
+        result.pop();
+      }
+      result.push(point);
+    }
+    return result;
+  };
+  const lower = half(points);
+  const upper = half(points.slice().reverse());
+  const hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
+  if (hull.length < 3) throw new Error("the measured geometry hull is collinear");
+  return hull;
+}
+
+/**
+ * Promote the ratified per-phase `cross` form into the backend-neutral runtime container owned by
+ * sc-19020. Records are partitioned by the COMPLETE runtime selector before fitting: a campaign may
+ * capture several tiers/rungs/providers/sources, but no regression is ever allowed to cross one of
+ * those boundaries. Each curve names the exact immutable record subset it consumed, partitioned by
+ * source path and bound to the digest of that source's exact committed bytes.
+ */
+export function buildVideoMemoryCurveBundle(report, records, manifest, sourceEvidenceInput) {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error("the video curve source dataset has no records");
+  }
+  const recordIds = records.map((record) => record.id);
+  if (recordIds.some((id) => !/^imc-[0-9a-f]{20}$/.test(id)) || new Set(recordIds).size !== records.length) {
+    throw new Error("video curve source records need unique immutable imc ids");
+  }
+  const sourceInputs = sourceEvidenceInput;
+  if (!Array.isArray(sourceInputs) || sourceInputs.length === 0) {
+    throw new Error("video curve generation requires one or more exact source evidence inputs");
+  }
+  const sourceByRecord = new Map();
+  const sourceCatalog = sourceInputs
+    .map((source) => {
+      if (
+        typeof source?.path !== "string" ||
+        !isCanonicalRepoPath(source.path) ||
+        typeof source.raw !== "string"
+      ) {
+        throw new Error(
+          "each video curve source requires a canonical repository-relative path and exact raw bytes",
+        );
+      }
+      const parsed = JSON.parse(source.raw);
+      if (!Array.isArray(parsed.records) || parsed.records.length === 0) {
+        throw new Error(`${source.path} has no non-empty records array`);
+      }
+      const sha256 = createHash("sha256").update(source.raw).digest("hex");
+      for (const record of parsed.records) {
+        if (sourceByRecord.has(record.id)) throw new Error(`record ${record.id} appears in multiple evidence sources`);
+        sourceByRecord.set(record.id, { path: source.path, sha256, record });
+      }
+      return { path: source.path, sha256 };
+    })
+    .sort((left, right) => compareText(left.path, right.path));
+  if (!sourceCatalog.every((source, index) => index === 0 || sourceCatalog[index - 1].path < source.path)) {
+    throw new Error("video curve evidence source paths must be unique");
+  }
+  for (const record of records) {
+    const source = sourceByRecord.get(record.id);
+    if (!source || !isDeepStrictEqual(source.record, record)) {
+      throw new Error(`source evidence bytes do not contain promoted record ${record.id} exactly`);
+    }
+  }
+  if (sourceByRecord.size !== records.length) {
+    throw new Error("source evidence contains records outside the promoted input set");
+  }
+
+  if (
+    report?.generatedBy !== "scripts/fit-ltx-temporal-form.mjs" ||
+    report.capturedRecords !== records.length ||
+    !Array.isArray(report.observations) ||
+    report.observations.length !== records.length
+  ) {
+    throw new Error("fit report does not describe the exact promoted record set");
+  }
+  const observationById = new Map(
+    report.observations.map((observation) => [observation.recordId, observation]),
+  );
+  if (observationById.size !== records.length || records.some((record) => !observationById.has(record.id))) {
+    throw new Error("fit report observations do not match the immutable promoted record ids");
+  }
+  for (const record of records) {
+    const observation = observationById.get(record.id);
+    if (typeof observation.role !== "string" || observation.role.length === 0) {
+      throw new Error(`fit report observation ${record.id} has no declared plan role`);
+    }
+    const [expectedPoint] = pointsFrom(
+      [record],
+      new Map([[record.fixture, observation.role]]),
+      manifest,
+    );
+    if (!isDeepStrictEqual(observation, persistedObservation(expectedPoint))) {
+      throw new Error(
+        `fit report observation ${record.id} does not match its immutable source record`,
+      );
+    }
+  }
+  const selectorOf = (record) => {
+    const measurements = Object.fromEntries(record.diagnostics.measurements.map((entry) => [entry.name, entry.value]));
+    const decodeTilingEngaged = measurements.decodeTilingEngaged;
+    if (decodeTilingEngaged !== 0 && decodeTilingEngaged !== 1) {
+      throw new Error(
+        `record ${record.id} needs an exact decodeTilingEngaged measurement of 0 or 1`,
+      );
+    }
+    const catalogModel = manifest.models.find((model) => model.id === record.target.modelId);
+    if (!catalogModel) throw new Error(`model ${record.target.modelId} is absent from builtin.models.jsonc`);
+    return {
+      modelId: record.target.modelId,
+      modelFamily: catalogModel.family,
+      provider: record.target.provider,
+      backend: record.backend,
+      tier: record.target.tier,
+      mode: record.target.mode,
+      rung: record.strategy.rung,
+      loadShape: record.loadShape,
+      batch: record.target.geometry.batch,
+      closureDigest: record.repositories.inference.closureDigest,
+      calibrationAbi: VIDEO_MEMORY_CURVE_CALIBRATION_ABI,
+      calibrationFingerprint: record.calibrationFingerprint,
+      decodePass: decodeTilingEngaged === 1 ? "tiled" : "single_pass",
+    };
+  };
+  const groups = new Map();
+  for (const record of records) {
+    const selector = selectorOf(record);
+    const key = JSON.stringify(Object.values(selector));
+    if (!groups.has(key)) groups.set(key, { selector, records: [] });
+    groups.get(key).records.push(record);
+  }
+  if (!Array.isArray(report.selectorFits) || report.selectorFits.length !== groups.size) {
+    throw new Error("fit report does not contain one fit for every complete selector");
+  }
+  const reportedFits = new Map();
+  for (const entry of report.selectorFits) {
+    const key = JSON.stringify(Object.values(entry?.selector ?? {}));
+    const hasInlineFits = entry?.fits && typeof entry.fits === "object";
+    const hasLegacyFit = typeof entry?.legacyFitTier === "string";
+    if (
+      entry?.key !== key ||
+      reportedFits.has(key) ||
+      hasInlineFits === hasLegacyFit ||
+      (hasLegacyFit && entry.legacyFitTier !== entry.selector?.tier)
+    ) {
+      throw new Error("fit report contains a malformed or duplicate complete selector");
+    }
+    reportedFits.set(key, entry);
+  }
+
+  const curves = [...groups.entries()].map(([selectorKey, { selector, records: scopedRecords }]) => {
+    scopedRecords.sort((left, right) => compareText(left.id, right.id));
+    const {
+      modelId,
+      modelFamily,
+      provider,
+      backend,
+      tier,
+      mode,
+      rung,
+      loadShape,
+      batch,
+      closureDigest,
+      calibrationAbi,
+      calibrationFingerprint,
+      decodePass,
+    } = selector;
+    if (!/^[0-9a-f]{64}$/.test(closureDigest)) {
+      throw new Error(`inference closure digest is not sha256: ${closureDigest}`);
+    }
+    const observations = scopedRecords.map((record) => observationById.get(record.id));
+    const reported = reportedFits.get(selectorKey);
+    if (
+      !reported ||
+      !isDeepStrictEqual(reported.selector, selector) ||
+      !isDeepStrictEqual(reported.recordIds, scopedRecords.map((record) => record.id))
+    ) {
+      throw new Error(`${modelId}/${tier}/${rung} fit report record subset is detached`);
+    }
+    const reportedSelectorFits = reported.fits ?? (
+      reported.legacyFitTier === tier
+        ? Object.fromEntries(
+          Object.keys(SERIES)
+            .filter((series) => report.fits?.[series]?.[tier])
+            .map((series) => [series, report.fits[series][tier]]),
+        )
+        : null
+    );
+    if (!reportedSelectorFits) {
+      throw new Error(`${modelId}/${tier}/${rung} fit report has no selector-scoped fit`);
+    }
+    const phase = (series) => {
+      const candidate = reportedSelectorFits[series]?.candidates?.cross;
+      if (!candidate || candidate.singular) {
+        throw new Error(`missing non-singular ${series}/${tier} cross fit`);
+      }
+      const coefficients = candidate.coefficients;
+      const keys = Object.keys(coefficients);
+      if (JSON.stringify(keys) !== JSON.stringify(["fixedGb", "perMpxGb", "perMpxFrameGb"])) {
+        throw new Error(
+          `${series}/${tier} cross coefficients have unexpected shape ${keys.join(",")}`,
+        );
+      }
+      for (const [name, value] of Object.entries(coefficients)) {
+        if (!Number.isFinite(value) || value < 0) {
+          throw new Error(`${series}/${tier} ${name} must be finite and non-negative`);
+        }
+      }
+      if (
+        !Number.isFinite(candidate.fit.maxAbsGib) ||
+        !Number.isFinite(candidate.heldOut.maxAbsGib)
+      ) {
+        throw new Error(`${series}/${tier} cross fit needs fit and held-out residual bounds`);
+      }
+      return {
+        ...coefficients,
+        maxResidualGb: Math.max(candidate.fit.maxAbsGib, candidate.heldOut.maxAbsGib),
+      };
+    };
+    const sourceGroups = new Map();
+    for (const record of scopedRecords) {
+      const source = sourceByRecord.get(record.id);
+      const key = `${source.path}\0${source.sha256}`;
+      if (!sourceGroups.has(key)) {
+        sourceGroups.set(key, { path: source.path, sha256: source.sha256, recordIds: [] });
+      }
+      sourceGroups.get(key).recordIds.push(record.id);
+    }
+    const evidenceSources = [...sourceGroups.values()]
+      .map((source) => ({ ...source, recordIds: source.recordIds.sort() }))
+      .sort((left, right) => compareText(left.path, right.path));
+    const fitPoints = observations.filter((observation) => observation.role === "fit").length;
+    const heldOutPoints = observations.filter(
+      (observation) => observation.role.startsWith("held_out"),
+    ).length;
+    if (fitPoints + heldOutPoints !== scopedRecords.length) {
+      const unscored = observations
+        .filter(
+          (observation) =>
+            observation.role !== "fit" && !observation.role.startsWith("held_out"),
+        )
+        .map((observation) => `${observation.recordId}:${observation.role}`)
+        .sort();
+      throw new Error(
+        `${modelId}/${tier}/${rung} contains records outside the fitted or held-out subsets: ${unscored.join(", ")}`,
+      );
+    }
+    return {
+      // Keep the human-readable id bijective with the complete selector. Runtime also validates
+      // every field independently; the id is not an authorization shortcut.
+      id: `${modelId}:${modelFamily}:${provider}:${backend}:${tier}:${mode}:${rung}:${loadShape}:b${batch}:abi${calibrationAbi}:${decodePass}:${closureDigest.slice(0, 12)}:${calibrationFingerprint}`,
+      modelId,
+      modelFamily,
+      provider,
+      backend,
+      tier,
+      mode,
+      rung,
+      loadShape,
+      batch,
+      closureDigest,
+      calibrationAbi,
+      calibrationFingerprint,
+      decodePass,
+      measuredGeometryHull: geometryHull(observations.map((observation) => observation.geometry)),
+      phases: { conditioning: phase("text"), denoise: phase("denoise"), decode: phase("decode") },
+      evidence: {
+        records: scopedRecords.length,
+        fitPoints,
+        heldOutPoints,
+        sources: evidenceSources,
+      },
+    };
+  });
+  curves.sort((left, right) => compareText(left.id, right.id));
+
+  return {
+    schemaVersion: 2,
+    generatedBy: "scripts/fit-ltx-temporal-form.mjs",
+    sourceFit: "docs/generated/ltx-temporal-form-fit-sc-18810.json",
+    sourceCatalog,
+    curves,
   };
 }
 
@@ -673,10 +1216,9 @@ async function main() {
     const found = args.flatMap((arg, index) => (arg === flag ? [args[index + 1]] : []));
     return found.length > 0 ? found : fallback;
   };
-  const datasetPath = path.resolve(
-    ROOT,
-    value("--dataset", "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
-  );
+  const datasetPaths = repeated("--dataset", [
+    "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+  ]).map((relative) => path.resolve(ROOT, relative));
   const planPath = path.resolve(
     ROOT,
     value("--plan", "docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json"),
@@ -685,6 +1227,12 @@ async function main() {
     ROOT,
     value("--write", "docs/generated/ltx-temporal-form-fit-sc-18810.json"),
   );
+  const curvePath = path.resolve(
+    ROOT,
+    value("--curve-write", "docs/generated/video-memory-curves.json"),
+  );
+  const manifestPath = path.resolve(ROOT, "config/manifests/builtin.models.jsonc");
+  const curveSchemaPath = path.resolve(ROOT, "packages/schemas/video-memory-curves.schema.json");
   // BOTH driver sessions, in chronological order. The first crashed the host after four captures
   // and its log went uncommitted in the original PR, which is what let four of the thirteen records
   // ship with no terminal line anywhere. `--driver-log` may be repeated.
@@ -692,17 +1240,25 @@ async function main() {
     "docs/calibration/sc-18810/precrash-q8-run.log",
     "docs/calibration/sc-18810/sweep-run.log",
   ]).map((relative) => path.resolve(ROOT, relative));
-  const dataset = await readJson(datasetPath);
+  const datasets = await Promise.all(
+    datasetPaths.map(async (file) => {
+      const raw = await readFile(file, "utf8");
+      return { path: repoRelativePath(file), raw, parsed: JSON.parse(raw) };
+    }),
+  );
+  const records = datasets.flatMap(({ parsed }) => parsed.records);
   const plan = await readJson(planPath);
+  const manifest = JSON.parse(stripJsoncComments(await readFile(manifestPath, "utf8")));
+  const curveSchema = await readJson(curveSchemaPath);
   const logs = await Promise.all(
     driverLogPaths.map(async (file) => ({
-      path: path.relative(ROOT, file),
+      path: repoRelativePath(file),
       text: await readFile(file, "utf8"),
     })),
   );
   // Which geometries were ATTEMPTED comes from the drivers' own logs, not from a hand-typed list.
   const driverStates = driverStatesFrom(logs.map((log) => log.text));
-  const points = pointsFrom(dataset.records, rolesFromPlan(plan));
+  const points = pointsFrom(records, rolesFromPlan(plan), manifest);
   const fixtureByName = new Map(
     plan.providers.map((provider) => [provider.name, provider.fixture]),
   );
@@ -713,20 +1269,39 @@ async function main() {
     sessionsFrom(logs, points, fixtureByName),
   );
   const serialised = `${JSON.stringify(report, null, 2)}\n`;
+  const curveBundle = buildVideoMemoryCurveBundle(report, records, manifest, datasets);
+  const curveSchemaProblems = videoCurveSchemaErrors(curveSchema, curveBundle);
+  if (curveSchemaProblems.length > 0) {
+    throw new Error(
+      `${repoRelativePath(curvePath)} violates ${repoRelativePath(curveSchemaPath)}:\n${curveSchemaProblems.join("\n")}`,
+    );
+  }
+  const serialisedCurves = `${JSON.stringify(curveBundle, null, 2)}\n`;
   if (args.includes("--check")) {
-    const existing = await readFile(reportPath, "utf8");
-    if (existing !== serialised) {
+    const [existing, existingCurves] = await Promise.all([
+      readFile(reportPath, "utf8"),
+      readFile(curvePath, "utf8"),
+    ]);
+    if (existing !== serialised || existingCurves !== serialisedCurves) {
+      const stale = [
+        ...(existing !== serialised ? [repoRelativePath(reportPath)] : []),
+        ...(existingCurves !== serialisedCurves ? [repoRelativePath(curvePath)] : []),
+      ];
       process.stderr.write(
-        `${path.relative(ROOT, reportPath)} is stale — re-run scripts/fit-ltx-temporal-form.mjs\n`,
+        `${stale.join(", ")} is stale — re-run scripts/fit-ltx-temporal-form.mjs\n`,
       );
       process.exitCode = 1;
       return;
     }
-    process.stdout.write(`${path.relative(ROOT, reportPath)} is current\n`);
+    process.stdout.write(
+      `${repoRelativePath(reportPath)} and ${repoRelativePath(curvePath)} are current\n`,
+    );
     return;
   }
-  await writeFile(reportPath, serialised);
-  process.stdout.write(`wrote ${path.relative(ROOT, reportPath)}\n`);
+  await Promise.all([writeFile(reportPath, serialised), writeFile(curvePath, serialisedCurves)]);
+  process.stdout.write(
+    `wrote ${repoRelativePath(reportPath)} and ${repoRelativePath(curvePath)}\n`,
+  );
   for (const [series, tiers] of Object.entries(report.fits)) {
     for (const [tier, slice] of Object.entries(tiers)) {
       const rows = Object.entries(slice.candidates)
