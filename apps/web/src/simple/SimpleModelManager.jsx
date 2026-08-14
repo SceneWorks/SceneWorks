@@ -3,6 +3,7 @@ import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
+import { licenseAcknowledgmentBlocked } from "../licenseAcknowledgment.js";
 import { blanketFloorGb, declaredFloorHostGb, installedFloorHostGb } from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -100,6 +101,15 @@ export function SimpleModelManager() {
   async function download(row) {
     const enqueue = row.kind === "lora" ? createLoraDownloadJob : createModelDownloadJob;
     if (typeof enqueue !== "function") {
+      return;
+    }
+    // Licence gate (sc-17227). Simple renders no licence UI — by design, it is the reduced shell —
+    // so a model whose licence must be accepted cannot be accepted HERE. `createModelDownloadJob`
+    // refuses it either way; hand off to the Models screen, which owns the notice and the
+    // checkbox, instead of toasting a refusal the user has no way to act on.
+    if (row.kind === "model" && licenseAcknowledgmentBlocked(row.entry)) {
+      toast(`${row.name} needs its license accepted first — opening Models.`);
+      openInAdvanced("Models");
       return;
     }
     const job = await enqueue(row.entry);

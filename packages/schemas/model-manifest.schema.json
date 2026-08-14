@@ -591,6 +591,14 @@
           "gated": { "type": "boolean" },
           "credentialHost": { "type": "string" },
           "licenseUrl": { "type": "string", "format": "uri" },
+          "requiresLicenseAcknowledgment": {
+            "type": "boolean",
+            "description": "Requires an explicit in-app license acknowledgment before the download is allowed (sc-17227). INDEPENDENT of `gated`: `gated` means the download needs a credential on `credentialHost`, this means the user must be shown the terms and accept them. `gated: true` also implies acknowledgment; this flag covers a PUBLIC repo whose license still binds the user (MiniMax-H3)."
+          },
+          "licenseNotice": {
+            "type": "string",
+            "description": "Restrictions the user is notified of at the acknowledgment gate (sc-17227). Plain prose restating the upstream license's own operative terms — territory, acceptable use, revenue ceiling — not a summary invented here. Rendered inside the acknowledgment box."
+          },
           "nonCommercial": { "type": "boolean" },
           "promptless": { "type": "boolean" },
           "structuredPrompt": { "type": "boolean" },
@@ -759,6 +767,10 @@
             "description": "Display metadata for model catalog and studio surfaces.",
             "properties": {
               "label": { "type": "string" },
+              "attribution": {
+                "type": "string",
+                "description": "Attribution line the upstream license REQUIRES on the user interface (sc-17227) — e.g. MiniMax H3 Community License §IV.2 \"You shall prominently display 'MiniMax H3' on the user interface\". Rendered prominently above the description on the model card, not folded into prose."
+              },
               "description": { "type": "string" },
               "durationHint": { "type": "string" },
               "promptHint": { "type": "string" },

@@ -97,7 +97,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
+    validate_raw_job_payload(&state, &payload.job_type, &payload.payload).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,
@@ -426,7 +426,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
     } else {
-        validate_raw_job_payload(state, &job_type, &merged)?;
+        validate_raw_job_payload(state, &job_type, &merged).await?;
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
@@ -448,7 +448,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
 /// `modelId`, and `model_convert.outputDir` selects its final install location. Other raw job
 /// payloads may contain descriptive model metadata, but are deliberately absent unless that field
 /// selects a filesystem path.
-fn validate_raw_job_payload(
+async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &JsonObject,
@@ -461,6 +461,44 @@ fn validate_raw_job_payload(
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
+    // `repo`/`sourceUrl` rather than on a model id.
+    //
+    // This route enqueues `job_type` + payload VERBATIM: `run_model_download_job` reads `repo` /
+    // `files` / `revision` straight out of the payload with no catalog lookup anywhere in between,
+    // and `validate_payload_model_id` above only FORMAT-checks `modelId` — which the payload need
+    // not carry at all. So a `model_download` posted here fetched `MiniMaxAI/MiniMax-H3` and was
+    // answered 201 while the typed `POST /api/v1/models/:id/download` answered 403 for the same
+    // bytes. Rejecting the whole job type instead would break retry/duplicate, which re-validate a
+    // stored `model_download` payload through this same function; the repo-keyed check lets an
+    // already-authorized download retry (the typed route stamps `licenseAcknowledged` onto the job)
+    // while still refusing a fresh unacknowledged one.
+    //
+    // The LoRA download/import types are in the list because they take the same `repo` + `files`
+    // shape through `run_lora_download_job` and would otherwise be the identical bypass wearing a
+    // different `job_type`. `/loras/import` applies the SAME predicate on its own typed route
+    // (`queue_lora_import_job`) — it fetches whatever repo the caller names and never consults the
+    // LoRA catalog for it, so what the catalog happens to declare has no bearing on what that route
+    // can reach. `/loras/:id/download` needs no gate of its own: it resolves the repo FROM the
+    // catalog entry named by the path id and 404s an id the catalog does not contain, so a caller
+    // cannot point it at a repo.
+    //
+    // `model_convert` is here because it is a fetching job type too, and less obviously so: it
+    // names no `repo`, but `resolve_convert_plan`'s LTX arm hands the payload's `baseRepo` to
+    // `ensure_ltx_upscaler_cached` → `ensure_hf_files_cached`, and `upscalerFile` is a GLOB — so
+    // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
+    // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
+    // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
+    if matches!(
+        job_type,
+        JobType::ModelDownload
+            | JobType::ModelImport
+            | JobType::ModelConvert
+            | JobType::LoraDownload
+            | JobType::LoraImport
+    ) {
+        crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
     }
     if matches!(job_type, JobType::ModelConvert) {
         let output_dir = payload

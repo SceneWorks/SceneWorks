@@ -2448,3 +2448,161 @@ def test_acestep_declares_its_distilled_guidance_axes_explicitly():
     audio_block = models["acestep_v15_turbo"]["audio"]
     assert audio_block["supportsGuidance"] is False
     assert audio_block["supportsNegativePrompt"] is False
+
+
+# --------------------------------------------------------------------------------------
+# sc-17227 — MiniMax-H3 downstream-user licensing. The MiniMax H3 Community License grants a
+# NON-TRANSFERABLE licence (§II) and defines "Licensee" as whoever uses the Works (§I.9), so a
+# SceneWorks user is a Licensee in their own right; §V.2 obliges us to notify each user that the
+# §V / Exhibit A restrictions apply BEFORE providing access. `MiniMaxAI/MiniMax-H3` is a PUBLIC
+# repo, so the pre-existing acknowledgment gate — which keyed off `gated`, i.e. off "needs a
+# Hugging Face credential" — could not express that: declaring `gated` would demand a token that
+# does not exist, and not declaring it left no gate at all.
+# --------------------------------------------------------------------------------------
+
+MINIMAX_H3_IDS = ("minimax_h3", "minimax_h3_ref")
+
+
+def test_minimax_h3_requires_license_acknowledgment_without_a_credential():
+    """Both partitions raise the acknowledgment gate, and NEITHER is credential-gated.
+
+    `gated` here would be a factual error about a public repo, not merely a UX wart: the Models
+    screen would render "Add token in Settings" and "Request access on Hugging Face" for a
+    credential and an access page that do not exist.
+    """
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    for model_id in MINIMAX_H3_IDS:
+        entry = models[model_id]
+        assert entry["requiresLicenseAcknowledgment"] is True, model_id
+        assert entry.get("gated") is not True, f"{model_id}: MiniMaxAI/MiniMax-H3 is a PUBLIC repo"
+        assert "credentialHost" not in entry, model_id
+        assert entry["licenseUrl"] == "https://huggingface.co/MiniMaxAI/MiniMax-H3", model_id
+
+
+def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
+    """§V.2 requires notifying the user that the use restrictions apply — a bare "accept the
+    license" checkbox does not. The notice must name the FOUR terms that decide whether the user
+    may use the model at all, so assert on the SUBSTANCE, not on the field being non-empty."""
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    for model_id in MINIMAX_H3_IDS:
+        notice = models[model_id]["licenseNotice"]
+        # §II / §I.9 — the licence binds the user, not only SceneWorks.
+        assert "NON-TRANSFERABLE" in notice, model_id
+        # §I.5 / §V.4 — every Excluded Territory, named. A partial list would mislead.
+        for territory in (
+            "European Union",
+            "United Kingdom",
+            "Republic of Korea",
+            "United States of America",
+        ):
+            assert territory in notice, f"{model_id}: {territory} missing from licenseNotice"
+        # §II — the Excluded-Territory scope is "not yet", not "not ever": the agreement invites
+        # anyone there to ask about a licence. Omitting the route would make the territory line
+        # read as a flat, permanent bar.
+        assert "api@minimax.io" in notice, model_id
+        # §V.1 + Exhibit A item 12 — the disclosure obligation SceneWorks does NOT discharge for
+        # the user (nothing in the app marks output as machine-generated), so it must be stated.
+        assert "machine-generated" in notice, model_id
+        # §IV.1 — the ceiling above which a separate authorization is required. The licence's own
+        # measure is REVENUE ("generate more than 20 million US dollars ... in yearly revenue"),
+        # not earnings; "earn" would read as profit and understate who is covered.
+        assert "20 million US dollars in yearly revenue" in notice, model_id
+        # §V.3 — the restriction SceneWorks' own feature set is most likely to reach: the product
+        # ships a LoRA trainer, dataset captioning and a training studio. Named because the notice
+        # claims to list the terms that decide whether the user may use the model at all, and a
+        # reader who did not see it would reasonably conclude training on H3 output is
+        # unrestricted. This assertion is what stops the set silently shrinking back to three.
+        #
+        # Bound to the ITEM HEADING, not to a bare "§V.3" (sc-17227 review LOW): the notice's
+        # closing sentence "…is what §V.3 forbids" satisfied the loose form, so deleting the whole
+        # fourth item still passed. The heading appears once, in the item itself.
+        assert "(4) NO IMPROVING OTHER AI MODELS (§V.3)" in notice, model_id
+        assert "improve any other artificial intelligence model" in notice, model_id
+        assert "Four of its terms" in notice, model_id
+
+
+def test_minimax_h3_shipped_notice_names_the_same_restrictions():
+    """The §III.4 NOTICE that ships in the app (About → Licenses) is the copy a user has when
+    they have only the built application and no repository checkout, so it must name the same set
+    the manifest gate names — including §V.3. Pinned here for the same reason: so the bullet list
+    cannot quietly lose a term."""
+    notice = (ROOT / "apps" / "desktop" / "licenses" / "minimax-h3" / "NOTICE.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "Four of its terms bind every user directly" in notice
+    for fragment in (
+        "Applicable Territory (Sections I and V.4)",
+        "Acceptable Use Policy (Section V.1 and Exhibit A)",
+        "Additional Commercial Terms (Section IV.1)",
+        "No improving other AI models (Section V.3)",
+        "improve any other\n    artificial intelligence model",
+        "20 million US dollars in\n    yearly revenue",
+    ):
+        assert fragment in notice, fragment
+    # sc-17227 review: the notice must not assert, as fact, that the modified-files notice §III.2
+    # requires is currently served on the re-hosted repository — nothing in this repository checks
+    # that, and the re-host is owned by sc-17150. Verified by pinning the hedge, so restoring the
+    # bare claim fails here.
+    assert "is not verified by anything in this repository" in notice
+    assert "re-hosted repository is where that notice is served" not in notice
+
+
+def test_minimax_h3_declares_the_section_iv_2_ui_attribution():
+    """§IV.2: "You shall prominently display 'MiniMax H3' on the user interface". The exact string
+    with a SPACE — the hyphenated `MiniMax-H3` product name does not contain it."""
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    for model_id in MINIMAX_H3_IDS:
+        attribution = models[model_id]["ui"]["attribution"]
+        assert "MiniMax H3" in attribution, model_id
+        assert attribution == "Powered by MiniMax H3", model_id
+
+
+def test_schema_accepts_license_acknowledgment_without_gated():
+    """The authoring contract must permit the decoupled shape. Guard the SCHEMA, not just the
+    shipped entries: without these keys the catalog stops validating (additionalProperties: false),
+    which is the parity-lane failure sc-17227 had to clear."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    entry["requiresLicenseAcknowledgment"] = True
+    entry["licenseNotice"] = "Restrictions apply."
+    entry.setdefault("ui", {})["attribution"] = "Powered by MiniMax H3"
+
+    errors = list(validator.iter_errors({"schemaVersion": 1, "models": [entry]}))
+
+    assert not errors, [
+        (error.validator, list(error.absolute_path), error.message) for error in errors
+    ]
+
+
+def test_license_acknowledgment_schema_guard_has_teeth():
+    """Mutation check: the three keys are only accepted because the schema declares them. Remove
+    each one INDIVIDUALLY and the shape must be rejected — proving the test above is not passing
+    on some catch-all."""
+    base = _load_schema(SCHEMA_PATH)
+    entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    entry["requiresLicenseAcknowledgment"] = True
+    entry["licenseNotice"] = "Restrictions apply."
+    entry.setdefault("ui", {})["attribution"] = "Powered by MiniMax H3"
+    document = {"schemaVersion": 1, "models": [entry]}
+
+    for holder, key in (
+        (("properties", "models", "items", "properties"), "requiresLicenseAcknowledgment"),
+        (("properties", "models", "items", "properties"), "licenseNotice"),
+        (("properties", "models", "items", "properties", "ui", "properties"), "attribution"),
+    ):
+        schema = copy.deepcopy(base)
+        node = schema
+        for step in holder:
+            node = node[step]
+        assert key in node, f"{key} is not declared where this guard looks"
+        del node[key]
+        errors = list(jsonschema.Draft202012Validator(schema).iter_errors(document))
+        assert any(
+            error.validator == "additionalProperties" and key in error.message
+            for error in errors
+        ), f"removing {key} from the schema did not reject the entry"

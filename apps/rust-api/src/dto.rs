@@ -1119,6 +1119,13 @@ pub(crate) struct ModelDownloadRequest {
     /// else the first supported entry) — the back-compat single-variant behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) variant: Option<String>,
+    /// The caller asserts the user has accepted the model's license (sc-17227). Required — and
+    /// only consulted — for a catalog entry carrying `requiresLicenseAcknowledgment`, whose
+    /// Hugging Face repo is PUBLIC and therefore has no credential check to fail behind. Defaults
+    /// to `false`, so a client that does not know about the field is refused rather than let
+    /// through: the acknowledgment must be affirmatively asserted, never assumed.
+    #[serde(default)]
+    pub(crate) license_acknowledged: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1159,6 +1166,14 @@ pub(crate) struct ModelImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227). Consulted only when `repo`/`sourceUrl` resolves to a catalog entry carrying
+    /// `requiresLicenseAcknowledgment` — the same repo-keyed gate `POST /api/v1/jobs` applies —
+    /// and defaults to `false` so a client that has never heard of the field is refused rather
+    /// than let through. Serialized onto the queued job (and only when true) so a retry of an
+    /// authorized import re-validates against the assertion the original request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default, skip_deserializing, skip_serializing_if = "bool_is_false")]
     pub(crate) uploaded_source_path: bool,
 }
@@ -1198,6 +1213,14 @@ pub(crate) struct LoraImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227) — the same field, default, and meaning as on [`ModelImportRequest`]. A LoRA
+    /// import takes a caller-supplied `repo`/`sourceUrl` and never looks it up in the LoRA catalog,
+    /// so it can name a licence-restricted MODEL repo; the gate is keyed on that repo, not on
+    /// anything the LoRA catalog declares. Serialized onto the queued job only when true, so a
+    /// retry of an authorized import re-validates against the assertion the request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default = "default_lora_scope")]
     pub(crate) scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

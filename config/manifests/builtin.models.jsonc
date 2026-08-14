@@ -12974,6 +12974,23 @@
       // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
       // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
       "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      // sc-17227 — LICENCE ACKNOWLEDGMENT WITHOUT A CREDENTIAL. `gated` is deliberately ABSENT:
+      // `MiniMaxAI/MiniMax-H3` is a PUBLIC repo, so there is no Hugging Face token to add and no
+      // "Request access" page to visit. Declaring `gated: true` here to get the acknowledgment
+      // checkbox would demand a credential that does not exist. `requiresLicenseAcknowledgment` is
+      // the decoupled half: it raises the in-app acknowledgment gate (sc-7872) and blocks the
+      // download until the user accepts, with no credential UI.
+      //
+      // WHY IT IS REQUIRED AT ALL. The MiniMax H3 Community License is non-transferable (§II) and
+      // defines a "Licensee" as whoever uses the Works (§I.9), so the user is a Licensee in their
+      // own right — SceneWorks' authorization does not stand in for theirs. §V.2 obliges us, before
+      // providing access, to notify each user that the §V / Exhibit A restrictions apply. This is
+      // that notification; `licenseNotice` is its text. It does NOT resolve the §V.4 territorial
+      // question — an acknowledgment cannot make an Excluded-Territory use authorized — which stays
+      // Michael's ship/no-ship call on sc-17227.
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the licence does not authorize use of the model, its derivatives, or their outputs in the European Union, the United Kingdom, the Republic of Korea, or the United States of America. §II adds that MiniMax will continuously evaluate those Excluded Territories and that anyone in them interested in deploying its models is welcome to contact MiniMax about obtaining a licence; the contact address the agreement gives is api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
       "downloads": [
         // Quant matrix (sc-17150, epic 8506 shape): each tier is a SEPARATE user-selectable
         // artifact tagged with a `variant`; q4 (default) installs when no tier is chosen. Sizes are
@@ -13213,6 +13230,13 @@
       // a generate peak).
       "ui": {
         "label": "MiniMax-H3",
+        // sc-17227 — §IV.2 of the MiniMax H3 Community License: "You shall prominently display
+        // 'MiniMax H3' on the user interface of commercial product or service that uses MiniMax H3
+        // or MiniMax H3 Works." The exact string with a SPACE, not the hyphenated repo name, and
+        // rendered as its own line above the description on the model card rather than folded into
+        // prose. §III.3.a separately encourages the "Powered by MiniMax H3" wording, so one line
+        // discharges both.
+        "attribution": "Powered by MiniMax H3",
         "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — which is why renders are measured in hours at the default canvas. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. macOS native MLX only, and it needs a large-memory Mac.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
         "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
@@ -13256,6 +13280,13 @@
       // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
       // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
       "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      // sc-17227 — same licence gate as `minimax_h3`, and it must be declared HERE too: the
+      // acknowledgment is keyed per model id, and this is a separate entry the user can install
+      // on its own. See the sibling entry for why `gated` is absent (the HF repo is public, so
+      // there is no credential to demand) and why §V.2 requires the notification.
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the licence does not authorize use of the model, its derivatives, or their outputs in the European Union, the United Kingdom, the Republic of Korea, or the United States of America. §II adds that MiniMax will continuously evaluate those Excluded Territories and that anyone in them interested in deploying its models is welcome to contact MiniMax about obtaining a licence; the contact address the agreement gives is api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
       "downloads": [
         {
           "provider": "huggingface",
@@ -13399,6 +13430,8 @@
       },
       "ui": {
         "label": "MiniMax-H3 References",
+        // §IV.2 attribution, same as `minimax_h3` — see that entry for the citation (sc-17227).
+        "attribution": "Powered by MiniMax H3",
         "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. Same open-weights caveats as MiniMax-H3: no hosted prompt refinement, no native 2K, dense attention, and no guidance or negative-prompt axis.",
         "recommendedFor": ["reference_to_video"],
         "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps, and the same canvas-dominated cost — start at 576x320.",

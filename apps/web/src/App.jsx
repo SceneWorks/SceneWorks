@@ -3053,6 +3053,9 @@ export function App() {
     // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
     // a row the picker would drop on the next render (sc-15952).
     models: imageModels,
+    // The whole catalog, so an install requirement resolves to its real entry — including a VIDEO
+    // model, which `imageModels` filters out — before the download starts (sc-17227).
+    catalogModels: models,
     macCapabilities,
     catalogRevision,
     failedInstallJobIds,

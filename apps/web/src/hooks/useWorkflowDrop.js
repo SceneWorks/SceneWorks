@@ -89,6 +89,13 @@ export function useWorkflowDrop({
   // sc-15952. The installed models the studio would actually offer, so a substitute the user picked
   // is re-checked against the live list on every render rather than trusted once at pick time.
   models = [],
+  // The FULL model catalog — every type, installed or not — used only to resolve an install
+  // requirement's id to its real entry before handing it to `installModel` (sc-17227). Distinct
+  // from `models` above, which is the IMAGE picker's list: it is type-filtered, so resolving
+  // against it would still hand a stub for a VIDEO requirement, which is exactly what MiniMax-H3
+  // is. The licence gate inside `createModelDownloadJob` reads the entry's own flags, and a stub
+  // silently disables it.
+  catalogModels = [],
   // The same live Mac/MLX gate Image Studio applies to its model picker and pose controls.
   macCapabilities = null,
   // A cheap identity for "what this install has on disk", derived by App from the model and LoRA
@@ -446,6 +453,18 @@ export function useWorkflowDrop({
   // the job in the queue list, surface its progress and its failure, and — through `useJobEvents` —
   // refetch the catalog that re-resolves this very panel. A bare fetch here would install the model
   // and leave every one of those un-wired.
+  //
+  // The row is resolved to its REAL catalog entry first (sc-17227). `createModelDownloadJob`'s
+  // licence gate reads the entry's own `gated` / `requiresLicenseAcknowledgment`, so handing it a
+  // `{ id }` stub made `requiresLicenseAcknowledgment(model)` false and the gate could not fire:
+  // the panel skipped the acknowledgment AND omitted `licenseAcknowledged` from the request body.
+  // For a `requiresLicenseAcknowledgment` model the server still refused (with a raw error instead
+  // of the guided message); for a `gated` one BOTH halves missed — the client by the stub, the
+  // server by its deliberate `gated` exclusion — so with a saved Hugging Face credential the
+  // weights landed with no acknowledgment at all.
+  //
+  // An id with no catalog entry falls back to the bare row: it cannot download anything either way
+  // (`POST /api/v1/models/:id/download` 404s on an unknown id), so there is nothing to gate.
   const installRequirement = useCallback(
     async (row) => {
       const key = `${row?.kind}:${row?.id}`;
@@ -460,7 +479,11 @@ export function useWorkflowDrop({
         ...current,
         installing: { ...current.installing, [key]: true },
       }));
-      const job = await start({ id: row.id });
+      const entry =
+        row.kind === "model"
+          ? catalogModels.find((candidate) => candidate?.id === row.id)
+          : null;
+      const job = await start(entry ?? { id: row.id });
       setFixes((current) => ({
         ...current,
         installing: { ...current.installing, [key]: false },
@@ -470,7 +493,7 @@ export function useWorkflowDrop({
         queued: { ...current.queued, [key]: job?.id ?? Boolean(job) },
       }));
     },
-    [fixes.installing, queued, installModel, installLora],
+    [fixes.installing, queued, installModel, installLora, catalogModels],
   );
 
   // "Use this workflow" — build the recipe and hand it to the SAME launch the viewer's

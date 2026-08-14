@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
+import { offerableWithoutLicenseUi } from "../licenseAcknowledgment.js";
 import { audioModelUsable } from "../modelEligibility.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 
@@ -29,8 +30,20 @@ function isDownloadable(model) {
 // download offers run through (modelEligibility.js `audioModelUsable`), so onboarding never
 // dangles a bare audio entry that no mode can drive. `audioModelUsable` already requires
 // `type === "audio"`, so the guard is a no-op for every other type.
+//
+// A model that requires an in-app licence acknowledgment is NOT offered here at all (sc-17227).
+// The wizard has no licence UI — no terms, no checkbox — and first-run onboarding bulk-queues
+// whatever is ticked, so offering one would mean downloading weights whose licence binds the user
+// personally without ever having shown it. `createModelDownloadJob` refuses that download anyway;
+// not listing it is the honest form of the same rule, and the user can install it from the Models
+// screen, which does show the terms. Scoped to the standalone flag rather than to `gated` — see
+// `offerableWithoutLicenseUi` for why the credential-gated models are left as they were.
 function isOfferable(model, caps) {
-  return isDownloadable(model) && (model.type !== "audio" || audioModelUsable(model, caps));
+  return (
+    isDownloadable(model) &&
+    offerableWithoutLicenseUi(model) &&
+    (model.type !== "audio" || audioModelUsable(model, caps))
+  );
 }
 
 function downloadSizeText(model) {
