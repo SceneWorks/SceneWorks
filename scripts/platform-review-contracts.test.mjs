@@ -2096,6 +2096,17 @@ test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct",
     );
     assert.match(
       workflow,
+      /\$ffmpegVersionLines = @\(& ffmpeg -version\)\s+if \(\$LASTEXITCODE -ne 0\) \{ throw 'ffmpeg version probe failed' \}\s+\$ffmpegVersion = \(\$ffmpegVersionLines \| Select-Object -First 1\)\.Trim\(\)/,
+      "the runner probe must consume ffmpeg output before selecting its version line",
+    );
+    assert.doesNotMatch(
+      workflow,
+      /ffmpeg -version \| Select-Object -First 1/,
+      "an early-closing native pipeline must not leak exit code 1 into the Actions wrapper",
+    );
+    assert.match(workflow, /ffmpeg = \$ffmpegVersion/);
+    assert.match(
+      workflow,
       /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
       "only a verified capture may publish the MP4/stills/metadata bundle",
     );
@@ -2273,6 +2284,16 @@ test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct",
           "Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds",
           "Assert-DurationNear 'product MP4 container' $probe.format.duration $renderedDurationSeconds",
         ),
+      },
+    },
+    {
+      name: "early-closing ffmpeg version pipeline restored",
+      expected: /must consume ffmpeg output before selecting its version line|must not leak exit code 1/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow
+          .replace("$ffmpegVersionLines = @(& ffmpeg -version)", "$ffmpegVersionLines = & ffmpeg -version | Select-Object -First 1")
+          .replace("$ffmpegVersion = ($ffmpegVersionLines | Select-Object -First 1).Trim()", "$ffmpegVersion = $ffmpegVersionLines.Trim()"),
       },
     },
     {
