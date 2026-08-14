@@ -11088,6 +11088,9 @@
           // (auto-injected per-pass; see mlx.autoDistillLora), so it must download alongside the
           // 10Eros checkpoint rather than being a pick-one alternate.
           "coRequisite": true,
+          // This adapter is exclusive to Eros. If an old off-Mac Eros install is removed through
+          // its cleanup-only catalog tombstone, reclaim this repo alongside the primary checkpoint.
+          "cleanupWithModel": true,
           "files": ["ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 662072824

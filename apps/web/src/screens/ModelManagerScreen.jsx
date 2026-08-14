@@ -1163,9 +1163,10 @@ export function ModelManagerScreen() {
     const downloadJobs = downloadJobsFor(model);
     const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
     const installed = model.installState === "installed";
+    const cleanupOnly = model.platformCleanupOnly === true;
     const incomplete = model.cacheState === "incomplete" || model.repairAvailable;
     const missingRequiredFiles = Array.isArray(model.missingRequiredFiles) ? model.missingRequiredFiles : [];
-    const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
+    const localDownloadJob = cleanupOnly || installed ? null : downloadJobs.find((job) => job.status !== "completed");
     const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
     const downloadSize = downloadSizeText(model);
     const unassociated = !model.family;
@@ -1178,7 +1179,7 @@ export function ModelManagerScreen() {
     // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
     // Conversion state is a platform capability supplied by the API, not a memory measurement.
     // Keep that control surface intact while guarding the MLX memory block by the active lane.
-    const mlxState = model.mlxConversionState;
+    const mlxState = cleanupOnly ? null : model.mlxConversionState;
     const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx") : null;
     const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
     const convertJobs = convertJobsFor(model);
@@ -1244,7 +1245,7 @@ export function ModelManagerScreen() {
             ))}
           </ul>
         ) : null}
-        {gated && !installed ? (
+        {!cleanupOnly && gated && !installed ? (
           <GatedModelNotice
             host={model.credentialHost}
             repoUrl={gatedRepoUrl(model) ?? model.licenseUrl ?? null}
@@ -1261,7 +1262,12 @@ export function ModelManagerScreen() {
             {missingRequiredFiles.length ? `: ${missingRequiredFiles.slice(0, 3).join(", ")}${missingRequiredFiles.length > 3 ? "..." : ""}` : ""}.
           </p>
         ) : null}
-        {localDownloadJob ? (
+        {cleanupOnly ? (
+          <p className="inline-warning">
+            This model is no longer available on this platform. Delete it to reclaim its existing local files.
+          </p>
+        ) : null}
+        {!cleanupOnly && localDownloadJob ? (
           <WorkerProgressCard
             job={localDownloadJob}
             onCancel={onCancelJob}
@@ -1270,7 +1276,7 @@ export function ModelManagerScreen() {
             onOpenQueue={onOpenQueue}
           />
         ) : null}
-        {mlxState ? (
+        {!cleanupOnly && mlxState ? (
           <div className="mlx-status">
             <div className="mlx-status-badges">
               <span className="status-badge">MLX</span>
@@ -1331,7 +1337,7 @@ export function ModelManagerScreen() {
             ) : null}
           </div>
         ) : null}
-        {hasTierMatrix ? (
+        {!cleanupOnly && hasTierMatrix ? (
           <ModelTierDownloadPanel
             model={model}
             unifiedMemoryGb={unifiedMemoryGb}
@@ -1345,20 +1351,20 @@ export function ModelManagerScreen() {
         ) : null}
         {/* Convert-at-install models (mlxTiers) have no download panel; surface their installed
             tiers with a per-tier delete so unused convert outputs can be reclaimed (sc-12025). */}
-        {!hasTierMatrix ? (
+        {!cleanupOnly && !hasTierMatrix ? (
           <ConvertedTierList
             model={model}
             onDeleteVariant={deleteModelVariant}
             deletingItem={deletingItem}
           />
         ) : null}
-        {model.updateAvailable && !mlxState ? (
+        {!cleanupOnly && model.updateAvailable && !mlxState ? (
           <p className="inline-warning">A newer model download is available; the installed version remains usable.</p>
         ) : null}
         <div className="model-card-footer">
           <span className="model-card-size">{downloadSize}</span>
           <div className="model-card-footer-actions">
-            {hasTierMatrix ? (
+            {cleanupOnly ? null : hasTierMatrix ? (
               // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
               // affordance here for an incomplete cache or soft co-requisite update; otherwise
               // there's no single-tier button. The default-tier job fetches every co-requisite.

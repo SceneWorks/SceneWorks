@@ -1332,6 +1332,14 @@
                     "properties": { "coRequisite": { "const": true } },
                     "required": ["coRequisite"]
                   }
+                },
+                {
+                  "$comment": "SC-18902: cleanupWithModel opts an exclusive dependency into cleanup-only tombstone deletion, so it is valid only on a coRequisite row.",
+                  "if": { "required": ["cleanupWithModel"] },
+                  "then": {
+                    "properties": { "coRequisite": { "const": true } },
+                    "required": ["coRequisite"]
+                  }
                 }
               ],
               "properties": {
@@ -1370,6 +1378,10 @@
                 "coRequisite": {
                   "type": "boolean",
                   "description": "Marks this entry as a FETCH-ALL dependency installed IN ADDITION TO the primary download, not a pick-one alternate (contrast `variant` tiers and `platforms` OS alternates). Installing the model queues the primary plus every co-requisite for the current OS. A hard dependency (the default) gates install state; a soft dependency leaves the primary usable and surfaces updateAvailable. Co-requisites are never chosen as the primary/default and are excluded from quant-tier enumeration. A co-requisite may be shared by several models, so deleting one model does NOT remove it. See sc-9696, sc-13079, epic 7840."
+                },
+                "cleanupWithModel": {
+                  "type": "boolean",
+                  "description": "Marks an exclusive co-requisite whose repository may be reclaimed with a cleanup-only parent-model tombstone after that product is withdrawn on a platform. Valid only with coRequisite: true; shared dependencies must omit it."
                 },
                 "required": {
                   "enum": ["hard", "soft"],
