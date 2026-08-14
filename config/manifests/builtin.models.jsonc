@@ -12998,21 +12998,26 @@
         // artifacts plus 1,519 B of repo-root files reconcile to the repo total 240,725,488,299 B
         // to the byte.
         //
-        // ONLY THE DiT IS TIERED (sc-17139): three self-contained tiers would repeat the 62 GB text
-        // encoder and the 11 GB VAE floor per tier and cost ~250 GB. The text encoder and both VAEs
-        // are shared `coRequisite` rows below, byte-identical between this entry and
-        // `minimax_h3_ref`, so the floor downloads ONCE for both.
+        // THE DiT AND THE TEXT ENCODER ARE TIERED; BOTH VAEs ARE NOT. Originally only the DiT was
+        // (sc-17139) — three self-contained tiers would have repeated the 62 GB text encoder and the
+        // 11 GB VAE floor per tier and cost ~250 GB. sc-19120 tiered the text encoder separately, as
+        // a per-tier `coRequisite` (`variant` SCOPES a co-requisite, sc-14980), which buys the
+        // saving without duplicating the VAEs. The text encoder and both VAEs remain
+        // byte-identical between this entry and `minimax_h3_ref`, so the floor downloads ONCE for
+        // both; the VAE rows carry no `variant` and so stay tier-agnostic.
         //
         // ⚠️ QUANT BUYS DISK, AND ALSO MEMORY — but not where the process peak is. Measured
         // (sc-17150 activity 19121): DiT denoise-resident drops 40.43 GB (bf16) → 11.63 GB (q4), a
-        // 28.80 GB reduction. The ~53 GB generate peak is the DENSE Qwen3-VL-32B text encoder,
-        // which runs BEFORE the DiT loads and is dense in every tier, so it masks the DiT stages
-        // and makes the process peak look tier-independent. It is removable, not intrinsic:
-        // sc-19120 (packed TE tier) + sc-18662 (block streaming) are the pair that lowers it.
+        // 28.80 GB reduction. The ~53 GB generate peak was the Qwen3-VL-32B text encoder, which runs
+        // BEFORE the DiT loads and USED TO BE dense in every tier, so it masked the DiT stages and
+        // made the process peak look tier-independent. sc-19120 removed that: the text encoder is
+        // now packed per tier (q4/q8 rows below), so the peak is no longer tier-independent.
+        // ⚠️ The post-sc-19120 generate peak has NOT been re-measured — the numbers above are the
+        // pre-change measurement, and sc-18662 (block streaming) is the remaining half of the gap.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
-          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q4",
           "default": true,
           "files": ["q4/transformer/*"],
@@ -13023,7 +13028,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
-          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q8",
           "files": ["q8/transformer/*"],
           "platforms": ["macos"],
@@ -13033,7 +13038,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
-          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "bf16",
           "files": ["bf16/transformer/*"],
           "platforms": ["macos"],
@@ -13049,10 +13054,45 @@
         // ONE file MiniMax changed (it adds the 7 `additional_special_tokens` whose ids the engine
         // assigns BY LIST ORDER), and taking the whole component from one repo keeps a single
         // pinned revision covering all three shared components with no tokenizer overlay.
+        //
+        // ⚠️ THAT REASONING HOLDS FOR bf16 ONLY. sc-19120 adds PACKED q4/q8 text encoders, which do
+        // not exist upstream in any form, so those two tiers ARE rehosted in
+        // `SceneWorks/minimax-h3-mlx` beside the DiT tiers. `variant` on a co-requisite SCOPES it
+        // (sc-14980): `resolve_co_requisites_for_tier` picks exactly ONE row per `componentId`, so
+        // each tier subtree must be SELF-CONTAINED. Every tier therefore ships the same nine
+        // non-shard files — the seven tokenizer/preprocessor sidecars are copied VERBATIM from
+        // `MiniMaxAI/MiniMax-H3` at the revision pinned below, so MiniMax's 7
+        // `additional_special_tokens` (assigned BY LIST ORDER) are preserved in every tier. Shard 13
+        // is omitted from the packed tiers too, for the reason spelled out on the bf16 row.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18722713964
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 33723765614
+        },
         {
           "provider": "huggingface",
           "repo": "MiniMaxAI/MiniMax-H3",
           "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "variant": "bf16",
           "coRequisite": true,
           "componentId": "text_encoder",
           "subdir": "text_encoder",
@@ -13291,7 +13331,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
-          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q4",
           "default": true,
           "files": ["q4/transformer_ref/*"],
@@ -13305,7 +13345,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
-          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q8",
           "files": ["q8/transformer_ref/*"],
           "platforms": ["macos"],
@@ -13315,21 +13355,48 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
-          "revision": "f22bc294f46894584645aec59a513ee411450c96",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "bf16",
           "files": ["bf16/transformer_ref/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 66280569250,
           "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
-        // BYTE-IDENTICAL to `minimax_h3`'s co-requisite rows — same repo, same pinned revision, same
-        // component ids, same file predicates. That identity is what makes the 72.9 GB shared floor
-        // download ONCE for both entries instead of twice; a co-requisite is never removed when one
-        // of the models that references it is deleted.
+        // BYTE-IDENTICAL to `minimax_h3`'s co-requisite rows — same repos, same pinned revisions,
+        // same component ids, same file predicates, same `variant` scoping. That identity is what
+        // makes the shared floor download ONCE for both entries instead of twice; a co-requisite is
+        // never removed when one of the models that references it is deleted. The floor is now
+        // TIER-SCOPED rather than a single number: 72.9 GB at bf16, but 29.7 GB at q4 and 44.7 GB at
+        // q8, because sc-19120 made the text encoder a per-tier component (see `minimax_h3`).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18722713964
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 33723765614
+        },
         {
           "provider": "huggingface",
           "repo": "MiniMaxAI/MiniMax-H3",
           "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "variant": "bf16",
           "coRequisite": true,
           "componentId": "text_encoder",
           "subdir": "text_encoder",
