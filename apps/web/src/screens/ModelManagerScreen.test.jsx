@@ -97,6 +97,31 @@ const SD3_5_MODEL = {
   ui: { description: "Gated SD3.5 Large model." },
 };
 
+// MiniMax-H3 (sc-17227): the first model that needs a LICENCE ACKNOWLEDGMENT WITHOUT a Hugging
+// Face credential. `MiniMaxAI/MiniMax-H3` is a PUBLIC repo — there is no token to add and no
+// access to request — but the MiniMax H3 Community License is non-transferable (§II) and binds
+// the user directly, and §V.2 obliges SceneWorks to notify each user that its use restrictions
+// apply before providing access. So: `requiresLicenseAcknowledgment` WITHOUT `gated`, plus the
+// `licenseNotice` prose that is the notification, plus the §IV.2 `ui.attribution` string.
+const MINIMAX_H3_LICENSE_NOTICE =
+  "The MiniMax H3 Community License grants a NON-TRANSFERABLE licence (§II). Its Applicable " +
+  "Territory (§V.4) excludes the European Union, the United Kingdom, the Republic of Korea and " +
+  "the United States of America, and Exhibit A item 12 requires you to disclose that content is " +
+  "machine-generated when you publish it.";
+const LICENSE_ACK_ONLY_MODEL = {
+  id: "minimax_h3",
+  name: "MiniMax-H3",
+  type: "video",
+  family: "minimax-h3",
+  installState: "missing",
+  downloadable: true,
+  requiresLicenseAcknowledgment: true,
+  licenseUrl: "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+  licenseNotice: MINIMAX_H3_LICENSE_NOTICE,
+  downloads: [{ provider: "huggingface", repo: "SceneWorks/minimax-h3-mlx", files: ["q4/transformer/*"] }],
+  ui: { attribution: "Powered by MiniMax H3", description: "Joint video + audio generation." },
+};
+
 // A quant-matrix model whose q8 tier is TORN (sc-13383): its files are partly present, so the API
 // reports installState "missing" + cacheState "incomplete" with the missing weights named. The
 // complete q4/bf16 siblings keep the MODEL installed, so only the q8 tier row offers repair.
@@ -335,6 +360,118 @@ describe("ModelManagerScreen gated-model notice", () => {
       (button) => button.textContent.startsWith("Download"),
     );
     expect(downloadButton.disabled).toBe(false);
+  });
+
+  // sc-17227: the acknowledgment gate is decoupled from the HF credential. A model that declares
+  // `requiresLicenseAcknowledgment` WITHOUT `gated` raises the gate and shows NO credential UI —
+  // no keychain lookup, no "Add token in Settings", no "Request access on Hugging Face" — because
+  // its repo is public and there is nothing to add or request. Before the decoupling this model
+  // either got no gate at all (`gated` absent) or demanded a credential that does not exist.
+  it("gates a public-repo model on the license alone, with no credential UI (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    // The credential half is entirely absent.
+    expect(invoke).not.toHaveBeenCalledWith("list_credentials", undefined);
+    expect(container.textContent).not.toContain("Gated download");
+    expect(container.textContent).not.toContain("Add token in Settings");
+    expect(container.textContent).not.toContain("Request access on Hugging Face");
+    expect(container.textContent).toContain("License acknowledgment required");
+    // The licence half is present: the "Review license" link and the acknowledgment checkbox.
+    const links = [...container.querySelectorAll(".model-gated-actions a")];
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe("Review license");
+    expect(links[0].getAttribute("href")).toBe("https://huggingface.co/MiniMaxAI/MiniMax-H3");
+    expect(container.querySelector(".model-license-ack input")).toBeTruthy();
+  });
+
+  // sc-17227: the load-bearing half of the decoupling. The download must stay BLOCKED until the
+  // box is checked, exactly as for a credential-gated model — decoupling must not soften the gate.
+  it("blocks a license-acknowledgment download until the box is checked (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton).toBeTruthy();
+    expect(downloadButton.disabled).toBe(true);
+    expect(downloadButton.getAttribute("title")).toBe("Accept the license above before downloading.");
+
+    // Clicking while blocked queues nothing.
+    await click(downloadButton);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    // Accepting unblocks it, and only then does the download queue.
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    expect(downloadButton.disabled).toBe(false);
+    await click(downloadButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+    );
+  });
+
+  // sc-17227: MiniMax H3 Community License §V.2 requires notifying each user that the §V /
+  // Exhibit A restrictions apply BEFORE providing access. A bare "accept the license" checkbox
+  // does not do that, so the manifest's `licenseNotice` renders inside the gate box.
+  it("shows the manifest license notice inside the gate (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const terms = container.querySelector(".model-gated-notice .model-license-terms");
+    expect(terms).toBeTruthy();
+    expect(terms.textContent).toBe(MINIMAX_H3_LICENSE_NOTICE);
+    // The specific restrictions, not a generic "read the license" line.
+    expect(terms.textContent).toContain("NON-TRANSFERABLE");
+    expect(terms.textContent).toContain("United States of America");
+    expect(terms.textContent).toContain("machine-generated");
+  });
+
+  // sc-17227: MiniMax H3 Community License §IV.2 — "You shall prominently display 'MiniMax H3' on
+  // the user interface". `ui.attribution` renders as its own line on the card, not folded into the
+  // description prose, and carries the exact string with a space (not the hyphenated repo name).
+  it("renders the license-required UI attribution on the model card (sc-17227)", async () => {
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const attribution = container.querySelector(".model-card-attribution");
+    expect(attribution).toBeTruthy();
+    expect(attribution.textContent).toBe("Powered by MiniMax H3");
+    expect(attribution.textContent).toContain("MiniMax H3");
+    // A model that declares no attribution renders no such line — this is per-model, not global.
+    await render([PLAIN_MODEL]);
+    expect(container.querySelector(".model-card-attribution")).toBeNull();
+  });
+
+  // sc-17227: the localStorage seeding paths used to key on `gated`, so a returning user's accept
+  // would never re-seed for an acknowledgment-only model and the gate would re-block every visit.
+  it("seeds and re-seeds the ack for an acknowledgment-only model (sc-17227)", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    // Mount with an empty catalog first so the once-only useState initializer sees nothing; the
+    // catalog then resolves, which is the `useEffect([models])` re-seed path (sc-7873).
+    await render([]);
+    await render([LICENSE_ACK_ONLY_MODEL]);
+    await selectTab(container, "Video Models");
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    expect(ackCheckbox).toBeTruthy();
+    expect(ackCheckbox.checked).toBe(true);
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton.disabled).toBe(false);
+  });
+
+  // sc-17227: an INSTALLED model shows no gate — the acknowledgment is a pre-download step, and
+  // re-blocking an installed model would strand it. Same rule the credential gate already follows.
+  it("shows no license gate once an acknowledgment-only model is installed (sc-17227)", async () => {
+    await render([{ ...LICENSE_ACK_ONLY_MODEL, installState: "installed" }]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
   });
 
   it("offers a one-click Fix on a torn tier that repairs by re-downloading it (sc-13383)", async () => {

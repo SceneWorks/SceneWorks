@@ -7018,6 +7018,19 @@ details[open] > summary.lora-scope-group-heading::before,
   margin: 0;
 }
 
+/* The restrictions the acknowledgment is an acknowledgment OF (sc-17227): the manifest's
+   `licenseNotice`, rendered inside the gate box. It can run several sentences — MiniMax H3
+   Community License §V.2 requires notifying the user that the §V / Exhibit A restrictions
+   apply — so it scrolls inside the card rather than pushing the Download button out of reach. */
+.model-license-terms {
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
 .mlx-status {
   display: grid;
   gap: 8px;
@@ -7766,6 +7779,18 @@ details[open] > summary.lora-scope-group-heading::before,
 
 [data-theme="dark"] .model-card-rec-chip {
   color: var(--accent);
+}
+
+/* Licence-required UI attribution (sc-17227), e.g. MiniMax H3 Community License §IV.2. Sits
+   directly above the description and reads at full text weight/colour rather than the muted
+   description tone — "prominently display" is the obligation, so it must not look like a
+   footnote. */
+.model-card-attribution {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
 }
 
 .model-card-description {

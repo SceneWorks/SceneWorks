@@ -229,6 +229,21 @@ function gatedRepoUrl(model) {
 // getters/setters swallow failures and default to "not acknowledged".
 const LICENSE_ACK_KEY_PREFIX = "sceneworks-license-ack:";
 
+// sc-17227: "needs a licence acknowledgment" and "needs a Hugging Face credential"
+// are DIFFERENT requirements, and until now the screen had only one flag for both.
+// `gated` means the download will 401 without a token on `credentialHost`; it still
+// implies an acknowledgment, so every existing gated model behaves exactly as before.
+// `requiresLicenseAcknowledgment` is the other half on its own: a PUBLIC repo whose
+// licence nevertheless binds the user directly, so the terms must be shown and accepted
+// before the download — with no credential UI, because there is no credential to add and
+// no access to request. MiniMax-H3 is the first: `MiniMaxAI/MiniMax-H3` is public, and the
+// MiniMax H3 Community License is non-transferable (§II), so SceneWorks' own authorization
+// does not cover the user (sc-17227). Coupling the two would have failed open (no gate at
+// all) or demanded a token that does not exist.
+function requiresLicenseAcknowledgment(model) {
+  return model?.gated === true || model?.requiresLicenseAcknowledgment === true;
+}
+
 function readLicenseAck(modelId) {
   if (!modelId) {
     return false;
@@ -257,43 +272,58 @@ function writeLicenseAck(modelId, acknowledged) {
   }
 }
 
-// Gated models (e.g. FLUX.1 [dev]) need an accepted license + a saved credential
-// before a download can succeed. The catalog flags these with `gated`/
-// `credentialHost`/`licenseUrl` (sc-1898). When the matching credential is already
-// present we soften the notice to a ready state; otherwise we point the user at the
-// Settings credential screen. `present` is undefined while presence is still
-// unknown (e.g. the credential list hasn't loaded) — we still show the link then.
-// `repoUrl` links the gated repo so the user can request access (sc-5999); shown
-// alongside `licenseUrl` only when the license lives on a different page (e.g.
-// Ideogram 4, whose terms are on the source repo but access is on the SceneWorks repo).
-// `acknowledged`/`onAcknowledgeChange` drive the in-app license-acknowledgment gate
-// (sc-7872): the download button stays disabled until the user checks the box.
-function GatedModelNotice({
+// The pre-download license gate. Two independent requirements share one box (sc-17227):
+//
+//   * CREDENTIAL (`credentialRequired`, from the catalog's `gated` — sc-1898). Gated models
+//     (e.g. FLUX.1 [dev]) need a saved token on `credentialHost` plus access granted on the
+//     model page before the download can succeed. When the matching credential is already
+//     present we soften the notice to a ready state; otherwise we point the user at the
+//     Settings credential screen. `present` is undefined while presence is still unknown
+//     (e.g. the credential list hasn't loaded) — we still show the link then. `repoUrl` links
+//     the gated repo so the user can request access (sc-5999); shown alongside `licenseUrl`
+//     only when the license lives on a different page (e.g. Ideogram 4, whose terms are on
+//     the source repo but access is on the SceneWorks repo).
+//   * ACKNOWLEDGMENT (always, whenever this notice renders — sc-7872). The download button
+//     stays disabled until `acknowledged`. `licenseNotice` is the manifest's statement of the
+//     restrictions the user is accepting; MiniMax H3 Community License §V.2 obliges us to
+//     notify each user that its use restrictions apply, and a bare "accept the license"
+//     checkbox does not do that.
+//
+// A model can need the second without the first: a PUBLIC repo (no token, nothing to request)
+// under a licence that still binds the user. Rendering the credential half unconditionally
+// would tell that user to add a token that does not exist.
+function LicenseGateNotice({
+  credentialRequired,
   host,
   repoUrl,
   licenseUrl,
+  licenseNotice,
   present,
   acknowledged,
   onAcknowledgeChange,
   onOpenSettings,
 }) {
   const hostLabel = host || "the required service";
-  const safeRepoUrl = safeExternalUrl(repoUrl);
+  const safeRepoUrl = credentialRequired ? safeExternalUrl(repoUrl) : null;
   const safeLicenseUrl = safeExternalUrl(licenseUrl);
   const showSeparateLicense = safeLicenseUrl && safeLicenseUrl !== safeRepoUrl;
+  const ready = credentialRequired && present;
   return (
-    <div className={present ? "model-gated-notice ready" : "model-gated-notice"}>
-      <p className={present ? "inline-success" : "inline-warning"}>
-        {present
-          ? `Credential for ${hostLabel} saved — request access on the model page, then download.`
-          : `Gated download. Add a ${hostLabel} token, then request access on the model page and accept the license before downloading.`}
+    <div className={ready ? "model-gated-notice ready" : "model-gated-notice"}>
+      <p className={ready ? "inline-success" : "inline-warning"}>
+        {!credentialRequired
+          ? "License acknowledgment required. These weights carry a license that binds you directly — read it and accept before downloading."
+          : present
+            ? `Credential for ${hostLabel} saved — request access on the model page, then download.`
+            : `Gated download. Add a ${hostLabel} token, then request access on the model page and accept the license before downloading.`}
       </p>
+      {licenseNotice ? <p className="model-license-terms">{licenseNotice}</p> : null}
       <div className="model-gated-actions">
-        {present ? null : (
+        {credentialRequired && !present ? (
           <button type="button" onClick={onOpenSettings}>
             Add token in Settings
           </button>
-        )}
+        ) : null}
         {safeRepoUrl ? (
           <a href={safeRepoUrl} target="_blank" rel="noreferrer noopener">
             Request access on Hugging Face
@@ -755,7 +785,7 @@ export function ModelManagerScreen() {
   // notice checkbox both updates this map and persists to localStorage.
   const [licenseAcks, setLicenseAcks] = useState(() =>
     models.reduce((acc, model) => {
-      if (model.gated && readLicenseAck(model.id)) {
+      if (requiresLicenseAcknowledgment(model) && readLicenseAck(model.id)) {
         acc[model.id] = true;
       }
       return acc;
@@ -776,7 +806,11 @@ export function ModelManagerScreen() {
     setLicenseAcks((current) => {
       let next = current;
       for (const model of models) {
-        if (model.gated && current[model.id] === undefined && readLicenseAck(model.id)) {
+        if (
+          requiresLicenseAcknowledgment(model) &&
+          current[model.id] === undefined &&
+          readLicenseAck(model.id)
+        ) {
           if (next === current) {
             next = { ...current };
           }
@@ -786,6 +820,10 @@ export function ModelManagerScreen() {
       return next;
     });
   }, [models]);
+  // Keyed on `gated` ALONE, not on the acknowledgment flag (sc-17227): this is what decides
+  // whether to make the `list_credentials` keychain call at all. A licence-acknowledgment model
+  // on a public repo has no credential to look up, and asking would be a pointless keychain
+  // call on a deployment whose catalog has no gated model.
   const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = useMemo(
     () => loras.filter((lora) => matchesFamily(lora, familyFilter)),
@@ -1187,11 +1225,14 @@ export function ModelManagerScreen() {
     const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
     const gated = Boolean(model.gated);
     const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
-    // License-acknowledgment gate (sc-7872): an uninstalled gated model can't be
-    // downloaded until the user accepts its license in-app. Already-installed
-    // gated models (no notice shown) are never blocked.
+    // License-acknowledgment gate (sc-7872, decoupled from the credential by sc-17227): an
+    // uninstalled model whose licence must be acknowledged can't be downloaded until the user
+    // accepts it in-app. Already-installed models (no notice shown) are never blocked. The
+    // requirement comes from `gated` OR the standalone `requiresLicenseAcknowledgment` — the
+    // latter covers a public repo whose licence still binds the user (MiniMax-H3).
+    const licenseGated = requiresLicenseAcknowledgment(model);
     const licenseAcknowledged = licenseAcks[model.id] === true;
-    const licenseAckRequired = gated && !installed && !licenseAcknowledged;
+    const licenseAckRequired = licenseGated && !installed && !licenseAcknowledged;
     // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
     // + multi-select instead of the single Download button. Single-variant models are unchanged.
     const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
@@ -1225,6 +1266,13 @@ export function ModelManagerScreen() {
           </span>
         </div>
         {isRecommendedModel(model) ? <span className="model-card-rec-chip">★ Recommended</span> : null}
+        {/* Licence-required UI attribution (sc-17227). Some upstream licences oblige the product
+            to display a specific string prominently — MiniMax H3 Community License §IV.2 requires
+            "MiniMax H3" on the user interface. Its own line above the description, not folded into
+            prose, so it is legible as attribution rather than marketing copy. */}
+        {model.ui?.attribution ? (
+          <p className="model-card-attribution">{model.ui.attribution}</p>
+        ) : null}
         <p className="model-card-description">{model.ui?.description ?? model.family ?? model.id}</p>
         {capabilities.length ? (
           <ul className="model-capabilities">
@@ -1244,11 +1292,13 @@ export function ModelManagerScreen() {
             ))}
           </ul>
         ) : null}
-        {gated && !installed ? (
-          <GatedModelNotice
+        {licenseGated && !installed ? (
+          <LicenseGateNotice
+            credentialRequired={gated}
             host={model.credentialHost}
-            repoUrl={gatedRepoUrl(model) ?? model.licenseUrl ?? null}
+            repoUrl={gated ? (gatedRepoUrl(model) ?? model.licenseUrl ?? null) : null}
             licenseUrl={model.licenseUrl}
+            licenseNotice={model.licenseNotice}
             present={credentialPresent}
             acknowledged={licenseAcknowledged}
             onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
