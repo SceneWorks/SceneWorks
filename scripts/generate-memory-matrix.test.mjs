@@ -23,7 +23,10 @@ import {
   RUNG4_APPLICABILITIES,
   RUNG4_IMPLEMENTATIONS,
   RUNG4_REQUEST_PEAKS,
+  assertGeneratorSourceDoesNotRestateTheRemovedEdge,
+  deriveOutOfMatrixApplicability,
   familyGroup,
+  parseRung4Survey,
   familyStory,
   mlxRequiredHostBytes,
   observedPeakBytes,
@@ -1804,12 +1807,20 @@ test("rung 4 is not claimed on MLX where its declared rung-1 prerequisite is abs
   }
 });
 
-test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing separating these two families", async () => {
-  // The mutation check for the prerequisite. Both fixtures below claim a rung-4 implementation the
-  // real providers do not have; the ONLY difference between them is whether the entry advertises
-  // rung 1. Mage-Flow does not (the epic's uncovered-rung-1 set), SANA does. If the rung-4 arm
-  // stopped consulting `stagedResidencyIsAvailable`, the Mage-Flow half would go green — which is
-  // exactly the false claim `gen_core::memory_strategy`'s prerequisite edge exists to prevent.
+test("the rung-1 gate holds the rung-4 claim, and is the ONLY thing separating these two families", async () => {
+  // The mutation check for the generator's rung-1 gate. Both fixtures below claim a rung-4
+  // implementation the real providers do not have; the ONLY difference between them is whether the
+  // entry advertises rung 1. Mage-Flow does not (the epic's uncovered-rung-1 set), SANA does. If the
+  // rung-4 arm stopped consulting `stagedResidencyIsAvailable`, the Mage-Flow half would go green.
+  //
+  // sc-18664 corrected what this gate IS. It is not `gen_core::memory_strategy`'s shared
+  // prerequisite: SC-15998 removed that rung-1 edge and left `LoadShape::DeferredMaterialization` as
+  // rung 4's only shared one. It is a proxy for the edge INDIVIDUAL providers append through
+  // `additional_prerequisites` — mlx-gen-anima and mlx-gen-chroma push exactly this rung-1 edge when
+  // the load is streamable, while mlx-gen-bernini deliberately pushes none — applied uniformly
+  // because the survey carries no per-(family, backend) record of those edges to apply it from. The
+  // proxy is inert on today's catalog: removing both call sites regenerates a byte-identical
+  // artifact. This test pins the behaviour that exists; the survey's notes carry the divergence.
   const claimImplemented = async (group, entry) => {
     const survey = await surveyFixture();
     const verdict = survey.families[group].backends.mlx;
@@ -1850,6 +1861,416 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
         cell.strategyParameters.transformerWindowSize === 1,
     ),
     "with the prerequisite present the same claim IS honoured — so the assertion above is not vacuous",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// sc-18664 — the corrected prerequisite note, and the families the matrix cannot carry.
+// ---------------------------------------------------------------------------
+
+const surveyRejects = async (mutate, pattern) => {
+  const survey = await surveyFixture();
+  mutate(survey);
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    pattern,
+  );
+};
+
+const h3 = (survey) => survey.outOfMatrixFamilies["17137"];
+
+test("the survey's notes state rung 4's real prerequisite and cannot restate the removed one", async () => {
+  const survey = await surveyFixture();
+  const notes = survey.notes.join("\n");
+
+  // The positive half. `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES` names exactly one edge at the pinned
+  // revision (gen-core memory_strategy.rs:290-293), and SC-15998 is the story that made it so.
+  assert.match(notes, /LoadShape::DeferredMaterialization/);
+  assert.match(notes, /SC-15998/);
+  assert.doesNotMatch(notes, /rung 4 requires rung 1/i);
+
+  // Each guard mutated on its own, so a green suite is evidence about every one of them rather than
+  // about the set. All four run through the real generator, which is what proves the reach.
+  await surveyRejects((mutated) => {
+    mutated.notes.push("Rung 4 requires rung 1 engaged in the same request.");
+  }, /restate the rung-1 prerequisite SC-15998 removed/);
+  await surveyRejects((mutated) => {
+    mutated.notes.push("The window additionally requires rung 1 engaged in the same request.");
+  }, /restate the rung-1 prerequisite SC-15998 removed/);
+  await surveyRejects((mutated) => {
+    mutated.notes = mutated.notes.map((note) =>
+      note.replaceAll("LoadShape::DeferredMaterialization", "a deferred load"),
+    );
+  }, /must name LoadShape::DeferredMaterialization/);
+  await surveyRejects((mutated) => {
+    mutated.notes = mutated.notes.map((note) => note.replaceAll("SC-15998", "an earlier story"));
+  }, /must name SC-15998/);
+});
+
+test("a provider's OWN rung-1 edge stays sayable per family — the ban is on the blanket claim", async () => {
+  // The scope of the guard is the point, not an accident. mlx-gen-anima pushes a
+  // `BoundedTransformerResidency -> StagedResidency (EngagedInSameRequest)` edge through
+  // `additional_prerequisites` when the load is streamable, so Anima's entry saying its window needs
+  // rung 1 in the same request is TRUE. A document-wide ban would have forced that correct verdict to
+  // be rewritten, which is precisely what sc-18664 was told not to do.
+  const survey = await surveyFixture();
+  const anima = survey.families["15524"].backends.mlx;
+  assert.match(anima.summary, /rung 1 engaged in the same request/);
+  await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+});
+
+test("MiniMax-H3 is surveyed per stack, and the family verdict is derived from those stacks", async () => {
+  const survey = await surveyFixture();
+  const record = h3(survey);
+  assert.deepEqual(record.catalogEntries, ["minimax_h3", "minimax_h3_ref"]);
+  assert.throws(() => familyGroup("minimax_h3"), /no family story/);
+
+  for (const backend of ["mlx", "candle"]) {
+    const verdict = record.backends[backend];
+    // `partial` is the honest answer and it is COMPUTED: three-plus separately-indexed windowable
+    // stacks needing a plan each, and a conv remainder that cannot be windowed at all.
+    assert.equal(verdict.structuralApplicability, "partial");
+    assert.equal(deriveOutOfMatrixApplicability(verdict.stacks), "partial");
+    assert.equal(verdict.implementation, "none");
+    assert.equal(verdict.requestPeak.finding, "unmeasured");
+    // The contract says Missing, not StructurallyNotApplicable, and the reason is the LOADER.
+    assert.equal(verdict.contractSupport, "missing");
+    assert.match(verdict.contractReason, /EagerMaterialization/);
+    assert.deepEqual(verdict.nonWindowableStacks, ["vae.encoder", "audio_vae.decode"]);
+    assert.ok(verdict.stacks.every((stack) => stack.reason));
+  }
+
+  const mlx = record.backends.mlx;
+  // The DiT trunk and the conditioning tower are separate stacks with separate answers, which is the
+  // whole reason a single family-level verdict would have been wrong in one direction or the other.
+  const byId = new Map(mlx.stacks.map((stack) => [stack.id, stack]));
+  assert.equal(byId.get("transformer.blocks").structuralApplicability, "full");
+  assert.equal(byId.get("text_encoder.language_model").structuralApplicability, "full");
+  assert.equal(byId.get("vae.decoder").structuralApplicability, "full");
+  assert.equal(byId.get("audio_vae.decode").windowable, false);
+  assert.ok(byId.get("vae.encoder").structural.length > 0);
+  // The candle crate ships no text encoder (sc-17156), so its stack list must not inherit one.
+  assert.ok(record.backends.candle.stacks.every((stack) => !stack.id.startsWith("text_encoder.")));
+
+  // The retraction rides the row rather than living only in a story comment.
+  assert.match(mlx.requestPeak.reason, /RETRACTED/);
+});
+
+test("the MiniMax-H3 record is validated on every generation, not merely stored", async () => {
+  // Each guard mutated ALONE. A record nothing reads is not a delivered record, so every one of
+  // these goes through `buildMatrix` — the same path `--check` and the pre-push hook take.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.structuralApplicability = "full";
+  }, /its stacks derive partial/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.nonWindowableStacks = ["vae.encoder"];
+  }, /nonWindowableStacks is/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.contractSupport = "structurally-not-applicable";
+  }, /StructurallyNotApplicable while this survey names a windowable stack/);
+  await surveyRejects((survey) => {
+    delete h3(survey).backends.mlx.contractReason;
+  }, /record contractSource and contractReason/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.implementation = "shared-primitive";
+  }, /while the contract does not declare rung 4 Implemented/);
+  await surveyRejects((survey) => {
+    const stack = h3(survey).backends.mlx.stacks.find((entry) => entry.id === "audio_vae.decode");
+    delete stack.structural;
+  }, /Structurally N\/A claim, which the epic accepts only with static provider evidence/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks.find((entry) => entry.id === "vae.encoder").windowable = true;
+  }, /contradicts structuralApplicability/);
+  await surveyRejects((survey) => {
+    delete h3(survey).backends.mlx.stacks[0].reason;
+  }, /a per-stack verdict without a stated reason is an assertion/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks[1].id = h3(survey).backends.mlx.stacks[0].id;
+  }, /ids must not repeat/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks = [];
+  }, /the family verdict is derived from per-stack verdicts/);
+  await surveyRejects((survey) => {
+    delete h3(survey).backends.mlx.evidence;
+  }, /must cite at least one source/);
+});
+
+test("every remaining out-of-matrix throw site is mutated on its own (sc-18664 review)", async () => {
+  // The rest of `parseOutOfMatrixRung4Families`. Split from the block above only for readability —
+  // the rule is the same and it is the whole point of the file: ONE mutation per throw site, so a
+  // green run is evidence about each guard rather than about the set. Every one of these went red
+  // on its own before this test was committed.
+
+  // The record has to say what it is a survey OF. An empty array, not a delete: `?.length` treats
+  // them alike, and the empty array is the mutation a careless edit actually produces.
+  await surveyRejects((survey) => {
+    h3(survey).catalogEntries = [];
+  }, /must name the catalog entries it is a survey OF/);
+
+  // The three verdict-level vocabularies, each alone. `RUNG4_APPLICABILITIES` /
+  // `RUNG4_IMPLEMENTATIONS` / `RUNG4_REQUEST_PEAKS` are the same frozen lists the `families`
+  // verdicts are held to, and an out-of-matrix record has to be held to them too or the two halves
+  // of the survey drift into different vocabularies.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.structuralApplicability = "mostly";
+  }, /\(mlx\): unknown structuralApplicability "mostly"/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.implementation = "partial";
+  }, /unknown implementation "partial"/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.requestPeak.finding = "probably-moves";
+  }, /unknown requestPeak finding "probably-moves"/);
+
+  // The stack-level vocabulary is a separate throw site from the verdict-level one, and the match
+  // is anchored on the `stacks[...]` prefix so this cannot pass by hitting the verdict-level guard.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks.find((entry) => entry.id === "vae.decoder").structuralApplicability =
+      "windowable-ish";
+  }, /stacks\["vae\.decoder"\]: unknown structuralApplicability "windowable-ish"/);
+
+  // `contractSupport` mirrors `gen_core::MemoryStrategySupport`, so its vocabulary is closed too.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.contractSupport = "not-yet";
+  }, /unknown contractSupport "not-yet"/);
+
+  // `contractSource` deleted INDEPENDENTLY of `contractReason`. The guard is `!(reason && source)`,
+  // so deleting only the reason (covered above) proves one conjunct and this proves the other.
+  await surveyRejects((survey) => {
+    delete h3(survey).backends.mlx.contractSource;
+  }, /record contractSource and contractReason/);
+
+  // The `implemented && derived === "none"` contradiction. Reachable, so it is tested rather than
+  // deleted — but only by driving the whole record to a consistent `none`, which is why it had no
+  // coverage: every stack unwindowable with its own structural evidence, the family verdict `none`
+  // to match the derivation, `nonWindowableStacks` naming all of them, and only THEN the contract
+  // claiming Implemented. Every earlier guard passes; this one is what catches it.
+  await surveyRejects((survey) => {
+    const verdict = h3(survey).backends.mlx;
+    verdict.stacks = verdict.stacks.map((stack) => ({
+      ...stack,
+      structuralApplicability: "none",
+      windowable: false,
+      structural: stack.structural ?? [{ source: "inference:fixture", reason: "fixture" }],
+    }));
+    verdict.structuralApplicability = "none";
+    verdict.nonWindowableStacks = verdict.stacks.map((stack) => stack.id);
+    verdict.contractSupport = "implemented";
+  }, /Implemented while this survey finds no windowable stack/);
+});
+
+test("an out-of-matrix record has to date the tree its evidence resolves in (sc-18664 review)", async () => {
+  // The record cites crates the matrix's own pin does not contain, so `generatedFrom.
+  // inferenceRevision` does not date it and something on the record has to.
+  const survey = await surveyFixture();
+  const cargo = await readFile(new URL("../Cargo.toml", import.meta.url), "utf8");
+  const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
+  assert.equal(pin, "014134e3035ad7e4eca5c2ed7bded2375dc3c071");
+
+  for (const backend of ["mlx", "candle"]) {
+    const revision = h3(survey).backends[backend].contractRevision;
+    assert.equal(revision, "79f02e6d0eaca861a0698ee490b70daa7441e321");
+    // The field earns its place only because it DIFFERS from the pin. Asserting a value that
+    // happened to equal the pin would be a green that proves nothing.
+    assert.notEqual(revision, pin);
+  }
+  // And the divergence is stated in prose too, not left for a reader to infer from two shas.
+  assert.match(h3(survey).whyOutOfMatrix, /79f02e6d0eaca861a0698ee490b70daa7441e321/);
+
+  // Each guard mutated alone.
+  await surveyRejects((mutated) => {
+    delete h3(mutated).backends.mlx.contractRevision;
+  }, /contractRevision must name the inference revision/);
+  await surveyRejects((mutated) => {
+    h3(mutated).backends.candle.contractRevision = "main";
+  }, /contractRevision must name the inference revision/);
+  await surveyRejects((mutated) => {
+    // Too short to identify a commit unambiguously — a 7-character abbreviation is not provenance.
+    h3(mutated).backends.mlx.contractRevision = "79f02e6";
+  }, /at least 9 hex characters/);
+});
+
+test("the out-of-matrix record self-invalidates the day the matrix learns the family", async () => {
+  // The guard that keeps this section from becoming a museum. It is keyed by epic id precisely
+  // because `familyGroup` has no answer for a video entry; if it ever gains one, the record has to
+  // move into `families`, where the coverage fence can see it.
+  await surveyRejects((survey) => {
+    h3(survey).catalogEntries = ["sdxl"];
+  }, /familyGroup now resolves sdxl to family SC-15525/);
+  await surveyRejects((survey) => {
+    survey.outOfMatrixFamilies["15525"] = h3(survey);
+  }, /is also a `families` key/);
+
+  // And the reason it cannot simply live in `families` today: the coverage fence runs survey ->
+  // catalog too, so a video family placed there fails generation outright rather than sitting inert.
+  await surveyRejects((survey) => {
+    delete survey.outOfMatrixFamilies["17137"];
+    survey.families["17137"] = {
+      name: "MiniMax-H3",
+      backends: {
+        mlx: {
+          structuralApplicability: "partial",
+          implementation: "none",
+          requestPeak: { finding: "unmeasured" },
+          evidence: [{ source: "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs" }],
+        },
+      },
+    };
+  }, /the catalog advertises no mlx entry in that family/);
+});
+
+test("deriveOutOfMatrixApplicability restates the survey's vocabulary for unconditionally resident stacks", () => {
+  const stack = (structuralApplicability) => ({ structuralApplicability });
+  assert.equal(deriveOutOfMatrixApplicability([stack("full")]), "full");
+  // Two separately-indexed stacks need a plan each, which is `partial` by the vocabulary's first
+  // clause even though both are individually uniform.
+  assert.equal(deriveOutOfMatrixApplicability([stack("full"), stack("full")]), "partial");
+  // A remainder that cannot be windowed is `partial` by its third clause.
+  assert.equal(deriveOutOfMatrixApplicability([stack("full"), stack("none")]), "partial");
+  assert.equal(deriveOutOfMatrixApplicability([stack("partial")]), "partial");
+  assert.equal(deriveOutOfMatrixApplicability([stack("none"), stack("none")]), "none");
+});
+
+test("the derivation reproduces 38 of the 40 `families` verdicts, and route scoping is the exception", async () => {
+  // sc-18664 review. The claim used to be that this function is simply the survey's vocabulary
+  // restated. It is not quite, so the gap is measured here rather than asserted away. Applying the
+  // derivation to every verdict `families` already carries — `blockStacks[].windowable` mapped onto
+  // the applicability vocabulary — reproduces all but Qwen-Image's two.
+  const survey = await surveyFixture();
+  const disagreements = [];
+  let verdicts = 0;
+  for (const [group, family] of Object.entries(survey.families)) {
+    for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
+      verdicts += 1;
+      const stacks = (verdict.blockStacks ?? []).map((entry) => ({
+        structuralApplicability: entry.windowable ? "full" : "none",
+        routeScoped: (entry.entries ?? []).length > 0,
+      }));
+      assert.ok(stacks.length, `SC-${group} ${backend} carries no blockStacks to derive from`);
+      const derived = deriveOutOfMatrixApplicability(stacks);
+      if (derived !== verdict.structuralApplicability) {
+        disagreements.push({ group, backend, derived, recorded: verdict.structuralApplicability, stacks });
+      }
+    }
+  }
+  assert.equal(verdicts, 40);
+  assert.equal(verdicts - disagreements.length, 38);
+
+  // And the two are the SAME family on both backends, disagreeing for the SAME reason: the second
+  // stack is control-route-only, so it is not resident on the routes the `full` verdict covers, and
+  // this function has no route axis to see that with.
+  assert.deepEqual(
+    disagreements.map((entry) => `${entry.group}:${entry.backend}`).sort(),
+    ["15511:candle", "15511:mlx"],
+  );
+  for (const entry of disagreements) {
+    assert.equal(entry.recorded, "full");
+    assert.equal(entry.derived, "partial");
+    assert.equal(entry.stacks.filter((stack) => stack.routeScoped).length, 1);
+  }
+  for (const backend of ["mlx", "candle"]) {
+    assert.deepEqual(survey.families["15511"].backends[backend].blockStacks[1].entries, [
+      "qwen_image_control",
+    ]);
+  }
+
+  // Why route scoping is not added rather than merely undone: no out-of-matrix record needs it.
+  // MiniMax-H3 has a route-conditional stack of its own — `text_encoder.vision_tower`, the `fl2va`
+  // keyframe path only — and drops out to the same answer with it removed, because its conv
+  // remainder and its several separately-indexed denoise stacks each force `partial` unaided.
+  const mlx = h3(survey).backends.mlx;
+  const vision = mlx.stacks.find((stack) => stack.id === "text_encoder.vision_tower");
+  assert.match(vision.blocks, /`fl2va` keyframe path only/);
+  assert.equal(deriveOutOfMatrixApplicability(mlx.stacks), "partial");
+  assert.equal(
+    deriveOutOfMatrixApplicability(mlx.stacks.filter((stack) => stack !== vision)),
+    "partial",
+  );
+});
+
+test("the ban on the removed rung-1 claim reaches the generator's OWN prose, not just the notes", async () => {
+  // sc-18664 review. The corrected sentence survived ~500 lines below the guard that bans it, in
+  // the `stagedResidencyIsAvailable` docstring — the site a reader of the gate itself lands on.
+  // Banning a sentence in the data file while it lives on in the file the guard is written in is
+  // the "one half of a pair moved" defect, so the generator's own source is now scanned too.
+  const source = await readFile(new URL("./generate-memory-matrix.mjs", import.meta.url), "utf8");
+  assertGeneratorSourceDoesNotRestateTheRemovedEdge(source);
+  // The corrected docstring says what the note says: a proxy for a provider-appended edge, not the
+  // contract rule, with the contract's actual sole prerequisite named.
+  assert.match(source, /BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES` is\n \* `&\[MemoryStrategyPrerequisite::LoadShape\(LoadShape::DeferredMaterialization\)\]`/);
+  assert.match(source, /additional_prerequisites/);
+
+  // The exact text the review found, verbatim from the pre-correction docstring and wrapped across
+  // two comment lines exactly as it was.
+  const RESTORED = [
+    " * Whether this entry advertises rung 1 on this backend. Rung 4 requires rung 1 engaged in the same",
+    " * request (`gen_core::memory_strategy`'s `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`), so the rung-4 arm",
+    " * below reads the prerequisite from the SAME predicate the rung-1 arm uses.",
+  ].join("\n");
+  assert.throws(
+    () => assertGeneratorSourceDoesNotRestateTheRemovedEdge(`/**\n${RESTORED}\n */\n`),
+    /restates the rung-1 prerequisite SC-15998 removed/,
+  );
+
+  // Each pattern in the shared set proven on its own, so a green run is evidence about both rather
+  // than about the set.
+  assert.throws(
+    () => assertGeneratorSourceDoesNotRestateTheRemovedEdge("// rung 4 requires rung 1.\n"),
+    /rung 4 requires rung 1/,
+  );
+  assert.throws(
+    () =>
+      assertGeneratorSourceDoesNotRestateTheRemovedEdge(
+        "// The window also requires rung 1 engaged in the same request.\n",
+      ),
+    /requires rung 1 engaged in the same request/,
+  );
+
+  // The flattening, proven on its OWN. The fixture above does not prove it: its first line carries
+  // `Rung 4 requires rung 1` whole, so the shorter pattern catches it line-oriented and the guard
+  // stays green with the flattening deleted — which is what a mutation run of this file showed.
+  // This fixture trips ONLY the long pattern and only once comment continuations are joined, so it
+  // is the one that goes green if the flattening is removed. It is also the real defect's shape:
+  // the surviving docstring wrapped between `same` and `request`, which is exactly why a
+  // line-oriented grep of the generator reported no match at all.
+  const WRAPPED_ONLY = "/**\n * The window additionally requires rung 1 engaged in the same\n * request, per this provider's own edge.\n */\n";
+  assert.doesNotMatch(WRAPPED_ONLY, /rung 4 requires rung 1/i, "must not trip the short pattern");
+  assert.doesNotMatch(
+    WRAPPED_ONLY,
+    /requires rung 1 engaged in the same request/i,
+    "and must be invisible to a line-oriented scan before flattening",
+  );
+  assert.throws(
+    () => assertGeneratorSourceDoesNotRestateTheRemovedEdge(WRAPPED_ONLY),
+    /requires rung 1 engaged in the same request/,
+  );
+
+  // The excision that lets the file scan itself fails CLOSED. Rename the pattern constant and the
+  // literals stop being excised, so the guard throws instead of going quietly green — the failure
+  // direction that matters for a self-scanning gate.
+  assert.throws(
+    () =>
+      assertGeneratorSourceDoesNotRestateTheRemovedEdge(
+        source.replace(
+          "export const STALE_RUNG1_PREREQUISITE_PATTERNS = Object.freeze([",
+          "export const RENAMED_PATTERNS = Object.freeze([",
+        ),
+      ),
+    /restates the rung-1 prerequisite SC-15998 removed/,
+  );
+
+  // Reach. `parseRung4Survey` is what `buildMatrix` calls on every generation — every other survey
+  // mutation in this file proves that edge — so wiring the source scan into it is what puts the
+  // generator's prose behind `--check` and the pre-push hook. Injecting the source proves the call
+  // happens without touching the real file.
+  const survey = await readFile(SURVEY_URL, "utf8");
+  parseRung4Survey(survey, { familyGroups: familyGroup, generatorSource: source });
+  assert.throws(
+    () =>
+      parseRung4Survey(survey, {
+        familyGroups: familyGroup,
+        generatorSource: `${source}\n// rung 4 requires rung 1.\n`,
+      }),
+    /restates the rung-1 prerequisite SC-15998 removed/,
   );
 });
 
