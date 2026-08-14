@@ -53,6 +53,46 @@ describe("modelEligibility predicates", () => {
     expect(videoModelUsable({ type: "video", capabilities: ["animate_character"] }, caps)).toBe(true);
     expect(videoModelUsable({ type: "video", capabilities: [] }, caps)).toBe(false);
     expect(videoModelUsable({ type: "image", capabilities: ["text_to_video"] }, caps)).toBe(false);
+    const eros = { type: "video", macOnly: true, capabilities: ["text_to_video"] };
+    expect(videoModelUsable(eros, { ...caps, platform: "macos" })).toBe(true);
+    expect(videoModelUsable(eros, { ...caps, platform: "windows" })).toBe(false);
+    expect(videoModelUsable(eros, { ...caps, platform: "linux" })).toBe(false);
+    expect(videoModelUsable(eros, { ...caps, platform: "" })).toBe(false);
+  });
+
+  it("SC-18902 withdraws Eros from off-Mac pickers and offers without hiding base LTX", () => {
+    const windows = { ...caps, platform: "windows" };
+    const base = {
+      id: "ltx_2_3",
+      type: "video",
+      capabilities: ["text_to_video"],
+      installState: "installed",
+      downloadable: true,
+    };
+    const eros = {
+      id: "ltx_2_3_eros",
+      type: "video",
+      macOnly: true,
+      capabilities: ["text_to_video"],
+      installState: "missing",
+      downloadable: false,
+      usable: false,
+      recommended: true,
+    };
+    expect(generationModelsForType([base, eros], "video").map((model) => model.id)).toEqual(["ltx_2_3"]);
+    expect(downloadOffersFor([eros], videoModelUsable, windows)).toEqual([]);
+    expect(videoModelUsable(base, windows)).toBe(true);
+
+    const unknownFallback = fallbackModels.filter((model) =>
+      videoModelUsable(model, { ...caps, platform: "" }),
+    );
+    expect(unknownFallback.some((model) => model.id === "ltx_2_3_eros")).toBe(false);
+    expect(unknownFallback.some((model) => model.id === "ltx_2_3")).toBe(true);
+
+    const macEros = { ...eros, installState: "missing", downloadable: true, usable: true };
+    expect(downloadOffersFor([macEros], videoModelUsable, { ...caps, platform: "macos" }).map((model) => model.id)).toEqual([
+      "ltx_2_3_eros",
+    ]);
   });
 
   it("documentModelUsable requires an interleave-capable image model", () => {
@@ -197,11 +237,13 @@ describe("modelEligibility predicates", () => {
     expect(supportedControlModes(null)).toEqual([]);
   });
 
-  it("downloadOffersFor prefers recommended, falls back to any eligible, skips installed", () => {
+  it("downloadOffersFor prefers recommended and skips installed or unavailable entries", () => {
     const models = [
       { id: "rec", type: "image", capabilities: ["text_to_image"], installState: "missing", recommended: true },
       { id: "plain", type: "image", capabilities: ["text_to_image"], installState: "missing" },
       { id: "done", type: "image", capabilities: ["text_to_image"], installState: "installed", recommended: true },
+      { id: "unusable", type: "image", capabilities: ["text_to_image"], installState: "missing", usable: false, recommended: true },
+      { id: "unavailable", type: "image", capabilities: ["text_to_image"], installState: "missing", downloadable: false, recommended: true },
     ];
     expect(downloadOffersFor(models, imageModelUsable, caps).map((m) => m.id)).toEqual(["rec"]);
     // No recommended among eligible → fall back to all eligible (not installed).

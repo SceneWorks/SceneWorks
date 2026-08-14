@@ -11058,6 +11058,10 @@
       "family": "ltx-video",
       "type": "video",
       "adapter": "ltx_video",
+      // SC-18902: the exact-head Windows/CUDA route produced unusable undistilled noise. Eros is
+      // available only through its validated MLX two-pass cond_safe recipe; base LTX-2.3 remains
+      // the cross-platform LTX choice.
+      "macOnly": true,
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
       "downloads": [
         {
@@ -11070,6 +11074,7 @@
           // transformer + bundled vae/audio_vae/vocoder), so it is a drop-in checkpoint.
           "files": ["10Eros_v1.3_bf16.safetensors"],
           "default": true,
+          "platforms": ["macos"],
           "estimatedSizeBytes": 46139885750
         },
         {
@@ -11083,7 +11088,11 @@
           // (auto-injected per-pass; see mlx.autoDistillLora), so it must download alongside the
           // 10Eros checkpoint rather than being a pick-one alternate.
           "coRequisite": true,
+          // This adapter is exclusive to Eros. If an old off-Mac Eros install is removed through
+          // its cleanup-only catalog tombstone, reclaim this repo alongside the primary checkpoint.
+          "cleanupWithModel": true,
           "files": ["ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 662072824
         }
       ],
@@ -11132,8 +11141,8 @@
         // 704 (= 64·11) 720p buckets apply (sc-12294).
         "resolutions": ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
         "requiresDimensionsMultipleOf": 64,
-        // Epic 7114 curated sampler menu (sc-7296): shares LTX's curated set (same engine id as
-        // base LTX-2.3 per backend). No scheduler axis.
+        // Epic 7114 curated sampler menu (sc-7296): shares base LTX's curated set on its MLX route.
+        // Eros has no Candle route after SC-18902 acceptance. No scheduler axis.
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
       "loraCompatibility": {

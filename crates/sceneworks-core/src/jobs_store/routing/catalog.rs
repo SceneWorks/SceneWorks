@@ -881,9 +881,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
 /// Legend for the [`VideoModelCaps::new`] positional args:
 /// `new(id, video_mlx_routed, candle_video_routed, candle_video_i2v, candle_video_vace)`.
 pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
-    // LTX-2.3 base + eros (sc-3035 MLX; sc-5097 / sc-5495 candle): txt2video on both backends.
+    // LTX-2.3 base (sc-3035 MLX; sc-5097 candle): txt2video on both backends.
     VideoModelCaps::new("ltx_2_3", true, true, false, false),
-    VideoModelCaps::new("ltx_2_3_eros", true, true, false, false),
+    // 10Eros remains MLX-only (sc-18902). Exact-head Candle/CUDA acceptance run 31766800005
+    // rendered the dense, undistilled checkpoint through the single-pass distilled engine at the
+    // shipped 8-step defaults and produced unresolved noise with no prompt subject. The required
+    // cond_safe distill LoRA is a two-pass MLX recipe and only 768/3,320 keys match Candle's adapter
+    // surface, so Candle must not claim this model until it has a complete validated recipe.
+    VideoModelCaps::new("ltx_2_3_eros", true, false, false, false),
     // Wan2.2 TI2V-5B (sc-3034 MLX; sc-5097 candle): txt2video + VACE advanced modes on candle.
     VideoModelCaps::new("wan_2_2", true, true, false, true),
     // Wan2.2 14B MoE (sc-5175): T2V-14B is text-only; I2V-14B is image→video ONLY (candle_video_i2v).
@@ -1706,7 +1711,6 @@ mod tests {
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
         "wan_2_2",
         "ltx_2_3",
-        "ltx_2_3_eros",
         "wan_2_2_t2v_14b",
         "wan_2_2_i2v_14b",
         "svd",

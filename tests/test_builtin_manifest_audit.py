@@ -717,6 +717,78 @@ def test_schema_accepts_mlx_sequential_offload_capability():
     ]
 
 
+def test_cleanup_with_model_is_boolean_and_requires_a_corequisite():
+    """SC-18902: only an explicitly exclusive co-requisite may follow a cleanup tombstone."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    download = {
+        "provider": "huggingface",
+        "repo": "namespace/exclusive-adapter",
+        "coRequisite": True,
+        "cleanupWithModel": True,
+    }
+    valid = _model_entry_with_download(download)
+    assert not list(validator.iter_errors({"schemaVersion": 1, "models": [valid]}))
+
+    without_corequisite = _model_entry_with_download(
+        {key: value for key, value in download.items() if key != "coRequisite"}
+    )
+    errors = list(
+        validator.iter_errors({"schemaVersion": 1, "models": [without_corequisite]})
+    )
+    assert any(
+        error.validator == "required"
+        and "coRequisite" in error.message
+        for error in errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in errors]
+
+    wrong_type = _model_entry_with_download({**download, "cleanupWithModel": "yes"})
+    errors = list(validator.iter_errors({"schemaVersion": 1, "models": [wrong_type]}))
+    assert any(
+        error.validator == "type"
+        and list(error.absolute_path)[-1:] == ["cleanupWithModel"]
+        for error in errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in errors]
+
+
+def _cleanup_with_model_ownership_errors(manifest: dict) -> list[str]:
+    owners_by_repo: dict[str, set[str]] = {}
+    cleanup_rows: list[tuple[str, str]] = []
+    for model in manifest["models"]:
+        for download in model.get("downloads", []):
+            repo = download.get("repo")
+            if repo:
+                owners_by_repo.setdefault(repo, set()).add(model["id"])
+            if download.get("cleanupWithModel") is True:
+                cleanup_rows.append((model["id"], repo))
+    return [
+        f"{model_id}:{repo} is referenced by {sorted(owners_by_repo.get(repo, set()))}"
+        for model_id, repo in cleanup_rows
+        if owners_by_repo.get(repo, set()) != {model_id}
+    ]
+
+
+def test_cleanup_with_model_repositories_are_exclusive_to_one_parent():
+    """Deleting a cleanup tombstone may recursively remove only a repo no sibling model uses."""
+    manifest = _load_builtin_models_manifest()
+    assert not _cleanup_with_model_ownership_errors(manifest)
+
+    mutated = copy.deepcopy(manifest)
+    eros = next(model for model in mutated["models"] if model["id"] == "ltx_2_3_eros")
+    exclusive = next(
+        download for download in eros["downloads"] if download.get("cleanupWithModel") is True
+    )
+    sibling = next(model for model in mutated["models"] if model["id"] == "ltx_2_3")
+    sibling["downloads"].append(
+        {
+            "provider": exclusive["provider"],
+            "repo": exclusive["repo"],
+            "files": exclusive.get("files", []),
+        }
+    )
+    errors = _cleanup_with_model_ownership_errors(mutated)
+    assert errors and "ltx_2_3" in errors[0] and "ltx_2_3_eros" in errors[0], errors
+
 def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
     """Static capabilities and exact provider contracts share one overlay vocabulary.
 

@@ -285,14 +285,18 @@ fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRout
 }
 
 /// The candle (Windows/CUDA/Linux) video engine a `run_video_generate_job` request routes to — the
-/// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). Every arm is gated on
-/// `settings.backend_candle_enabled`; when that is off (default) the resolver returns
-/// [`CandleVideoRoute::Stub`] so routing is unchanged until parity is accepted. Conditioning shapes
-/// never reach the candle lane — the router's `video_job_is_candle_eligible` confines it — so this is
-/// a narrow replace/animate/extend/txt2video ladder.
+/// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). The Eros terminal refusal precedes the
+/// backend flag so even a directly invoked legacy job cannot produce a stub; every supported arm is
+/// gated on `settings.backend_candle_enabled`, and returns [`CandleVideoRoute::Stub`] when disabled.
+/// Conditioning shapes never reach the candle lane — the router's `video_job_is_candle_eligible`
+/// confines it — so this is a narrow replace/animate/extend/txt2video ladder.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleVideoRoute {
+    /// `ltx_2_3_eros` is MLX-only after its undistilled Candle route failed exact-head CUDA
+    /// acceptance (sc-18902). Keep a worker-side terminal backstop for replayed/legacy jobs that
+    /// bypass the current scheduler refusal; they must never become procedural stub output.
+    UnsupportedEros,
     /// `replace_person` on a `scail2_*` model → candle SCAIL-2 replacement (sc-6837). Carries the id.
     ReplacePersonScail2(&'static str),
     /// `replace_person` on any other candle-VACE model → candle Wan-VACE replacement (sc-5494).
@@ -315,11 +319,30 @@ enum CandleVideoRoute {
     Stub,
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn reject_unsupported_candle_video_route(route: CandleVideoRoute) -> Result<(), WorkerError> {
+    match route {
+        CandleVideoRoute::UnsupportedEros => Err(WorkerError::InvalidPayload(
+            "LTX-2.3 10Eros is not supported on Candle/CUDA: its validated recipe requires the \
+             MLX two-pass cond_safe distill adapter, while the undistilled Candle route produced \
+             unusable noise in SC-18902 acceptance. Use an Apple Silicon MLX worker or select the \
+             base LTX-2.3 model."
+                .to_owned(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Run the candle video dispatch predicate ladder ONCE and return the [`CandleVideoRoute`]. Mirrors the
 /// historical inline ladder EXACTLY — same predicate order + `backend_candle_enabled` gating — so
 /// routing is byte-identical (sc-8828). Pure decision: no I/O, no generation.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> CandleVideoRoute {
+    // This precedes the backend gate and every mode arm deliberately. A replayed Eros job must fail
+    // even on a disabled Candle worker, never misroute to Wan-VACE or procedural stub output.
+    if request.model == "ltx_2_3_eros" {
+        return CandleVideoRoute::UnsupportedEros;
+    }
     if !settings.backend_candle_enabled {
         return CandleVideoRoute::Stub;
     }
@@ -738,8 +761,15 @@ pub(crate) async fn run_video_generate_job(
     // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (decoded, adapter, raw_settings, replacement_status) =
-        match resolve_candle_video_route(&request, settings) {
+    let (decoded, adapter, raw_settings, replacement_status) = {
+        let candle_route = resolve_candle_video_route(&request, settings);
+        reject_unsupported_candle_video_route(candle_route)?;
+        match candle_route {
+            // The rejection above is the execution backstop. Keep this arm unreachable so adding a
+            // new match site cannot accidentally turn the unsupported route into successful output.
+            CandleVideoRoute::UnsupportedEros => {
+                unreachable!("unsupported Eros route was rejected")
+            }
             // sc-6837 (epic 6563): SCAIL-2 is a distinct cross-identity replacement backend (NOT Wan-VACE)
             // behind the same person-track pipeline. A `scail2_14b` replace_person job routes to the candle
             // SCAIL-2 engine (the character reference + the tracked person's color masks, `replace_flag`),
@@ -867,7 +897,8 @@ pub(crate) async fn run_video_generate_job(
                 stub_raw_settings(&request),
                 None::<Value>,
             ),
-        };
+        }
+    };
     #[cfg(not(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")

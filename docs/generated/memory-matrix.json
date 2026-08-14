@@ -1,20 +1,20 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2ba55cbcf8ec4b91c018ef805eb229906789436160fe15796a24ae13f9177dec",
+    "sceneWorksRevision": "source-tree:1ef5a4312cb08c56b15a3c348ac0971d7f9d369450efd2bfbc063a8183e90549",
     "inferenceRevision": "b4a29108e1eaf873bae3aa85262cd0849c24b311",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "d8cbd7dcd724d2e1ec725bb31fe4d970030aaea8ea6274d67d10e7b34e2ed7c3"
+        "sha256": "43ae8ca19a6612b805a65b04fb37725a4ef769ef50b2399fceba69d3c913a9f4"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "2ff8bd2d0e53d0bde63459143642ff4bb6090c83637f09f49dc9eb1bf53a6582"
+        "sha256": "a7d591389a107e863b49ee38bd6f498aab3627affd846449ef769bdaeabda413"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "19e74d890937743be0cfae2dc334a1dced216ab6031296dc6d32dc45567ef78a"
+        "sha256": "a4ac0a48ab8d7d61068ae09c9d1d9e6a644fe0e8179cbace22949f5bb52e24e8"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -22,7 +22,7 @@
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "b57658a45f5bb586213f2f7e7903c2c0ac6c2485e55d73f5aa92187cf58f5657"
+        "sha256": "c722db91b5cf1c8e6ad81f2630f42f21bfb7da9c4fa2c45feae9c4f990bcc8bb"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
@@ -54,7 +54,7 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "e17383f43ab735be296e3abd1b7b963482371f187b486970b1b756243cdf1bdf"
+        "sha256": "092966f1e7fcf2bd07179283b2ad5902abf6e6466eb480e21473c5d696d2591a"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -86,7 +86,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "d9dcaa847740012b946eae49e88a8bd9f9185d41ba3d67409815b8da825fb92e"
+        "sha256": "7a03a1da862d619348e58aff77aae980d7b06aa4dcc5dac17b3bfccdf96d9842"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -160,12 +160,12 @@
       "image": 53,
       "video": 10
     },
-    "cells": 10880,
+    "cells": 10820,
     "publishedCells": 208,
-    "elidedCells": 10672,
+    "elidedCells": 10612,
     "elidedByState": {
       "Implemented/unverified": 3529,
-      "Missing": 7143
+      "Missing": 7083
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -2280,48 +2280,20 @@
       "family": "ltx-video",
       "resolvedRoute": "ltx_2_3",
       "resolvedRoutes": {
-        "mlx": "ltx_2_3",
-        "candle": "ltx_2_3_distilled"
+        "mlx": "ltx_2_3"
       },
       "routeKind": "video",
       "backends": [
-        "mlx",
-        "candle"
+        "mlx"
       ],
       "owningFamilyStories": {
-        "mlx": 18813,
-        "candle": 18813
+        "mlx": 18813
       },
       "owningModelStories": {
-        "mlx": null,
-        "candle": null
+        "mlx": null
       },
       "axes": {
         "mlx": {
-          "tiers": [
-            "default"
-          ],
-          "modes": [
-            "extend_clip",
-            "first_last_frame",
-            "image_to_video",
-            "replace_person",
-            "text_to_video",
-            "video_bridge"
-          ],
-          "overlays": [
-            "lora",
-            "none"
-          ],
-          "rungs": [
-            "resident",
-            "staged_residency",
-            "bounded_decode",
-            "bounded_attention",
-            "bounded_transformer_residency"
-          ]
-        },
-        "candle": {
           "tiers": [
             "default"
           ],
@@ -5873,8 +5845,8 @@
         "Rung 3 is PARTIAL, and partial for a stated reason rather than by rounding. Every attention role — self, text cross, cross-modal — goes through one `Attention::forward` (`transformer.rs:131-192`) onto `candle_gen::sdpa_budgeted_bhsd(..., ATTN_SCORES_BUDGET)` (`:169-177`), which chunks the QUERY rows (`candle-gen/src/attention.rs:207-239`). But the budget is a compile-time `1_000_000_000` (`attention.rs:92`) and the planner returns the whole `sq` when `b*h*sk*sq` fits (`crates/contracts/gen-core/src/attention_budget.rs:170-171`). With `TEXT_MAX_LENGTH = 256` (`config.rs:39`) and 32 video heads (`config.rs:97`), cross-attention to the fixed text context needs ~122k query rows before it splits — a single un-chunked pass for every geometry below the validated `MAX_LATENT_TOKENS = 131_072` ceiling (`config.rs:50`) bar its top ~7%. Video SELF-attention chunks from ~5,590 tokens, so it is engaged on every real clip. The crate says so itself (`transformer.rs:159-164`). It is an i32-overflow correctness guard (sc-9116) that happens to bound memory, not a tunable operating point: the budget is a constant with no request or env knob, and there is no `AttentionPlan` variant on this path.",
         "Rung 4 is absent: `block_window`, `BlockWindowBackend`, `run_windowed` and `BlockPlan` return zero hits across `crates/media/candle-gen/candle-gen-ltx/`. The AvDiT is loaded eagerly and wholly (`transformer.rs:591-597`) with no streamed loader analogous to `candle-gen-mage`'s, which does drive the shared primitive (`candle-gen-mage/src/transformer.rs:757-759`). The primitive is reachable; LTX simply does not call it.",
         "Overlays are COMPATIBLE here too, by the same mechanism as the MLX twin. `install_ltx_adapters` calls `push_additive_lora` (`adapters.rs:213-217`), which appends an `AdditiveResidual::Lora { a, b, scale }` to a `Vec` on the shared `LoraLinear` (`candle-gen/src/train/lora.rs:307-309`) and applies it AFTER the base matmul in the forward (`:439-445`), in the deferred two-matmul form that never materializes the `[out,in]` product (`:110-112`) and never dequantizes a packed base. The module doc states the base is left unchanged specifically to avoid materializing a 22B dense transformer to fold a small adapter (`adapters.rs:3-6`). So a re-materialized block could replay the same pushes.",
-        "On the DISTILLED LoRA specifically: there is no fold to undo on this path either, but for a different reason than the MLX twin — the auto-injected distill LoRA is NOT APPLIED on Candle at all, so for `ltx_2_3_eros` the compatibility question is moot here rather than answered. The worker's Candle video path resolves user adapters only (`crates/sceneworks-worker/src/video_jobs/candle.rs:957` -> `resolve_ltx_user_adapters`), whose doc states the exclusion deliberately: \"Candle has one distilled denoise pass, so this shared resolver deliberately excludes the MLX-only two-pass 10Eros distill recipe\" (`crates/sceneworks-worker/src/video_jobs/ltx.rs:705-707`); the injecting resolver is `#[cfg(target_os = \"macos\")]` (`ltx.rs:692`, `:753`). The engine agrees from its own side rather than folding: `adapters.rs:87-95` ERRORS on a multi-entry `pass_scales` with \"candle LTX-2.3 uses one distilled denoise pass\". Any user LoRA that does arrive is still a forward-time residual, so the compatibility answer for USER overlays is the same as MLX's. Adapter targeting is narrower here (`transformer_blocks.N.attn{1,2}.{to_q,to_k,to_v,to_out.0}` only, `adapters.rs:49-60`) — audio and cross-modal projections are deliberately frozen.",
-        "Recorded as an open question this survey found but does not own: `VIDEO_MODEL_CAPS` routes `ltx_2_3_eros` on Candle (`crates/sceneworks-core/src/jobs_store/routing/catalog.rs:886`), its base checkpoint is documented as NOT pre-distilled (`crates/sceneworks-worker/src/video_jobs/ltx.rs:740-742`), and the Candle path injects no distill LoRA — so that route appears to render an un-distilled base. Whether it actually degrades cannot be settled from source; it needs a CUDA render. sc-18902 tracks it. It matters to this survey only because it decides which entries a future Candle rung-4 implementation claim could honestly cover."
+        "On the DISTILLED LoRA specifically: there is no fold to undo on this backend because `ltx_2_3_eros` no longer routes to Candle (sc-18902). Exact-head CUDA baseline run 31766800005 proved that sending its undistilled dense checkpoint through Candle's single distilled denoise pass produces unresolved noise with no prompt subject. The published cond_safe recipe cannot be transferred honestly: it is two-pass on MLX and only 768/3,320 keys match Candle's narrower adapter surface (`transformer_blocks.N.attn{1,2}.{to_q,to_k,to_v,to_out.0}` only, `adapters.rs:49-60`). Base LTX and its user LoRAs remain compatible with the Candle forward-time residual mechanism described above.",
+        "SC-18902 closed the survey's former open question with exact-head runtime evidence: run 31766800005 completed the 153-frame Candle/CUDA render at the shipped 768x512, 6 s, 25 fps, 8-step defaults, and artifact 9207109616 showed severe unresolved noise, no identifiable fox, and no coherent subject motion in the native renderer and product mux. `VIDEO_MODEL_CAPS` now keeps `ltx_2_3_eros` MLX-only and `candle_video_engine_id` returns no Eros provider. A future Candle rung-4 claim therefore covers base `ltx_2_3`, not Eros, unless a complete Candle-native distill recipe is separately implemented and CUDA-validated."
       ]
     },
     {
@@ -10162,66 +10134,6 @@
       "implemented": 12,
       "states": {
         "Implemented/unverified": 12
-      }
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "backend": "candle",
-      "rung": "bounded_attention",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
-      }
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "backend": "candle",
-      "rung": "bounded_decode",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
-      }
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "backend": "candle",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
-      }
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "backend": "candle",
-      "rung": "resident",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
-      }
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "backend": "candle",
-      "rung": "staged_residency",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
       }
     },
     {

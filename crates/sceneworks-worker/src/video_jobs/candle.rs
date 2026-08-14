@@ -57,12 +57,6 @@ const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
 const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_REPO: &str = "SceneWorks/ltx-2.3-mlx";
-// The `ltx_2_3_eros` weights repo (sc-5495): a full dense LTX-2.3 fine-tune (the candle provider
-// loads its bf16 single-file checkpoint like the base; same architecture, same Gemma encoder).
-// The pinned checkpoint version is manifest-driven (`downloads[].files` / `mlx.convertSourceFile`),
-// so only that one file is fetched even though the repo also ships older + fp8 variants.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_LTX_EROS_REPO: &str = "TenStrip/LTX2.3-10Eros";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
@@ -81,17 +75,17 @@ const CANDLE_WAN_VACE_REPO: &str = "Wan-AI/Wan2.1-VACE-14B-diffusers";
 /// does not serve. Note ltx maps to `ltx_2_3_distilled` (the candle provider's id), not the MLX
 /// `ltx_2_3`. Covers the base txt2video ids (5B + ltx) plus the Wan2.2 **14B** dual-expert MoE pair
 /// (sc-5174 / sc-5175): `wan_2_2_t2v_14b` (text→video) and `wan_2_2_i2v_14b` (image→video), plus `svd`
-/// (image→video, sc-5493 / epic 5481). `ltx_2_3_eros` (sc-5495) maps to the same `ltx_2_3_distilled`
-/// engine as the base — it's a full dense LTX-2.3 fine-tune — differing only in the weights repo.
+/// (image→video, sc-5493 / epic 5481). `ltx_2_3_eros` is deliberately absent (sc-18902): exact-head
+/// Candle/CUDA acceptance run 31766800005 produced unresolved noise with no prompt subject. Its
+/// required two-pass cond_safe distill LoRA does not fit Candle's single-pass adapter surface, so the
+/// worker must not silently run the undistilled dense checkpoint through this distilled engine.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "wan_2_2" => Some("wan2_2_ti2v_5b"),
         "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
         "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
-        // Base + eros both load the one candle LTX-2.3 engine (the eros merge is a full dense LTX-2.3
-        // checkpoint, sc-5495); they differ only in the weights repo (see `candle_video_repo`).
-        "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled"),
+        "ltx_2_3" => Some("ltx_2_3_distilled"),
         // SVD-XT image→video (sc-5493 / epic 5481): the candle-gen-svd provider's `svd_xt` engine.
         "svd" => Some("svd_xt"),
         // Mochi 1 (epic 1788 / sc-11992). The sceneworks id IS the engine id: `candle-gen-mochi`
@@ -152,7 +146,7 @@ pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
 /// The candle weights repo for a video engine: the manifest `repo` wins, else — for the Wan
 /// quant-matrix models whose per-tier candle repos live in `downloads[]` with no top-level `repo`
 /// (`SceneWorks/wan2.2-*-candle`, sc-10027) — the platform-appropriate candle tier repo matching the
-/// requested tier (default q4), else `ltx_2_3_eros`'s own fine-tune repo, else the candle default repo.
+/// requested tier (default q4), else the candle default repo.
 ///
 /// Without the `downloads[]` resolution the Windows/Linux Wan-14B lane fell back to the DENSE
 /// `Wan-AI/*-Diffusers` default — a different (bf16, ~72 GB) repo that the packed-tier install never
@@ -171,11 +165,7 @@ pub(super) fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> Stri
     if let Some(repo) = candle_wan_tier_repo_from_downloads(request, engine_id) {
         return repo;
     }
-    if request.model == "ltx_2_3_eros" {
-        CANDLE_LTX_EROS_REPO.to_owned()
-    } else {
-        candle_video_default_repo(engine_id).to_owned()
-    }
+    candle_video_default_repo(engine_id).to_owned()
 }
 
 /// The candle Wan tier repo from the manifest `downloads[]` for THIS platform (sc-10539). The Wan
@@ -285,8 +275,9 @@ fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
 
 /// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. The checkpoint is
 /// already packed, so the returned load quant is deliberately `None`: `LoadSpec::quantize` means
-/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros remains
-/// on its dense standalone checkpoint, so the SceneWorks model id is part of the guard.
+/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros has no
+/// Candle route after SC-18902 acceptance, and the SceneWorks model-id guard prevents its dense
+/// standalone checkpoint from being mistaken for this base-LTX turnkey tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,

@@ -2036,7 +2036,7 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
 
     // The EXEMPT engines (sc-12344's recorded reason: their on-disk bytes are not their loaded set,
     // so a byte-derived floor would wall-reject working cards — see `vram_gate::wan_weight_components`).
-    for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
+    for model in ["ltx_2_3", "svd"] {
         let engine_id = candle_video_engine_id(model).expect("a candle video engine");
         assert_eq!(
             crate::vram_gate::wan_weight_bytes(engine_id, root),
@@ -2044,6 +2044,11 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
             "{model} → {engine_id} is exempt by decision; gating it on a dir sum would over-count"
         );
     }
+    assert_eq!(
+        candle_video_engine_id("ltx_2_3_eros"),
+        None,
+        "SC-18902 removed Eros from the Candle universe; it is not a fit-gate exemption"
+    );
 
     // Mochi rides its own frame-dependent gate (sc-12306), never this one.
     assert_eq!(
@@ -5385,7 +5390,8 @@ fn video_route_replace_person_dispatches_by_model() {
 fn candle_video_route_gates_on_backend_flag_then_mode() {
     let mut settings = Settings::from_env();
 
-    // Candle disabled (default) → always the stub, regardless of model/mode.
+    // Candle disabled (default) → supported models stub, but Eros remains a terminal refusal so a
+    // direct/replayed legacy job can never manufacture procedural success.
     settings.backend_candle_enabled = false;
     let scail2_replace = request(json!({
         "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
@@ -5394,10 +5400,40 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::Stub,
     );
+    let disabled_eros = request(json!({
+        "projectId": "p", "model": "ltx_2_3_eros", "mode": "text_to_video",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&disabled_eros, &settings),
+        CandleVideoRoute::UnsupportedEros,
+    );
 
     // Enabled: `replace_person` on the candle SCAIL-2 model → the SCAIL-2 replacement variant;
     // any other replace-capable model → candle Wan-VACE.
     settings.backend_candle_enabled = true;
+    // sc-18902: a replayed Eros job gets a terminal worker-side refusal before every mode arm. It
+    // must never fall through to procedural Stub output or borrow the Wan-VACE replace/extend lane.
+    for mode in ["text_to_video", "replace_person", "extend_clip"] {
+        let eros = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "mode": mode,
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&eros, &settings),
+            CandleVideoRoute::UnsupportedEros,
+            "Eros {mode} must fail loudly rather than reach a real or stub Candle route",
+        );
+    }
+    let error = reject_unsupported_candle_video_route(CandleVideoRoute::UnsupportedEros)
+        .expect_err("the execution seam must reject the unsupported Eros route");
+    match error {
+        WorkerError::InvalidPayload(message) => {
+            assert!(message.contains("not supported on Candle/CUDA"));
+            assert!(message.contains("Apple Silicon MLX"));
+            assert!(message.contains("base LTX-2.3"));
+        }
+        other => panic!("Eros rejection must remain a typed invalid-payload error, got {other:?}"),
+    }
+    assert!(reject_unsupported_candle_video_route(CandleVideoRoute::Stub).is_ok());
     assert_eq!(
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
@@ -11256,19 +11292,16 @@ mod candle_video_label_tests {
         assert_eq!(candle_video_engine_id("ltx_2_3"), Some("ltx_2_3_distilled"));
         // SVD maps to the candle `svd_xt` engine (sc-5493).
         assert_eq!(candle_video_engine_id("svd"), Some("svd_xt"));
-        // eros now shares the one candle LTX-2.3 engine with the base (sc-5495 wired the eros
-        // dense checkpoint through `ltx_2_3_distilled`; they differ only in `candle_video_repo`).
-        assert_eq!(
-            candle_video_engine_id("ltx_2_3_eros"),
-            Some("ltx_2_3_distilled")
-        );
-        assert!(is_candle_video_engine("ltx_2_3_eros"));
+        // sc-18902: exact-head Candle/CUDA acceptance rendered unresolved noise from Eros's
+        // undistilled dense checkpoint. Until Candle has a complete validated distill recipe it
+        // must not resolve an engine id or advertise this model.
+        assert_eq!(candle_video_engine_id("ltx_2_3_eros"), None);
+        assert!(!is_candle_video_engine("ltx_2_3_eros"));
         for model in [
             "wan_2_2",
             "wan_2_2_t2v_14b",
             "wan_2_2_i2v_14b",
             "ltx_2_3",
-            "ltx_2_3_eros",
             "svd",
         ] {
             assert!(is_candle_video_engine(model), "{model}");

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { SimpleModelManager } from "./SimpleModelManager.jsx";
 import { SimpleUiContext } from "./SimpleUiContext.js";
-import { mountRoot, unmountRoot } from "../testUtils/dom.js";
+import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { MEMORY_HEADROOM_FRACTION, tierFits } from "../tierSuggestion.js";
 
 // sc-15400: the Simple Model Manager row showed `needs ${mlx.minMemoryGb} GB` unconditionally. That
@@ -168,6 +168,60 @@ describe("SimpleModelManager memory label", () => {
     await render(root, { models: [zImage()] });
     expect(metaText(container)).toEqual(["from 22 GB"]);
     expect(container.textContent).not.toContain("48 GB");
+  });
+
+  it("opens cleanup-only complete and partial tombstones in Manage, never Download", async () => {
+    const createModelDownloadJob = vi.fn(async () => ({ id: "must-not-run" }));
+    for (const [installState, cacheState] of [
+      ["installed", "complete"],
+      ["missing", "incomplete"],
+    ]) {
+      await render(root, {
+        createModelDownloadJob,
+        models: [{
+          id: "ltx_2_3_eros",
+          name: "LTX-2.3 10Eros",
+          type: "video",
+          installState,
+          cacheState,
+          platformCleanupOnly: true,
+          downloadable: false,
+          removable: true,
+        }],
+      });
+      const videoTab = [...container.querySelectorAll('[role="tab"]')]
+        .find((button) => button.textContent.includes("Video"));
+      await click(videoTab);
+      const action = container.querySelector(".su-row-action");
+      expect(action?.textContent).toBe("Manage");
+      expect(container.textContent).not.toContain("Download");
+      await click(action);
+      expect(simpleUi.openInAdvanced).toHaveBeenLastCalledWith("Models");
+      expect(createModelDownloadJob).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps an ordinary missing-but-removable model downloadable", async () => {
+    const createModelDownloadJob = vi.fn(async () => ({ id: "download-job" }));
+    await render(root, {
+      createModelDownloadJob,
+      models: [{
+        id: "ordinary_video",
+        name: "Ordinary Video",
+        type: "video",
+        installState: "missing",
+        removable: true,
+        downloadable: true,
+      }],
+    });
+    const videoTab = [...container.querySelectorAll('[role="tab"]')]
+      .find((button) => button.textContent.includes("Video"));
+    await click(videoTab);
+    const action = container.querySelector(".su-row-action");
+    expect(action?.textContent).toBe("Download");
+    await click(action);
+    expect(createModelDownloadJob).toHaveBeenCalledOnce();
+    expect(simpleUi.openInAdvanced).not.toHaveBeenCalled();
   });
 
   // THE BLOCKER-1 GUARD. Tied to `tierFits` — the app's own fit criterion — rather than to the string

@@ -2418,7 +2418,8 @@ test("a verdict may run ahead of the model universe, but no further than the rou
     routedLanes({ routingCatalog, routingCandle, routingMlx }),
   );
 
-  // `VIDEO_MODEL_CAPS` routes both LTX entries on both lanes, so both verdicts are inside the fence.
+  // The LTX family remains routed on both lanes through base `ltx_2_3`; Eros contributes only MLX.
+  // Family-level survey verdicts are therefore still inside both real routing fences.
   assert.ok(routed.has("ltx-video:mlx"));
   assert.ok(routed.has("ltx-video:candle"));
   // A lane the catalog does not route is NOT.
@@ -3793,6 +3794,12 @@ test("video providers are per BACKEND, derived from the worker's own route resol
   const matrix = await buildMatrix({ publish: false });
   const ltx = matrix.models.find((model) => model.id === "ltx_2_3");
   assert.deepEqual(ltx.resolvedRoutes, { mlx: "ltx_2_3", candle: "ltx_2_3_distilled" });
+  const eros = matrix.models.find((model) => model.id === "ltx_2_3_eros");
+  assert.deepEqual(
+    eros.resolvedRoutes,
+    { mlx: "ltx_2_3" },
+    "sc-18902: Eros keeps its validated MLX recipe and must not regain the failed Candle route",
+  );
   const providers = new Set(
     matrix.cells
       .filter((cell) => cell.modelId === "ltx_2_3")
@@ -3925,8 +3932,8 @@ test("a routed backend with no *_engine_id arm fails HERE, naming the resolver (
   // arm must point at `candle_video_engine_id` instead.
   const candle = await readFile(new URL(`../${SOURCE_PATHS.videoRouteCandle}`, import.meta.url), "utf8");
   const withoutCandleArm = candle.replace(
-    '"ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled")',
-    '"ltx_2_3_eros" => Some("ltx_2_3_distilled")',
+    '"ltx_2_3" => Some("ltx_2_3_distilled")',
+    '"ltx_2_3_missing" => Some("ltx_2_3_distilled")',
   );
   assert.notEqual(withoutCandleArm, candle, "the mutation must actually change candle.rs");
   await assert.rejects(

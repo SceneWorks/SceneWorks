@@ -1914,13 +1914,13 @@ test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T
   assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
 });
 
-// SC-18902. Source inspection cannot decide whether the current Eros Candle route is acceptable:
-// the decision starts with a real Windows/CUDA baseline artifact. The published cond_safe LoRA is
-// not a valid candidate for the current Candle adapter surface (3,320 source keys versus 768
-// accepted keys), so this pins a product-neutral baseline only. The mutation loop is load-bearing:
+// SC-18902 historical acceptance evidence. The real Windows/CUDA baseline proved the former Eros
+// Candle route unusable. The published cond_safe LoRA was not a valid candidate for Candle's adapter
+// surface (3,320 source keys versus 768 accepted keys), so the retained harness pins the exact
+// rejected baseline rather than pretending a partial adapter is usable. The mutation loop is load-bearing:
 // each historically plausible drift is injected into an in-memory copy and must make this same
 // validator fail, proving the positive assertions are sensitive rather than decorative.
-test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct", async () => {
+test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines distinct", async () => {
   const documents = {
     manifestText: await source("config/manifests/builtin.models.jsonc"),
     workflow: await source(".github/workflows/windows-candle.yml"),
