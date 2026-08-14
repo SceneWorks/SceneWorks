@@ -233,6 +233,7 @@ async fn generate_krea_edit_stream(
         request,
         settings,
     )?;
+    let spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
     // applied to the edit lane's POSITIVE grounded context by the engine (inference sc-12009).
     let text_style_gain = resolve_text_style_gain(request);

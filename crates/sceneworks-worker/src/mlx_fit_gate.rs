@@ -5465,6 +5465,7 @@ mod tests {
                 backend: "mlx",
                 modality: gen_core::Modality::Image,
                 capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
                 denoiser_output_latent_space: None,
                 required_components: &[],
                 control_kinds: None,
@@ -6051,6 +6052,7 @@ mod tests {
                 backend: "mlx",
                 modality: gen_core::Modality::Image,
                 capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
                 denoiser_output_latent_space: None,
                 required_components: &[],
                 control_kinds: None,
@@ -6703,7 +6705,15 @@ mod tests {
     #[test]
     fn shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission() {
         fn fixture_spec(root: &std::path::Path, policy: OffloadPolicy) -> LoadSpec {
-            for component in ["text_encoder", "transformer", "vae"] {
+            let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
+                .expect("Krea owns an encoder contract");
+            gen_core_testkit::write_encoder_contract_fixture_with_quant(
+                &root.join("text_encoder"),
+                contract,
+                Some(4),
+            )
+            .expect("registry-owned Krea encoder fixture");
+            for component in ["transformer", "vae"] {
                 let directory = root.join(component);
                 std::fs::create_dir_all(&directory).unwrap();
                 let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
@@ -6712,13 +6722,11 @@ mod tests {
                 bytes.extend_from_slice(&0_f32.to_le_bytes());
                 std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
             }
-            for component in ["text_encoder", "transformer"] {
-                std::fs::write(
-                    root.join(component).join("config.json"),
-                    r#"{"quantization":{"bits":4,"group_size":64}}"#,
-                )
-                .unwrap();
-            }
+            std::fs::write(
+                root.join("transformer").join("config.json"),
+                r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )
+            .unwrap();
             LoadSpec::new(WeightsSource::Dir(root.to_owned()))
                 .with_quant(gen_core::Quant::Q4)
                 .with_offload_policy(policy)
@@ -6749,6 +6757,7 @@ mod tests {
                     backend: "mlx",
                     modality: gen_core::Modality::Image,
                     capabilities: gen_core::Capabilities::default(),
+                    encoder_contract: None,
                     denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
@@ -6898,6 +6907,7 @@ mod tests {
                     backend: "mlx",
                     modality: gen_core::Modality::Image,
                     capabilities: gen_core::Capabilities::default(),
+                    encoder_contract: None,
                     denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
@@ -9012,6 +9022,85 @@ mod tests {
             .expect("sparse fixture size");
     }
 
+    /// Build the exact FLUX.2 encoder/config/tokenizer admission surface used by the source-bound
+    /// audit without loading a tensor. Klein's Qwen3 stays dense across every DiT tier; Dev follows
+    /// the selected tier and its base route also retains the builtin Pixtral vision surface.
+    #[cfg(target_os = "macos")]
+    fn write_audited_flux2_encoder_fixture(
+        snapshot_root: &Path,
+        provider_id: &str,
+        tier: &str,
+    ) -> Result<Option<u64>, String> {
+        let (quant_bits, include_multimodal) = match provider_id {
+            "flux2_klein_9b" | "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit" => (None, false),
+            "flux2_dev" | "flux2_dev_edit" => (
+                match tier {
+                    "q4" => Some(4),
+                    "q8" => Some(8),
+                    "bf16" => None,
+                    other => return Err(format!("unsupported audited FLUX.2 tier {other}")),
+                },
+                true,
+            ),
+            "flux2_dev_control" => (
+                match tier {
+                    "q4" => Some(4),
+                    "q8" => Some(8),
+                    "bf16" => None,
+                    other => return Err(format!("unsupported audited FLUX.2 tier {other}")),
+                },
+                false,
+            ),
+            _ => return Ok(None),
+        };
+        let contract = crate::inference_runtime::media_encoder_contract(provider_id)
+            .ok_or_else(|| format!("{provider_id} owns an encoder contract"))?;
+        let encoder_root = snapshot_root.join("text_encoder");
+        let result = if include_multimodal {
+            gen_core_testkit::write_multimodal_encoder_contract_fixture_with_quant(
+                &encoder_root,
+                contract,
+                runtime_macos::providers::flux2::config::DEV_VISION_ENCODER_CONTRACT,
+                quant_bits,
+            )
+        } else {
+            gen_core_testkit::write_encoder_contract_fixture_with_quant(
+                &encoder_root,
+                contract,
+                quant_bits,
+            )
+        };
+        result.map_err(|error| {
+            format!("write registry-owned {provider_id} {tier} encoder fixture: {error}")
+        })?;
+        if include_multimodal {
+            if let Some(bits) = quant_bits {
+                // Mistral3 stores the language model under `text_config`, but selected-encoder
+                // admission deliberately accepts packing evidence only from the authoritative
+                // root marker. Keep both views aligned, as converted Dev snapshots do.
+                let config_path = encoder_root.join("config.json");
+                let mut config: Value = serde_json::from_slice(
+                    &std::fs::read(&config_path).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+                let group_size = contract
+                    .packing
+                    .ok_or_else(|| {
+                        format!("{provider_id} packed fixture has no encoder packing contract")
+                    })?
+                    .group_size;
+                config["quantization"] =
+                    serde_json::json!({"bits": bits, "group_size": group_size});
+                std::fs::write(
+                    config_path,
+                    serde_json::to_vec(&config).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(Some(sum_safetensors_bytes(&encoder_root)))
+    }
+
     #[cfg(target_os = "macos")]
     fn set_sparse_valid_safetensor(path: &Path, bytes: u64) -> Result<(), String> {
         if let Some(parent) = path.parent() {
@@ -9354,6 +9443,22 @@ mod tests {
                 r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
             )
             .map_err(|error| error.to_string())?;
+        } else if let Some(encoder_bytes) =
+            write_audited_flux2_encoder_fixture(&weights, provider_id, tier)?
+        {
+            let remaining_bytes = base_asset_bytes.checked_sub(encoder_bytes).ok_or_else(|| {
+                format!(
+                    "{provider_id} {tier} registry encoder fixture uses {encoder_bytes} bytes, \
+                    above the shipped base total {base_asset_bytes}"
+                )
+            })?;
+            let transformer_bytes = remaining_bytes.saturating_mul(9) / 10;
+            let vae_bytes = remaining_bytes - transformer_bytes;
+            set_sparse_valid_safetensor(
+                &weights.join("transformer/model.safetensors"),
+                transformer_bytes,
+            )?;
+            set_sparse_valid_safetensor(&weights.join("vae/model.safetensors"), vae_bytes)?;
         } else {
             set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
         }

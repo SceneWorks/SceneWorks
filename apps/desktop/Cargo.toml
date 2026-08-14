@@ -50,6 +50,12 @@ tempfile = "3.13"
 # SIGTERM the Python worker / API sidecar for graceful shutdown before force-kill.
 nix = { version = "0.29", default-features = false, features = ["signal"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Resolve packaged sidecars and resources from the native bundle location.
+# Tauri's generic helpers derive both from current_exe, which can diverge from
+# the live .app location after the bundle is moved to an external volume.
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSString", "NSURL"] }
+
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 # First-run CUDA/onnxruntime redist downloader (cuda_provision.rs): the heavy GPU
 # runtime DLLs are no longer bundled (NSIS ~2 GB limit) — they're fetched on first run

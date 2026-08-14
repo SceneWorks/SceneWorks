@@ -1,14 +1,14 @@
 use super::advanced;
 use super::{
-    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
-    safe_weight_filename, standard_tier_subdir, DownloadContext,
+    attach_manifest_text_encoder, pose_entries, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
+    ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, PathBuf, Progress, QwenFunControl, QwenFunControlPaths,
+    QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
-    pose_entries, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, QwenFunControl, QwenFunControlPaths, QwenFunControlRequest, Settings, Value,
-    WorkerError, WorkerResult,
+    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
+    safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
@@ -329,6 +329,7 @@ pub(super) fn qwen_control_raw_settings(
 /// drives every pose.
 pub(super) struct QwenStrictControl {
     qwen_base: PathBuf,
+    load_spec: gen_core::LoadSpec,
     controlnet: PathBuf,
     prompt: String,
     negative: String,
@@ -343,6 +344,8 @@ pub(super) struct QwenStrictControl {
 pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictControl {
     QwenStrictControl {
         qwen_base: path.clone(),
+        load_spec: gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(path.clone()))
+            .with_control(gen_core::WeightsSource::File(path.clone())),
         controlnet: path,
         prompt: "p".to_owned(),
         negative: "n".to_owned(),
@@ -412,6 +415,22 @@ impl CandleStrictControl for QwenStrictControl {
     /// The Qwen-Image-2512 base tier dir + the packed 2512-Fun-Controlnet-Union overlay file, exactly
     /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
+        if let Some(text_encoder) = self.load_spec.text_encoder.as_ref() {
+            let transformer = self.qwen_base.join("transformer");
+            let vae = self.qwen_base.join("vae");
+            if transformer.is_dir() && vae.is_dir() {
+                return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+                    "Qwen-Image",
+                    "strict-pose ControlNet branch",
+                    &transformer,
+                    &[
+                        crate::conditioning_fit::weights_source_path(text_encoder),
+                        vae.as_path(),
+                        self.controlnet.as_path(),
+                    ],
+                ));
+            }
+        }
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "Qwen-Image",
             "strict-pose ControlNet branch",
@@ -423,9 +442,10 @@ impl CandleStrictControl for QwenStrictControl {
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = QwenFunControlPaths {
             qwen_base: self.qwen_base.clone(),
+            text_encoder: None,
             controlnet: self.controlnet.clone(),
         };
-        QwenFunControl::load(&paths).map_err(|error| {
+        QwenFunControl::load_with_spec(&paths, &self.load_spec).map_err(|error| {
             WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))
         })
     }
@@ -491,9 +511,17 @@ pub(super) async fn generate_candle_qwen_control_stream(
     let pose_count = pose_entries(request).len();
     let raw_settings =
         qwen_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
+    let selected_spec = attach_manifest_text_encoder(
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(qwen_base.clone()))
+            .with_control(gen_core::WeightsSource::File(controlnet.clone())),
+        QWEN_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
 
     let provider = QwenStrictControl {
         qwen_base,
+        load_spec: selected_spec,
         controlnet,
         prompt: request.prompt.clone(),
         negative: request.negative_prompt.clone(),

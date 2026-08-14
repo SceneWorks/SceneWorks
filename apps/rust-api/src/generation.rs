@@ -121,7 +121,9 @@ pub(crate) async fn create_image_job(
         .and_then(Value::as_str)
         .unwrap_or(payload.model.as_str())
         .to_owned();
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    let mut model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    resolve_selected_image_text_encoder(&state, &job_payload, &model_id, &mut model_manifest_entry)
+        .await?;
     validate_selected_decoder_for_manifest(&job_payload, &model_manifest_entry)?;
     // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
@@ -169,6 +171,7 @@ pub(crate) async fn create_image_job(
         &mut job_payload,
     )
     .await?;
+    validate_imported_submission(&state, &model_id, &job_payload)?;
     if payload.seed.is_none() {
         // `job_payload["count"]` is the resolved count — the block above writes the model's declared
         // `defaults.count` whenever the caller named none, so the seed batch matches what actually
@@ -201,7 +204,89 @@ pub(crate) async fn create_image_job(
     if let Some(caption_request) = caption_request {
         crate::ideogram::spawn_ideogram_caption_watcher(state, job.id.clone(), caption_request);
     }
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
+/// source shape and operation select one provider registration; family identity alone never admits
+/// a request. Builtins retain their id-keyed routing and are out of this family gate.
+fn validate_imported_submission(
+    state: &AppState,
+    model_id: &str,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if entry.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+        || sceneworks_core::jobs_store::is_builtin_image_model(model_id)
+    {
+        return Ok(());
+    }
+    let candle_required = !cfg!(target_os = "macos") || state.settings.candle_required;
+    let has_material_control = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
+    let backend = if candle_required { "candle" } else { "mlx" };
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .unwrap_or("unknown");
+    if sceneworks_core::jobs_store::imported_image_request_provider_eligible(
+        model_id, payload, backend,
+    ) {
+        return Ok(());
+    }
+    let feature = if has_material_control
+        && !payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get("poses"))
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    {
+        "control image/mode without a supported Pose request"
+    } else if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "strict-pose control"
+    } else if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("phases"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "multi-phase denoise"
+    } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        "image edit"
+    } else if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "LoRA/LoKr adapters"
+    } else {
+        "requested generation shape"
+    };
+    let code = if candle_required {
+        "candle_unsupported"
+    } else if has_material_control {
+        "imported_control_unsupported"
+    } else {
+        "imported_unsupported"
+    };
+    Err(ApiError::bad_request(format!(
+        "{code}: imported {family} {feature} is not supported by the resolved {backend} provider \
+         registration for this exact source and operation; the request was not queued"
+    )))
 }
 
 pub(crate) async fn create_vqa_job(
@@ -223,7 +308,7 @@ pub(crate) async fn create_vqa_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
@@ -267,7 +352,7 @@ pub(crate) async fn create_interleave_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
@@ -729,7 +814,7 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the
@@ -804,7 +889,7 @@ pub(crate) async fn create_audio_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an

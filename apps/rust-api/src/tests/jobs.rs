@@ -770,6 +770,716 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     );
 }
 
+/// SC-18314: the browser authors only an opaque encoder id. Every image-create boundary must
+/// discard caller/persisted resolution metadata, resolve the id against current server state, and
+/// reject an id that has disappeared instead of silently substituting the model encoder.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_closed() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
+    let base_payload = json!({
+        "projectId": "project-1",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "model": "krea_2_turbo",
+        "count": 1,
+        "width": 1024,
+        "height": 1024
+    });
+    let mut stale_create = base_payload.clone();
+    stale_create["advanced"] = json!({ "textEncoderModel": stale_id });
+    // A typed create must ignore any client attempt to carry the private resolution and reject the
+    // unavailable authored id from a fresh catalog lookup.
+    stale_create["modelManifestEntry"] = json!({
+        "resolvedTextEncoder": {
+            "selectionId": stale_id,
+            "sourceKind": "directory",
+            "path": temp_dir.path().join("attacker-selected")
+        }
+    });
+    let (status, body) = request(app.clone(), "POST", "/api/v1/image/jobs", stale_create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("is unavailable")));
+
+    let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", base_payload).await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    assert!(original["payload"]["modelManifestEntry"]
+        .get("resolvedTextEncoder")
+        .is_none());
+    let job_id = original["id"].as_str().expect("job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": { "textEncoderModel": stale_id },
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("is unavailable")));
+
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        assert!(body["payload"]["modelManifestEntry"]
+            .get("resolvedTextEncoder")
+            .is_none());
+    }
+}
+
+/// SC-18314: server resolution is worker-private. Exercise the raw queue primitive with the exact
+/// typed-image metadata shape so every generic job projection is covered without depending on a
+/// platform provider fixture. The raw store and `/jobs/claim` must retain the resolution; every
+/// browser-visible HTTP/SSE shape must retain only the authored opaque id.
+#[tokio::test]
+async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let selected = temp_dir.path().join("server/private/selected.safetensors");
+    let selected_parent = selected.parent().expect("selected parent").to_path_buf();
+    let distinct_server_root = temp_dir.path().join("other/managed/models");
+    let distinct_canonical_target = temp_dir.path().join("outside/canonical/encoder.bin");
+    let selection_id = "text_encoder_0123456789abcdef0123456789abcdef";
+    let job_payload = json!({
+        "prompt": "/imagine a lake",
+        "installedPath": "/public/models/base.safetensors",
+        "sourcePath": "/public/loras/style.safetensors",
+        "selectedEcho": selected.display().to_string(),
+        "advanced": { "textEncoderModel": selection_id },
+        "modelManifestEntry": {
+            "resolvedTextEncoder": {
+                "selectionId": selection_id,
+                "sourceKind": "file",
+                "path": selected
+            }
+        }
+    });
+    let create_request = json!({
+        "type": "image_detail",
+        "projectId": "project-1",
+        "projectName": "Project 1",
+        "payload": job_payload,
+        "requestedGpu": "auto"
+    });
+    let assert_public = |surface: &str, value: &Value| {
+        let encoded = value.to_string();
+        assert!(
+            !encoded.contains("resolvedTextEncoder"),
+            "{surface} exposed server-private resolution: {value}"
+        );
+        assert!(
+            !encoded.contains(selected.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem path: {value}"
+        );
+        assert!(
+            !encoded.contains(selected_parent.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem prefix: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_server_root.to_string_lossy().as_ref()),
+            "{surface} exposed an allowed model root: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_canonical_target.to_string_lossy().as_ref()),
+            "{surface} exposed a distinct canonical target: {value}"
+        );
+    };
+
+    let mut events = state.events.subscribe();
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_public("create response", &created);
+    assert_eq!(
+        created["payload"]["advanced"]["textEncoderModel"],
+        selection_id
+    );
+    assert_eq!(created["payload"]["prompt"], "/imagine a lake");
+    assert_eq!(
+        created["payload"]["installedPath"],
+        "/public/models/base.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["sourcePath"],
+        "/public/loras/style.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["selectedEcho"],
+        "[selected text encoder]"
+    );
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    let raw = state.jobs_store.get_job(&job_id).expect("raw job reads");
+    assert_eq!(
+        raw.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "public projection must not mutate the worker-owned stored row"
+    );
+    assert_eq!(
+        raw.payload["selectedEcho"],
+        selected.display().to_string(),
+        "the raw worker payload must retain an exact selected-path echo"
+    );
+    let mut raw_with_extra = raw.clone();
+    raw_with_extra.status = sceneworks_core::contracts::JobStatus::Failed;
+    raw_with_extra.extra.insert(
+        "partialAssetPath".to_owned(),
+        Value::String("/public/outputs/partial.png".to_owned()),
+    );
+    let projected_extra =
+        serde_json::to_value(crate::public_job_snapshot(raw_with_extra)).expect("job serializes");
+    assert_eq!(
+        projected_extra["partialAssetPath"], "/public/outputs/partial.png",
+        "unrelated partial output paths remain public contract data"
+    );
+
+    for expected in ["job.updated", "queue.updated"] {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("create event arrives")
+            .expect("event stream remains open");
+        assert_eq!(event.event, expected);
+        assert_public(
+            &format!("live {expected}"),
+            &serde_json::from_str(&event.data).expect("event data parses"),
+        );
+    }
+
+    let (status, listed) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("list response", &listed);
+    let (status, fetched) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("get response", &fetched);
+    let (status, queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("queue response", &queue);
+
+    let (status, reconnect) = request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reconnect[1].0, "jobs.snapshot");
+    assert_public("reconnect jobs.snapshot", &reconnect[1].1);
+    assert_eq!(reconnect[2].0, "queue.updated");
+    assert_public("reconnect queue.updated", &reconnect[2].1);
+
+    for operation in ["retry", "duplicate"] {
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "prompt": format!("safe {operation}") } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {response}");
+        assert_public(&format!("{operation} response"), &response);
+    }
+
+    let (status, canceled_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled_one}");
+    assert_public("single cancel response", &canceled_one);
+    let (status, cleared_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_one}");
+    assert_public("single clear response", &cleared_one);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel-pending",
+        json!({ "projectId": "project-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_public("cancel-pending response", &canceled);
+
+    // Seed a fresh row for the one private boundary: a compatible worker claim. The raw payload
+    // must survive public projection intact so the worker can validate and prepare its receipt.
+    let (status, worker_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{worker_job}");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "Test GPU",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(
+        claimed["job"]["payload"]["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "the worker claim must retain the server-private exact source"
+    );
+    let claimed_id = claimed["job"]["id"].as_str().expect("claimed id");
+    while tokio::time::timeout(Duration::from_millis(25), events.next())
+        .await
+        .is_ok()
+    {}
+    let (status, progress) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "running",
+            "stage": "running",
+            "progress": 0.5,
+            "message": "halfway",
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{progress}");
+    assert_public("progress response", &progress);
+    let progress_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_event.event, "job.updated");
+    assert_public(
+        "progress job.updated",
+        &serde_json::from_str(&progress_event.data).expect("progress event parses"),
+    );
+    let progress_queue = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress queue.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_queue.event, "queue.updated");
+    assert_public(
+        "progress queue.updated",
+        &serde_json::from_str(&progress_queue.data).expect("progress queue event parses"),
+    );
+
+    let private_error = format!(
+        "Selected text encoder must be inside an app-managed directory ({}, {}). Pinned target changed from {} to {}",
+        selected_parent.display(),
+        distinct_server_root.display(),
+        selected.display(),
+        distinct_canonical_target.display()
+    );
+    let private_result = json!({
+        "partialAssetPath": "/public/outputs/partial.png",
+        "selectedReceipt": selected.display().to_string()
+    });
+    let (status, failed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": format!("Selected encoder failed at {}", selected.display()),
+            "error": private_error,
+            "result": private_result,
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{failed}");
+    assert_public("failed progress response", &failed);
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Selected text encoder must be inside")));
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("[selected text encoder]")));
+    assert_eq!(
+        failed["result"]["partialAssetPath"],
+        "/public/outputs/partial.png"
+    );
+    assert_eq!(
+        failed["result"]["selectedReceipt"],
+        "[selected text encoder]"
+    );
+    let raw_failed = state
+        .jobs_store
+        .get_job(claimed_id)
+        .expect("raw failure reads");
+    assert_eq!(raw_failed.error.as_deref(), Some(private_error.as_str()));
+    assert!(raw_failed
+        .message
+        .contains(selected.to_string_lossy().as_ref()));
+    assert_eq!(
+        raw_failed.result["selectedReceipt"],
+        selected.display().to_string()
+    );
+    let failed_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("failed job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(failed_event.event, "job.updated");
+    assert_public(
+        "failed job.updated",
+        &serde_json::from_str(&failed_event.data).expect("failed event parses"),
+    );
+    let (status, failed_get) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{claimed_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed get response", &failed_get);
+    let (status, failed_list) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed list response", &failed_list);
+    let (status, failed_reconnect) =
+        request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed reconnect jobs.snapshot", &failed_reconnect[1].1);
+    assert_public("failed reconnect queue.updated", &failed_reconnect[2].1);
+    let (status, cleared_terminal) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_terminal}");
+    assert_public("terminal clear response", &cleared_terminal);
+
+    // The supervisor crash report wraps its snapshot in `Option<JobSnapshot>` rather than using
+    // the ordinary progress response. Claim one final raw row so that container boundary is also
+    // proven public while the persisted worker payload remains exact.
+    let (status, termination_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request).await;
+    assert_eq!(status, StatusCode::CREATED, "{termination_job}");
+    let termination_job_id = termination_job["id"]
+        .as_str()
+        .expect("termination job id")
+        .to_owned();
+    let (status, termination_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{termination_claim}");
+    assert_eq!(termination_claim["job"]["id"], termination_job_id);
+    let (status, terminated) = request(
+        app,
+        "POST",
+        "/api/v1/workers/worker-1/terminated",
+        json!({ "signal": 9, "exitCode": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{terminated}");
+    assert_eq!(terminated["id"], termination_job_id);
+    assert_public("worker-terminated response", &terminated);
+    let raw_terminated = state
+        .jobs_store
+        .get_job(&termination_job_id)
+        .expect("raw terminated job reads");
+    assert_eq!(
+        raw_terminated.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "worker-termination projection must not mutate the stored worker payload"
+    );
+}
+
+#[test]
+fn selected_encoder_root_file_parent_is_never_a_universal_redaction_prefix() {
+    #[cfg(unix)]
+    let selected = std::path::Path::new("/selected.safetensors");
+    #[cfg(windows)]
+    let selected = std::path::Path::new(r"C:\selected.safetensors");
+
+    let cases = [
+        (
+            "https://example.com/models/help",
+            "https://example.com/models/help",
+        ),
+        (
+            "keep this/that slash-bearing prose",
+            "keep this/that slash-bearing prose",
+        ),
+        ("/", "/"),
+        ("root: / and keep this", "root: / and keep this"),
+        ("root: /; keep this", "root: /; keep this"),
+        (r#"root: "/" and keep this"#, r#"root: "/" and keep this"#),
+        (
+            "/another/private/models/escaped.safetensors",
+            "[selected text encoder]",
+        ),
+    ];
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+
+    let mut selected = selected.display().to_string();
+    crate::redact_private_text_encoder_diagnostic(&mut selected);
+    assert_eq!(selected, "[selected text encoder]");
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_encoder_symlink_canonical_target_is_redacted_without_using_root() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let lexical_parent = temp_dir.path().join("managed/text-encoders");
+    let escaped_parent = temp_dir.path().join("outside-root");
+    std::fs::create_dir_all(&lexical_parent).expect("lexical parent creates");
+    std::fs::create_dir_all(&escaped_parent).expect("escaped parent creates");
+    let canonical_target = escaped_parent.join("target.safetensors");
+    std::fs::write(&canonical_target, b"sentinel").expect("target writes");
+    let lexical = lexical_parent.join("selected.safetensors");
+    std::os::unix::fs::symlink(&canonical_target, &lexical).expect("symlink creates");
+
+    let mut diagnostic = format!(
+        "Selected text encoder resolved from {} to {}; allowed roots: {}",
+        lexical.display(),
+        canonical_target.display(),
+        temp_dir.path().join("another/model/root").display()
+    );
+    crate::redact_private_text_encoder_diagnostic(&mut diagnostic);
+    assert!(!diagnostic.contains(temp_dir.path().to_string_lossy().as_ref()));
+    assert!(diagnostic.contains("Selected text encoder resolved from"));
+    assert!(diagnostic.contains("[selected text encoder]"));
+}
+
+#[test]
+fn selected_encoder_path_token_scrubber_handles_wrappers_and_preserves_web_urls() {
+    let cases = [
+        ("source:/private/model", "source:[selected text encoder]"),
+        ("`/private/model with spaces`", "[selected text encoder]"),
+        ("</private/model>", "[selected text encoder]"),
+        (
+            r"source=C:\Models\private\model",
+            "source=[selected text encoder]",
+        ),
+        (
+            r"source=\\server\share\private\model",
+            "source=[selected text encoder]",
+        ),
+        ("file:///private/model", "[selected text encoder]"),
+        (
+            "https://example.com/private/model",
+            "https://example.com/private/model",
+        ),
+        (
+            "//cdn.example.com/private/model",
+            "//cdn.example.com/private/model",
+        ),
+        ("relative/model", "relative/model"),
+        ("./relative/model", "./relative/model"),
+        ("../relative/model", "../relative/model"),
+        ("~/relative/model", "~/relative/model"),
+        ("${HOME}/relative/model", "${HOME}/relative/model"),
+        (
+            "/Volumes/External Models/encoder.safetensors changed",
+            "[selected text encoder]",
+        ),
+        (
+            "at /tmp/private see https://example.com/public",
+            "at [selected text encoder]",
+        ),
+        ("/💾", "[selected text encoder]"),
+        ("/_", "[selected text encoder]"),
+        ("/...", "[selected text encoder]"),
+        ("/", "/"),
+        (r"C:\", r"C:\"),
+    ];
+
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+}
+
+#[test]
+fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() {
+    let file = crate::private_text_encoder_path_spellings("/models/x.safetensors", Some("file"));
+    let windows_file =
+        crate::private_text_encoder_path_spellings("C:/Models/X.safetensors", Some("file"));
+    let windows_unc = crate::private_text_encoder_path_spellings(
+        r"\\Server\Share\Encoder.safetensors",
+        Some("file"),
+    );
+    let encoded_file = crate::private_text_encoder_path_spellings(
+        "/Volumes/External Models/x.safetensors",
+        Some("file"),
+    );
+    let unix_backslash = crate::private_text_encoder_path_spellings(r"/models/a\b", Some("file"));
+    let directory =
+        crate::private_text_encoder_path_spellings("/models/encoder", Some("directory"));
+    let trailing_directory =
+        crate::private_text_encoder_path_spellings("/models/encoder/", Some("directory"));
+    let cases = [
+        (&file, "/models/x.safetensors", "[selected text encoder]"),
+        (
+            &file,
+            "file:///models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:///C:/Models/X.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:/c:/models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            r"c:\models\x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_unc,
+            "//server/share/encoder.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/External%20Models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/%e2%98%83/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "/Volumes/External%20Models/x.safetensors",
+            "/Volumes/External%20Models/x.safetensors",
+        ),
+        (
+            &file,
+            "/models/x.safetensors.backup",
+            "/models/x.safetensors.backup",
+        ),
+        (&file, "/models/x.safetensors.", "[selected text encoder]."),
+        (&file, "/models/x.safetensors!", "[selected text encoder]!"),
+        (
+            &file,
+            "xhttp:///models/x.safetensors",
+            "xhttp://[selected text encoder]",
+        ),
+        (
+            &directory,
+            "/models/encoder changed",
+            "[selected text encoder] changed",
+        ),
+        (
+            &directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (
+            &trailing_directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (&directory, "/models/encoder-v2", "/models/encoder-v2"),
+        (
+            &directory,
+            "/backup/models/encoder",
+            "/backup/models/encoder",
+        ),
+        (
+            &directory,
+            "https://example.com/models/encoder",
+            "https://example.com/models/encoder",
+        ),
+        (&unix_backslash, "/models/a/b", "/models/a/b"),
+    ];
+
+    for (spellings, input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_selected_text_encoder_paths(&mut actual, spellings);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+
+    let unknown_directory = crate::private_text_encoder_path_spellings("/models/unknown", None);
+    let mut unknown_descendant = "/models/unknown/shard.safetensors".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut unknown_descendant, &unknown_directory);
+    assert_eq!(
+        unknown_descendant,
+        "[selected text encoder]/shard.safetensors"
+    );
+
+    let posix_double_slash =
+        crate::private_text_encoder_path_spellings("//mnt/Encoder", Some("file"));
+    let mut case_distinct_posix = "//mnt/encoder".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut case_distinct_posix, &posix_double_slash);
+    assert_eq!(case_distinct_posix, "//mnt/encoder");
+}
+
 #[test]
 fn serialize_job_lora_carries_network_type_to_payload() {
     // A trained LoKr adapter records networkType (epic 2193); the generation
@@ -975,6 +1685,287 @@ async fn create_image_job_enforces_the_pose_output_ceiling() {
         error["detail"],
         "advanced.poses must contain at most 64 entries; each pose renders one image"
     );
+}
+
+#[tokio::test]
+async fn candle_required_builtin_krea_keeps_builtin_scope_and_queues() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = true;
+    let app = create_app(settings).expect("app creates");
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "krea_2_turbo",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["payload"]["modelManifestEntry"]["catalogScope"],
+        json!("builtin"),
+        "the worker-facing merged manifest must preserve builtin scope"
+    );
+}
+
+#[tokio::test]
+async fn candle_required_rejects_unsupported_import_before_creating_a_job() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = true;
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for advanced in [
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+        json!({
+            "phases": [{ "steps": 4 }],
+            "controlImage": "control-1"
+        }),
+        json!({
+            "poses": [{ "id": "pose-1", "keypoints": [] }],
+            "controlMode": "canny"
+        }),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "user_krea",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("candle_unsupported")));
+    }
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 0, "a preflight refusal must not create a queued job");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for advanced in [
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+        json!({
+            "phases": [{ "steps": 4 }],
+            "controlImage": "control-1"
+        }),
+        json!({
+            "poses": [{ "id": "pose-1", "keypoints": [] }],
+            "controlMode": "canny"
+        }),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "user_krea",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("imported_control_unsupported")));
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "user_krea",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": {
+                "poses": [{ "id": "pose-1", "keypoints": [] }],
+                "controlImage": "control-1",
+                "controlMode": "pose"
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["payload"]["advanced"]["controlImage"], "control-1");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the supported imported Pose request queues");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "finetune_mage",
+            "name": "Fine-tuned Mage",
+            "type": "image",
+            "family": "mage-flow",
+            "importSourceShape": "transformer_directory",
+            "paths": { "model": "/probe/finetune-mage" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for (label, extra) in [
+        (
+            "edit",
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+        ),
+        ("reference", json!({ "referenceAssetId": "reference-1" })),
+        (
+            "multi-phase",
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ),
+        (
+            "unsupported quant tier",
+            json!({ "advanced": { "quantTier": "nvfp4" } }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(extra.as_object().expect("extra object").clone());
+        let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("imported_unsupported")),
+            "{label} must fail at exact imported-provider admission: {error}"
+        );
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the exact registered generate shape queues");
 }
 
 /// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.

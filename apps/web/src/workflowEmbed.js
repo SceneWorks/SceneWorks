@@ -119,7 +119,8 @@ const L_INPUTS =
 const L_CLIP = "the clip length, frame rate and quality preset a video run asked for";
 const L_MOTION = "the camera-motion preset, and which timeline action produced a clip";
 const L_VIDEO_ENGINE =
-  "which video pipeline, checkpoint variant, text encoder and fast-step recipe a video run used";
+  "which video pipeline, checkpoint variant and fast-step recipe a video run used";
+const L_TEXT_ENCODER = "which text encoder read the prompt";
 const L_OMITTED = "a note naming any list that was too long to record";
 
 // Every field the envelope can carry, and what the copy says about it. Keys prefixed `advanced.`
@@ -189,7 +190,7 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.timelineAction", L_MOTION],
   ["advanced.ltxPipeline", L_VIDEO_ENGINE],
   ["advanced.distilledVariant", L_VIDEO_ENGINE],
-  ["advanced.textEncoderModel", L_VIDEO_ENGINE],
+  ["advanced.textEncoderModel", L_TEXT_ENCODER],
   ["advanced.lightning", L_VIDEO_ENGINE],
   ["advanced.videoCfgGuidanceScale", L_SETTINGS],
   ["advanced.videoStgGuidanceScale", L_SETTINGS],

@@ -49,6 +49,53 @@ fn fit_rgb(source: &image::RgbImage, width: u32, height: u32, mode: &str) -> ima
     }
 }
 
+/// Resolve one exact imported generate surface and reject every request axis the selected provider
+/// cannot execute. Source shape is part of the registry key: a sibling route for the same family is
+/// never unioned in. The ComfyUI lanes are ordinary Generate routes; only a singular Reference is
+/// admitted when that exact descriptor advertises it.
+fn imported_generate_request_has_unsupported_shape(request: &ImageRequest) -> bool {
+    request.mode == "edit_image"
+        || !pose_entries(request).is_empty()
+        || request.source_asset_id.is_some()
+        || request.mask_asset_id.is_some()
+        || request.character_id.is_some()
+        || request.character_look_id.is_some()
+        || !request.reference_asset_ids.is_empty()
+        || request_has_multiphase(request)
+        || sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+}
+
+fn imported_generate_request_supported(
+    request: &ImageRequest,
+    family: &str,
+    source: gen_core::ImportedModelSource,
+) -> Option<gen_core::ModelDescriptor> {
+    // Reject shape before registry/path resolution so every shared Generate consumer (Mage and the
+    // three ComfyUI Candle lanes) refuses material control intent at the same admission seam.
+    if imported_generate_request_has_unsupported_shape(request) {
+        return None;
+    }
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        family,
+        source,
+        gen_core::ImportedModelOperation::Generate,
+    )?;
+    if request.reference_asset_id.is_some()
+        && !descriptor
+            .capabilities
+            .conditioning
+            .contains(&gen_core::ConditioningKind::Reference)
+    {
+        return None;
+    }
+    if (!request.loras.is_empty())
+        && !(descriptor.capabilities.supports_lora || descriptor.capabilities.supports_lokr)
+    {
+        return None;
+    }
+    Some(descriptor)
+}
+
 /// Fit an engine [`Image`] (RGB8) to `width`×`height` by `mode` via [`fit_rgb`].
 /// `pub(crate)` so the video I2V resolve paths (`video_jobs.rs`, sc-6139) can pre-fit a
 /// starting image to the output dims with the same crop/pad geometry as the image-edit lane.
@@ -201,6 +248,8 @@ fn resolve_image_route_with_imported_availability(
     settings: &Settings,
     imported_control_available: bool,
     imported_available: bool,
+    sdxl_imported_available: bool,
+    mage_finetuned_available: bool,
 ) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
@@ -271,9 +320,9 @@ fn resolve_image_route_with_imported_availability(
         // builtin Krea. The imported id is in no `MODEL_TABLE`, so `mlx_available` is `false` for it — this
         // arm is what routes it to real MLX generation at all (S0d marked it Mac-routable; this loads it).
         Some(ImageRoute::KreaImported)
-    } else if sdxl_imported_available(request, settings) {
+    } else if sdxl_imported_available {
         Some(ImageRoute::SdxlImported)
-    } else if mage_finetuned_available(request, settings) {
+    } else if mage_finetuned_available {
         // A fine-tuned Mage-Flow base (sc-15036). The fine-tune's id is in no `MODEL_TABLE`, so
         // `mlx_available` is `false` for it — this arm is what routes it to real MLX generation at
         // all. A builtin Mage id is claimed by the generic `mlx_available` arm below, unchanged.
@@ -333,6 +382,8 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         settings,
         krea_imported_control_available(request, settings),
         krea_imported_available(request, settings),
+        sdxl_imported_available(request, settings),
+        mage_finetuned_available(request, settings),
     )
 }
 
@@ -341,6 +392,8 @@ enum PreparedImageRoute {
     Plain(ImageRoute),
     KreaImported(Box<PreparedKreaImportedSources>),
     KreaImportedControl(Box<PreparedKreaImportedControlSources>),
+    SdxlImported(Box<PreparedSdxlImportedSources>),
+    MageFinetuned(Box<PreparedMageFinetunedTransformer>),
 }
 
 #[cfg(target_os = "macos")]
@@ -350,6 +403,8 @@ impl PreparedImageRoute {
             Self::Plain(route) => *route,
             Self::KreaImported(_) => ImageRoute::KreaImported,
             Self::KreaImportedControl(_) => ImageRoute::KreaImportedControl,
+            Self::SdxlImported(_) => ImageRoute::SdxlImported,
+            Self::MageFinetuned(_) => ImageRoute::MageFinetuned,
         }
     }
 }
@@ -368,11 +423,15 @@ fn prepare_image_route(
     } else {
         None
     };
+    let sdxl = prepare_sdxl_imported_sources(request, settings)?;
+    let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         settings,
         imported_control.is_some(),
         imported.is_some(),
+        sdxl.is_some(),
+        mage_finetuned.is_some(),
     ) else {
         return Ok(None);
     };
@@ -382,6 +441,12 @@ fn prepare_image_route(
         ),
         ImageRoute::KreaImported => PreparedImageRoute::KreaImported(Box::new(
             imported.expect("prepared imported route lost its sources"),
+        )),
+        ImageRoute::SdxlImported => PreparedImageRoute::SdxlImported(Box::new(
+            sdxl.expect("prepared SDXL imported route lost its sources"),
+        )),
+        ImageRoute::MageFinetuned => PreparedImageRoute::MageFinetuned(Box::new(
+            mage_finetuned.expect("prepared Mage fine-tuned route lost its transformer"),
         )),
         route => PreparedImageRoute::Plain(route),
     }))
@@ -708,6 +773,7 @@ impl CandleImageRoute {
 enum PreparedCandleImageRoute {
     Plain(CandleImageRoute),
     KreaImported(Box<PreparedKreaImportedSources>),
+    SdxlImported(Box<PreparedSdxlImportedSources>),
     ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
     QwenImageComfyui(Box<qwen_comfyui_candle::ComfyuiQwenPaths>),
     Flux2Comfyui(Box<flux2_comfyui_candle::ComfyuiFlux2Paths>),
@@ -719,6 +785,7 @@ impl PreparedCandleImageRoute {
         match self {
             Self::Plain(route) => *route,
             Self::KreaImported(_) => CandleImageRoute::KreaImported,
+            Self::SdxlImported(_) => CandleImageRoute::SdxlImported,
             Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
             Self::QwenImageComfyui(_) => CandleImageRoute::QwenImageComfyui,
             Self::Flux2Comfyui(_) => CandleImageRoute::Flux2Comfyui,
@@ -736,6 +803,7 @@ fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
     settings: &Settings,
     imported_available: bool,
+    sdxl_imported_available: bool,
     zimage_comfyui_available: bool,
     qwen_comfyui_available: bool,
     flux2_comfyui_available: bool,
@@ -823,7 +891,7 @@ fn resolve_candle_image_route_with_prepared_availability(
         // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
         // this bespoke route must claim them before the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
-    } else if sdxl_imported_available(request, settings) {
+    } else if sdxl_imported_available {
         Some(CandleImageRoute::SdxlImported)
     } else if zimage_comfyui_available {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
@@ -882,6 +950,7 @@ fn resolve_candle_image_route(
         request,
         settings,
         krea_imported_available(request, settings),
+        sdxl_imported_available(request, settings),
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),
         qwen_comfyui_candle::qwen_comfyui_available(request, settings),
         flux2_comfyui_candle::flux2_comfyui_available(request, settings),
@@ -899,6 +968,7 @@ fn prepare_candle_image_route(
         return Ok(None);
     }
     let imported = prepare_krea_imported_sources(request, settings)?;
+    let sdxl = prepare_sdxl_imported_sources(request, settings)?;
     let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources(request, settings)?;
     let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources(request, settings)?;
     let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources(request, settings)?;
@@ -906,6 +976,7 @@ fn prepare_candle_image_route(
         request,
         settings,
         imported.is_some(),
+        sdxl.is_some(),
         zimage.is_some(),
         qwen.is_some(),
         flux2.is_some(),
@@ -916,6 +987,9 @@ fn prepare_candle_image_route(
         CandleImageRoute::KreaImported => PreparedCandleImageRoute::KreaImported(
             Box::new(imported.expect("prepared imported route lost its sources")),
         ),
+        CandleImageRoute::SdxlImported => PreparedCandleImageRoute::SdxlImported(Box::new(
+            sdxl.expect("prepared SDXL imported route lost its sources"),
+        )),
         CandleImageRoute::ZimageComfyui => PreparedCandleImageRoute::ZimageComfyui(
             Box::new(zimage.expect("prepared Z-Image route lost its sources")),
         ),
@@ -2190,8 +2264,9 @@ fn wants_krea_convrot(request: &ImageRequest) -> bool {
 
 /// Resolve the INT8-ConvRot LoadSpec inputs for a Krea 2 request (sc-9300): the canonical bf16 Krea 2
 /// snapshot DIR (the LoadSpec `weights` root — tokenizer / Qwen3-VL TE / Qwen-Image VAE / config + the
-/// non-quantized surface) and the downloaded ConvRot DiT single-file (the LoadSpec `text_encoder`
-/// `File`, which the candle-gen krea engine's `convrot_selector` routes to `load_components_convrot`).
+/// non-quantized surface) and the downloaded ConvRot DiT single-file (the named
+/// `krea_convrot_dit` component, leaving `LoadSpec::text_encoder` exclusively for
+/// real encoder substitution).
 ///
 /// `None` when the request didn't select ConvRot, OR either artifact isn't present yet (the bf16
 /// `bf16/` subdir of the `krea-2-turbo-mlx` turnkey, or the ConvRot DiT `.safetensors`) — the caller
@@ -3524,7 +3599,11 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     Ok(AdapterKind::Lora)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<AdapterKind> {
     let header = pin
         .read_unchanged(|file| {
@@ -3545,13 +3624,21 @@ fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<
 }
 
 #[derive(Debug)]
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 struct PreparedAdapters {
     specs: Vec<AdapterSpec>,
     pins: Vec<gen_core::PinnedWeightsFile>,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 impl PreparedAdapters {
     #[cfg(all(target_os = "macos", test))]
     fn is_empty(&self) -> bool {
@@ -3562,7 +3649,11 @@ impl PreparedAdapters {
 /// Prepared counterpart of [`resolve_adapters`]. Classification reads through the exact token that
 /// is later installed on the `LoadSpec`; repeated references to the same lexical entry share one
 /// token, while preserving every requested adapter spec and its scale/order.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 fn resolve_prepared_adapters(
     request: &ImageRequest,
     settings: &Settings,
@@ -3690,6 +3781,75 @@ fn load_spec(
         spec = spec.with_ip_adapter(WeightsSource::Dir(dir));
     }
     spec
+}
+
+/// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
+/// the exact prepared source receipt before any planner, fit gate, or provider loader sees the spec.
+/// Default/absent selection is an exact no-op.
+pub(super) fn attach_manifest_text_encoder(
+    spec: LoadSpec,
+    engine_id: &str,
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<LoadSpec> {
+    crate::text_encoder_selection::prepare_selected_text_encoder(
+        spec,
+        engine_id,
+        &request.advanced,
+        &request.model_manifest_entry,
+        settings,
+    )
+}
+
+/// Whether the request carries a non-default authored encoder id. Kept beside the attachment seam
+/// so bespoke File routes make the same default/invalid-shape decision as registry routes.
+pub(super) fn has_authored_text_encoder(request: &ImageRequest) -> WorkerResult<bool> {
+    match request.advanced.get("textEncoderModel") {
+        None => Ok(false),
+        Some(Value::String(id)) if id == "default" => Ok(false),
+        Some(Value::String(id)) if !id.trim().is_empty() => Ok(true),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.textEncoderModel must be a non-empty string option id returned by GET /api/v1/models"
+                .to_owned(),
+        )),
+    }
+}
+
+/// Finalize a complete bespoke File-route spec. A selected encoder's contract export prepares every
+/// configured File slot plus its shard/config/tokenizer receipt atomically; the default path keeps
+/// the route's existing explicit tokens. Pre-resolved route tokens are compared against the
+/// contract-prepared set so a mutation between dispatch resolution and attachment fails closed.
+pub(super) fn prepare_manifest_text_encoder_with_file_pins(
+    mut spec: LoadSpec,
+    engine_id: &str,
+    request: &ImageRequest,
+    settings: &Settings,
+    pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
+    label: &str,
+) -> WorkerResult<LoadSpec> {
+    let selected = has_authored_text_encoder(request)?;
+    let pins = pins.into_iter().collect::<Vec<_>>();
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    if !selected {
+        crate::paths::prepare_load_spec_with_file_pins(&mut spec, pins, label)?;
+        return Ok(spec);
+    }
+
+    for expected in pins {
+        expected
+            .ensure_unchanged()
+            .map_err(|error| crate::classify_engine_error(label, error))?;
+        let received = spec
+            .prepared_file_pin_for(expected.loader_path())
+            .map_err(|error| crate::classify_engine_error(label, error))?;
+        if received != Some(&expected) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{label}: source changed while the selected text encoder receipt was prepared: {}",
+                expected.loader_path().display()
+            )));
+        }
+    }
+    Ok(spec)
 }
 
 /// Select deferred materialization for the native Candle/CUDA Qwen routes. Only the uniform
@@ -3921,6 +4081,7 @@ mod candle_image_load_shape_tests {
                     backend: "candle",
                     modality: gen_core::Modality::Image,
                     capabilities: Default::default(),
+                    encoder_contract: None,
                     required_components: &[],
                     control_kinds: None,
                 },
@@ -4086,7 +4247,11 @@ mod measured_mlx_load_shape_tests {
         TransformerComponent,
     };
 
-    fn fixture_spec(root: &std::path::Path, quant_bits: Option<u8>) -> LoadSpec {
+    fn fixture_spec(
+        root: &std::path::Path,
+        quant_bits: Option<u8>,
+        encoder: Option<(&str, Option<i32>)>,
+    ) -> LoadSpec {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
@@ -4099,14 +4264,38 @@ mod measured_mlx_load_shape_tests {
             bytes.extend_from_slice(&0f32.to_le_bytes());
             std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
         }
-        std::fs::write(
-            root.join("text_encoder/config.json"),
-            quant_bits.map_or_else(
-                || r#"{"dtype":"bfloat16"}"#.to_owned(),
-                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
-            ),
-        )
-        .unwrap();
+        if let Some((engine_id, encoder_quant_bits)) = encoder {
+            let contract = crate::inference_runtime::media_encoder_contract(engine_id)
+                .unwrap_or_else(|| panic!("{engine_id} owns a text-encoder contract"));
+            let result = if engine_id == "qwen_image_edit" {
+                gen_core_testkit::write_multimodal_encoder_contract_fixture_with_quant(
+                    &root.join("text_encoder"),
+                    contract,
+                    runtime_macos::providers::qwen_image::VISION_ENCODER_CONTRACT,
+                    None,
+                )
+            } else {
+                gen_core_testkit::write_encoder_contract_fixture_with_quant(
+                    &root.join("text_encoder"),
+                    contract,
+                    encoder_quant_bits,
+                )
+            };
+            result.unwrap_or_else(|error| {
+                panic!("write registry-owned {engine_id} encoder fixture: {error}")
+            });
+        } else {
+            std::fs::write(
+                root.join("text_encoder/config.json"),
+                quant_bits.map_or_else(
+                    || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                    |bits| {
+                        format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#)
+                    },
+                ),
+            )
+            .unwrap();
+        }
         std::fs::write(
             root.join("transformer/config.json"),
             quant_bits.map_or_else(
@@ -4132,9 +4321,9 @@ mod measured_mlx_load_shape_tests {
     #[test]
     fn worker_lens_specs_reach_only_their_exact_measured_contracts() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path(), None);
+        let bf16 = fixture_spec(bf16_dir.path(), None, None);
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), Some(4)).with_quant(Quant::Q4);
+        let q4 = fixture_spec(q4_dir.path(), Some(4), None).with_quant(Quant::Q4);
 
         let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
         assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
@@ -4210,9 +4399,13 @@ mod measured_mlx_load_shape_tests {
     #[test]
     fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path(), None);
+        let bf16 = fixture_spec(
+            bf16_dir.path(),
+            None,
+            Some(("qwen_image", None)),
+        );
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), None);
+        let q4 = fixture_spec(q4_dir.path(), None, Some(("qwen_image_edit", None)));
         std::fs::write(
             q4_dir.path().join("transformer/config.json"),
             r#"{"quantization":{"bits":4}}"#,
@@ -4286,7 +4479,11 @@ mod measured_mlx_load_shape_tests {
             ("q8", Some(8), Some(Quant::Q8)),
         ] {
             let root = tempfile::tempdir().unwrap();
-            let mut spec = fixture_spec(root.path(), quant_bits);
+            let mut spec = fixture_spec(
+                root.path(),
+                quant_bits,
+                Some(("krea_2_turbo", quant_bits.map(i32::from))),
+            );
             if let Some(quant) = quant {
                 spec = spec.with_quant(quant);
             }
@@ -4332,7 +4529,12 @@ mod measured_mlx_load_shape_tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let base = fixture_spec(root.path(), Some(4)).with_quant(Quant::Q4);
+        let base = fixture_spec(
+            root.path(),
+            Some(4),
+            Some(("krea_2_turbo", Some(4))),
+        )
+        .with_quant(Quant::Q4);
         assert_eq!(
             apply_measured_mlx_load_shape_for_request("krea_2_turbo", base.clone(), false)
                 .load_shape,
@@ -6886,6 +7088,9 @@ async fn generate_stream(
         && ideogram_edit_mask.is_none()
         && hires_fix.is_none();
     spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
+    // Finalize the full load shape before exporting the encoder receipt: preparation covers every
+    // configured File slot (PiD, adapters, named components) and the same spec then drives fit/load.
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         engine_id,
         &request.model,
@@ -8975,6 +9180,16 @@ async fn generate_candle_stream(
         &request.model_manifest_entry,
         settings,
     )?;
+    if let Some((_, convrot_dit)) = convrot.as_ref() {
+        shared_contract_spec = shared_contract_spec.with_component(
+            gen_core::KREA_CONVROT_DIT_COMPONENT,
+            WeightsSource::File(convrot_dit.clone()),
+        );
+    }
+    // Export the selected encoder receipt only after the entire load shape is complete; this exact
+    // prepared spec is reused by the selector and eventual provider/cache load.
+    shared_contract_spec =
+        attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
@@ -9458,15 +9673,6 @@ async fn generate_candle_stream(
         // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
         spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
     }
-    // INT8-ConvRot LoadSpec seam (sc-9300, epic 9083): ride the ConvRot DiT single-file on the shared,
-    // already-optional `LoadSpec::text_encoder` as a `WeightsSource::File` while `spec.weights` stays the
-    // canonical Krea 2 bf16 snapshot `Dir` (set as `weights_dir` above). The candle-gen krea engine's
-    // `convrot_selector` decodes a `File` here → `load_components_convrot` (which enforces the sm_89
-    // compute-cap floor); a `Dir`/`None` there is the normal dense/packed path. Other engines ignore it.
-    if let Some((_, convrot_dit)) = convrot {
-        spec.text_encoder = Some(WeightsSource::File(convrot_dit));
-    }
-
     // Surface the decision before model execution, while the reason for a slow render is still clear,
     // then keep the same compact note on subsequent progress updates. The structured event is the
     // statistics trace; the tracing event remains useful in the worker log. Neither changes admission

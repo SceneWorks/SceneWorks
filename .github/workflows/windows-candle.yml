@@ -531,7 +531,9 @@ jobs:
       # coverage; it is the least urgent signal in this job, so it reports last.
       #
       # When this fails after a pin bump, the fix is to commit the dump it just produced and re-run
-      # `npm run gen:preview-support` from apps/web — not to restamp the revision line.
+      # `npm run gen:preview-support` from apps/web — not to restamp the revision line. The diagnostic
+      # upload immediately below this step preserves both fresh files on a mismatch so the exact linked
+      # registry output can be reviewed and committed without reconstructing it from the log diff.
       #
       # The AUDIO dump (sc-17593) is verified here too, and in macos-mlx.yml's twin step. Unlike the
       # media files, `audio/capabilities.candle.json` is written by BOTH lanes — `AUDIO_BACKEND` is
@@ -544,6 +546,7 @@ jobs:
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
       - name: Verify capabilities.candle.json is a real dump, not a restamp
+        id: verify_candle_capabilities
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
@@ -586,3 +589,12 @@ jobs:
           :audio_restamped
           echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump at this pin. Either box re-dumps it - the audio registry is candle-native everywhere - then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
           exit /b 1
+      - name: Upload fresh Candle capability facts after a verification failure
+        if: ${{ always() && steps.verify_candle_capabilities.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candle-capability-facts-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/engine-capability-facts-verify/capabilities.candle.json
+            ${{ runner.temp }}/engine-capability-facts-verify/audio/capabilities.candle.json
+          if-no-files-found: warn

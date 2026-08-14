@@ -285,6 +285,200 @@ describe("ImageStudio advanced model defaults", () => {
   });
 });
 
+describe("ImageStudio text encoder selector", () => {
+  let container;
+  let root;
+
+  const DEFAULT_ENCODER = {
+    id: "default",
+    label: "Model encoder (default)",
+    description: "Uses the model encoder.",
+    isDefault: true,
+  };
+  const ALTERNATE_ENCODER = {
+    id: "text_encoder_0123456789abcdef0123456789abcdef",
+    label: "qwen3_artist (operator staged)",
+    description: "Uses the staged encoder.",
+    isDefault: false,
+  };
+  const modelWithEncoders = (options) => ({
+    ...Z_IMAGE,
+    textEncoderOptions: options,
+  });
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const openAdvanced = () => click(document.body.querySelector(".advanced-section-toggle"));
+  const generate = () =>
+    click(
+      [...document.body.querySelectorAll("button")].find(
+        (button) => button.textContent === "Generate",
+      ),
+    );
+
+  it("keeps the default payload unchanged and emits an explicit alternate", async () => {
+    const context = baseContext({
+      createImageJob: vi.fn(async () => ({ id: "job-encoder" })),
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+    });
+    await render(context);
+    await openAdvanced();
+
+    const selector = container.querySelector('select[aria-label="Text encoder model"]');
+    expect(selector.value).toBe("default");
+    await generate();
+    expect(context.createImageJob.mock.calls[0][0].advanced).not.toHaveProperty(
+      "textEncoderModel",
+    );
+
+    await act(async () => setSelect(selector, ALTERNATE_ENCODER.id));
+    await generate();
+    expect(context.createImageJob.mock.calls[1][0].advanced.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("preserves a selected encoder that disappears so submission fails closed server-side", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-stale-encoder" }));
+    const context = baseContext({
+      createImageJob,
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+    });
+    await render(context);
+    await openAdvanced();
+    await act(async () =>
+      setSelect(
+        container.querySelector('select[aria-label="Text encoder model"]'),
+        ALTERNATE_ENCODER.id,
+      ),
+    );
+
+    await render({
+      ...context,
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER])],
+    });
+    const selector = container.querySelector('select[aria-label="Text encoder model"]');
+    expect(selector.value).toBe(ALTERNATE_ENCODER.id);
+    expect(selector.selectedOptions[0].disabled).toBe(true);
+    expect(container.textContent).toContain("no longer staged");
+
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("restores the persisted selection and records it in a saved preset", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        textEncoderModel: ALTERNATE_ENCODER.id,
+      }),
+    );
+    const context = baseContext({
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+    });
+    await render(context);
+    await openAdvanced();
+
+    expect(container.querySelector('select[aria-label="Text encoder model"]').value).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("sceneworks-studio-image-project_1") || "{}",
+      ).textEncoderModel,
+    ).toBe(ALTERNATE_ENCODER.id);
+
+    await act(async () => setInput(nameInput(container), "Alternate encoder preset"));
+    await saveWithScope(container, "This project");
+    expect(context.createPreset.mock.calls[0][0].defaults.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("restores an authored encoder from a workflow recipe and re-emits it", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-replayed-encoder" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+        studioLaunch: {
+          id: "launch-text-encoder",
+          view: "Image",
+          assetId: "asset-text-encoder",
+          recipe: {
+            model: Z_IMAGE.id,
+            mode: "text_to_image",
+            prompt: "a fox",
+            rawAdapterSettings: { textEncoderModel: ALTERNATE_ENCODER.id },
+          },
+        },
+      }),
+    );
+    await openAdvanced();
+
+    expect(container.querySelector('select[aria-label="Text encoder model"]').value).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("emits the same encoder id for every item in a batch run", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        textEncoderModel: ALTERNATE_ENCODER.id,
+        batchMode: true,
+        batchPromptsText: "first prompt\nsecond prompt",
+      }),
+    );
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `batch-encoder-${sequence++}` }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+      }),
+    );
+
+    const runBatch = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Run batch"),
+    );
+    await click(runBatch);
+
+    expect(createImageJob).toHaveBeenCalledTimes(2);
+    for (const [payload] of createImageJob.mock.calls) {
+      expect(payload.advanced.textEncoderModel).toBe(ALTERNATE_ENCODER.id);
+    }
+  });
+});
+
 describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
   let container;
   let root;

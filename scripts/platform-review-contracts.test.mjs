@@ -697,7 +697,7 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
 
-test("both stage-1 lanes verify their own capability dump, LAST and reachably", async () => {
+test("both stage-1 lanes verify their own capability dump last among coverage and reachably", async () => {
   // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
   // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
   // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
@@ -728,6 +728,13 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
     // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
     // the point — nothing else would notice an unconditional step being appended later.
     for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+      const candleFailureArtifact =
+        path === ".github/workflows/windows-candle.yml" &&
+        block.startsWith("name: Upload fresh Candle capability facts after a verification failure") &&
+        /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/.test(
+          block,
+        );
+      if (candleFailureArtifact) continue;
       assert.match(
         block,
         /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
@@ -808,6 +815,36 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
       );
     }
   }
+});
+
+test("Windows preserves exact fresh capability facts when verification fails", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const verifyAt = workflow.indexOf(
+    "- name: Verify capabilities.candle.json is a real dump, not a restamp",
+  );
+  const uploadAt = workflow.indexOf(
+    "- name: Upload fresh Candle capability facts after a verification failure",
+  );
+  assert.ok(verifyAt > 0 && uploadAt > verifyAt);
+  const tail = workflow.slice(verifyAt, uploadAt + 1000);
+  assert.match(tail, /id: verify_candle_capabilities/);
+  assert.match(
+    tail,
+    /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/,
+  );
+  assert.match(
+    tail,
+    /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
+  );
+  assert.match(
+    tail,
+    /engine-capability-facts-verify\/capabilities\.candle\.json/,
+  );
+  assert.match(
+    tail,
+    /engine-capability-facts-verify\/audio\/capabilities\.candle\.json/,
+  );
+  assert.match(tail, /if-no-files-found: warn/);
 });
 
 test("every workspace path a self-hosted lane watches maps to a package that lane builds", async () => {

@@ -554,6 +554,7 @@ async fn generate_krea_control_stream(
         request,
         settings,
     )?;
+    let spec = attach_manifest_text_encoder(spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
     let calibration_provenance = krea_control_calibration_provenance(
         match &spec.weights {
             WeightsSource::Dir(path) => path,

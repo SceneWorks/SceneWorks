@@ -27,18 +27,21 @@ mod routing;
 // the gaps/mlx/candle predicates directly; the catalog lists are exercised only by the
 // `#[cfg(test)]` routing suites, so that glob is test-gated to stay warning-clean.
 pub(crate) use routing::candle::*;
+#[cfg(not(test))]
+pub(crate) use routing::catalog::image_family_is_mlx_routed;
 #[cfg(test)]
 pub(crate) use routing::catalog::*;
-#[cfg(not(test))]
-pub(crate) use routing::catalog::{image_family_is_mlx_routed, is_builtin_image_model};
 pub(crate) use routing::gaps::*;
 pub(crate) use routing::mlx::*;
 
 // External re-export surface: `apps/rust-api/src/lib.rs` and the integration test
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
-    candle_routed_image_models, imported_image_model_lora_advertisement, mac_capabilities,
-    model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
+    candle_routed_image_models, imported_control_intent_is_material,
+    imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
+    imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
+    mac_capabilities, model_mac_support, ImportedProviderSurface, MacCapabilities,
+    MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,

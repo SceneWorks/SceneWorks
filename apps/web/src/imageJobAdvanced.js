@@ -29,6 +29,10 @@ export function buildImageJobAdvanced(state) {
     stepsOverride,
     guidanceOverride,
     guidanceMethod,
+    // Runtime-curated compatible language encoder substitution (sc-18314).
+    supportsTextEncoderSelection,
+    textEncoderModel,
+    defaultTextEncoderId,
     // Flash attention (sc-3674).
     flashAttn,
     // Caption upsampling (sc-6135).
@@ -128,6 +132,14 @@ export function buildImageJobAdvanced(state) {
       : {}),
     ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
       ? { guidanceScale: Number(guidanceOverride) }
+      : {}),
+    // The bundled/paired encoder is the byte-identical default. Only an explicit non-default
+    // opaque catalog id rides the request; stale authored ids intentionally remain present so the
+    // API can fail closed instead of silently substituting the builtin encoder.
+    ...(supportsTextEncoderSelection &&
+    textEncoderModel &&
+    textEncoderModel !== defaultTextEncoderId
+      ? { textEncoderModel }
       : {}),
     // Flash attention (sc-3674): only emitted when toggled OFF — the worker defaults to ON
     // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.

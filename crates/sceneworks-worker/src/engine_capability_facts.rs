@@ -317,6 +317,25 @@ pub struct EngineFact {
     pub decoder_options: Vec<DecoderOptionFact>,
 }
 
+/// One provider-owned route for an exact imported source shape and request operation. These rows
+/// are emitted from the linked inference registry; an absent row is an explicit backend refusal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedProviderFact {
+    pub family: String,
+    pub source: String,
+    pub operation: String,
+    pub provider_id: String,
+    pub conditioning: Vec<String>,
+    pub supports_lora: bool,
+    pub supports_lokr: bool,
+    pub supported_quants: Vec<String>,
+    pub supports_kv_cache: bool,
+    pub supports_sequential_offload: bool,
+    /// Every route is resolved and loaded through the ordinary runtime registry/cache seam.
+    pub registry_cached: bool,
+}
+
 /// Provenance stamped onto every facts file so a stale dump is detectable without rebuilding.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -338,6 +357,10 @@ pub struct EngineCapabilityFacts {
     pub generated_from: FactsProvenance,
     /// Every generator this backend registered, sorted by id so the file is byte-stable across runs.
     pub engines: Vec<EngineFact>,
+    /// Exact provider-declared import routes. Consumers must match both `source` and `operation`;
+    /// family-wide unioning would advertise shapes the selected loader cannot validate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<ImportedProviderFact>,
 }
 
 impl EngineCapabilityFacts {
@@ -430,9 +453,171 @@ pub fn facts_from_descriptors(
                 dumper: dumper.to_owned(),
             },
             engines,
+            imports: Vec::new(),
         });
     }
     Ok(out)
+}
+
+fn imported_source_label(source: gen_core::ImportedModelSource) -> &'static str {
+    match source {
+        gen_core::ImportedModelSource::TransformerFile => "transformer_file",
+        gen_core::ImportedModelSource::FusedCheckpoint => "fused_checkpoint",
+        gen_core::ImportedModelSource::TransformerDirectory => "transformer_directory",
+        gen_core::ImportedModelSource::ComfyUiTree => "comfy_ui_tree",
+    }
+}
+
+fn imported_operation_label(operation: gen_core::ImportedModelOperation) -> &'static str {
+    match operation {
+        gen_core::ImportedModelOperation::Generate => "generate",
+        gen_core::ImportedModelOperation::Edit => "edit",
+        gen_core::ImportedModelOperation::Pose => "pose",
+        gen_core::ImportedModelOperation::MultiPhase => "multi_phase",
+    }
+}
+
+fn conditioning_label(kind: gen_core::ConditioningKind) -> &'static str {
+    match kind {
+        gen_core::ConditioningKind::Reference => "reference",
+        gen_core::ConditioningKind::ReferenceAudio => "reference_audio",
+        gen_core::ConditioningKind::AudioEdit => "audio_edit",
+        gen_core::ConditioningKind::AudioEditRegions => "audio_edit_regions",
+        gen_core::ConditioningKind::VoiceEmbedding => "voice_embedding",
+        gen_core::ConditioningKind::MultiReference => "multi_reference",
+        gen_core::ConditioningKind::ReduxRefs => "redux_refs",
+        gen_core::ConditioningKind::Control => "control",
+        gen_core::ConditioningKind::Depth => "depth",
+        gen_core::ConditioningKind::Mask => "mask",
+        gen_core::ConditioningKind::Keyframe => "keyframe",
+        gen_core::ConditioningKind::VideoClip => "video_clip",
+        gen_core::ConditioningKind::ControlClip => "control_clip",
+        gen_core::ConditioningKind::VideoSync => "video_sync",
+        gen_core::ConditioningKind::ConversationHistory => "conversation_history",
+    }
+}
+
+fn quant_label(quant: gen_core::Quant) -> &'static str {
+    match quant {
+        gen_core::Quant::Q4 => "q4",
+        gen_core::Quant::Q8 => "q8",
+        gen_core::Quant::Nvfp4 => "nvfp4",
+    }
+}
+
+fn append_imported_fact(
+    facts: &mut [EngineCapabilityFacts],
+    route: &gen_core::ImportedModelRegistration,
+    descriptor: gen_core::ModelDescriptor,
+) {
+    let backend = facts
+        .iter_mut()
+        .find(|facts| facts.backend == descriptor.backend)
+        .expect("descriptor backend was grouped above");
+    backend.imports.push(ImportedProviderFact {
+        family: route.family.to_owned(),
+        source: imported_source_label(route.source).to_owned(),
+        operation: imported_operation_label(route.operation).to_owned(),
+        provider_id: route.provider_id.to_owned(),
+        conditioning: descriptor
+            .capabilities
+            .conditioning
+            .iter()
+            .copied()
+            .map(conditioning_label)
+            .map(str::to_owned)
+            .collect(),
+        supports_lora: descriptor.capabilities.supports_lora,
+        supports_lokr: descriptor.capabilities.supports_lokr,
+        supported_quants: descriptor
+            .capabilities
+            .supported_quants
+            .iter()
+            .copied()
+            .map(quant_label)
+            .map(str::to_owned)
+            .collect(),
+        supports_kv_cache: descriptor.capabilities.supports_kv_cache,
+        supports_sequential_offload: descriptor.capabilities.supports_sequential_offload,
+        registry_cached: true,
+    });
+}
+
+fn sort_imported_facts(facts: &mut [EngineCapabilityFacts]) {
+    for backend in facts {
+        backend.imports.sort_by(|left, right| {
+            (
+                &left.family,
+                &left.source,
+                &left.operation,
+                &left.provider_id,
+            )
+                .cmp(&(
+                    &right.family,
+                    &right.source,
+                    &right.operation,
+                    &right.provider_id,
+                ))
+        });
+    }
+}
+
+/// Test-facing pure derivation from registry parts. Production uses [`facts_from_registry`] so the
+/// exact gen-core resolution seam owns provider lookup and structural capability withdrawal.
+pub fn facts_from_registry_parts(
+    descriptors: &[gen_core::ModelDescriptor],
+    imports: &[gen_core::ImportedModelRegistration],
+    inference_revision: &str,
+    dumper: &str,
+) -> Result<Vec<EngineCapabilityFacts>, String> {
+    let mut facts = facts_from_descriptors(descriptors, inference_revision, dumper)?;
+    for route in imports {
+        let mut descriptor = descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == route.provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "imported route {}/{:?}/{:?} targets missing provider {}",
+                    route.family, route.source, route.operation, route.provider_id
+                )
+            })?;
+        if !route.inherit_adapters {
+            descriptor.capabilities.supports_lora = false;
+            descriptor.capabilities.supports_lokr = false;
+        }
+        append_imported_fact(&mut facts, route, descriptor);
+    }
+    sort_imported_facts(&mut facts);
+    Ok(facts)
+}
+
+/// Derive facts directly from the provider registry. `imported_model_descriptor` performs exact
+/// family/source/operation resolution and applies `inherit_adapters`; the serializer never
+/// re-implements either decision.
+pub fn facts_from_registry(
+    registry: &gen_core::ProviderRegistry,
+    inference_revision: &str,
+    dumper: &str,
+) -> Result<Vec<EngineCapabilityFacts>, String> {
+    let descriptors: Vec<gen_core::ModelDescriptor> = registry
+        .generators()
+        .map(|registration| (registration.descriptor)())
+        .collect();
+    let mut facts = facts_from_descriptors(&descriptors, inference_revision, dumper)?;
+    for route in registry.imported_models() {
+        let descriptor = registry
+            .imported_model_descriptor(route.family, route.source, route.operation)
+            .ok_or_else(|| {
+                format!(
+                    "registry refused its own imported route {}/{:?}/{:?} targeting {}",
+                    route.family, route.source, route.operation, route.provider_id
+                )
+            })?;
+        append_imported_fact(&mut facts, route, descriptor);
+    }
+    sort_imported_facts(&mut facts);
+    Ok(facts)
 }
 
 /// Bucket descriptors per backend, each bucket sorted by id and proven duplicate-free.
@@ -556,12 +741,9 @@ const AUDIO_DUMPER_INVOCATION: &str = "cargo run -p sceneworks-worker --bin \
 /// Reads only each registration's `descriptor` closure — no model load, no weights on disk — the
 /// same introspection `mlx-gen-catalog` and [`crate::engines::registry_capabilities`] do.
 pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, String> {
-    let descriptors: Vec<gen_core::ModelDescriptor> = crate::inference_runtime::media()
-        .generators()
-        .map(|registration| (registration.descriptor)())
-        .collect();
-    facts_from_descriptors(
-        &descriptors,
+    let registry = crate::inference_runtime::media();
+    facts_from_registry(
+        registry,
         crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
         dumper_invocation(),
     )
@@ -700,6 +882,7 @@ mod tests {
                 supports_preview,
                 ..Default::default()
             },
+            encoder_contract: None,
             required_components: &[],
             control_kinds: None,
         }
@@ -775,6 +958,39 @@ mod tests {
         assert_eq!(facts[1].file_name(), "capabilities.mlx.json");
     }
 
+    #[test]
+    fn imported_facts_match_exact_shape_and_apply_structural_adapter_refusal() {
+        let mut provider = descriptor("mage_flow_base", "mlx", true);
+        provider.family = "mage-flow";
+        provider.capabilities.supports_lora = true;
+        provider.capabilities.supports_lokr = true;
+        provider.capabilities.supported_quants = &[gen_core::Quant::Q4];
+        provider.capabilities.supports_kv_cache = true;
+        let route = gen_core::ImportedModelRegistration {
+            family: "mage-flow",
+            source: gen_core::ImportedModelSource::TransformerDirectory,
+            operation: gen_core::ImportedModelOperation::Generate,
+            provider_id: "mage_flow_base",
+            required_components: Some(&["mage_text_encoder", "mage_vae"]),
+            inherit_adapters: false,
+        };
+
+        let facts = facts_from_registry_parts(&[provider], &[route], "revision", "dump")
+            .expect("exact imported facts");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].imports.len(), 1);
+        let imported = &facts[0].imports[0];
+        assert_eq!(imported.family, "mage-flow");
+        assert_eq!(imported.source, "transformer_directory");
+        assert_eq!(imported.operation, "generate");
+        assert_eq!(imported.provider_id, "mage_flow_base");
+        assert!(!imported.supports_lora);
+        assert!(!imported.supports_lokr);
+        assert_eq!(imported.supported_quants, ["q4"]);
+        assert!(imported.supports_kv_cache);
+        assert!(imported.registry_cached);
+    }
+
     // The same engine id twice in one backend would make the stage-2 join through
     // MODEL_TABLE.engine_id resolve to whichever row won — a silently wrong answer for every
     // SceneWorks id mapping onto it.
@@ -835,6 +1051,23 @@ mod tests {
                 SCENEWORKS_BACKENDS,
                 entry.file_name(),
             );
+        }
+        let imported = facts
+            .iter()
+            .flat_map(|entry| entry.imports.iter())
+            .collect::<Vec<_>>();
+        assert!(
+            !imported.is_empty(),
+            "the linked registry must publish its exact imported-source routes"
+        );
+        if facts.iter().any(|entry| entry.backend == "mlx") {
+            assert!(imported.iter().any(|route| {
+                route.family == "mage-flow"
+                    && route.source == "transformer_directory"
+                    && route.operation == "generate"
+                    && !route.supports_lora
+                    && !route.supports_lokr
+            }));
         }
     }
 

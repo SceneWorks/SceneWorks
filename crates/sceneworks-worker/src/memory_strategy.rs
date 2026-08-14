@@ -1756,6 +1756,7 @@ mod tests {
                     backend: "candle",
                     modality: gen_core::Modality::Image,
                     capabilities: Default::default(),
+                    encoder_contract: None,
                     denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,

@@ -922,6 +922,15 @@ pub(crate) fn default_repo_for(sceneworks_id: &str) -> Option<&'static str> {
         .map(|row| row.default_repo)
 }
 
+/// Registry id paired with a SceneWorks catalog id. Unlike [`mlx_model`], this pure lookup is
+/// available to the API-side text-encoder catalog builder before a descriptor is joined.
+pub(crate) fn engine_id_for_model(sceneworks_id: &str) -> Option<&'static str> {
+    MODEL_TABLE
+        .iter()
+        .find(|row| row.sceneworks_id == sceneworks_id)
+        .map(|row| row.engine_id)
+}
+
 /// The registry-DERIVED subset of the MLX worker's capabilities (sc-3723): exactly the
 /// capabilities backed by a linked generator/trainer/captioner descriptor whose backend is
 /// enabled in `settings`. Off-macOS the provider crates aren't linked, so the registry is
@@ -2177,6 +2186,7 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
             denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
@@ -2201,6 +2211,7 @@ mod tests {
             backend: "candle",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
             denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
@@ -2226,6 +2237,7 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
             denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,

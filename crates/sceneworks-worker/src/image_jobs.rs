@@ -629,10 +629,14 @@ pub(crate) async fn run_image_generate_job(
                 // A full base fine-tune's own checkpoint (sc-15036): pair the trained transformer
                 // with the installed Mage-Flow base's shared text encoder + VAE and render through
                 // `load_finetuned`. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::MageFinetuned(transformer) = route else {
+                    unreachable!("Mage fine-tuned route missing its prepared transformer")
+                };
                 generate_mage_finetuned_stream(
                     api,
                     settings,
                     job,
+                    *transformer,
                     &plan,
                     &project_path,
                     backend,
@@ -641,11 +645,17 @@ pub(crate) async fn run_image_generate_job(
                 .await?;
             }
             ImageRoute::SdxlImported => {
+                let PreparedImageRoute::SdxlImported(sources) = route else {
+                    unreachable!("SDXL imported route missing its prepared sources")
+                };
                 generate_sdxl_imported_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -1159,11 +1169,17 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::SdxlImported => {
+                    let PreparedCandleImageRoute::SdxlImported(sources) = route else {
+                        unreachable!("SDXL imported route missing its prepared sources")
+                    };
                     generate_sdxl_imported_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1534,7 +1550,10 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 /// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
 /// confined as directories, then their selected child is independently pinned and confined so a
 /// child symlink cannot inherit trust from its parent.
-#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn resolve_prepared_adapter_file(
     lora: &Value,
     settings: &Settings,

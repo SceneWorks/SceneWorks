@@ -556,7 +556,12 @@ async fn generate_flux2_edit_stream(
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
     let enhance = PromptEnhance::from_advanced(&request.advanced);
-    let spec = load_spec(weights_dir, quant, adapters, None);
+    let spec = attach_manifest_text_encoder(
+        load_spec(weights_dir, quant, adapters, None),
+        engine_id,
+        request,
+        settings,
+    )?;
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -990,7 +995,12 @@ async fn generate_flux2_dev_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = flux2_control_spec(weights_dir, control_weights, quant, adapters);
+    let spec = attach_manifest_text_encoder(
+        flux2_control_spec(weights_dir, control_weights, quant, adapters),
+        FLUX2_DEV_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         FLUX2_DEV_CONTROL_ENGINE_ID,

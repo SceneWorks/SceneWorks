@@ -509,6 +509,7 @@ async fn generate_krea_multiphase_stream(
         request,
         settings,
     )?;
+    let spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
 
