@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:22a67f01004e8bbc4758c605f8f3113987ec997065346742092edd179d83148f",
+    "sceneWorksRevision": "source-tree:01097a57ec166b1a246c168d3144919984f80cfc8334cda77585fe6dcfecf19a",
     "inferenceRevision": "82b45a5f621608c037b2b2286b3c8b078d9bdf81",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "5a18daca4b439047ae3eb2a9667079903fdd42299518992beb3f7b9474cb1e1a"
+        "sha256": "81d929c7a38526ea77484bc6e5d7e53b08fdcc0ad8579243eb36e9e0f4e1176e"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -128,12 +128,12 @@
   ],
   "summary": {
     "imageModels": 53,
-    "cells": 8540,
+    "cells": 8240,
     "publishedCells": 208,
-    "elidedCells": 8332,
+    "elidedCells": 8032,
     "elidedByState": {
-      "Implemented/unverified": 2923,
-      "Missing": 5409
+      "Implemented/unverified": 2834,
+      "Missing": 5198
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -613,7 +613,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -635,7 +634,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -678,7 +676,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -700,7 +697,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -743,7 +739,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -765,7 +760,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1771,7 +1765,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1793,7 +1786,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1836,7 +1828,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1858,7 +1849,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -5629,111 +5619,110 @@
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 6,
+      "elided": 6,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 6
+        "Implemented/unverified": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -5741,135 +5730,134 @@
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 6,
+      "elided": 6,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 6
+        "Implemented/unverified": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -5877,135 +5865,134 @@
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 6,
+      "elided": 6,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 6
+        "Implemented/unverified": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -6013,24 +6000,24 @@
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
@@ -8317,27 +8304,26 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 6,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8345,27 +8331,26 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 6,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8373,27 +8358,26 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 6,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8401,75 +8385,74 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 2,
+      "elided": 6,
+      "implemented": 1,
       "states": {
-        "Implemented/unverified": 2,
-        "Missing": 10
+        "Implemented/unverified": 1,
+        "Missing": 5
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
+          "bf16": 1,
           "q4": 0,
           "q8": 0
         },
         "mode": {
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 1
         }
       }
     },
@@ -8477,135 +8460,134 @@
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 2,
+      "elided": 6,
+      "implemented": 1,
       "states": {
-        "Implemented/unverified": 2,
-        "Missing": 10
+        "Implemented/unverified": 1,
+        "Missing": 5
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
+          "q4": 1,
           "q8": 0
         },
         "mode": {
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 1
         }
       }
     },
@@ -8613,24 +8595,24 @@
       "modelId": "lens",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {

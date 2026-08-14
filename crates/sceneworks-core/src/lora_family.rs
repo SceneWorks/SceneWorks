@@ -559,10 +559,9 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "chroma" => Some("chroma_diffusers"),
         "kolors" => Some("kolors_diffusers"),
         "sdxl" => Some("sdxl_diffusers"),
-        // Mage-Flow is macOS-only native MLX (epic 14034): there is no Torch/diffusers adapter.
-        // Like bernini / sd3 this label is recorded in recipe/lineage only — the job is MLX-routed
-        // by engine id (builtins) or by family (a full base fine-tune, sc-15036), never
-        // instantiated through a Torch adapter. Matches the builtin entries' `"adapter"`.
+        // Mage-Flow uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
+        // Torch/diffusers adapter. This family label records recipe/lineage and selects the native
+        // routes; it is never instantiated through the generic Torch adapter.
         "mage-flow" => Some("mlx_mage"),
         // SD3 / SD3.5 is the native-MLX port (epic 7841); there is no Torch/diffusers
         // adapter wired in SceneWorks. This label is recorded in recipe/lineage only —
@@ -573,9 +572,9 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
         "svd" => Some("svd_video"),
-        // Bernini is macOS-only native MLX (epic 4699): there is no Torch/diffusers
-        // adapter. This label is recorded in recipe/lineage only; on Mac the job is
-        // MLX-routed by engine id, never instantiated through a Torch adapter.
+        // Bernini uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
+        // Torch/diffusers adapter. This label is recorded in recipe/lineage and selects native
+        // routes, never the generic Torch adapter.
         "bernini" => Some("bernini"),
         // SCAIL-2 (epic 5439) is likewise macOS-only native MLX (engine id
         // "scail2_14b"); no Torch/diffusers adapter. Lineage label only.

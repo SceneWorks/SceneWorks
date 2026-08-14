@@ -241,6 +241,59 @@ export function parseEngineModelTable(rustSource) {
 }
 
 /**
+ * Parse preview support for the bespoke Candle Qwen-Edit lane.
+ *
+ * That provider is dispatched directly by SceneWorks rather than registered in the generic media
+ * registry, so stage-1 engine facts cannot describe it. The declaration and the actual
+ * `QwenEditRequest.preview` wiring live in one Rust source file; both must remain present or this
+ * parser fails loudly instead of preserving a stale `true` claim.
+ */
+export function parseBespokePreviewRoutes(rustSource) {
+  if (typeof rustSource !== "string" || rustSource.length === 0) {
+    throw new Error("parseBespokePreviewRoutes: expected qwen_edit_candle.rs source text");
+  }
+  const source = stripRustComments(
+    rustSource,
+    "parseBespokePreviewRoutes: qwen_edit_candle.rs",
+  );
+  const anchor = "const QWEN_EDIT_CANDLE_PREVIEW_MODELS: &[&str] =";
+  const declarations = source.split(anchor).length - 1;
+  if (declarations !== 1) {
+    throw new Error(
+      `parseBespokePreviewRoutes: expected exactly one ${anchor}, found ${declarations}`,
+    );
+  }
+  const afterAnchor = source.slice(source.indexOf(anchor) + anchor.length);
+  const open = afterAnchor.indexOf("&[");
+  const close = open === -1 ? -1 : afterAnchor.indexOf("]", open + 2);
+  if (open === -1 || close === -1) {
+    throw new Error("parseBespokePreviewRoutes: preview model list is not a closed `&[...]`");
+  }
+  const body = afterAnchor.slice(open + 2, close);
+  const modelIds = [...body.matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
+  const quotes = (body.match(/"/g) ?? []).length;
+  if (modelIds.length === 0 || quotes !== modelIds.length * 2) {
+    throw new Error("parseBespokePreviewRoutes: preview model list is empty or only partly parsed");
+  }
+  if (new Set(modelIds).size !== modelIds.length) {
+    throw new Error("parseBespokePreviewRoutes: preview model list contains a duplicate id");
+  }
+  if (
+    !/move\s*\|\s*index,\s*\(seed,\s*prompt\),\s*preview,\s*on_progress\s*\|/.test(source) ||
+    !/let\s+req\s*=\s*QwenEditRequest\s*\{[\s\S]*?\bpreview,\s*\};/.test(source)
+  ) {
+    throw new Error(
+      "parseBespokePreviewRoutes: QwenEditRequest is not wired to drive_gen_items' live preview sink",
+    );
+  }
+  return modelIds.map((modelId) => ({
+    modelId,
+    backend: "candle",
+    supportsPreview: true,
+  }));
+}
+
+/**
  * Parse one declared `&[&str]` backend list out of
  * `crates/sceneworks-worker/src/engine_capability_facts.rs`.
  *
@@ -493,9 +546,10 @@ const byBackendName = (left, right) =>
  * @param {{sceneworksId: string, engineId: string}[]} rows from {@link parseEngineModelTable}
  * @param {{backend: string, generatedFrom?: object, engines: object[]}[]} factsFiles media stage-1 dumps
  * @param {{backend: string, registry: string, generatedFrom?: object, engines: object[]}[]} audioFactsFiles audio stage-1 dumps
+ * @param {{modelId: string, backend: string, supportsPreview: boolean}[]} bespokePreviewRoutes exact direct-dispatch routes parsed from worker source
  * @returns the canonical catalog object both artifacts are written from
  */
-export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
+export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = [], bespokePreviewRoutes = []) {
   if (!Array.isArray(factsFiles) || factsFiles.length === 0) {
     throw new Error(
       "derivePreviewSupport: no stage-1 facts files. Nothing can be derived without at least one " +
@@ -504,6 +558,9 @@ export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
   }
   if (!Array.isArray(audioFactsFiles)) {
     throw new Error("derivePreviewSupport: audioFactsFiles must be an array of audio dumps");
+  }
+  if (!Array.isArray(bespokePreviewRoutes)) {
+    throw new Error("derivePreviewSupport: bespokePreviewRoutes must be an array");
   }
 
   const indexed = factsFiles
@@ -547,10 +604,51 @@ export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
     }
   }
 
+  const modelIds = new Set(rows.map((row) => row.sceneworksId));
+  const knownBackends = new Set(backendNames);
+  const bespokeKeys = new Set();
+  for (const route of bespokePreviewRoutes) {
+    if (
+      typeof route?.modelId !== "string" ||
+      typeof route?.backend !== "string" ||
+      route?.supportsPreview !== true
+    ) {
+      throw new Error(
+        `derivePreviewSupport: malformed bespoke preview route ${JSON.stringify(route)}`,
+      );
+    }
+    if (!modelIds.has(route.modelId)) {
+      throw new Error(
+        `derivePreviewSupport: bespoke preview route names unknown MODEL_TABLE id ${route.modelId}`,
+      );
+    }
+    if (!knownBackends.has(route.backend)) {
+      throw new Error(
+        `derivePreviewSupport: bespoke preview route names undumped backend ${route.backend}`,
+      );
+    }
+    const key = `${route.modelId}\u0000${route.backend}`;
+    if (bespokeKeys.has(key)) {
+      throw new Error(`derivePreviewSupport: duplicate bespoke preview route ${key}`);
+    }
+    bespokeKeys.add(key);
+    const existing = models[route.modelId]?.[route.backend];
+    if (existing !== undefined && existing !== route.supportsPreview) {
+      throw new Error(
+        `derivePreviewSupport: bespoke preview route ${route.modelId}/${route.backend} conflicts ` +
+          "with the generic media registry dump",
+      );
+    }
+    models[route.modelId] = {
+      ...(models[route.modelId] ?? {}),
+      [route.backend]: route.supportsPreview,
+    };
+  }
+
   // Every MODEL_TABLE id, not merely the ones that produced an answer: the collision is between the
   // two NAMESPACES, and a media row whose engine happens to be in no facts file today would
   // otherwise let an audio engine quietly take its name and answer for it.
-  const fromMedia = new Set(rows.map((row) => row.sceneworksId));
+  const fromMedia = modelIds;
   for (const entry of audioIndexed) {
     for (const [engineId, supportsPreview] of entry.engines) {
       if (fromMedia.has(engineId)) {

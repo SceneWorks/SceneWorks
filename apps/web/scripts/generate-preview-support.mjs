@@ -22,6 +22,9 @@
 //   3. config/engine-capabilities/audio/capabilities.<backend>.json — the same dump of the SEPARATE
 //      audio registry (sc-17593), whose engine ids ARE SceneWorks model ids and so need no join.
 //      Written by the same command on either lane: audio is candle-native everywhere.
+//   4. crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs — exact preview-bearing model ids
+//      for the bespoke Candle Qwen-Edit provider, plus the request's live PreviewSink wiring. This
+//      direct-dispatch provider is intentionally absent from the generic media registry dump.
 //
 // A single-stage generator would have had to link an engine registry itself, which only the two
 // self-hosted lanes can do — so its drift guard would have been reachable only where an engine
@@ -45,6 +48,7 @@ import {
   assertBackendCoverage,
   catalogToWebPreviewSupport,
   derivePreviewSupport,
+  parseBespokePreviewRoutes,
   parseEngineModelTable,
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
@@ -57,6 +61,12 @@ const factsDir = fileURLToPath(new URL("../../../config/engine-capabilities", im
 const audioFactsDir = `${factsDir}/audio`;
 const enginesPath = fileURLToPath(
   new URL("../../../crates/sceneworks-worker/src/engines.rs", import.meta.url),
+);
+const qwenEditCandlePath = fileURLToPath(
+  new URL(
+    "../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+    import.meta.url,
+  ),
 );
 // The declared backend list (sc-17119). Read from the Rust const rather than the directory listing,
 // because the directory listing cannot see a file that was never written.
@@ -121,6 +131,7 @@ const catalog = derivePreviewSupport(
   parseEngineModelTable(readFileSync(enginesPath, "utf8")),
   factsFiles,
   audioFactsFiles,
+  parseBespokePreviewRoutes(readFileSync(qwenEditCandlePath, "utf8")),
 );
 
 writeFileSync(manifestPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");

@@ -3167,7 +3167,7 @@ fn mage_flow_image_job_with_a_lora_is_claimed_by_the_mlx_worker() {
             .claim_next_job("worker-torch")
             .expect("torch claim ok")
             .is_none(),
-        "Mage-Flow is MLX-only; the generic torch descriptor must not claim it"
+        "Mage-Flow uses native backends; the generic torch descriptor must not claim it"
     );
     let claimed = store
         .claim_next_job("worker-mlx")

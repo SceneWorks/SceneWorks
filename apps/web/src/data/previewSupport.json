@@ -164,10 +164,12 @@
       "mlx": true
     },
     "qwen_image_edit_2511": {
-      "mlx": true
+      "mlx": true,
+      "candle": true
     },
     "qwen_image_edit_2511_lightning": {
-      "mlx": true
+      "mlx": true,
+      "candle": true
     },
     "realvisxl": {
       "candle": true,

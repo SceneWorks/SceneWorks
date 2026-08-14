@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { fallbackModels } from "./constants.js";
 
+describe("fallbackModels truthful style-variation surface (sc-18481)", () => {
+  it.each(["lens", "lens_turbo", "chroma1_hd", "chroma1_base", "chroma1_flash"])(
+    "%s does not restore the removed hidden style-variation no-op",
+    (id) => {
+      const model = fallbackModels.find((entry) => entry.id === id);
+      expect(model, `${id} must be present in fallbackModels`).toBeTruthy();
+      expect(model.capabilities).not.toContain("style_variations");
+    },
+  );
+});
+
 // SD3.5 Image Studio surfacing (epic 7841 / sc-7873). The fallbackModels list seeds the picker
 // before the live catalog loads; the three SD3.5 variants must be present as text-to-image image
 // models with the SD3.5 prompt guide and per-variant defaults (Turbo fast, Large high-fidelity,

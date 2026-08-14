@@ -45,6 +45,8 @@ const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
 const WORKER_IMAGE_DISPATCH: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/base.rs");
+const WORKER_IMAGE_QWEN_EDIT_CANDLE: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/qwen_edit_candle.rs");
 const WORKER_ENGINE_TABLE: &str = include_str!("../../../../sceneworks-worker/src/engines.rs");
 const WORKER_GPU_CAPABILITIES: &str = include_str!("../../../../sceneworks-worker/src/gpu.rs");
 const WORKER_VIDEO_DISPATCH: &str =
@@ -128,6 +130,7 @@ pub struct ModelCapabilityRow {
     pub conditioning_shape: Vec<CapabilityCell>,
     pub user_adapters: Vec<CapabilityCell>,
     pub precision_tier: Vec<CapabilityCell>,
+    pub guidance_method: Vec<CapabilityCell>,
     pub preview: CapabilityCell,
 }
 
@@ -217,6 +220,12 @@ struct ManifestModel {
     downloads: Vec<ManifestDownload>,
     #[serde(default)]
     ui: Value,
+    #[serde(default)]
+    limits: Value,
+    #[serde(default)]
+    mlx: Value,
+    #[serde(default)]
+    candle: Value,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
 }
@@ -289,6 +298,8 @@ struct GeneratorCapabilityFacts {
     supports_lokr: bool,
     #[serde(default)]
     supported_quants: Vec<String>,
+    #[serde(default)]
+    supported_guidance_methods: Vec<String>,
     supports_preview: bool,
     supports_prompt_enhancement: bool,
 }
@@ -354,7 +365,7 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
     );
 
     Ok(BackendCapabilityMatrix {
-        schema_version: 2,
+        schema_version: 3,
         generated_by: GENERATOR.to_owned(),
         summary,
         sources: source_digests(),
@@ -389,6 +400,7 @@ fn matrix_summary(
             model.conditioning_shape.as_slice(),
             model.user_adapters.as_slice(),
             model.precision_tier.as_slice(),
+            model.guidance_method.as_slice(),
         ] {
             for cell in cells {
                 count(cell);
@@ -426,6 +438,7 @@ fn model_row(
     let mut conditioning_shape = Vec::new();
     let mut user_adapters = Vec::new();
     let mut precision_tier = Vec::new();
+    let mut guidance_method = Vec::new();
 
     if is_image {
         for operation in &manifest_operations {
@@ -475,6 +488,14 @@ fn model_row(
     for tier in precision_union(model, mlx_facts, candle_facts)? {
         precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
     }
+    for method in guidance_method_union(model) {
+        guidance_method.push(guidance_method_cell(
+            model,
+            &method,
+            mlx_facts,
+            candle_facts,
+        )?);
+    }
 
     let mlx_preview = descriptor_preview(model, mlx_facts)
         .or_else(|| preview.and_then(|backends| backends.get("mlx")).copied());
@@ -507,6 +528,7 @@ fn model_row(
         conditioning_shape,
         user_adapters,
         precision_tier,
+        guidance_method,
         preview,
     })
 }
@@ -849,10 +871,10 @@ fn backend_supports(job: &JobSnapshot, facts: &RuntimeDescriptorFacts) -> Result
     ))
 }
 
-/// The Qwen-Edit and FLUX.2 edit workers are bespoke SceneWorks lanes rather than registered
-/// generator descriptors, so their conditioning axes are absent from inference runtime facts. Keep
-/// this exception exact: the shared production lane table is consumed by both scheduler and worker,
-/// and only the modes/shapes that those concrete lanes implement may supplement descriptor truth.
+/// Bespoke image lanes are production routes that do not expose every supported shape through the
+/// generic generator descriptor. Keep this supplement exact: the shared production lane table is
+/// consumed by both scheduler and worker, and only the modes/shapes implemented by the resolved lane
+/// may supplement descriptor truth.
 fn bespoke_image_lane_support(
     backend: &str,
     model: &str,
@@ -901,6 +923,37 @@ fn bespoke_image_lane_support(
                 && category == "conditioning"
                 && (capability == "reference"
                     || (model == "flux2_dev" && capability == "multiReference"))
+        }
+        CandleImageLane::BerniniEdit => {
+            model == "bernini_image"
+                && matches!(
+                    (category, capability),
+                    ("operation", "edit_image") | ("conditioning", "reference")
+                )
+        }
+        CandleImageLane::FluxIpAdapter => {
+            matches!(model, "flux_dev" | "flux_schnell")
+                && category == "conditioning"
+                && capability == "reference"
+        }
+        CandleImageLane::SdxlEdit => {
+            matches!(
+                model,
+                "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+            ) && matches!(
+                (category, capability),
+                ("operation", "edit_image" | "image_inpaint") | ("conditioning", "mask")
+            )
+        }
+        CandleImageLane::SdxlIpAdapter => {
+            matches!(
+                model,
+                "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+            ) && category == "conditioning"
+                && capability == "reference"
+        }
+        CandleImageLane::KolorsControl => {
+            model == "kolors" && category == "conditioning" && capability == "control"
         }
         _ => false,
     }
@@ -993,6 +1046,11 @@ fn operation_request(
         "edit_image" => (
             JobType::ImageEdit,
             json!({ "mode": operation, "sourceAssetId": "probe" }),
+            true,
+        ),
+        "image_to_image" if model.id == "z_image_edit" => (
+            JobType::ImageEdit,
+            json!({ "mode": "edit_image", "sourceAssetId": "probe" }),
             true,
         ),
         "style_variations" | "image_to_image" if model.id.starts_with("flux2_") => (
@@ -1166,6 +1224,13 @@ fn conditioning_payload(
         "reference" if model.model_type == "video" => {
             job_type = JobType::VideoGenerate;
             payload = video_payload(&model.id, "image_to_video");
+        }
+        "reference" if model.id == "bernini_image" => {
+            // Bernini's still-image reference semantic is its real source edit route, not a t2i
+            // request carrying the generic referenceAssetId shape used by IP-Adapter families.
+            let (kind, edit, _) = operation_request(model, "edit_image")?;
+            job_type = kind;
+            payload = edit;
         }
         "reference"
             if (model.id.starts_with("sensenova_")
@@ -1509,6 +1574,98 @@ fn precision_cell(
     ))
 }
 
+fn guidance_methods_in_limits(limits: &Value) -> BTreeSet<String> {
+    limits
+        .get("guidanceMethods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|method| !method.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn backend_guidance_methods(value: &Value) -> BTreeSet<String> {
+    value
+        .get("limits")
+        .map(guidance_methods_in_limits)
+        .unwrap_or_default()
+}
+
+fn guidance_method_union(model: &ManifestModel) -> Vec<String> {
+    let mut methods = guidance_methods_in_limits(&model.limits);
+    methods.extend(backend_guidance_methods(&model.mlx));
+    methods.extend(backend_guidance_methods(&model.candle));
+    methods.into_iter().collect()
+}
+
+fn manifest_guidance_method_support(model: &ManifestModel, backend: &str, method: &str) -> bool {
+    let global = model
+        .limits
+        .get("guidanceMethods")
+        .and_then(Value::as_array)
+        .map(|methods| {
+            methods
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|candidate| candidate == method)
+        });
+    let backend_limits = match backend {
+        "mlx" => &model.mlx,
+        "candle" => &model.candle,
+        _ => return false,
+    };
+    let backend_specific = backend_limits
+        .get("limits")
+        .and_then(|limits| limits.get("guidanceMethods"))
+        .and_then(Value::as_array)
+        .map(|methods| {
+            methods
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|candidate| candidate == method)
+        });
+    backend_specific.or(global).unwrap_or(method == "cfg")
+}
+
+fn guidance_method_cell(
+    model: &ManifestModel,
+    method: &str,
+    mlx_facts: &RuntimeDescriptorFacts,
+    candle_facts: &RuntimeDescriptorFacts,
+) -> Result<CapabilityCell, String> {
+    let mut payload = json!({ "mode": "text_to_image" });
+    if method != "cfg" {
+        payload["advanced"] = json!({ "guidanceMethod": method });
+    }
+    let job = probe_job(JobType::ImageGenerate, &model.id, payload)?;
+    let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
+        if !manifest_guidance_method_support(model, &facts.snapshot.backend, method)
+            || !backend_supports(&job, facts)?
+        {
+            return Ok(false);
+        }
+        let descriptors = native_generator_descriptors(facts, &model.id);
+        Ok(if method == "cfg" {
+            !descriptors.is_empty()
+        } else {
+            descriptors.into_iter().any(|descriptor| {
+                descriptor
+                    .supported_guidance_methods
+                    .iter()
+                    .any(|candidate| candidate == method)
+            })
+        })
+    };
+    Ok(cell(
+        method.to_owned(),
+        supports(mlx_facts)?,
+        supports(candle_facts)?,
+        gap_for(&model.id, "guidance-method", method),
+    ))
+}
+
 fn provider_registered(facts: &RuntimeDescriptorFacts, id: &str) -> Option<&'static str> {
     let snapshot = &facts.snapshot;
     if snapshot
@@ -1676,45 +1833,32 @@ fn cell(
 }
 
 fn gap_for(model: &str, category: &str, capability: &str) -> ParityObligation {
-    let (work_item, authority) = match category {
-        "adapter" => ("sc-18477", None),
-        "video-conditioning" => ("sc-18478", Some("epic-8588")),
-        "video-precision" => ("sc-18478", Some("epic-9083")),
-        "video-preview" => ("sc-18478", Some("epic-16948")),
-        category if category == "video" || category.starts_with("video-") => {
-            let authority = (model == "krea_realtime_14b").then_some("epic-8433");
-            ("sc-18478", authority)
-        }
-        "preview" => {
-            let story = if model.starts_with("wan_")
-                || matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "svd" | "bernini")
+    let (work_item, authority) = if model == "krea_realtime_14b" {
+        ("epic-8433", Some("epic-8433"))
+    } else {
+        match category {
+            "adapter" => ("sc-18477", None),
+            "video-conditioning" | "conditioning" => ("epic-8588", Some("epic-8588")),
+            "video-precision" | "precision" => ("epic-9083", Some("epic-9083")),
+            "video-preview" | "preview" => ("epic-16948", Some("epic-16948")),
+            "guidance-method" if capability == "cfg_pp" => ("sc-8257", Some("epic-7434")),
+            category if category == "video" || category.starts_with("video-") => ("sc-18481", None),
+            "operation"
+                if matches!(model, "sana_1600m" | "sana_sprint_1600m")
+                    && capability == "image_to_image" =>
             {
-                "sc-18478"
-            } else {
-                "sc-18476"
-            };
-            (story, Some("epic-16948"))
+                ("sc-18475", Some("epic-8588"))
+            }
+            "operation" if model == "flux2_dev" && capability == "prompt_enhancement" => {
+                ("sc-18474", None)
+            }
+            "operation" => ("sc-18481", None),
+            // sc-18479 closes the current matrix. Future residual training gaps belong to the
+            // parity-closure story rather than the completed implementation story.
+            "training" => ("sc-18481", None),
+            "utility" => ("sc-18480", None),
+            _ => ("sc-18480", None),
         }
-        "precision" => ("sc-18476", Some("epic-9083")),
-        "conditioning" if matches!(model, "sana_1600m" | "sana_sprint_1600m") => {
-            ("sc-18475", Some("epic-8588"))
-        }
-        "conditioning" => ("sc-18476", Some("epic-8588")),
-        "operation"
-            if matches!(model, "sana_1600m" | "sana_sprint_1600m")
-                && capability == "image_to_image" =>
-        {
-            ("sc-18475", Some("epic-8588"))
-        }
-        "operation" if model == "flux2_dev" && capability == "prompt_enhancement" => {
-            ("sc-18474", None)
-        }
-        "operation" => ("sc-18476", None),
-        // sc-18479 closes the current matrix. Future residual training gaps belong to the
-        // parity-closure story rather than the completed implementation story.
-        "training" => ("sc-18481", None),
-        "utility" => ("sc-18480", None),
-        _ => ("sc-18480", None),
     };
     ParityObligation {
         work_item: work_item.to_owned(),
@@ -2455,6 +2599,7 @@ fn validate_obligations(
             ("conditioningShape", model.conditioning_shape.as_slice()),
             ("userAdapters", model.user_adapters.as_slice()),
             ("precisionTier", model.precision_tier.as_slice()),
+            ("guidanceMethod", model.guidance_method.as_slice()),
         ] {
             for cell in cells {
                 check(
@@ -2512,6 +2657,7 @@ fn source_digests() -> BTreeMap<String, String> {
         ("trainingCatalog", TRAINING_CATALOG),
         ("workerDispatch", WORKER_DISPATCH),
         ("workerImageDispatch", WORKER_IMAGE_DISPATCH),
+        ("workerImageQwenEditCandle", WORKER_IMAGE_QWEN_EDIT_CANDLE),
         ("workerEngineTable", WORKER_ENGINE_TABLE),
         ("workerGpuCapabilities", WORKER_GPU_CAPABILITIES),
         ("workerVideoDispatch", WORKER_VIDEO_DISPATCH),
@@ -2717,6 +2863,126 @@ mod tests {
     }
 
     #[test]
+    fn sc18481_existing_candle_image_lanes_are_not_descriptor_false_negatives() {
+        let matrix = backend_capability_matrix().unwrap();
+        for (model, shape) in [
+            ("bernini_image", "reference"),
+            ("flux_dev", "reference"),
+            ("flux_schnell", "reference"),
+            ("sdxl", "reference"),
+            ("sdxl", "mask"),
+            ("realvisxl", "reference"),
+            ("realvisxl", "mask"),
+            ("illustrious_xl_v1", "reference"),
+            ("illustrious_xl_v1", "mask"),
+            ("illustrious_xl_v2", "reference"),
+            ("illustrious_xl_v2", "mask"),
+            ("kolors", "control"),
+        ] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let cell = row
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == shape)
+                .unwrap_or_else(|| panic!("missing {model}/{shape}"));
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "{model}/{shape} must follow its live native routes"
+            );
+            assert!(cell.parity_obligation.is_none());
+        }
+    }
+
+    #[test]
+    fn sc18481_z_image_edit_and_removed_no_op_style_claims_use_real_product_shapes() {
+        let matrix = backend_capability_matrix().unwrap();
+        let z_edit = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "z_image_edit")
+            .unwrap();
+        let image_to_image = z_edit
+            .operation_and_mode
+            .iter()
+            .find(|cell| cell.capability == "image_to_image")
+            .expect("Z-Image Edit exposes image-to-image");
+        assert_eq!(
+            (image_to_image.mlx, image_to_image.candle),
+            (Some(true), Some(true)),
+            "the probe must use image_edit + sourceAssetId, like the real editor request"
+        );
+
+        for model in [
+            "lens",
+            "lens_turbo",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
+        ] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            assert!(!row
+                .manifest_operations
+                .iter()
+                .any(|operation| operation == "style_variations"));
+            assert!(!row
+                .operation_and_mode
+                .iter()
+                .any(|cell| cell.capability == "style_variations"));
+        }
+    }
+
+    #[test]
+    fn sc18481_cfg_pp_has_an_exact_guidance_axis_and_live_specialist_owner() {
+        let matrix = backend_capability_matrix().unwrap();
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let cfg = row
+                .guidance_method
+                .iter()
+                .find(|cell| cell.capability == "cfg")
+                .expect("standard CFG is represented");
+            assert_eq!((cfg.mlx, cfg.candle), (Some(true), Some(true)));
+            let cfg_pp = row
+                .guidance_method
+                .iter()
+                .find(|cell| cell.capability == "cfg_pp")
+                .expect("manifest-exposed CFG++ is represented");
+            assert_eq!((cfg_pp.mlx, cfg_pp.candle), (Some(true), Some(false)));
+            let obligation = cfg_pp
+                .parity_obligation
+                .as_ref()
+                .expect("Candle CFG++ remains a tracked specialist gap");
+            assert_eq!(obligation.work_item, "sc-8257");
+            assert_eq!(obligation.authority.as_deref(), Some("epic-7434"));
+            assert_eq!(obligation.url, "https://app.shortcut.com/trefry/story/8257");
+        }
+    }
+
+    #[test]
+    fn sc18481_bernini_preserves_candle_only_adapters_without_global_ui_exposure() {
+        let matrix = backend_capability_matrix().unwrap();
+        for model in ["bernini", "bernini_image"] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            for adapter in ["lora", "lokr"] {
+                let cell = row
+                    .user_adapters
+                    .iter()
+                    .find(|cell| cell.capability == adapter)
+                    .unwrap();
+                assert_eq!((cell.mlx, cell.candle), (Some(false), Some(true)));
+                assert!(cell.preserved_candle_only);
+                assert!(cell.parity_obligation.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn generated_summary_is_derived_from_every_matrix_section() {
         let matrix = backend_capability_matrix().unwrap();
         assert_eq!(
@@ -2826,6 +3092,56 @@ mod tests {
     }
 
     #[test]
+    fn residual_obligations_use_live_specialist_authority() {
+        let matrix = backend_capability_matrix().unwrap();
+        for row in &matrix.models {
+            for (axis, cells) in [
+                ("conditioning", row.conditioning_shape.as_slice()),
+                ("precision", row.precision_tier.as_slice()),
+                ("guidance", row.guidance_method.as_slice()),
+            ] {
+                for cell in cells {
+                    let Some(obligation) = &cell.parity_obligation else {
+                        continue;
+                    };
+                    assert!(!matches!(
+                        obligation.work_item.as_str(),
+                        "sc-18476" | "sc-18478"
+                    ));
+                    let expected = if row.id == "krea_realtime_14b" {
+                        ("epic-8433", Some("epic-8433"))
+                    } else {
+                        match axis {
+                            "conditioning" => ("epic-8588", Some("epic-8588")),
+                            "precision" => ("epic-9083", Some("epic-9083")),
+                            "guidance" => ("sc-8257", Some("epic-7434")),
+                            _ => unreachable!(),
+                        }
+                    };
+                    assert_eq!(obligation.work_item, expected.0, "{}/{axis}", row.id);
+                    assert_eq!(
+                        obligation.authority.as_deref(),
+                        expected.1,
+                        "{}/{axis}",
+                        row.id
+                    );
+                    assert_eq!(obligation.url, shortcut_url(&obligation.work_item));
+                }
+            }
+            if let Some(obligation) = &row.preview.parity_obligation {
+                let expected = if row.id == "krea_realtime_14b" {
+                    "epic-8433"
+                } else {
+                    "epic-16948"
+                };
+                assert_eq!(obligation.work_item, expected, "{}/preview", row.id);
+                assert_eq!(obligation.authority.as_deref(), Some(expected));
+                assert_eq!(obligation.url, shortcut_url(expected));
+            }
+        }
+    }
+
+    #[test]
     fn every_manifest_operation_has_an_exact_matrix_cell() {
         let matrix = backend_capability_matrix().unwrap();
         for model in &matrix.models {
@@ -2876,15 +3192,12 @@ mod tests {
                 .filter(|cell| cell.mlx == Some(true) && cell.candle != Some(true))
             {
                 video_mlx_only += 1;
-                assert_eq!(
-                    cell.parity_obligation
-                        .as_ref()
-                        .map(|item| item.work_item.as_str()),
-                    Some("sc-18478"),
-                    "video capability {}/{} must stay with the video parity story",
-                    video.id,
-                    cell.capability
-                );
+                let obligation = cell.parity_obligation.as_ref().unwrap();
+                assert!(!matches!(
+                    obligation.work_item.as_str(),
+                    "sc-18476" | "sc-18478"
+                ));
+                assert_eq!(obligation.url, shortcut_url(&obligation.work_item));
             }
         }
         assert!(
@@ -3460,6 +3773,7 @@ mod tests {
             "apiGeneration",
             "apiContractEntry",
             "apiDto",
+            "workerImageQwenEditCandle",
             "workerVideoDispatch",
             "workerVideoWan",
             "workerVideoVace",
@@ -3521,6 +3835,13 @@ mod tests {
                 .iter()
                 .map(|cell| cell.capability.as_str())
                 .collect();
+            let guidance: BTreeSet<&str> = row
+                .guidance_method
+                .iter()
+                .map(|cell| cell.capability.as_str())
+                .collect();
+            let exposed_guidance: BTreeSet<String> =
+                guidance_method_union(model).into_iter().collect();
             for descriptor in descriptors {
                 for shape in &descriptor.conditioning {
                     assert!(
@@ -3549,6 +3870,15 @@ mod tests {
                         "{} loses descriptor LoKr",
                         model.id
                     );
+                }
+                for method in &descriptor.supported_guidance_methods {
+                    if exposed_guidance.contains(method) {
+                        assert!(
+                            guidance.contains(method.as_str()),
+                            "{} loses manifest-exposed descriptor guidance method {method}",
+                            model.id
+                        );
+                    }
                 }
             }
         }

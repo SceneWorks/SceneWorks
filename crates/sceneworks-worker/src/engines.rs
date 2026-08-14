@@ -546,8 +546,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // — forcing `frames:1` + `video_mode:"t2i"|"i2i"` so the engine returns a single still — so it
     // does NOT ride the generic `generate_stream`; this row supplies the `mlx_model` join the worker
     // uses for `adapter_id` / `mlx_weights_gap` / the descriptor-capability lookup. Engine defaults:
-    // 40 steps, guidance (omega_txt) 4.0 (mlx-gen-bernini `FullDefaults`). No LoRA (descriptor
-    // `supports_lora: false`). `default_repo` is the turnkey snapshot, but the dedicated path
+    // 40 steps, guidance (omega_txt) 4.0 (mlx-gen-bernini `FullDefaults`). The MLX descriptor has
+    // no adapter surface; the separate native Candle descriptor supports LoRA/LoKr. `default_repo`
+    // is the turnkey snapshot, but the dedicated path
     // resolves the dir via `resolve_bernini_model_dir` (env / app-managed / download), not this repo.
     ModelRow {
         sceneworks_id: "bernini_image",
@@ -1833,8 +1834,9 @@ mod tests {
             "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
             "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::SIZE_MULTIPLE,
             "krea_2_turbo" | "krea_2_raw" => p::krea::SIZE_MULTIPLE,
-            // Mage is macOS-only; keep the all-target MODEL_TABLE lattice tied to the same ÷16
-            // contract on candle CI even though runtime-cuda intentionally has no Mage provider.
+            // Mage now has native MLX and Candle providers. Its Candle facade does not export a
+            // stride constant through `runtime_cuda::providers`, so keep the shared ÷16 contract
+            // explicit here and checked against the all-target MODEL_TABLE lattice.
             "mage_flow_base"
             | "mage_flow"
             | "mage_flow_turbo"

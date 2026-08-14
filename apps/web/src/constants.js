@@ -272,7 +272,7 @@ const seededFallbackModels = [
     id: "lens",
     name: "Lens",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Microsoft Lens base text-to-image (20-step, CFG 5.0); higher quality than Turbo, also the LoRA training base.",
       promptGuide: { title: "Lens Prompt Guide", path: "/prompt-guides/lens.md" },
@@ -282,7 +282,7 @@ const seededFallbackModels = [
     id: "lens_turbo",
     name: "Lens-Turbo",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Microsoft Lens distilled 4-step text-to-image; strong text rendering, large-VRAM GPU.",
       promptGuide: { title: "Lens-Turbo Prompt Guide", path: "/prompt-guides/lens-turbo.md" },
@@ -389,7 +389,7 @@ const seededFallbackModels = [
     id: "chroma1_hd",
     name: "Chroma1-HD",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
       promptGuide: { title: "Chroma1-HD Prompt Guide", path: "/prompt-guides/chroma1-hd.md" },
@@ -399,7 +399,7 @@ const seededFallbackModels = [
     id: "chroma1_base",
     name: "Chroma1-Base",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
       promptGuide: { title: "Chroma1-Base Prompt Guide", path: "/prompt-guides/chroma1-base.md" },
@@ -409,7 +409,7 @@ const seededFallbackModels = [
     id: "chroma1_flash",
     name: "Chroma1-Flash",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     defaults: { resolution: "768x768", steps: 12, guidanceScale: 1.0, sampler: "heun", scheduler: "default" },
     limits: {
       resolutions: ["768x768", "1024x1024", "1280x720", "720x1280"],
