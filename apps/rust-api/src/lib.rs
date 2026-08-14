@@ -63,7 +63,7 @@ use sceneworks_core::training_store::{
 };
 use sceneworks_core::video_request::{
     default_resolution, duration_limit_error, fps_limit_error, reference_limit_error,
-    resolve_duration, resolve_fps,
+    requested_steps, resolve_duration, resolve_fps, steps_limit_error,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

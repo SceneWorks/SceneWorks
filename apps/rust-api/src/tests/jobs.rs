@@ -6381,6 +6381,207 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         .contains("fps must be between 1 and 60"));
 }
 
+/// sc-19426: `limits.hardMinSteps` is enforced at enqueue against the POST-PRESET model's floor,
+/// and — the part that makes the key worth existing — a below-floor request is REFUSED rather than
+/// raised onto the floor.
+///
+/// The fixture makes the two plausible homes disagree, exactly as the duration and fps tests above
+/// do:
+///   * default video model — no floor at all (1 step is fine)
+///   * `preset-vid`        — floor 2, the MiniMax-H3 shape
+///
+/// `advanced.steps: 1` is the discriminator. A gate reading the DTO's stale `payload.model` — i.e.
+/// inside `validate_video_job`, which runs BEFORE `apply_recipe_preset_to_video_payload` — sees the
+/// default's absent floor, admits it, and enqueues a job whose scheduler cannot build a schedule
+/// from a single sigma grid point.
+#[tokio::test]
+async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Default Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Default Vid" }
+            },
+            {
+              "id": "preset-vid",
+              "name": "Preset Vid",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "minimax_h3",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 50 },
+              "limits": { "hardMinSteps": 2 },
+              "ui": { "label": "Preset Vid" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "preset_override",
+              "name": "Preset Override",
+              "workflow": "text_to_video",
+              "model": "preset-vid",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Step Floor Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // 1 step: fine for the default (no floor) but under the preset-resolved model's 2. `model`
+    // omitted so the preset's model wins — the sc-12300 shape.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 1 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "1 step under preset-vid's 2-step floor must be refused at enqueue, not raised: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("preset-vid"),
+        "names the model whose floor applied — NOT the default's: {detail}"
+    );
+    assert!(
+        detail.contains("at least 2 sampling steps"),
+        "states the floor: {detail}"
+    );
+    assert!(
+        detail.contains("asks for 1."),
+        "states what was asked: {detail}"
+    );
+
+    // At-floor admits: 2 is exactly the floor, and the bound is `<`. This is what keeps the
+    // assertion above from passing for a gate that simply rejects everything.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 2 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "2 is at the floor: {body}");
+    assert_eq!(body["payload"]["model"], "preset-vid");
+    assert_eq!(
+        body["payload"]["advanced"]["steps"], 2,
+        "the admitted count travels VERBATIM — the gate refuses, it never rewrites"
+    );
+
+    // A request naming NO steps is admitted even on the floored model: `advanced` is a passthrough
+    // map with no blanket step count, so an omitted `steps` means the engine picks. Refusing it
+    // would be the sc-12400 regression on a new axis.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a steps-less payload must not be refused by the floor: {body}"
+    );
+
+    // ...and the SAME 1-step request against the default model (no floor) is admitted, proving the
+    // rejection above came from the per-model floor rather than a blanket step bound.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 1 },
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the default model declares no floor, so 1 step is its own business: {body}"
+    );
+}
+
 /// sc-12400 — the regression sc-12297 shipped: a request that names **no duration at all** was
 /// rejected for "asking for 6s", on 7 of the 10 shipped video models.
 ///

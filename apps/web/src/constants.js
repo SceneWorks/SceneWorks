@@ -859,6 +859,9 @@ const seededFallbackModels = [
       hardMinDuration: 5.1667,
       hardMaxDuration: 14.375,
       recommendedMaxDuration: 14.375,
+      // The scheduler needs two sigma grid points to have one evaluation between them, so a 1-step
+      // request is refused rather than raised (sc-19426).
+      hardMinSteps: 2,
       fps: [24],
       maxPixels: 1032192,
       resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
@@ -880,6 +883,7 @@ const seededFallbackModels = [
       hardMinDuration: 5.1667,
       hardMaxDuration: 14.375,
       recommendedMaxDuration: 14.375,
+      hardMinSteps: 2,
       fps: [24],
       maxPixels: 1032192,
       resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
