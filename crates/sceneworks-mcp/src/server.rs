@@ -234,7 +234,7 @@ pub struct SubmitVideoJobArgs {
     #[schemars(description = "The video prompt (1-4000 characters).")]
     pub prompt: String,
     #[schemars(
-        description = "\"generate\" (default: text-to-video, or image-to-video when sourceAssetId is set, or first/last-frame when lastFrameAssetId is also set), \"extend\" (continue a clip; needs sourceClipAssetId), \"bridge\" (fill between two clips; needs sourceClipAssetId + bridgeRightClipAssetId), or \"person_replace\" (swap a tracked person; needs sourceClipAssetId + personTrackId + characterId)."
+        description = "\"generate\" (default: text-to-video, or image-to-video when sourceAssetId is set, or first/last-frame when lastFrameAssetId is also set), \"reference\" (render from reference media; needs at least one of referenceAssetIds / sourceClipAssetIds / referenceAudioAssetIds), \"extend\" (continue a clip; needs sourceClipAssetId), \"bridge\" (fill between two clips; needs sourceClipAssetId + bridgeRightClipAssetId), or \"person_replace\" (swap a tracked person; needs sourceClipAssetId + personTrackId + characterId)."
     )]
     pub mode: Option<String>,
     #[schemars(description = "Things to avoid in the video.")]
@@ -255,6 +255,15 @@ pub struct SubmitVideoJobArgs {
     pub quality: Option<String>,
     #[schemars(description = "Seed for reproducible output. Omit for a random seed.")]
     pub seed: Option<i64>,
+    /// sc-17161. Denoise step count, carried in `advanced.steps` — the ONLY key the API reads it
+    /// from (`sceneworks_core::video_request::requested_steps`). Without it this tool could only
+    /// ever submit the model's `defaults.steps`, which for MiniMax-H3 is 50 and measured in HOURS
+    /// at the default canvas; the cheap draft an agent would reach for was unreachable.
+    /// Per-model floors are real (`limits.hardMinSteps`), so `list_models` reports them.
+    #[schemars(
+        description = "Denoise steps. Omit for the model's own default. Fewer steps render proportionally faster; a model may declare a minimum (minSteps from list_models) below which the request is refused rather than raised."
+    )]
+    pub steps: Option<u32>,
     #[schemars(
         description = "LoRA adapters to apply: [{\"id\": <from list_loras>, \"weight\": 0.0-2.0}]."
     )]
@@ -275,6 +284,19 @@ pub struct SubmitVideoJobArgs {
     pub source_clip_asset_id: Option<String>,
     #[schemars(description = "RIGHT video clip asset id for bridge mode.")]
     pub bridge_right_clip_asset_id: Option<String>,
+    /// sc-17161. `reference` mode's subject images. The API's `reference_to_video` arm takes them
+    /// as a LIST (Bernini encodes each as a subject reference; MiniMax-H3 Ref2VA labels them
+    /// `<Picture 1>`, `<Picture 2>` … IN THE ORDER GIVEN, so the order is part of the request).
+    #[schemars(
+        description = "Reference image asset ids for \"reference\" mode (subjects, characters, wardrobe, locations). Order is meaningful for models that label references in the prompt."
+    )]
+    pub reference_asset_ids: Option<Vec<String>>,
+    /// sc-17161. Reference video clips for `reference` mode. Distinct from `sourceClipAssetId`,
+    /// which is the single clip extend/bridge/person_replace edit.
+    #[schemars(
+        description = "Reference video clip asset ids for \"reference\" mode, on a model whose reference modes take motion clips as well as images. Models that do not take reference clips reject a non-empty list."
+    )]
+    pub source_clip_asset_ids: Option<Vec<String>>,
     /// sc-17160. Only models that DECLARE `limits.maxReferenceAudioAssets` accept these; every
     /// other video model refuses a non-empty list at enqueue, which is why the description says
     /// so rather than letting the caller discover it from a 400.
@@ -327,7 +349,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count) and supported resolutions."
+        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. A duration or fps menu is EXHAUSTIVE — a value not in it is refused, never rounded to the nearest one."
     )]
     async fn list_models(&self) -> Result<CallToolResult, ErrorData> {
         let models = self
@@ -564,7 +586,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "Submit a video generation job WITHOUT waiting for it (video renders for minutes). Modes: \"generate\" (text-to-video; add sourceAssetId for image-to-video, plus lastFrameAssetId for first/last-frame), \"extend\" (continue a clip), \"bridge\" (fill between two clips), \"person_replace\" (swap a tracked person for a Character). Returns the job id + initial snapshot; poll get_job_status, then fetch links with get_job_result once completed."
+        description = "Submit a video generation job WITHOUT waiting for it (video renders for minutes). Modes: \"generate\" (text-to-video; add sourceAssetId for image-to-video, plus lastFrameAssetId for first/last-frame), \"reference\" (render from reference media — images and/or video clips and/or audio clips), \"extend\" (continue a clip), \"bridge\" (fill between two clips), \"person_replace\" (swap a tracked person for a Character). Check list_models first: duration, fps and resolution menus are exhaustive per model and an off-menu value is refused rather than rounded. Returns the job id + initial snapshot; poll get_job_status, then fetch links with get_job_result once completed."
     )]
     async fn submit_video_job(
         &self,
@@ -982,6 +1004,32 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
                 "text_to_video"
             }
         }
+        // sc-17161. `reference_to_video` is one of the twelve modes `VIDEO_JOB_MODES` admits and
+        // was the only one this tool could not reach — MiniMax-H3 Ref2VA's ONLY mode, and the mode
+        // the `referenceAudioAssetIds` field sc-17160 added exists to feed, so the field was
+        // reachable while the mode that consumes it was not.
+        //
+        // "at least one reference of ANY kind" mirrors `validate_video_job`'s arm exactly
+        // (apps/rust-api/src/lib.rs): Ref2VA conditions on images AND clips AND audio, and an
+        // audio-only or clip-only set is a shape the checkpoint serves. Checking it HERE keeps the
+        // tool's contract fail-fast — a precise message instead of a submitted-then-400'd job —
+        // and the per-model half (which of the three a given model actually takes, and how many)
+        // stays where it belongs, on the model's declared caps at enqueue.
+        "reference" => {
+            let empty =
+                |ids: &Option<Vec<String>>| ids.as_deref().map_or(true, <[String]>::is_empty);
+            if empty(&args.reference_asset_ids)
+                && empty(&args.source_clip_asset_ids)
+                && empty(&args.reference_audio_asset_ids)
+            {
+                return Err(
+                    "reference mode requires at least one of referenceAssetIds, \
+                     sourceClipAssetIds or referenceAudioAssetIds"
+                        .to_owned(),
+                );
+            }
+            "reference_to_video"
+        }
         "extend" => {
             if args.source_clip_asset_id.is_none() {
                 return Err(
@@ -1023,8 +1071,8 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
         }
         other => {
             return Err(format!(
-                "unsupported mode \"{other}\": use \"generate\", \"extend\", \"bridge\" or \
-                 \"person_replace\""
+                "unsupported mode \"{other}\": use \"generate\", \"reference\", \"extend\", \
+                 \"bridge\" or \"person_replace\""
             ))
         }
     };
@@ -1063,6 +1111,14 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
             args.bridge_right_clip_asset_id.as_ref().map(|v| json!(v)),
         ),
         (
+            "referenceAssetIds",
+            args.reference_asset_ids.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "sourceClipAssetIds",
+            args.source_clip_asset_ids.as_ref().map(|v| json!(v)),
+        ),
+        (
             "referenceAudioAssetIds",
             args.reference_audio_asset_ids.as_ref().map(|v| json!(v)),
         ),
@@ -1079,6 +1135,13 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
         if let Some(value) = value {
             body.insert(key.to_owned(), value);
         }
+    }
+    // `steps` rides in `advanced`, which is a verbatim passthrough map — `requested_steps` reads
+    // `advanced.steps` and nothing else, so a top-level key would be silently dropped. Emitted
+    // only when the caller named one, so an omitted step count still means "the model's own
+    // default" rather than a blanket this tool invented (the same rule the optional keys follow).
+    if let Some(steps) = args.steps {
+        body.insert("advanced".to_owned(), json!({ "steps": steps }));
     }
     Ok(Value::Object(body))
 }
@@ -1387,10 +1450,41 @@ pub(crate) fn compact_models(models: &Value) -> Value {
             ],
             &mut out,
         );
-        // The resolution menu is the one `limits` field a job request needs; the
-        // rest (sampler/scheduler menus, counts) stays on the full API response.
-        if let Some(resolutions) = model.pointer("/limits/resolutions") {
-            out.insert("resolutions".to_owned(), resolutions.clone());
+        // The menus and floors a caller needs to build a request the enqueue gate ACCEPTS.
+        // Resolutions were the only one carried before sc-17161, and that was survivable while
+        // every video model took a continuous duration range. MiniMax-H3 is not that shape: its
+        // fourteen `17n + 5` rungs are the only renderable lengths, its fps is a one-entry menu,
+        // and its step floor is 2 — so an agent that could not see them would guess "6 seconds,
+        // 25 fps" and get a 400 for every call. Sampler/scheduler menus and the download/footprint
+        // blocks stay on the full API response; these are the request-shaping keys.
+        for (key, pointer) in [
+            ("resolutions", "/limits/resolutions"),
+            ("durations", "/limits/durations"),
+            ("fps", "/limits/fps"),
+            ("minSteps", "/limits/hardMinSteps"),
+            ("maxReferenceAssets", "/limits/maxReferenceAssets"),
+            ("maxSourceClipAssets", "/limits/maxSourceClipAssets"),
+            ("maxReferenceAudioAssets", "/limits/maxReferenceAudioAssets"),
+            (
+                "maxCombinedReferenceAssets",
+                "/limits/maxCombinedReferenceAssets",
+            ),
+        ] {
+            if let Some(value) = model.pointer(pointer) {
+                out.insert(key.to_owned(), value.clone());
+            }
+        }
+        // Licence-required UI attribution (sc-17227 §IV.2 / sc-17161). An MCP client renders the
+        // model it used in ITS OWN interface, so the string has to travel with the catalog entry
+        // rather than living only on SceneWorks' own screens.
+        if let Some(attribution) = model.pointer("/ui/attribution") {
+            out.insert("attribution".to_owned(), attribution.clone());
+        }
+        // Where the model's prompting guidance lives. Prompt shape is not generic across video
+        // families — MiniMax-H3 generates its soundtrack from the same prompt, so an unprompted
+        // soundscape is invented rather than absent — and an agent has no other way to find out.
+        if let Some(guide) = model.pointer("/ui/promptGuide") {
+            out.insert("promptGuide".to_owned(), guide.clone());
         }
         // Which LoRA families this model accepts — pairs with list_loras.
         if let Some(families) = model.pointer("/loraCompatibility/families") {
@@ -1822,6 +1916,161 @@ mod tests {
         );
     }
 
+    /// sc-17161: `reference` is a real mode, not a synonym for `generate`.
+    ///
+    /// `reference_to_video` is one of the twelve modes `VIDEO_JOB_MODES` admits and was the ONLY
+    /// one `submit_video_job` could not reach. That gap is what made sc-17160's
+    /// `referenceAudioAssetIds` field inert here: the field was on the tool while the single mode
+    /// that consumes it was not, so an agent could set audio references and never render with them.
+    #[test]
+    fn video_job_body_reference_mode_carries_all_three_reference_kinds() {
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "the woman from <Picture 1> speaks with the voice from <Audio 1>",
+            "mode": "reference",
+            "referenceAssetIds": ["img_1", "img_2"],
+            "sourceClipAssetIds": ["clip_1"],
+            "referenceAudioAssetIds": ["aud_1"],
+            "model": "minimax_h3_ref"
+        }));
+        let body = video_job_body(&args).expect("body builds");
+        assert_eq!(body["mode"], "reference_to_video");
+        assert_eq!(body["referenceAssetIds"], json!(["img_1", "img_2"]));
+        assert_eq!(body["sourceClipAssetIds"], json!(["clip_1"]));
+        assert_eq!(body["referenceAudioAssetIds"], json!(["aud_1"]));
+        assert_eq!(body["model"], "minimax_h3_ref");
+    }
+
+    /// The gate is "at least one reference of ANY kind", mirroring `validate_video_job`'s arm.
+    ///
+    /// All three legs are exercised individually: an image-only spelling of this rule is exactly
+    /// the bug sc-17159 fixed one layer up, where an audio-only or clip-only Ref2VA set — a shape
+    /// the checkpoint serves — was 400'd before the per-model caps that admit it were consulted.
+    #[test]
+    fn video_job_body_reference_mode_takes_any_single_kind_but_not_none() {
+        let empty =
+            video_args_from(json!({ "projectId": "p1", "prompt": "x", "mode": "reference" }));
+        let error = video_job_body(&empty).expect_err("referenceless reference mode rejected");
+        assert!(error.contains("referenceAssetIds"), "{error}");
+        assert!(error.contains("sourceClipAssetIds"), "{error}");
+        assert!(error.contains("referenceAudioAssetIds"), "{error}");
+
+        // An explicitly EMPTY list is the same as naming none — otherwise `[]` would slip past the
+        // gate here and be refused by the API instead, which is the fail-fast this check exists for.
+        let blank = video_args_from(json!({
+            "projectId": "p1", "prompt": "x", "mode": "reference", "referenceAssetIds": []
+        }));
+        assert!(
+            video_job_body(&blank).is_err(),
+            "an empty list is not a reference"
+        );
+
+        for field in [
+            "referenceAssetIds",
+            "sourceClipAssetIds",
+            "referenceAudioAssetIds",
+        ] {
+            let mut payload = json!({ "projectId": "p1", "prompt": "x", "mode": "reference" });
+            payload[field] = json!(["only_one"]);
+            let body = video_job_body(&video_args_from(payload))
+                .unwrap_or_else(|error| panic!("{field} alone is a valid reference set: {error}"));
+            assert_eq!(body["mode"], "reference_to_video");
+            assert_eq!(body[field], json!(["only_one"]));
+        }
+    }
+
+    /// sc-17161: `steps` rides in `advanced`, the only place `requested_steps` reads it from.
+    ///
+    /// Without this the tool could submit nothing but the model's `defaults.steps` — 50 for
+    /// MiniMax-H3, measured in HOURS at its default canvas — so the cheap draft an agent would
+    /// reach for first was unreachable through MCP. A top-level `steps` key would be accepted by
+    /// the DTO's `deny_unknown_fields`-free serde and then silently ignored, which is worse than
+    /// a rejection.
+    #[test]
+    fn video_job_body_puts_steps_in_advanced_and_omits_it_otherwise() {
+        let args = video_args_from(json!({
+            "projectId": "p1", "prompt": "a storm", "steps": 4
+        }));
+        let body = video_job_body(&args).expect("body builds");
+        assert_eq!(body["advanced"], json!({ "steps": 4 }));
+        assert!(
+            body.get("steps").is_none(),
+            "a top-level steps key would be read by nothing: {body}"
+        );
+
+        let without = video_args_from(json!({ "projectId": "p1", "prompt": "a storm" }));
+        let body = video_job_body(&without).expect("body builds");
+        assert!(
+            body.get("advanced").is_none(),
+            "an unnamed step count still means the model's own default: {body}"
+        );
+    }
+
+    /// The compacted catalog carries the facts a caller needs to build an ACCEPTED request.
+    ///
+    /// Resolutions alone were survivable while every video model took a continuous duration range.
+    /// MiniMax-H3 is not that shape — fourteen `17n + 5` rungs, a one-entry fps menu and a 2-step
+    /// floor — so a caller that cannot see the menus guesses an off-menu value and is refused,
+    /// never rounded. The reference caps are here for the same reason: MiniMax-H3 Ref2VA's per-list
+    /// caps sum PAST its combined ceiling, so the combined number is not derivable from the others.
+    #[test]
+    fn compact_models_carries_the_request_shaping_limits_and_attribution() {
+        let models = json!([{
+            "id": "minimax_h3_ref",
+            "name": "MiniMax-H3 References",
+            "family": "minimax-h3",
+            "type": "video",
+            "capabilities": ["reference_to_video"],
+            "installState": "installed",
+            "defaults": { "duration": 5.1667, "fps": 24, "resolution": "1344x768", "steps": 50 },
+            "limits": {
+                "durations": [5.1667, 14.375],
+                "fps": [24],
+                "hardMinSteps": 2,
+                "resolutions": ["1344x768"],
+                "maxReferenceAssets": 9,
+                "maxSourceClipAssets": 3,
+                "maxReferenceAudioAssets": 3,
+                "maxCombinedReferenceAssets": 12,
+                "samplers": ["default"]
+            },
+            "ui": {
+                "attribution": "Powered by MiniMax H3",
+                "description": "…",
+                "promptGuide": { "title": "MiniMax-H3 Prompt Guide", "path": "/prompt-guides/minimax-h3.md" }
+            },
+            "downloads": [{ "repo": "SceneWorks/minimax-h3-mlx" }]
+        }]);
+        let compacted = compact_models(&models);
+        let entry = &compacted[0];
+
+        assert_eq!(entry["durations"], json!([5.1667, 14.375]));
+        assert_eq!(entry["fps"], json!([24]));
+        assert_eq!(entry["minSteps"], 2);
+        assert_eq!(entry["maxReferenceAssets"], 9);
+        assert_eq!(entry["maxSourceClipAssets"], 3);
+        assert_eq!(entry["maxReferenceAudioAssets"], 3);
+        assert_eq!(entry["maxCombinedReferenceAssets"], 12);
+        assert_eq!(entry["attribution"], "Powered by MiniMax H3");
+        assert_eq!(entry["promptGuide"]["path"], "/prompt-guides/minimax-h3.md");
+        // Still compact: the verbose blocks stay on the full API response.
+        assert!(entry.get("downloads").is_none(), "{entry}");
+        assert!(entry.get("limits").is_none(), "{entry}");
+        assert!(entry.get("samplers").is_none(), "{entry}");
+
+        // A model that declares none of it gains no keys — this is per-model, not a shape change.
+        let bare =
+            json!([{ "id": "svd", "type": "video", "limits": { "resolutions": ["1024x576"] } }]);
+        let entry = &compact_models(&bare)[0];
+        assert_eq!(entry["resolutions"], json!(["1024x576"]));
+        for key in ["durations", "fps", "minSteps", "attribution", "promptGuide"] {
+            assert!(
+                entry.get(key).is_none(),
+                "{key} must not be invented: {entry}"
+            );
+        }
+    }
+
     #[test]
     fn video_job_body_rejects_unknown_mode() {
         let args =
@@ -1829,6 +2078,9 @@ mod tests {
         let error = video_job_body(&args).expect_err("unknown mode rejected");
         assert!(error.contains("style_remix"), "{error}");
         assert!(error.contains("person_replace"), "{error}");
+        // The menu the message offers must list every mode the tool actually serves, or a caller
+        // is told to use a mode set that is missing the one it needs (sc-17161).
+        assert!(error.contains("reference"), "{error}");
     }
 
     #[test]

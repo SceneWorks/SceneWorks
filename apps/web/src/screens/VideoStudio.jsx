@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
-import { ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
+import { AssetPickerField, ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
@@ -96,6 +96,13 @@ import {
   schedulerOptionsFromModel,
   stepsDefaultFromModel,
 } from "../samplerOptions.js";
+import {
+  formatDurationOption,
+  minStepsForModel,
+  referenceCaps,
+  referenceLimitError,
+} from "../videoModelLimits.js";
+import { ModelAttribution } from "../components/ModelAttribution.jsx";
 
 const ltxVideoModelId = "ltx_2_3";
 const legacyDefaultTextEncoderId = "default";
@@ -183,6 +190,9 @@ export function VideoStudio() {
     [assets],
   );
   const videoAssets = useMemo(() => assets.filter((asset) => asset.type === "video"), [assets]);
+  // Library audio tracks the reference-audio picker can offer (sc-17161) — the audio twin of
+  // `videoAssets`, type-scoped so the picker never offers a render as a "voice".
+  const audioAssets = useMemo(() => assets.filter((asset) => asset.type === "audio"), [assets]);
   // Open on Text→Video for parity with Image Studio's Text→Image default and the
   // launch-request fallback below (sc-5716); the prior image_to_video default was the odd one out.
   const [mode, setMode] = useState(saved.mode ?? "text_to_video");
@@ -1107,6 +1117,36 @@ export function VideoStudio() {
   const selectedTrack = personTracks.find((track) => track.id === personTrackId);
   const comparisonAsset = latestAssets.find((asset) => asset.recipe?.mode === "replace_person");
   const comparisonSource = assets.find((asset) => asset.id === comparisonAsset?.lineage?.sourceClipAssetId);
+  // Per-model reference-media caps (sc-17160), read at the FORM (sc-17161). Before this the four
+  // caps had Rust readers only, so an over-selection was submittable and came back as a 400.
+  const refCaps = useMemo(() => referenceCaps(selectedModel), [selectedModel]);
+  // Which reference pickers a MODE + MODEL pair can actually feed. `reference_to_video` was the
+  // only mode serving multi-modal references when MiniMax-H3 Ref2VA arrived; the audio picker keys
+  // on the declared cap alone (default 0) because no other model takes audio references, and the
+  // clip picker keys on the cap being DECLARED, not merely non-zero — the blanket default is 8, so
+  // a value check would offer reference clips on Bernini's r2v, whose engine encodes images only.
+  const showAudioReferences = mode === "reference_to_video" && refCaps.audio > 0;
+  const showReferenceClips = mode === "reference_to_video" && refCaps.clipsDeclared && refCaps.clips > 0;
+  // The reference media this mode will actually SEND. The gate counts these rather than the raw
+  // state so the client refusal and the payload can never disagree about what was selected — the
+  // same single-expression rule `videoStudioValidation.js` exists to keep.
+  const outgoingReferenceAssetIds = [
+    "reference_to_video",
+    "reference_video_to_video",
+    "ads2v",
+    "animate_character",
+  ].includes(mode)
+    ? referenceAssetIds
+    : [];
+  const outgoingSourceClipAssetIds =
+    mode === "multi_video_to_video" || showReferenceClips ? sourceClipAssetIds : [];
+  const referenceLimitMessage = referenceLimitError({
+    modelName: selectedModel?.name,
+    caps: refCaps,
+    images: outgoingReferenceAssetIds.length,
+    clips: outgoingSourceClipAssetIds.length,
+    audio: referenceAudioAssetIds.length,
+  });
   const hasInputs =
     mode === "text_to_video" ||
     (mode === "image_to_video" && sourceAssetId) ||
@@ -1116,7 +1156,16 @@ export function VideoStudio() {
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId) ||
     // Bernini editing / reference-driven modes (sc-4703).
     (mode === "video_to_video" && sourceClipAssetId) ||
-    (mode === "reference_to_video" && referenceAssetIds.length > 0) ||
+    // `reference_to_video` needs at least one reference of ANY kind the model takes, not
+    // specifically an IMAGE (sc-17159 fixed the same spelling in `validate_video_job`). Bernini was
+    // the only model serving r2v when this line was written and it conditions on images alone, so
+    // "an image" and "a reference" were the same sentence; MiniMax-H3 Ref2VA broke that identity —
+    // an audio-only or clip-only set is a shape its checkpoint serves and the API admits. Gated on
+    // what the MODEL declares, so Bernini keeps needing an image: its clip/audio counts are 0 here.
+    (mode === "reference_to_video" &&
+      (referenceAssetIds.length > 0 ||
+        outgoingSourceClipAssetIds.length > 0 ||
+        (refCaps.audio > 0 && referenceAudioAssetIds.length > 0))) ||
     (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0) ||
     // Bernini multi-source modes (sc-5425): mv2v needs >=2 clips; ads2v needs a source
     // clip, a reference video, and >=1 reference image.
@@ -1195,6 +1244,7 @@ export function VideoStudio() {
       requiresLtxIcLora,
       hasLtxIcLora,
       replaceReady,
+      referenceLimitMessage,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1212,6 +1262,7 @@ export function VideoStudio() {
       requiresLtxIcLora,
       hasLtxIcLora,
       replaceReady,
+      referenceLimitMessage,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1221,6 +1272,8 @@ export function VideoStudio() {
   const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
   const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
   const fpsOptions = selectedModel?.limits?.fps ?? [24, 25, 30];
+  // `limits.hardMinSteps` (sc-19426) had no web reader — the Steps input hardcoded min="1".
+  const minSteps = minStepsForModel(selectedModel);
   const durationHint =
     selectedModel?.ui?.durationHint ??
     (selectedModel?.limits?.recommendedMaxDuration ? `Recommended: ${selectedModel.limits.recommendedMaxDuration}s or less.` : "");
@@ -1289,19 +1342,14 @@ export function VideoStudio() {
         ].includes(mode)
           ? sourceClipAssetId || null
           : null,
-        // Bernini multi-source clips (sc-5425) — only mv2v carries the array.
-        sourceClipAssetIds: mode === "multi_video_to_video" ? sourceClipAssetIds : [],
+        // Bernini multi-source clips (sc-5425) — mv2v carries the array, and so does a
+        // reference→video on a model that DECLARES a reference-clip cap (MiniMax-H3 Ref2VA takes
+        // up to 3 clips alongside its images and audio, sc-17160).
+        sourceClipAssetIds: outgoingSourceClipAssetIds,
         bridgeRightClipAssetId: mode === "video_bridge" ? bridgeRightClipAssetId || null : null,
         // Bernini subject references (sc-4703 / sc-5425) — the reference-driven modes + ads2v carry
         // them; SCAIL-2 character animation (sc-5449) carries the reference character image.
-        referenceAssetIds: [
-          "reference_to_video",
-          "reference_video_to_video",
-          "ads2v",
-          "animate_character",
-        ].includes(mode)
-          ? referenceAssetIds
-          : [],
+        referenceAssetIds: outgoingReferenceAssetIds,
         // Reference AUDIO clips (sc-17160). Deliberately NOT gated on a hardcoded mode list like
         // the two above: which modes take audio references is a MODEL fact, declared as
         // `limits.maxReferenceAudioAssets` and enforced server-side, and a model that takes none
@@ -1632,6 +1680,45 @@ export function VideoStudio() {
               />
             ) : null}
 
+            {/* Reference VIDEO clips (sc-17160 / sc-17161). Only for a model that declares a
+                reference-clip cap: MiniMax-H3 Ref2VA conditions on motion and pacing from up to 3
+                clips, where Bernini's r2v encodes reference images alone and would silently ignore
+                them — the invisible-in-the-output failure the per-model caps exist to prevent. */}
+            {showReferenceClips ? (
+              <VideoSourcePickerField
+                assets={videoAssets}
+                buttonLabel="Select clips"
+                characters={characters}
+                changeLabel="Edit clips"
+                emptyLabel={`No reference clips selected (up to ${refCaps.clips})`}
+                importAsset={importAsset}
+                label="Reference clips"
+                multiple
+                onChange={setSourceClipAssetIds}
+                projectId={activeProject?.id}
+                values={sourceClipAssetIds}
+              />
+            ) : null}
+
+            {/* Reference AUDIO clips (sc-17160 landed the payload field; this is the control that
+                makes it reachable). Gated on the declared cap alone — it defaults to 0, so the
+                picker appears only for a model that says it conditions on audio. Uses the plain
+                AssetPickerField with categories hidden, the same shape Audio Studio's reference
+                voice uses: the media pickers' All/Images/Video tabs carry no audio bucket. */}
+            {showAudioReferences ? (
+              <AssetPickerField
+                assets={audioAssets}
+                buttonLabel="Select audio"
+                changeLabel="Edit audio"
+                emptyLabel={`No reference audio selected (up to ${refCaps.audio})`}
+                label="Reference audio"
+                multiple
+                onChange={setReferenceAudioAssetIds}
+                showCategories={false}
+                values={referenceAudioAssetIds}
+              />
+            ) : null}
+
             {mode === "animate_character" ? (
               <>
                 <VideoSourcePickerField
@@ -1719,6 +1806,11 @@ export function VideoStudio() {
                   ))}
                 </select>
                 <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
+                {/* Licence-required attribution (sc-17227 §IV.2, landed on the generation surfaces
+                    by sc-17161). The Models card alone is one screen a user may never revisit after
+                    installing; this is where the model is used. Reads the manifest field — never a
+                    second hard-coded copy of a string a licence specifies. */}
+                <ModelAttribution model={selectedModel} className="studio-model-attribution" />
                 {recipeModelNotice ? (
                   <span className="field-hint" role="status">
                     This clip was made with “{recipeModelNotice}”, which isn’t installed. Its
@@ -1738,10 +1830,16 @@ export function VideoStudio() {
               </label>
               <label className="settings-field settings-field-count">
                 Duration
+                {/* A MENU, never a range: `limits.durations` is the model's exact renderable set,
+                    and MiniMax-H3 is the case that makes the distinction visible — its fourteen
+                    `17n + 5` lattice rungs are the ONLY lengths the checkpoint renders, so a
+                    slider would emit durations the engine refuses (15.0s among them, which its own
+                    docs advertise and which sits between the last rung and the next). The label
+                    carries the frame count because that is what the lattice is counting. */}
                 <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
                   {durationOptions.map((value) => (
                     <option key={value} value={value}>
-                      {value}s
+                      {formatDurationOption(value, fps)}
                     </option>
                   ))}
                 </select>
@@ -2108,13 +2206,24 @@ export function VideoStudio() {
               ) : null}
               <label>
                 Steps
+                {/* The floor is the MODEL's, not a blanket 1 (sc-19426 / sc-17161).
+                    MiniMax-H3's scheduler grid is `linspace(1, 0, steps)` with the terminal 0 as a
+                    grid point, so a 1-step request has nothing between its ends and is REFUSED
+                    rather than raised — the form has to say so instead of letting it be typed and
+                    then 400'd at enqueue. */}
                 <input
-                  min="1"
+                  min={String(minSteps)}
                   max="80"
                   disabled={lightningActive}
                   onChange={(event) => setStepsOverride(event.target.value)}
                   placeholder={lightningActive ? "4 (Lightning)" : String(stepsDefaultFromModel(selectedModel) ?? "")}
-                  title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps." : undefined}
+                  title={
+                    lightningActive
+                      ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                      : minSteps > 1
+                        ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
+                        : undefined
+                  }
                   type="number"
                   value={lightningActive ? "" : stepsOverride}
                 />

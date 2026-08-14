@@ -20,6 +20,12 @@ export function videoGenerateValidation({
   requiresLtxIcLora,
   hasLtxIcLora,
   replaceReady,
+  // sc-17161: the refusal from `referenceLimitError` for a reference selection past what the model
+  // declares (`limits.max{Reference,SourceClip,ReferenceAudio,CombinedReference}Assets`), or null.
+  // An ERROR, not a silent requirement: the pickers all look satisfied — MiniMax-H3 Ref2VA's
+  // combined cap refuses selections in which every individual picker is inside its own cap — so
+  // nothing else on the form explains why Generate is dead.
+  referenceLimitMessage = null,
   modelName,
   // sc-13136: the COMPOSED outgoing prompt (Subject:/Style: wrap + preset fold) and whether a
   // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
@@ -72,6 +78,9 @@ export function videoGenerateValidation({
   }
   if (!replaceReady) {
     issues.push(issue.error(null, "No live GPU worker can run person replacement yet."));
+  }
+  if (referenceLimitMessage) {
+    issues.push(issue.error(null, referenceLimitMessage));
   }
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   return issues;

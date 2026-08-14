@@ -7785,11 +7785,50 @@ details[open] > summary.lora-scope-group-heading::before,
    directly above the description and reads at full text weight/colour rather than the muted
    description tone — "prominently display" is the obligation, so it must not look like a
    footnote. */
+/* Prompt-guide tables (sc-17161). Scrolls inside its own box so a wide table never widens the
+   guide modal. */
+.markdown-table-wrap {
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.markdown-table-wrap table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.markdown-table-wrap th,
+.markdown-table-wrap td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-table-wrap th {
+  font-weight: 600;
+  background: var(--surface-2);
+}
+
 .model-card-attribution {
   margin: 0;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.5;
+  color: var(--text);
+}
+
+/* The same obligation on the GENERATION surfaces (sc-17161): the studios' model field, the queue
+   card, and the asset detail. Same full weight/colour as the Models card — the obligation is to
+   display prominently, so this is deliberately not the muted metadata tone the rows around it
+   use. Slightly tighter than the card because it sits inside a settings field. */
+.model-attribution,
+.studio-model-attribution {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
   color: var(--text);
 }
 

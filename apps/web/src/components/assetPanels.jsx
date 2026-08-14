@@ -26,6 +26,7 @@ import { audioAssetMetaLine, audioAssetRunGroups, formatClock } from "../audioTa
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
+import { ModelAttribution } from "./ModelAttribution.jsx";
 import { Modal } from "./Modal.jsx";
 import { assetImportedWorkflow } from "../workflowShare.js";
 
@@ -658,7 +659,14 @@ export function AssetDetail({
       <dl>
         <div>
           <dt>Model</dt>
-          <dd>{asset.recipe?.model ?? "Unknown"}</dd>
+          <dd>
+            {asset.recipe?.model ?? "Unknown"}
+            {/* Licence-required attribution (sc-17227 §IV.2, sc-17161). The asset detail is where
+                a finished render is inspected and shared from, so the obligation reaches it too.
+                `recipe.model` is an id and is never joined back to the catalog, so the component
+                resolves it; an unknown id or a model that declares none renders nothing. */}
+            <ModelAttribution modelId={asset.recipe?.model ?? ""} />
+          </dd>
         </div>
         <div>
           <dt>Duration</dt>
