@@ -162,6 +162,123 @@
         "file": "loras/krea2_turbo_lora_rank_64_bf16.safetensors",
         "revision": "952f49d49653cb42e7d6cf7cbfad74738073ec7d"
       }
+    },
+    // ── MiniMax-H3 turbo step-distill accelerators (epic 17137, sc-18725) ──────────────────────
+    // lightx2v's step-distilled adapters for MiniMax-H3. sc-18729 MEASURED the payoff on real
+    // weights at 1344x768/124 frames: 12.6 min at 4 steps against 2.42 h for the 50-step base
+    // (11.57x), with a matched-geometry floor of 7.05x measured base-vs-turbo at 576x320. Quality is
+    // a different sample, not a degraded one; the no-LoRA 4-step control is visibly undercooked
+    // (motion 1.117 vs 5.612), so the adapter is doing the work.
+    //
+    // 🔴 EVERY entry names the DIFFUSERS file, never the `_comfyui_` twin. The repo publishes each
+    // adapter twice (7 files: 4 diffusers + 3 ComfyUI). The ComfyUI exports are a different key
+    // space — `diffusion_model.*` with q/k/v fused into `attn.qkv_proj` (block-diagonal B, alpha
+    // multiplied by 3) and `mlp.fc1` carrying `[gate | value]` where our DiT is `[value | gate]`.
+    // Folding one is shape-valid and numerically WRONG — the sc-18740 class, which shipped green at
+    // cosine 0.73-0.78 — so the engine REFUSES them on the keys (not on the `target_format` stamp, so
+    // a stripped re-export is still caught). Naming one here would hard-error at install rather than
+    // degrade. Every ComfyUI file has a byte-equivalent diffusers twin, so this costs no capability.
+    //
+    // 🔴 NO ALPHA IS DECLARED HERE, and none may be. Alpha differs PER FILE within this one repo —
+    // 128, 8, 8, and absent — so any family-wide or per-entry declaration would be wrong for three of
+    // the four. The engine resolves it from the file: rank from the factor shapes (`lora_A.shape()[0]`
+    // = 128), alpha by precedence (per-target `.alpha` tensor -> PEFT `lora_adapter_metadata` -> the
+    // top-level `__metadata__["alpha"]` bare string -> `DEFAULT_LORA_ALPHA = 8`), NEVER the rank
+    // (sc-18724). Effective fold is `scale x alpha / rank`: 1.0 for the 768p file, 0.0625 for the
+    // other three. Both pre-existing alpha paths were SILENTLY wrong for these checkpoints — the PEFT
+    // path falls back to `alpha = rank` (16x too strong) and `parse_rank_alpha` defaults rank to 1.0
+    // (128x too strong); neither errors, and a mis-scaled LoRA produces plausible output.
+    //
+    // `defaultWeight` is the runtime `lora_scale` MULTIPLIER, not alpha — it stays 1.0 so the file's
+    // own alpha/rank fold lands unmodified. `role: accelerator` is WEIGHT-LOAD ONLY here, exactly as
+    // the schema documents it: selecting one today stacks the residual and STILL renders at the base
+    // 50 steps with the base shift 12.0. The auto-switch to the turbo recipe (4/8 steps, per-variant
+    // video shift 6 or 12, audio shift 3) is sc-18726; candle is sc-18727.
+    //
+    // All four are rank 128 / 624 tensors / 691,798,016 params (1.38 GB bf16) covering
+    // `transformer_blocks.{0..49}` + `token_refiner.refiner_blocks.{0,1}` x 6 targets = 312 modules,
+    // 0 unmatched. Nothing targets AdaLN (`adaln_proj` is deliberately unreachable to adapters), and
+    // the fold is tier-identical, so q4/q8/bf16 all take these unchanged. Referenced directly from
+    // lightx2v's HF repo (no re-host), downloaded on demand, pinned to the current commit.
+    {
+      // The 768p variant — trained at H3's shipped default canvas 1344x768 and the one sc-18729
+      // validated end-to-end. Its training video shift is 6, NOT the 12 the other two fl2v files
+      // want; that per-variant shift is sc-18726's to apply. The only file of the four whose alpha
+      // (128) equals its rank, so it is the only one that folds at scale 1.0.
+      "id": "minimax_h3_turbo_4step_768p",
+      "name": "MiniMax-H3 Turbo (4-step, 768p)",
+      "family": "minimax-h3",
+      "triggerWords": [],
+      "compatibility": { "families": ["minimax-h3"] },
+      "role": "accelerator",
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "file": "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors",
+        "revision": "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1"
+      }
+    },
+    {
+      // 8-step v1.0, trained at 544p mixed aspect ratios; training video shift 12. Alpha 8 against
+      // rank 128 folds at 0.0625 — the NON-default resolution path, and the one a naive loader gets
+      // 16x or 128x wrong.
+      "id": "minimax_h3_turbo_8step",
+      "name": "MiniMax-H3 Turbo (8-step)",
+      "family": "minimax-h3",
+      "triggerWords": [],
+      "compatibility": { "families": ["minimax-h3"] },
+      "role": "accelerator",
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "file": "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
+        "revision": "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1"
+      }
+    },
+    {
+      // 4-step v0.1, trained at 544p mixed aspect ratios; training video shift 12. The only published
+      // file carrying NO `alpha` in `__metadata__` at all, so it resolves through the engine's
+      // `DEFAULT_LORA_ALPHA = 8` fallback to the same 0.0625 fold. Kept alongside v1.0 because the two
+      // are not interchangeable — different training canvas from the 768p file, different NFE from the
+      // 8-step one.
+      "id": "minimax_h3_turbo_4step_v01",
+      "name": "MiniMax-H3 Turbo (4-step, v0.1)",
+      "family": "minimax-h3",
+      "triggerWords": [],
+      "compatibility": { "families": ["minimax-h3"] },
+      "role": "accelerator",
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "file": "minimax_h3_fl2v_turbo_4step_v0.1.safetensors",
+        "revision": "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1"
+      }
+    },
+    {
+      // The Ref2VA variant — it distils the REFERENCE-conditioned path, so it pairs with the
+      // `minimax_h3_ref` catalog entry rather than the `minimax_h3` (t2va/fl2va) one. That pairing is
+      // NOT enforced today and this entry does not pretend otherwise: both partitions share
+      // `family: minimax-h3` (they are one DiT architecture, one geometry), the LoRA schema has no
+      // per-model-id field, and the API's base-model gate is hardcoded to `wan-video`. Cross-selecting
+      // an fl2v file onto Ref2VA (or this onto t2va) is shape-valid and folds cleanly — it is a
+      // quality mismatch, not a failure. Enforcing the pairing needs a new per-model-id gate on both
+      // the LoRA schema and `validate_lora_specs_for_model`; surfaced on sc-18725 for triage.
+      "id": "minimax_h3_ref2v_turbo_4step",
+      "name": "MiniMax-H3 Ref2VA Turbo (4-step)",
+      "family": "minimax-h3",
+      "triggerWords": [],
+      "compatibility": { "families": ["minimax-h3"] },
+      "role": "accelerator",
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "file": "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+        "revision": "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1"
+      }
     }
   ]
 }
