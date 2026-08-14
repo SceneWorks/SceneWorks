@@ -2512,7 +2512,11 @@ def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
         # claims to list the terms that decide whether the user may use the model at all, and a
         # reader who did not see it would reasonably conclude training on H3 output is
         # unrestricted. This assertion is what stops the set silently shrinking back to three.
-        assert "§V.3" in notice, model_id
+        #
+        # Bound to the ITEM HEADING, not to a bare "§V.3" (sc-17227 review LOW): the notice's
+        # closing sentence "…is what §V.3 forbids" satisfied the loose form, so deleting the whole
+        # fourth item still passed. The heading appears once, in the item itself.
+        assert "(4) NO IMPROVING OTHER AI MODELS (§V.3)" in notice, model_id
         assert "improve any other artificial intelligence model" in notice, model_id
         assert "Four of its terms" in notice, model_id
 

@@ -465,6 +465,51 @@ describe("useWorkflowDrop", () => {
       expect(hook.missing.installed["model:fixture_model"]).toBe(true);
       expect(hook.missing.installFailed["model:fixture_model"]).toBeUndefined();
     });
+
+    // sc-17227 review HIGH 1. The install used to call `start({ id: row.id })` — a STUB. The
+    // licence gate lives inside `createModelDownloadJob` and reads the entry's own `gated` /
+    // `requiresLicenseAcknowledgment`, so a stub made the predicate false: the gate could not fire
+    // and `licenseAcknowledged` was never put on the request body. For a
+    // `requiresLicenseAcknowledgment` model the server still refused (a raw error rather than the
+    // guided message); for a `gated` one BOTH halves missed — the client by the stub, the server
+    // by its deliberate `gated` exclusion — so with a saved HF credential the weights landed with
+    // no acknowledgment at all.
+    it("hands the installer the real catalog entry, not an { id } stub (sc-17227)", async () => {
+      const installModel = vi.fn(async () => ({ id: "job_1", status: "queued" }));
+      const entry = {
+        id: "fixture_model",
+        name: "Fixture Model",
+        // A VIDEO model, deliberately: `models` is the IMAGE picker's list, so resolving against
+        // it would still hand a stub for exactly the kind of model MiniMax-H3 is.
+        type: "video",
+        requiresLicenseAcknowledgment: true,
+        licenseUrl: "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      };
+      await queueInstall({
+        projectId: "project_1",
+        token: "t",
+        installModel,
+        models: [],
+        catalogModels: [{ id: "some_other_model", type: "image" }, entry],
+      });
+      expect(installModel).toHaveBeenCalledTimes(1);
+      // The exact entry object, so every flag the gate reads is present — not a lookalike.
+      expect(installModel.mock.calls[0][0]).toBe(entry);
+    });
+
+    it("keeps the old { id } call when the catalog has no entry for it (sc-17227)", async () => {
+      // An id the catalog does not carry cannot download anything (`POST
+      // /api/v1/models/:id/download` 404s on an unknown id), so there is nothing to gate and
+      // nothing to resolve. That path stays byte-identical to the behavior before this fix.
+      const installModel = vi.fn(async () => ({ id: "job_1", status: "queued" }));
+      await queueInstall({
+        projectId: "project_1",
+        token: "t",
+        installModel,
+        catalogModels: [{ id: "unrelated", type: "image" }],
+      });
+      expect(installModel).toHaveBeenCalledWith({ id: "fixture_model" });
+    });
   });
 });
 

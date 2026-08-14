@@ -40,53 +40,84 @@ Three consequences follow, and they are the reason this plan looks the way it do
 
 ## Safeguards in force
 
-### S1 — No download starts without an acknowledgment, on every surface (technical, enforced)
+### S1 — No download starts without an acknowledgment, on the routes named below (technical, enforced)
 
 `config/manifests/builtin.models.jsonc` declares `requiresLicenseAcknowledgment: true` on both
-`minimax_h3` and `minimax_h3_ref`. Enforcement is at the **choke point**, not on a screen:
+`minimax_h3` and `minimax_h3_ref`. Enforcement is stated here as **the specific routes actually
+gated**, not as a universal — an earlier draft of this section claimed "every surface", and a review
+found two unlisted doors that fetched the same weights unrefused. Those are now closed; the point of
+enumerating rather than generalising is that the next such door should be visible as an addition to
+this list.
 
-* **The acknowledgment UI** lives on the Models screen. It renders the licence gate wherever a
-  download is still on offer — the model is not installed, or an update is offered — and **keeps
-  the Download button, every quant-tier checkbox, the tier panel's download button and the Update
-  button disabled until the box is checked** (`apps/web/src/screens/ModelManagerScreen.jsx`,
-  `licenseGateApplies` → `licenseAckRequired`). The acceptance persists per model id.
-* **Every download-starting surface is bound by one predicate.** `createModelDownloadJob`
-  (`apps/web/src/hooks/useModelsAndLoras.js`) refuses when
-  `licenseAcknowledgmentBlocked(model)` — and that is the function the Models screen, the Simple
-  UI's model manager, the first-run Setup Wizard, the studio availability gates, the workflow drop
-  and the Update button all call. The predicate is exported from
-  `apps/web/src/licenseAcknowledgment.js` precisely so a new surface cannot reintroduce its own
-  answer. Two surfaces additionally decline to *offer* what they cannot gate: the Setup Wizard does
-  not list a model requiring acknowledgment at all (it has no licence UI, and first-run bulk-queues
-  what is ticked), and the Simple UI hands off to the Models screen rather than toasting a refusal
-  the user could not act on.
-* **The API refuses independently.** `POST /api/v1/models/:id/download` answers **403** with
-  `code: "license_acknowledgment_required"` unless the request carries `licenseAcknowledged: true`
-  (`apps/rust-api/src/models.rs`, `model_requires_license_acknowledgment`). This is the half no
-  client-side check can provide: the endpoint is reachable from a browser on another machine (the
-  remote-access lane, epic 4484), from a workflow envelope's suggested action, and from `curl`. The
-  field defaults to `false`, so a client that has never heard of it is refused rather than let
-  through.
+**Server side — the enforcement boundary.** These are the doors that can fetch H3 weights, and what
+each answers. Enforcement is on the SERVER because no client-side check binds a browser on another
+machine (the remote-access lane, epic 4484), a workflow envelope's suggested action, or `curl`.
+
+| Route | Gated? | Where |
+| --- | --- | --- |
+| `POST /api/v1/models/:id/download` | **Yes** — 403 `license_acknowledgment_required` unless the body carries `licenseAcknowledged: true`. Keyed on the catalog **id**. | `create_model_download_job`, `apps/rust-api/src/models.rs` |
+| `POST /api/v1/jobs` with `model_download` / `model_import` / `lora_download` / `lora_import` | **Yes** — same 403 and same code, keyed on the payload's **repo** (and on a huggingface.co `sourceUrl`). | `validate_raw_job_payload`, `apps/rust-api/src/jobs.rs` → `ensure_job_payload_license_acknowledged` |
+| `POST /api/v1/models/import` (JSON and multipart) | **Yes** — same 403, same repo-keyed predicate. | `queue_model_import_job`, `apps/rust-api/src/models.rs` |
+| `POST /api/v1/loras/:id/download`, `POST /api/v1/loras/import` | **No** — and nothing to enforce today: no LoRA in either catalog declares `requiresLicenseAcknowledgment`, and none names an H3 repo. A licence-restricted LoRA would need this section extended first. | — |
+
+The repo-keyed half is what closes the generic queue route, which enqueues `job_type` + payload
+**verbatim**: `run_model_download_job` reads `repo` / `files` / `revision` straight out of the
+payload with no catalog lookup between the request and Hugging Face. Its index is built from
+`downloads[].repo` across **every** entry declaring the flag, **including co-requisite rows** —
+MiniMax-H3's shared text encoder and both VAEs come from `MiniMaxAI/MiniMax-H3` itself — and from
+the **unfiltered** manifest, because every H3 download row is `platforms: ["macos"]` and an
+OS-filtered index would leave the gate absent on Linux and Windows. Repo keys are compared
+case-insensitively.
+
+**Client side — where the terms are shown.** The acknowledgment UI lives on the Models screen
+(`apps/web/src/screens/ModelManagerScreen.jsx`). The gate renders when the card renders **any
+download affordance**: the model is not installed, its cache is incomplete, an update is offered,
+or — for a quant matrix — **any tier is still missing**. That last clause is not a refinement but a
+correction: the API marks a matrix model `installed` when *any* tier is present
+(`install_state_for`), so a MiniMax-H3 with q4 installed and q8/bf16 missing rendered no notice and
+no checkbox while its tier panel was still offering downloads, and the choke point then refused the
+click by naming a checkbox that was not on screen. While the gate applies, the Download button,
+every quant-tier checkbox, the tier panel's download button and the Update button are disabled.
+Acceptance persists per model id in localStorage — which does **not** survive a desktop relaunch, so
+the gate re-raising itself on a partially-installed model is the recovery path, not an edge case.
+
+`createModelDownloadJob` (`apps/web/src/hooks/useModelsAndLoras.js`) is the client choke point: it
+refuses when `licenseAcknowledgmentBlocked(model)` and attaches `licenseAcknowledged` otherwise. The
+Models screen, the Simple UI's model manager, the first-run Setup Wizard, the studio availability
+gates, the workflow drop and the Update button all call it. It reads the **catalog entry's own
+flags**, so every caller must hand it the real entry — the workflow drop resolves the requirement id
+against the full catalog for exactly that reason; passing a `{ id }` stub silently disabled the gate.
+Two surfaces additionally decline to *offer* what they cannot gate: the Setup Wizard does not list a
+model requiring acknowledgment at all (it has no licence UI, and first-run bulk-queues what is
+ticked), and the Simple UI hands off to the Models screen rather than toasting a refusal the user
+could not act on.
 
 This flag is deliberately **decoupled from `gated`** (sc-17227). `gated` means "the download needs a
 Hugging Face credential"; `MiniMaxAI/MiniMax-H3` is a **public** repo, so before the decoupling the
-gate could only either fail open or demand a token that does not exist.
+gate could only either fail open or demand a token that does not exist. One consequence is worth
+stating plainly: the server gate is scoped to `requiresLicenseAcknowledgment` and **not** to `gated`,
+so a merely-`gated` model is still backstopped only by Hugging Face's own 401.
 
-**What this does not claim.** The gate stops an *unacknowledged* download; it is not an
-authorization check and cannot be. A request that sets `licenseAcknowledged: true` by hand is
-allowed — but that request is itself an affirmative assertion that the user has accepted, which is
+**What this does not claim.** This paragraph scopes *authorization*; it does not scope
+*reachability* — which routes are covered is the table above, and that is the part a reviewer should
+re-derive from source rather than from this sentence. The gate stops an *unacknowledged* download; it
+is not an authorization check and cannot be. A request that sets `licenseAcknowledged: true` by hand
+is allowed — but that request is itself an affirmative assertion that the user has accepted, which is
 what §V.2 asks us to obtain. Nor does accepting make an otherwise unauthorized use authorized: a
 user in an Excluded Territory who ticks the box is still not licensed (§V.4), which is the open
 question in [Open, and not resolvable here](#open-and-not-resolvable-here), not something this
 safeguard resolves.
 
-Covered per surface — Simple UI, Setup Wizard, availability gate, Update button and the server —
-by `apps/web/src/screens/ModelManagerScreen.test.jsx`,
-`apps/web/src/simple/SimpleModelManager.test.jsx`,
+Covered by `apps/web/src/screens/ModelManagerScreen.test.jsx` (Models screen, tier panel, Update
+button, and the partially-installed matrix), `apps/web/src/simple/SimpleModelManager.test.jsx`,
 `apps/web/src/screens/SetupWizard.licenseGate.test.jsx`,
-`apps/web/src/hooks/useModelsAndLoras.licenseGate.test.jsx`,
-`apps/rust-api/src/tests/catalog.rs`
-(`license_acknowledgment_model_download_is_refused_without_the_acknowledgment`), and by
+`apps/web/src/hooks/useModelsAndLoras.licenseGate.test.jsx` (the choke point),
+`apps/web/src/hooks/useWorkflowDrop.test.jsx` (the workflow drop's entry resolution), and
+`apps/rust-api/src/tests/catalog.rs` — where
+`license_acknowledgment_generic_jobs_route_refuses_what_the_typed_route_refuses` runs the typed and
+generic requests against one app instance, and
+`license_acknowledgment_model_import_is_refused_for_a_restricted_repo` covers the import route. The
+manifest declarations are pinned by
 `tests/test_builtin_manifest_audit.py::test_minimax_h3_requires_license_acknowledgment_without_a_credential`.
 
 ### S2 — The user is told which restrictions apply, in the gate itself (§V.2 notification)
@@ -199,8 +230,12 @@ of the review is already automated — `npm run check:license-coverage`, the man
 audits in `tests/test_builtin_manifest_audit.py`, the per-surface gate tests listed under S1, and the
 server-side refusal tests in `apps/rust-api/src/tests/catalog.rs` all run in CI and fail on drift.
 Each of those guards has been mutation-checked individually: removing the choke-point refusal, the
-server rejection, the Setup Wizard exclusion, the Simple UI hand-off, the Update-button guard, or any
-one named restriction from either notice fails a test rather than passing quietly.
+typed-route rejection, the raw-jobs-route rejection, the import-route rejection, the co-requisite
+rows or the unfiltered read from the repo index, the case-normalisation of a repo key, the
+acknowledgment stamp that keeps a retry authorized, the partially-installed-matrix clause in the UI
+predicate, the workflow drop's entry resolution, the Setup Wizard exclusion, the Simple UI hand-off,
+the Update-button guard, or any one named restriction from either notice fails a test rather than
+passing quietly.
 
 ## Exhibit A item 12 — measured, not asserted
 

@@ -1190,26 +1190,43 @@ export function ModelManagerScreen() {
     const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
     const gated = Boolean(model.gated);
     const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
+    // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
+    // + multi-select instead of the single Download button. Single-variant models are unchanged.
+    const matrixVariants = orderedMatrixVariants(model);
+    const hasTierMatrix = model.hasVariantMatrix === true && matrixVariants.length > 0;
     // License-acknowledgment gate (sc-7872, decoupled from the credential by sc-17227): a model
     // whose licence must be acknowledged can't be downloaded until the user accepts it in-app.
     // The requirement comes from `gated` OR the standalone `requiresLicenseAcknowledgment` — the
     // latter covers a public repo whose licence still binds the user (MiniMax-H3).
     //
-    // The gate applies wherever a DOWNLOAD is still on offer, which is "not installed" OR
-    // "installed but an update is offered" (sc-17227). The `updateAvailable` half matters twice:
-    // a `breaking_update` with stale files present reports `installed: false` + `updateAvailable:
-    // true`, so the Update button was the one download control the gate did not cover; and an
-    // installed model whose stored ack was lost (desktop localStorage does not survive relaunch)
-    // would otherwise be refused at the choke point with no way to re-accept, because the notice
-    // renders only where this predicate is true. An installed model with nothing to download shows
-    // no notice — the acknowledgment is a pre-download step, and re-blocking it would be noise.
+    // The predicate follows the DOWNLOAD CONTROLS, and is derived from the same conditions that
+    // decide whether any of them render — deliberately, because deriving it independently is how
+    // this went wrong: `!installed || updateAvailable` read "installed" as "nothing left to
+    // download", which is FALSE for a quant matrix. `install_state_for` (apps/rust-api/src/models.rs)
+    // marks a matrix model installed when ANY tier is present, so a MiniMax-H3 with q4 installed and
+    // q8/bf16 missing reported `installed: true`, `updateAvailable: false` — no notice, no
+    // checkbox — while the tier panel still offered bf16 and q8 and the choke point
+    // (`licenseAcknowledgmentBlocked`) still refused the click, telling the user to accept a licence
+    // on a card that rendered nothing to accept. Unrecoverable through the UI, and hit on every
+    // desktop relaunch, where localStorage does not survive.
+    //
+    // Each disjunct is a control that can start a download:
+    //   !installed           → the footer Download button
+    //   incomplete           → the footer Fix button (a torn cache re-fetches)
+    //   updateAvailable      → the Update button (MLX block and footer); also the `breaking_update`
+    //                          shape, which reports installed:false + updateAvailable:true
+    //   an uninstalled tier  → the tier panel's checkboxes + its Download button
+    // An installed model with none of those shows no notice: the acknowledgment is a pre-download
+    // step, and re-blocking a finished install would be noise.
     const licenseGated = requiresLicenseAcknowledgment(model);
-    const licenseGateApplies = licenseGated && (!installed || model.updateAvailable === true);
+    const downloadOnOffer =
+      !installed ||
+      incomplete ||
+      model.updateAvailable === true ||
+      (hasTierMatrix && matrixVariants.some((variant) => variant.installState !== "installed"));
+    const licenseGateApplies = licenseGated && downloadOnOffer;
     const licenseAcknowledged = licenseAcks[model.id] === true;
     const licenseAckRequired = licenseGateApplies && !licenseAcknowledged;
-    // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
-    // + multi-select instead of the single Download button. Single-variant models are unchanged.
-    const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
     const firstCapability = capabilities.length ? capabilityLabel(capabilities[0]) : null;
     const familyMeta = [model.family ?? "unassociated", firstCapability].filter(Boolean).join(" · ");
     const macBlock = macModelBlock(model, macCapabilities);

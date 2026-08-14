@@ -136,6 +136,24 @@ const LICENSE_ACK_TIERED_MODEL = {
   ],
 };
 
+// sc-17227 review BLOCKER 2 — the PARTIALLY-installed quant matrix, which is where the first fix
+// left an unrecoverable dead end. `install_state_for` (apps/rust-api/src/models.rs) marks a matrix
+// model `installed` when ANY tier is present, so a user who installed q4 and left q8/bf16 for
+// later reports `installState: "installed"` with no update pending — while the tier panel is still
+// offering the two missing tiers. The predicate `!installed || updateAvailable` therefore rendered
+// no notice and no checkbox on a card whose download controls were live, and the choke point then
+// refused the click with "accept the license on the MiniMax-H3 card". Reachable on every desktop
+// relaunch, where the stored acknowledgment does not survive.
+const LICENSE_ACK_PARTIAL_MATRIX_MODEL = {
+  ...LICENSE_ACK_TIERED_MODEL,
+  installState: "installed",
+  variants: [
+    { variant: "bf16", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 75120439132 },
+    { variant: "q8", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 37560219566 },
+    { variant: "q4", installed: true, installState: "installed", cacheState: "complete", downloadSizeBytes: 18780109783 },
+  ],
+};
+
 // A quant-matrix model whose q8 tier is TORN (sc-13383): its files are partly present, so the API
 // reports installState "missing" + cacheState "incomplete" with the missing weights named. The
 // complete q4/bf16 siblings keep the MODEL installed, so only the q8 tier row offers repair.
@@ -524,6 +542,94 @@ describe("ModelManagerScreen gated-model notice", () => {
   it("shows no license gate once an acknowledgment-only model is installed (sc-17227)", async () => {
     await render([{ ...LICENSE_ACK_ONLY_MODEL, installState: "installed" }]);
     await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+  });
+
+  // sc-17227 review BLOCKER 2 — a model-level "installed" that still has tiers to fetch. The card
+  // must render the gate, because the tier panel below it is still offering downloads. Without
+  // this the acknowledgment was UNREACHABLE: no checkbox to tick, live tier controls, and a choke
+  // point that refused the click by telling the user to tick a checkbox that was not there.
+  it("raises the gate on a partially-installed quant matrix (sc-17227)", async () => {
+    await render([LICENSE_ACK_PARTIAL_MATRIX_MODEL]);
+    await selectTab(container, "Video Models");
+
+    // The notice and the acknowledgment checkbox are on the card — the recovery the dead end
+    // removed.
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    expect(ackCheckbox, "the acknowledgment checkbox must be reachable").toBeTruthy();
+    expect(ackCheckbox.checked).toBe(false);
+
+    // And every control that could start a download is blocked. bf16/q8 are blocked BY THE GATE
+    // (they were selectable before this fix); q4 is disabled because it is already installed, which
+    // is a different reason and must not be read as gate coverage.
+    const tierRows = [...container.querySelectorAll(".model-tier-row")];
+    expect(tierRows).toHaveLength(3);
+    const tierState = tierRows.map((row) => ({
+      installed: row.querySelector(".status-badge").textContent === "installed",
+      disabled: row.querySelector(".model-tier-select input").disabled,
+    }));
+    expect(tierState).toEqual([
+      { installed: false, disabled: true },
+      { installed: false, disabled: true },
+      { installed: true, disabled: true },
+    ]);
+    const tierDownload = container.querySelector(".model-tier-actions button");
+    expect(tierDownload.disabled).toBe(true);
+    expect(tierDownload.getAttribute("title")).toBe("Accept the license above before downloading.");
+    await click(tierDownload);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    // Accepting on this very card recovers the flow: the two missing tiers become selectable while
+    // the installed one stays disabled, and a tier can then install.
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    expect(
+      [...container.querySelectorAll(".model-tier-select input")].map((box) => box.disabled),
+    ).toEqual([false, false, true]);
+    // Tier rows are ordered bf16 → q8 → q4, so the first checkbox is the bf16 tier. Toggling it
+    // needs the native `checked` setter: a dispatched MouseEvent runs no activation behavior in
+    // jsdom, so React's onChange would read the unchanged value.
+    const bf16 = container.querySelector(".model-tier-select input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        bf16,
+        true,
+      );
+      bf16.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    const unblocked = container.querySelector(".model-tier-actions button");
+    expect(unblocked.disabled).toBe(false);
+    await click(unblocked);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+      expect.objectContaining({ variant: "bf16" }),
+    );
+  });
+
+  // sc-17227 review BLOCKER 2, the other half: a FULLY-installed matrix has nothing left to
+  // download, so it shows no gate. This is what stops the fix above from degenerating into
+  // "always show the notice", which would re-block finished installs with a pre-download step.
+  it("shows no gate on a fully-installed quant matrix (sc-17227)", async () => {
+    await render([
+      {
+        ...LICENSE_ACK_PARTIAL_MATRIX_MODEL,
+        variants: LICENSE_ACK_PARTIAL_MATRIX_MODEL.variants.map((variant) => ({
+          ...variant,
+          installed: true,
+          installState: "installed",
+          cacheState: "complete",
+        })),
+      },
+    ]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-tier-row")).toBeTruthy();
     expect(container.querySelector(".model-gated-notice")).toBeNull();
     expect(container.querySelector(".model-license-ack")).toBeNull();
   });

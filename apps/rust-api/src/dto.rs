@@ -1166,6 +1166,14 @@ pub(crate) struct ModelImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227). Consulted only when `repo`/`sourceUrl` resolves to a catalog entry carrying
+    /// `requiresLicenseAcknowledgment` — the same repo-keyed gate `POST /api/v1/jobs` applies —
+    /// and defaults to `false` so a client that has never heard of the field is refused rather
+    /// than let through. Serialized onto the queued job (and only when true) so a retry of an
+    /// authorized import re-validates against the assertion the original request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default, skip_deserializing, skip_serializing_if = "bool_is_false")]
     pub(crate) uploaded_source_path: bool,
 }

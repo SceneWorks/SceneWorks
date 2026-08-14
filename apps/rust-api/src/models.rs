@@ -480,6 +480,164 @@ fn model_requires_license_acknowledgment(model: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The payload key every job-creation door uses to carry the caller's acknowledgment through to
+/// the queue (sc-17227). Stamped by `create_model_download_job` once its own gate has passed, so a
+/// RETRY of a legitimately-authorized download re-validates against the same assertion rather than
+/// being refused for a field the typed route never wrote.
+pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
+
+/// Canonical comparison key for a Hugging Face `owner/name`. Lowercased so a case-variant repo
+/// string cannot walk past a gate keyed on the catalog's spelling — the hub resolves `owner/Name`
+/// and `owner/name` to the same repository, so treating them as different would be a bypass.
+fn huggingface_repo_key(repo: &str) -> Option<String> {
+    let repo = repo.trim().trim_end_matches('/').trim();
+    if repo.is_empty() {
+        return None;
+    }
+    Some(repo.to_ascii_lowercase())
+}
+
+/// The `owner/name` a huggingface.co URL addresses, or `None` for any other host. `/models/import`
+/// accepts a `sourceUrl` as an alternative to `repo`, and
+/// `https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/…` fetches exactly the same bytes as
+/// `repo: "MiniMaxAI/MiniMax-H3"`, so a repo-keyed gate that read only `repo` would leave the
+/// equivalent request open.
+fn huggingface_repo_from_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    let host = host.split('@').next_back().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    if host != "huggingface.co" && host != "www.huggingface.co" && host != "hf.co" {
+        return None;
+    }
+    // `/models/<owner>/<name>` and `/<owner>/<name>` both address a model repo; `datasets/…` and
+    // `spaces/…` are different namespaces and are left alone.
+    let path = path.strip_prefix("models/").unwrap_or(path);
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments.next()?;
+    if matches!(owner, "datasets" | "spaces" | "api") {
+        return None;
+    }
+    let name = segments.next()?;
+    Some(format!("{owner}/{name}"))
+}
+
+/// Every Hugging Face repo declared by a catalog entry that requires a license acknowledgment,
+/// mapped to the entry that declares it (sc-17227). Includes co-requisite rows: MiniMax-H3's text
+/// encoder and both VAEs come straight from `MiniMaxAI/MiniMax-H3`, which is the repo the review's
+/// bypass named, and a primary-only index would have missed it.
+///
+/// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
+/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is `platforms:
+/// ["macos"]` — so an index built from the snapshot would be EMPTY on Linux/Windows and the gate
+/// would evaporate on exactly the hosts where the LAN-exposed jobs API (epic 4484) is most likely
+/// to be reachable. A licence requirement is not a platform capability.
+async fn license_acknowledgment_repo_index(
+    state: &AppState,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+    let (models, _) = merged_model_manifest_entries(state).await?;
+    let mut index = std::collections::BTreeMap::new();
+    for model in models {
+        if !model_requires_license_acknowledgment(&model) {
+            continue;
+        }
+        let Some(model_id) = model.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(key) = download
+                .get("repo")
+                .and_then(Value::as_str)
+                .and_then(huggingface_repo_key)
+            else {
+                continue;
+            };
+            index.entry(key).or_insert_with(|| model_id.to_owned());
+        }
+    }
+    Ok(index)
+}
+
+/// The license-acknowledgment refusal for a request that named its weights by REPO (sc-17227).
+///
+/// [`create_model_download_job`] gates the typed `POST /api/v1/models/:id/download` by catalog id.
+/// That is not the only door: `POST /api/v1/jobs` enqueues a `model_download` payload VERBATIM
+/// (`repo` + `files` + `revision`, no catalog lookup anywhere between the request and
+/// `run_model_download_job`), and `POST /api/v1/models/import` fetches a caller-supplied repo or
+/// URL with no licence logic of its own. Both reached `MiniMaxAI/MiniMax-H3` — a PUBLIC repo, so
+/// nothing upstream refuses them — while the typed route answered 403. Keying on the repo rather
+/// than on the model id is what lets ONE mechanism close both: the payloads have no `modelId` to
+/// look up, but they must name the repo or they cannot fetch anything.
+///
+/// `acknowledged` is the caller's own assertion, exactly as on the typed route: the gate obtains
+/// an affirmative acknowledgment, it is not an authorization check (see
+/// `docs/minimax-h3-use-restriction-safeguards.md`).
+async fn ensure_license_acknowledged_for_source(
+    state: &AppState,
+    repo: Option<&str>,
+    source_url: Option<&str>,
+    acknowledged: bool,
+) -> Result<(), ApiError> {
+    // Each candidate keeps the caller's own spelling next to the lookup key, so the refusal echoes
+    // what was actually requested rather than the lowercased index key.
+    let candidates: Vec<(String, String)> = [
+        repo.map(str::to_owned),
+        source_url.and_then(huggingface_repo_from_url),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|named| huggingface_repo_key(&named).map(|key| (named, key)))
+    .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let index = license_acknowledgment_repo_index(state).await?;
+    let Some((requested, model_id)) = candidates
+        .iter()
+        .find_map(|(named, key)| index.get(key.as_str()).map(|model_id| (named, model_id)))
+    else {
+        return Ok(());
+    };
+    if acknowledged {
+        return Ok(());
+    }
+    Err(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "'{requested}' supplies '{model_id}', which requires accepting its license before \
+             download. Accept the license on the Models screen, or send \
+             `licenseAcknowledged: true` to assert that the user has accepted it."
+        ),
+        code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+    })
+}
+
+/// [`ensure_license_acknowledged_for_source`] over a raw job payload — the shape
+/// `POST /api/v1/jobs` (and the retry/duplicate re-validation) hands to the worker verbatim.
+pub(crate) async fn ensure_job_payload_license_acknowledged(
+    state: &AppState,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    ensure_license_acknowledged_for_source(
+        state,
+        payload.get("repo").and_then(Value::as_str),
+        payload.get("sourceUrl").and_then(Value::as_str),
+        payload
+            .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -670,6 +828,20 @@ fn build_model_download_job_payload(
     // client request cannot supply or override this flag, and co-requisites stay inert because the
     // calibration artifact identity is the primary checkpoint.
     insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
+    // Record the acknowledgment ON the job (sc-17227). `create_model_download_job` — the only
+    // non-test caller — has already refused the request unless the caller asserted it, so reaching
+    // here for a `requiresLicenseAcknowledgment` model means the assertion was made. Writing it
+    // into the payload is what keeps RETRY and DUPLICATE working: those re-run
+    // `validate_raw_job_payload` over the stored payload, and the repo-keyed gate there would
+    // otherwise refuse a download the typed route had already authorized. Co-requisites carry it
+    // too — `MiniMaxAI/MiniMax-H3` is itself a co-requisite repo, and it is the one the review's
+    // bypass named.
+    if model_requires_license_acknowledgment(model) {
+        job_payload.insert(
+            LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
     job_payload.insert(
         "provider".to_owned(),
         Value::String(required_string_field(download, "provider")?.to_owned()),
@@ -1698,6 +1870,18 @@ pub(crate) async fn queue_model_import_job(
     if let Some(repo) = payload.repo.as_deref() {
         validate_huggingface_repo(repo)?;
     }
+    // Licence acknowledgment, keyed on the repo the import will FETCH (sc-17227). This route had no
+    // licence logic at all — `model_import_enabled()` hard-returns `true` and nothing below reads
+    // the catalog for the source — so `{"repo": "MiniMaxAI/MiniMax-H3"}` pulled the restricted
+    // weights from upstream while `POST /api/v1/models/:id/download` was answering 403 for the same
+    // bytes. The same predicate the raw jobs route uses, so there is one mechanism, not two.
+    ensure_license_acknowledged_for_source(
+        &state,
+        payload.repo.as_deref(),
+        payload.source_url.as_deref(),
+        payload.license_acknowledged,
+    )
+    .await?;
     let model_type = match payload.model_type.as_deref().map(str::trim) {
         Some(value) if !value.is_empty() => {
             let normalized = value.to_ascii_lowercase();
@@ -1859,6 +2043,7 @@ pub(crate) async fn model_import_request_from_multipart(
         files: Vec::new(),
         family: None,
         expected_sha256: None,
+        license_acknowledged: false,
         uploaded_source_path: false,
     };
     let mut staged_path = None;
@@ -1900,6 +2085,13 @@ pub(crate) async fn model_import_request_from_multipart(
                 "family" => payload.family = Some(value.to_owned()),
                 "repo" => payload.repo = Some(value.to_owned()),
                 "sourceUrl" => payload.source_url = Some(value.to_owned()),
+                // The multipart form accepts `repo`/`sourceUrl` too, so it can reach a
+                // licence-restricted repo exactly like the JSON body and needs the same way to
+                // assert the acknowledgment (sc-17227). Anything other than "true" leaves it false
+                // — the assertion is affirmative or it is not made.
+                "licenseAcknowledged" => {
+                    payload.license_acknowledged = value.eq_ignore_ascii_case("true")
+                }
                 _ => {}
             }
         }
@@ -4692,6 +4884,26 @@ async fn estimate_model_catalog_sizes(
     .collect()
 }
 
+/// Built-in + user model manifest entries merged by id, with NO platform filtering — the raw
+/// authored catalog. [`load_model_catalog_inputs`] narrows `downloads` to the running OS on top of
+/// this; [`license_acknowledgment_repo_index`] deliberately reads it unfiltered, because a licence
+/// requirement must not depend on which OS is asking. Both manifest reads are mtime/size-cached
+/// (`load_manifest_entries`), so the second consumer costs a stat and a clone.
+async fn merged_model_manifest_entries(
+    state: &AppState,
+) -> Result<(Vec<Value>, std::collections::HashSet<String>), ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    let user =
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
+    let user_model_ids = user
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    Ok((merge_entries_by_id(builtin, user), user_model_ids))
+}
+
 async fn load_model_catalog_inputs(
     state: &AppState,
 ) -> Result<
@@ -4702,16 +4914,7 @@ async fn load_model_catalog_inputs(
     ),
     ApiError,
 > {
-    let manifest_dir = state.settings.config_dir.join("manifests");
-    let builtin =
-        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
-    let user =
-        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
-    let user_model_ids = user
-        .iter()
-        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect::<std::collections::HashSet<_>>();
-    let mut models = merge_entries_by_id(builtin, user);
+    let (mut models, user_model_ids) = merged_model_manifest_entries(state).await?;
     // Resolve per-platform download sources before computing install state/size: some video models
     // carry both a native MLX-convert checkpoint (macOS) and a diffusers/torch checkpoint
     // (Windows/Linux). Keep only the entries applicable to this OS so the download job, status,

@@ -4745,16 +4745,34 @@ fn external_lora_without_a_detected_family_is_refused_at_job_create() {
 // repo. Refuse here or the weights arrive.
 // --------------------------------------------------------------------------------------------
 
+/// The OS this test process is NOT running on, so a download row tagged with it is guaranteed to
+/// be stripped by `retain_downloads_for_os` on whichever host runs the suite (sc-17227). Used to
+/// prove the licence-repo index reads the UNFILTERED manifest: every real MiniMax-H3 row is
+/// `platforms: ["macos"]`, so an index built from the OS-filtered catalog snapshot would be empty
+/// — and the gate absent — on Linux and Windows.
+const FOREIGN_DOWNLOAD_OS: &str = if cfg!(target_os = "macos") {
+    "linux"
+} else {
+    "macos"
+};
+
 /// Seed a catalog with one acknowledgment-gated entry and one ordinary one, so every assertion
 /// below can be made against the SAME app instance.
+///
+/// Shaped like the real `minimax_h3`: the tier artifact comes from the SceneWorks re-host, while
+/// the shared text-encoder/VAE floor is a CO-REQUISITE row pointing at MiniMax's own
+/// `MiniMaxAI/MiniMax-H3`. That co-requisite repo is the one the review's bypass named, and it is
+/// platform-tagged for the OS this process is not on — so a gate that only saw primary rows, or
+/// only saw this host's rows, fails the assertions below.
 fn write_license_acknowledgment_catalog(config_dir: &std::path::Path) {
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
-        r#"
-            {
+        format!(
+            r#"
+            {{
               "schemaVersion": 1,
               "models": [
-                {
+                {{
                   "id": "minimax_h3",
                   "name": "MiniMax-H3",
                   "type": "video",
@@ -4762,24 +4780,37 @@ fn write_license_acknowledgment_catalog(config_dir: &std::path::Path) {
                   "requiresLicenseAcknowledgment": true,
                   "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
                   "downloads": [
-                    { "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "files": ["q4/transformer/*"] }
+                    {{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "files": ["q4/transformer/*"] }},
+                    {{ "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "coRequisite": true, "componentId": "text_encoder", "subdir": "text_encoder", "files": ["text_encoder/*"], "platforms": ["{FOREIGN_DOWNLOAD_OS}"] }}
                   ]
-                },
-                {
+                }},
+                {{
                   "id": "plain_model",
                   "name": "Plain",
                   "type": "image",
                   "family": "plain",
                   "downloads": [
-                    { "provider": "huggingface", "repo": "owner/plain", "files": ["*.safetensors"] }
+                    {{ "provider": "huggingface", "repo": "owner/plain", "files": ["*.safetensors"] }}
                   ]
-                }
+                }}
               ]
-            }
-            "#,
+            }}
+            "#
+        ),
     )
     .expect("builtin models writes");
     write_empty_sibling_manifests(config_dir);
+}
+
+/// The raw-queue body the review used to walk past the typed route's 403. `requestedGpu` is a
+/// required field of `JobCreateRequest`, so it is present here but carries no meaning for a
+/// download.
+fn raw_model_download_job(repo: &str) -> Value {
+    json!({
+        "type": "model_download",
+        "requestedGpu": "auto",
+        "payload": { "repo": repo, "files": ["*.safetensors"] }
+    })
 }
 
 #[tokio::test]
@@ -4879,4 +4910,236 @@ fn model_download_request_defaults_the_license_acknowledgment_to_false() {
     let asserted: crate::ModelDownloadRequest =
         serde_json::from_value(json!({ "licenseAcknowledged": true })).expect("acknowledged body");
     assert!(asserted.license_acknowledged);
+}
+
+// --------------------------------------------------------------------------------------------
+// sc-17227 review — the typed route's 403 was BYPASSABLE, proven live: against one `create_app`
+// instance, `POST /api/v1/models/minimax_h3/download` answered 403 while
+// `POST /api/v1/jobs {"type":"model_download","payload":{"repo":"MiniMaxAI/MiniMax-H3", …}}`
+// answered 201 and queued a job carrying that repo. `run_model_download_job` reads `repo`/`files`/
+// `revision` verbatim with no catalog lookup, so the weights would have landed.
+//
+// The fix enforces where the JOB is created, keyed on the payload's REPO rather than a model id,
+// which is the one mechanism that also closes `POST /api/v1/models/import`.
+// --------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn license_acknowledgment_generic_jobs_route_refuses_what_the_typed_route_refuses() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Request 1 — the typed route, as before.
+    let (typed_status, typed_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(typed_status, StatusCode::FORBIDDEN);
+    assert_eq!(typed_body["code"], "license_acknowledgment_required");
+
+    // Request 2 — the generic queue primitive, same app instance, naming MiniMax's own upstream
+    // repo. This is the request that returned 201.
+    let (raw_status, raw_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("MiniMaxAI/MiniMax-H3"),
+    )
+    .await;
+    assert_eq!(
+        raw_status,
+        StatusCode::FORBIDDEN,
+        "the generic jobs route must refuse the repo the typed route refuses: {raw_body:?}",
+    );
+    assert_eq!(
+        raw_body["code"], "license_acknowledgment_required",
+        "and refuse it with the SAME machine-readable code, not some incidental 4xx: {raw_body:?}",
+    );
+    assert!(
+        raw_body["detail"].as_str().is_some_and(
+            |detail| detail.contains("MiniMaxAI/MiniMax-H3") && detail.contains("minimax_h3")
+        ),
+        "the refusal must name the repo AND the catalog entry it supplies: {raw_body:?}",
+    );
+
+    // The re-hosted tier repo is the same weights under a different name, so it is refused too.
+    let (rehost_status, rehost_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("SceneWorks/minimax-h3-mlx"),
+    )
+    .await;
+    assert_eq!(rehost_status, StatusCode::FORBIDDEN, "{rehost_body:?}");
+    assert_eq!(rehost_body["code"], "license_acknowledgment_required");
+
+    // Case is not a way in: the hub resolves `owner/Name` and `owner/name` to one repository.
+    let (case_status, case_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("minimaxai/minimax-h3"),
+    )
+    .await;
+    assert_eq!(case_status, StatusCode::FORBIDDEN, "{case_body:?}");
+    assert_eq!(case_body["code"], "license_acknowledgment_required");
+
+    // Neither refusal queued anything — the whole point is that no worker picks the fetch up.
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused download must enqueue nothing: {jobs:?}",
+    );
+
+    // An UNRELATED repo through the same door is untouched — this is a licence gate, not a new
+    // blanket restriction on the raw queue.
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("owner/plain"),
+    )
+    .await;
+    assert_eq!(
+        plain_status,
+        StatusCode::CREATED,
+        "an unrestricted repo must still queue: {plain_job:?}",
+    );
+
+    // And the assertion is what opens it, exactly as on the typed route.
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_download",
+            "requestedGpu": "auto",
+            "payload": {
+                "repo": "MiniMaxAI/MiniMax-H3",
+                "files": ["*.safetensors"],
+                "licenseAcknowledged": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(asserted_job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+}
+
+#[tokio::test]
+async fn license_acknowledgment_model_import_is_refused_for_a_restricted_repo() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // `POST /api/v1/models/import` had NO licence logic at all — `model_import_enabled()` returns
+    // a hard `true` and nothing between the request and `run_model_import_job` reads the catalog.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({ "repo": "MiniMaxAI/MiniMax-H3", "type": "video" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+
+    // A `sourceUrl` addressing the same repo fetches the same bytes, so reading only `repo` would
+    // have left the equivalent request open.
+    let (url_status, url_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "sourceUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/vae/model.safetensors",
+            "type": "video"
+        }),
+    )
+    .await;
+    assert_eq!(url_status, StatusCode::FORBIDDEN, "{url_body:?}");
+    assert_eq!(url_body["code"], "license_acknowledgment_required");
+
+    // An unrestricted remote import is unaffected.
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({ "sourceUrl": "https://example.com/models/custom.safetensors", "type": "image" }),
+    )
+    .await;
+    assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
+
+    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so a
+    // retry re-validates against it rather than being refused for a field nothing wrote.
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "repo": "MiniMaxAI/MiniMax-H3",
+            "type": "video",
+            "licenseAcknowledged": true
+        }),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(
+        asserted_job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the queued import must carry the assertion: {asserted_job:?}",
+    );
+}
+
+#[tokio::test]
+async fn license_acknowledgment_survives_a_typed_download_retry() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // The typed route stamps the assertion onto the job. Without this the repo-keyed gate would
+    // refuse the RETRY of a download the same server had just authorized.
+    assert_eq!(
+        job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the authorized download must record its acknowledgment: {job:?}",
+    );
+
+    // Retry re-validates the stored payload through the same raw-payload validator.
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (retry_status, retry_job) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        retry_status,
+        StatusCode::CREATED,
+        "an authorized download must stay retryable: {retry_job:?}",
+    );
+    assert_eq!(retry_job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
 }
