@@ -108,12 +108,10 @@ const LTX_RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
 /// validating against LTX's OWN declared envelope instead of accepting any frame count at all.
 const LTX_PROVIDER: &str = "ltx_2_3";
 const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video path";
-/// ADAPTER-OWNED, and deliberately so. Every other arm reads its fingerprint back from the pinned
-/// provider's `MemoryStrategyContract::calibration`; `mlx-gen-ltx` registers **no** memory-strategy
-/// contract at all at the pin (zero `memory_strategy` symbols in the crate), so there is no provider
-/// identity to read. This constant versions the capture contract THIS arm implements — geometry
-/// envelope, staged-residency attestation, and phase boundaries — and the plan must match it, so a
-/// change here forces the plan and the records to move together.
+/// Historical adapter-owned SC-18810 capture identity. The pinned provider now publishes its own
+/// distinct memory-strategy contract; this arm intentionally remains gated on the historical plan
+/// until SC-18946 atomically promotes a new pin, provider identity, and replacement evidence. Never
+/// relabel the old records with the provider fingerprint.
 const LTX_CALIBRATION_FINGERPRINT: &str = "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1";
 /// One fixed seed for every `mlx:ltx_2_3` fixture
 /// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18808`).
@@ -7153,43 +7151,31 @@ mod qwen_evidence_tests {
 mod ltx_tests {
     use super::*;
 
-    /// The premise the ENTIRE `mlx:ltx_2_3` receipt rests on: `mlx-gen-ltx` registers no
-    /// `MemoryStrategyContract` at the pin.
-    ///
-    /// That single fact is why the arm's receipt is `status: gated` rather than `runtime_complete`
-    /// (see `run_ltx`), why `LTX_CALIBRATION_FINGERPRINT` is adapter-owned rather than read back
-    /// from a provider, and why `exact_fit` / `unknown_budget` / `stale_evidence` are reported as
-    /// unexecuted instead of passing. `run_ltx` DOES fail closed if the premise ever stops holding —
-    /// but that branch sits after env resolution, snapshot validation and `provider_registry()`, so
-    /// it is reachable only inside a real-weight capture, which no CI lane performs. Without this
-    /// test a pin bump that registers an LTX contract leaves every lane green and surfaces only the
-    /// next time someone burns a capture on a Mac.
-    ///
-    /// `Registry::memory_strategy_contract` returns `Ok(None)` without touching weights when nothing
-    /// is registered, so the premise is pinnable weights-free — exactly as every sibling arm pins its
-    /// own contract shape (`the_pinned_flux2_t2i_contract_is_direct_resident_only_and_plan_exact`,
-    /// `pinned_base_contract_exposes_the_exact_declared_full_ladder`,
-    /// `pinned_sdxl_contract_exposes_only_the_three_implemented_rungs`).
+    /// SC-19109 deliberately replaced the historical no-contract provider with a loaded-route LTX
+    /// contract. A synthetic path with no checkpoint identity must now fail closed rather than
+    /// resolving `None`: the registered contract verifies that the requested tier agrees with the
+    /// checkpoint itself. The SC-18946 campaign upgrades `run_ltx` against a real loaded provider;
+    /// until that atomic pin-and-evidence change lands, the historical arm remains `gated` and must
+    /// not pretend a weights-free fixture is runtime evidence.
     #[test]
-    fn the_pinned_ltx_provider_registers_no_memory_strategy_contract() {
+    fn the_pinned_ltx_provider_rejects_the_historical_weights_free_contract_probe() {
+        assert_eq!(
+            mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT,
+            "sc-19109-ltx-2-3-mlx-memory-ladder-v1"
+        );
         let registry = mlx_gen_ltx::provider_registry().unwrap();
-        // q8 is the tier the shipped plan captures; the contract lookup is tier-independent, but
-        // asking under the captured tier keeps the premise and the capture on the same spec.
-        for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
-            let contract = registry
-                .memory_strategy_contract(LTX_PROVIDER, &flux2_tests::weights_free_spec(quant))
-                .expect("reading an unregistered contract must not error");
-            assert!(
-                contract.is_none(),
-                "the pinned mlx-gen-ltx crate now registers a MemoryStrategyContract for \
-                 {LTX_PROVIDER} at quant {quant:?}. The `mlx:ltx_2_3` receipt is `status: gated` \
-                 SOLELY because it did not: with a contract there is a provider calibration \
-                 identity to read instead of the adapter-owned {LTX_CALIBRATION_FINGERPRINT:?}, and \
-                 exact_fit/unknown_budget/stale_evidence become executable rather than unexecuted. \
-                 Upgrade `run_ltx` to read the contract and re-derive the receipt status before \
-                 relaxing this assertion — do not simply delete it (sc-18808)."
-            );
-        }
+        let error = registry
+            .memory_strategy_contract(
+                LTX_PROVIDER,
+                &flux2_tests::weights_free_spec(Some(Quant::Q8)),
+            )
+            .expect_err("the registered LTX contract must validate checkpoint tier identity");
+        assert!(
+            error
+                .to_string()
+                .contains("requested Q8 does not match the checkpoint tier None"),
+            "unexpected loaded-contract validation error: {error}"
+        );
     }
 
     /// A minimal, otherwise-valid LTX target. Every field the arm reads before it touches the
