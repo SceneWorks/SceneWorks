@@ -790,6 +790,12 @@ jobs:
           Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds
           Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds
 
+          # Consume the native process completely before selecting one line. Piping ffmpeg directly
+          # into `Select-Object -First 1` closes stdout early on Windows, leaves LASTEXITCODE=1, and
+          # makes the otherwise-successful evidence step fail when the Actions wrapper exits.
+          $ffmpegVersionLines = @(& ffmpeg -version)
+          if ($LASTEXITCODE -ne 0) { throw 'ffmpeg version probe failed' }
+          $ffmpegVersion = ($ffmpegVersionLines | Select-Object -First 1).Trim()
           $runnerMetadata = [ordered]@{
             story = 'SC-18902'
             captureKind = 'current-candle-route-baseline'
@@ -801,7 +807,7 @@ jobs:
             gpu = ((& nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader | Out-String).Trim())
             rustc = ((& rustc --version | Out-String).Trim())
             cargo = ((& cargo --version | Out-String).Trim())
-            ffmpeg = ((& ffmpeg -version | Select-Object -First 1 | Out-String).Trim())
+            ffmpeg = $ffmpegVersion
           }
           $runnerMetadata | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $out 'runner.json') -Encoding utf8
           $productHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mp4).Hash.ToLowerInvariant()
