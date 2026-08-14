@@ -266,6 +266,18 @@ test("both Rust Docker builders carry the mechanically digested web capability s
   }
 });
 
+test("both Rust Docker builders carry the compiled memory-calibration evidence", async () => {
+  const dockerfile = await source("docker/rust.Dockerfile");
+  assert.equal(
+    (
+      dockerfile.match(
+        /^COPY docs\/generated\/memory-calibration-evidence\.json \.\/docs\/generated\/$/gm,
+      ) ?? []
+    ).length,
+    2,
+  );
+});
+
 test("all three manifest scripts import the shared JSONC parser", async () => {
   for (const scriptPath of [
     "scripts/check-scaffold.mjs",
