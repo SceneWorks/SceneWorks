@@ -674,9 +674,7 @@ pub(crate) fn ensure_video_model_available_on_platform(
     model_manifest_entry: &Value,
     platform: &str,
 ) -> Result<(), ApiError> {
-    if platform != "macos"
-        && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)
-    {
+    if crate::models::video_model_withdrawn_on_platform(model_id, model_manifest_entry, platform) {
         return Err(ApiError::bad_request(format!(
             "Model {model_id} is available only on macOS and cannot create video jobs on {platform}."
         )));

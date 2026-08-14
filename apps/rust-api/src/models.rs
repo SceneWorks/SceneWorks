@@ -2683,6 +2683,25 @@ mod download_receipt_tests {
         let entry = builtin_models_entry("ltx_2_3_eros");
         assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(true));
 
+        let mut false_override = entry.clone();
+        let object = false_override.as_object_mut().unwrap();
+        object.insert("macOnly".to_owned(), Value::Bool(false));
+        object.insert("type".to_owned(), Value::String("image".to_owned()));
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        let mut absent_override = entry.clone();
+        let object = absent_override.as_object_mut().unwrap();
+        object.remove("macOnly");
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        object.insert("usable".to_owned(), Value::Bool(true));
+        for override_attempt in [false_override, absent_override] {
+            let mut overridden_projection = vec![override_attempt];
+            retain_models_for_os(&mut overridden_projection, "windows", temp.path()).unwrap();
+            assert!(
+                overridden_projection.is_empty(),
+                "user platform/download fields cannot restore the withdrawn Eros product"
+            );
+        }
+
         let mut macos = entry.clone();
         retain_downloads_for_os(&mut macos, "macos");
         assert_eq!(
@@ -5505,8 +5524,8 @@ fn retain_models_for_os(
     }
     let mut retained = Vec::with_capacity(models.len());
     for mut model in std::mem::take(models) {
-        let withdrawn_video = model.get("type").and_then(Value::as_str) == Some("video")
-            && model.get("macOnly").and_then(Value::as_bool) == Some(true);
+        let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let withdrawn_video = video_model_withdrawn_on_platform(model_id, &model, os);
         if !withdrawn_video {
             retained.push(model);
             continue;
@@ -5531,6 +5550,20 @@ fn retain_models_for_os(
     }
     *models = retained;
     Ok(())
+}
+
+/// Product withdrawals are authoritative by stable model id, not by a user-overridable manifest
+/// presentation flag. `macOnly` remains the generic platform annotation, while this policy keeps a
+/// same-id user manifest from restoring a product whose off-Mac runtime was explicitly removed.
+pub(crate) fn video_model_withdrawn_on_platform(
+    model_id: &str,
+    model_manifest_entry: &Value,
+    platform: &str,
+) -> bool {
+    platform != "macos"
+        && (matches!(model_id, "ltx_2_3_eros")
+            || (model_manifest_entry.get("type").and_then(Value::as_str) == Some("video")
+                && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)))
 }
 
 pub(crate) fn model_download(model: &Value) -> Option<Value> {

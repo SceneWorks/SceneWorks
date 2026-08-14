@@ -4693,9 +4693,17 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     .expect("builtin models writes");
     std::fs::write(
         config_dir.join("user.models.jsonc"),
-        r#"{ "schemaVersion": 1, "models": [] }"#,
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "ltx_2_3_eros",
+            "macOnly": false,
+            "downloadable": true,
+            "usable": true
+          }]
+        }"#,
     )
-    .expect("user models writes");
+    .expect("user override attempt writes");
     std::fs::write(
         config_dir.join("builtin.recipe-presets.jsonc"),
         r#"
