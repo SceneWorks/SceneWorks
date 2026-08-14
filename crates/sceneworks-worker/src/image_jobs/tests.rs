@@ -18,6 +18,119 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+/// sc-18480: the worker half of the raw Batch Detail contract. The API starts from the web's
+/// no-manifest/no-quant payload and persists authoritative metadata plus `mlxQuantize: 0`; prove
+/// those persisted fields make the worker select the installed dense tier and resolve every SDXL
+/// descriptor component before dispatching to the provider.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_components() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir creates");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin models manifest present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin models manifest parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == json!("realvisxl"))
+        .cloned()
+        .expect("realvisxl manifest entry");
+
+    let stage = |repo: &str, revision: &str, file: &str| {
+        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), repo)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(revision);
+        let path = snapshot.join(file);
+        std::fs::create_dir_all(path.parent().expect("staged file parent"))
+            .expect("staged parent creates");
+        std::fs::write(&path, b"weights").expect("staged file writes");
+        path
+    };
+    let base_revision = "e40202d63baef826c7df95a639a811698c1178d2";
+    stage(
+        "SceneWorks/realvisxl-mlx",
+        base_revision,
+        "q4/unet/diffusion_pytorch_model.safetensors",
+    );
+    stage(
+        "SceneWorks/realvisxl-mlx",
+        base_revision,
+        "bf16/unet/diffusion_pytorch_model.safetensors",
+    );
+    for (repo, revision, file) in [
+        (
+            "openai/clip-vit-large-patch14",
+            "32bd64288804d66eefd0ccbe215aa642df71cc41",
+            "tokenizer.json",
+        ),
+        (
+            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+            "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+            "tokenizer.json",
+        ),
+        (
+            "madebyollin/sdxl-vae-fp16-fix",
+            "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+            "diffusion_pytorch_model.safetensors",
+        ),
+    ] {
+        stage(repo, revision, file);
+    }
+
+    let request = request(json!({
+        "projectId": "project-1",
+        "sourceAssetId": "asset-1",
+        "model": "realvisxl",
+        "displayName": "portrait.png",
+        "advanced": { "strength": 0.55, "cnScale": 0.7, "mlxQuantize": 0 },
+        "modelManifestEntry": entry
+    }));
+    let weights_dir = resolve_weights_dir(&request, &settings)
+        .expect("detail tier resolves")
+        .expect("detail base is installed");
+    assert_eq!(
+        tier_key_from_resolved_dir(&weights_dir),
+        Some("bf16"),
+        "the route-owned dense selector must beat the shipped q4 default"
+    );
+
+    let (clip_l, clip_bigg, vae) =
+        resolve_candle_detail_components(&request, &settings, &weights_dir, false)
+            .expect("dense base and all authoritative co-requisites resolve");
+    assert!(matches!(clip_l, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(matches!(clip_bigg, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(
+        matches!(vae, WeightsSource::File(path) if path.ends_with("diffusion_pytorch_model.safetensors"))
+    );
+
+    std::fs::remove_dir_all(&weights_dir).expect("remove staged bf16 tier");
+    let packed_fallback = resolve_weights_dir(&request, &settings)
+        .expect("fallback tier resolves")
+        .expect("q4 sibling remains installed");
+    assert_eq!(tier_key_from_resolved_dir(&packed_fallback), Some("q4"));
+    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback, false)
+        .expect_err("a packed sibling must not masquerade as the requested dense detail base");
+    assert!(
+        error
+            .to_string()
+            .contains("installed dense bf16 model tier"),
+        "the fallback refusal must tell the user which tier detail requires: {error}"
+    );
+}
+
 #[test]
 fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
     let valid = request(json!({

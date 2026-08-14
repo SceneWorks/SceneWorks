@@ -53,6 +53,37 @@ fn engine_dim(value: u32) -> u32 {
     value.div_ceil(8).saturating_mul(8).clamp(512, 2048)
 }
 
+/// Validate and resolve the Candle-only inputs before the detail provider loads. The raw Batch
+/// Detail route stamps a dense request, but the shared standard-tier resolver deliberately falls
+/// back to an installed sibling when the requested tier is absent. That behavior is useful for
+/// ordinary generation and unsafe here: packed SDXL detail is unsupported. Require the actual
+/// resolved standard-layout directory to be `bf16`, then resolve the descriptor-owned components.
+/// Flat custom SDXL directories remain valid dense inputs; they have no packed tier basename and
+/// are already protected by the `quantized` check.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_detail_components(
+    request: &ImageRequest,
+    settings: &Settings,
+    weights_dir: &Path,
+    quantized: bool,
+) -> WorkerResult<(WeightsSource, WeightsSource, WeightsSource)> {
+    if quantized {
+        return Err(WorkerError::InvalidPayload(
+            "SDXL detail on Candle requires a dense SDXL-family base; packed/request-quantized detail is not supported"
+                .to_owned(),
+        ));
+    }
+    if uses_standard_tier_layout(request)
+        && tier_key_from_resolved_dir(weights_dir) != Some("bf16")
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SDXL detail on Candle requires the installed dense bf16 model tier; the requested tier resolved to {}",
+            weights_dir.display()
+        )));
+    }
+    resolve_sdxl_components(&request.model_manifest_entry, settings)
+}
+
 /// Raised-cosine alpha ramp over the `overlap` borders so tiles blend seamlessly
 /// (parity with Python `_detail_feather`). Row-major `tile_h`×`tile_w` weights.
 fn detail_feather(tile_w: u32, tile_h: u32, overlap: u32) -> Vec<f32> {
@@ -517,17 +548,17 @@ pub(crate) async fn run_image_detail_job(
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let candle_paths = {
-        if quant.is_some() {
-            return Err(WorkerError::InvalidPayload(
-                "SDXL detail on Candle requires a dense SDXL-family base; packed/request-quantized detail is not supported"
-                    .to_owned(),
-            ));
-        }
         // Resolve the exact three descriptor-declared SDXL co-requisites from the Model Manager's
         // installed cache. Detail jobs must never create an ad-hoc cache or download model weights;
-        // a missing component fails here, before provider load, with the shared actionable error.
+        // a packed fallback or missing component fails here, before provider load, with an
+        // actionable error.
         let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
-            resolve_sdxl_components(&request.model_manifest_entry, settings)?;
+            resolve_candle_detail_components(
+                &request,
+                settings,
+                &weights_dir,
+                quant.is_some(),
+            )?;
         let mut admission_paths = vec![
             weights_dir.as_path(),
             control_file.as_path(),

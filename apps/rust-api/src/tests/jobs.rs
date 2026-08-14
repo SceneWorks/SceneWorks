@@ -308,6 +308,145 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
     }
 }
 
+/// sc-18480: Batch Detail keeps its established raw `/api/v1/jobs` contract, but the Candle SDXL
+/// provider needs the selected model's three descriptor-owned co-requisites. Start with the exact
+/// client shape (no `modelManifestEntry`) and prove the API enriches the persisted worker payload
+/// from the shipped catalog. `model_jobs::sdxl_co_requisites_resolve_all_three_from_every_live_*`
+/// proves this same three-id entry resolves to installed paths at the worker seam.
+#[tokio::test]
+async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Batch Detail",
+            "requestedGpu": "auto",
+            "payload": {
+                "projectId": "project-1",
+                "sourceAssetId": "asset-1",
+                "model": "realvisxl",
+                "displayName": "portrait.png",
+                "advanced": { "strength": 0.55, "cnScale": 0.7 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "detail job enqueues: {job}");
+
+    let entry = &job["payload"]["modelManifestEntry"];
+    assert_eq!(entry["id"], "realvisxl");
+    assert_eq!(entry["family"], "sdxl");
+    assert_eq!(entry["type"], "image");
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(
+        job["payload"]["advanced"]["mlxQuantize"],
+        json!(0),
+        "the Candle route must persist its supported dense-bf16 tier instead of inheriting q4"
+    );
+    let component_ids: std::collections::BTreeSet<&str> = entry["downloads"]
+        .as_array()
+        .expect("authoritative downloads array")
+        .iter()
+        .filter(|download| download["coRequisite"] == json!(true))
+        .filter_map(|download| download["componentId"].as_str())
+        .collect();
+    assert_eq!(
+        component_ids,
+        std::collections::BTreeSet::from([
+            "tokenizer_clip_l",
+            "tokenizer_clip_bigg",
+            "vae_fp16_fix",
+        ]),
+        "the raw job must reach Candle with every component its SDXL descriptor requires"
+    );
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "candle-detail-worker",
+            "gpuId": "0",
+            "gpuName": "Candle GPU",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "candle-detail-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "detail dispatches: {claimed}");
+    assert_eq!(claimed["job"]["id"], job["id"]);
+}
+
+#[tokio::test]
+async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "requestedGpu": "auto",
+            "payload": {
+                "projectId": "project-1",
+                "sourceAssetId": "asset-1",
+                "model": "realvisxl",
+                "advanced": { "strength": 0.55, "cnScale": 0.7 },
+                "modelManifestEntry": {
+                    "id": "client-spoof",
+                    "family": "sdxl",
+                    "downloads": [{
+                        "coRequisite": true,
+                        "componentId": "vae_fp16_fix",
+                        "repo": "untrusted/arbitrary-repo",
+                        "files": ["arbitrary.safetensors"]
+                    }]
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "detail job enqueues: {job}");
+    let entry = &job["payload"]["modelManifestEntry"];
+    assert_eq!(entry["id"], "realvisxl");
+    assert_eq!(entry["family"], "sdxl");
+    assert!(
+        !entry.to_string().contains("untrusted/arbitrary-repo"),
+        "client manifest metadata must be replaced, never merged or trusted: {entry}"
+    );
+}
+
 /// sc-13617 / F-055: raw jobs whose `model` reaches worker-side model path resolution must
 /// reject traversal before a job row exists. This table is the API-side inventory for that key.
 #[tokio::test]
@@ -315,7 +454,7 @@ async fn generic_model_backed_jobs_reject_path_unsafe_model_before_create() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    for job_type in ["image_upscale", "prompt_refine"] {
+    for job_type in ["image_upscale", "image_detail", "prompt_refine"] {
         let (status, body) = request(
             app.clone(),
             "POST",

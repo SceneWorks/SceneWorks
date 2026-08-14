@@ -76,7 +76,7 @@ pub(crate) async fn list_metrics(
 
 pub(crate) async fn create_job(
     State(state): State<AppState>,
-    ApiJson(payload): ApiJson<JobCreateRequest>,
+    ApiJson(mut payload): ApiJson<JobCreateRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     if matches!(payload.job_type, JobType::CatalogAnalysis) {
         return Err(ApiError::bad_request(
@@ -98,6 +98,58 @@ pub(crate) async fn create_job(
         )));
     }
     validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
+    if matches!(payload.job_type, JobType::ImageDetail) {
+        // Batch Detail deliberately uses the generic queue route, but it is still a model-backed
+        // native inference job. Resolve the same authoritative merged manifest entry as the typed
+        // generation routes before persistence so Candle can stage SDXL's descriptor-declared
+        // co-requisites. Never trust a client-provided entry: the raw web request historically
+        // carries none, and accepting one would let an untrusted caller select arbitrary repos or
+        // paths for the worker. The worker's established empty-model fallback is RealVisXL.
+        let model_id = payload
+            .payload
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or("realvisxl");
+        let model_manifest_entry =
+            crate::models::resolve_model_manifest_entry(&state, model_id).await?;
+        payload
+            .payload
+            .insert("modelManifestEntry".to_owned(), model_manifest_entry);
+        #[cfg(not(target_os = "macos"))]
+        {
+            // The Candle SDXL detail provider supports the dense base only. Batch Detail has never
+            // exposed a quant selector, while the shared image resolver otherwise inherits the
+            // catalog's packed q4 default. Stamp the route-owned bf16 selection into the persisted
+            // payload so tier resolution, admission, recipes, and retries all agree on the dense
+            // lane. An explicit incompatible API choice is rejected rather than silently changed.
+            let advanced = payload
+                .payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}));
+            let advanced = advanced
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("image_detail advanced must be an object"))?;
+            if let Some(value) = advanced.get("mlxQuantize") {
+                let bits = value
+                    .as_i64()
+                    .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+                    .ok_or_else(|| {
+                        ApiError::bad_request(
+                            "image_detail advanced.mlxQuantize must be an integer",
+                        )
+                    })?;
+                if bits > 0 {
+                    return Err(ApiError::bad_request(
+                        "Candle image_detail requires the dense bf16 model tier \
+                         (advanced.mlxQuantize must be 0)",
+                    ));
+                }
+            }
+            advanced.insert("mlxQuantize".to_owned(), Value::from(0));
+        }
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,
@@ -445,16 +497,19 @@ async fn validate_and_canonicalize_merged_generation_payload(
 
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
 /// inventory aligned with worker payload fields that reach filesystem model resolution:
-/// `image_upscale` and `prompt_refine` consume `model`; the model-management jobs consume
-/// `modelId`, and `model_convert.outputDir` selects its final install location. Other raw job
-/// payloads may contain descriptive model metadata, but are deliberately absent unless that field
-/// selects a filesystem path.
+/// `image_upscale`, `image_detail`, and `prompt_refine` consume `model`; the model-management jobs
+/// consume `modelId`, and `model_convert.outputDir` selects its final install location. Other raw
+/// job payloads may contain descriptive model metadata, but are deliberately absent unless that
+/// field selects a filesystem path.
 fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
-    if matches!(job_type, JobType::ImageUpscale | JobType::PromptRefine) {
+    if matches!(
+        job_type,
+        JobType::ImageUpscale | JobType::ImageDetail | JobType::PromptRefine
+    ) {
         validate_payload_model(payload)?;
     }
     if matches!(
