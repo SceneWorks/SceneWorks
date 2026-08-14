@@ -1119,6 +1119,13 @@ pub(crate) struct ModelDownloadRequest {
     /// else the first supported entry) — the back-compat single-variant behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) variant: Option<String>,
+    /// The caller asserts the user has accepted the model's license (sc-17227). Required — and
+    /// only consulted — for a catalog entry carrying `requiresLicenseAcknowledgment`, whose
+    /// Hugging Face repo is PUBLIC and therefore has no credential check to fail behind. Defaults
+    /// to `false`, so a client that does not know about the field is refused rather than let
+    /// through: the acknowledgment must be affirmatively asserted, never assumed.
+    #[serde(default)]
+    pub(crate) license_acknowledged: bool,
 }
 
 #[derive(Debug, Deserialize)]

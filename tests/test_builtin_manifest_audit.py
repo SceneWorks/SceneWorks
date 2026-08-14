@@ -2481,7 +2481,7 @@ def test_minimax_h3_requires_license_acknowledgment_without_a_credential():
 
 def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
     """§V.2 requires notifying the user that the use restrictions apply — a bare "accept the
-    license" checkbox does not. The notice must name the three terms that decide whether the user
+    license" checkbox does not. The notice must name the FOUR terms that decide whether the user
     may use the model at all, so assert on the SUBSTANCE, not on the field being non-empty."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
     for model_id in MINIMAX_H3_IDS:
@@ -2496,11 +2496,51 @@ def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
             "United States of America",
         ):
             assert territory in notice, f"{model_id}: {territory} missing from licenseNotice"
+        # §II — the Excluded-Territory scope is "not yet", not "not ever": the agreement invites
+        # anyone there to ask about a licence. Omitting the route would make the territory line
+        # read as a flat, permanent bar.
+        assert "api@minimax.io" in notice, model_id
         # §V.1 + Exhibit A item 12 — the disclosure obligation SceneWorks does NOT discharge for
         # the user (nothing in the app marks output as machine-generated), so it must be stated.
         assert "machine-generated" in notice, model_id
-        # §IV.1 — the revenue ceiling above which a separate authorization is required.
-        assert "20 million" in notice, model_id
+        # §IV.1 — the ceiling above which a separate authorization is required. The licence's own
+        # measure is REVENUE ("generate more than 20 million US dollars ... in yearly revenue"),
+        # not earnings; "earn" would read as profit and understate who is covered.
+        assert "20 million US dollars in yearly revenue" in notice, model_id
+        # §V.3 — the restriction SceneWorks' own feature set is most likely to reach: the product
+        # ships a LoRA trainer, dataset captioning and a training studio. Named because the notice
+        # claims to list the terms that decide whether the user may use the model at all, and a
+        # reader who did not see it would reasonably conclude training on H3 output is
+        # unrestricted. This assertion is what stops the set silently shrinking back to three.
+        assert "§V.3" in notice, model_id
+        assert "improve any other artificial intelligence model" in notice, model_id
+        assert "Four of its terms" in notice, model_id
+
+
+def test_minimax_h3_shipped_notice_names_the_same_restrictions():
+    """The §III.4 NOTICE that ships in the app (About → Licenses) is the copy a user has when
+    they have only the built application and no repository checkout, so it must name the same set
+    the manifest gate names — including §V.3. Pinned here for the same reason: so the bullet list
+    cannot quietly lose a term."""
+    notice = (ROOT / "apps" / "desktop" / "licenses" / "minimax-h3" / "NOTICE.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "Four of its terms bind every user directly" in notice
+    for fragment in (
+        "Applicable Territory (Sections I and V.4)",
+        "Acceptable Use Policy (Section V.1 and Exhibit A)",
+        "Additional Commercial Terms (Section IV.1)",
+        "No improving other AI models (Section V.3)",
+        "improve any other\n    artificial intelligence model",
+        "20 million US dollars in\n    yearly revenue",
+    ):
+        assert fragment in notice, fragment
+    # sc-17227 review: the notice must not assert, as fact, that the modified-files notice §III.2
+    # requires is currently served on the re-hosted repository — nothing in this repository checks
+    # that, and the re-host is owned by sc-17150. Verified by pinning the hedge, so restoring the
+    # bare claim fails here.
+    assert "is not verified by anything in this repository" in notice
+    assert "re-hosted repository is where that notice is served" not in notice
 
 
 def test_minimax_h3_declares_the_section_iv_2_ui_attribution():

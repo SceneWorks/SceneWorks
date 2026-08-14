@@ -4730,3 +4730,153 @@ fn external_lora_without_a_detected_family_is_refused_at_job_create() {
         error.detail
     );
 }
+
+// --------------------------------------------------------------------------------------------
+// sc-17227 — the license-acknowledgment gate, enforced SERVER-SIDE.
+//
+// The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
+// only runs in the client. This endpoint is reachable from a browser on another machine (the
+// remote-access lane, epic 4484), from a workflow envelope's suggested action, and from curl —
+// none of which any client-side check binds.
+//
+// This is newly load-bearing because MiniMax-H3 is the first model whose acknowledgment is the
+// ONLY gate: every previously gated model also needed a Hugging Face credential, and HF answers
+// 401 without one, so unacknowledged weights never landed. `MiniMaxAI/MiniMax-H3` is a PUBLIC
+// repo. Refuse here or the weights arrive.
+// --------------------------------------------------------------------------------------------
+
+/// Seed a catalog with one acknowledgment-gated entry and one ordinary one, so every assertion
+/// below can be made against the SAME app instance.
+fn write_license_acknowledgment_catalog(config_dir: &std::path::Path) {
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "minimax_h3",
+                  "name": "MiniMax-H3",
+                  "type": "video",
+                  "family": "minimax-h3",
+                  "requiresLicenseAcknowledgment": true,
+                  "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+                  "downloads": [
+                    { "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "files": ["q4/transformer/*"] }
+                  ]
+                },
+                {
+                  "id": "plain_model",
+                  "name": "Plain",
+                  "type": "image",
+                  "family": "plain",
+                  "downloads": [
+                    { "provider": "huggingface", "repo": "owner/plain", "files": ["*.safetensors"] }
+                  ]
+                }
+              ]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(config_dir);
+}
+
+#[tokio::test]
+async fn license_acknowledgment_model_download_is_refused_without_the_acknowledgment() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // A body that predates the field — exactly what an older client, a workflow envelope's
+    // suggested action, or a bare curl sends.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    // Assert WHICH refusal, not merely that it errored: the machine-readable code is what a client
+    // keys off, and the status distinguishes "not allowed" from a 400 malformed body.
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("requires accepting its license")),
+        "the refusal must say what to do: {body:?}",
+    );
+
+    // An explicit `false` is refused the same way — the field is an assertion, and denying it is
+    // not a way in.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "license_acknowledgment_required");
+
+    // Nothing was queued: the refusal happens before any job is created, so a rejected request
+    // leaves no download the worker could pick up.
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused download must enqueue nothing: {jobs:?}",
+    );
+}
+
+#[tokio::test]
+async fn license_acknowledgment_model_download_proceeds_once_asserted() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+
+    // The gate is scoped to the entries that declare it. A model with no license requirement must
+    // still download from a body that says nothing about a license — otherwise this would be a
+    // blanket new requirement on every download in the product.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["repo"], "owner/plain");
+}
+
+#[test]
+fn model_download_request_defaults_the_license_acknowledgment_to_false() {
+    // sc-17227: the field must default to NOT acknowledged. A `#[serde(default)]` on a `bool` is
+    // `false`, and this pins that direction — a default of `true` would let every client that has
+    // never heard of the field straight through the gate, which is the failure mode the gate
+    // exists to prevent.
+    let bare: crate::ModelDownloadRequest = serde_json::from_value(json!({})).expect("bare body");
+    assert!(!bare.license_acknowledged);
+
+    let asserted: crate::ModelDownloadRequest =
+        serde_json::from_value(json!({ "licenseAcknowledged": true })).expect("acknowledged body");
+    assert!(asserted.license_acknowledged);
+}

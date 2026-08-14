@@ -16,6 +16,11 @@ import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useHostMemory } from "../hooks/useHostMemory.js";
+import {
+  readLicenseAck,
+  requiresLicenseAcknowledgment,
+  writeLicenseAck,
+} from "../licenseAcknowledgment.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
 import { blanketFloorGb, suggestTier, tierFits } from "../tierSuggestion.js";
@@ -227,50 +232,10 @@ function gatedRepoUrl(model) {
 // it's a UX gate only — the server-side download still needs the HF credential +
 // granted access. localStorage may be unavailable (private mode, quota), so the
 // getters/setters swallow failures and default to "not acknowledged".
-const LICENSE_ACK_KEY_PREFIX = "sceneworks-license-ack:";
-
-// sc-17227: "needs a licence acknowledgment" and "needs a Hugging Face credential"
-// are DIFFERENT requirements, and until now the screen had only one flag for both.
-// `gated` means the download will 401 without a token on `credentialHost`; it still
-// implies an acknowledgment, so every existing gated model behaves exactly as before.
-// `requiresLicenseAcknowledgment` is the other half on its own: a PUBLIC repo whose
-// licence nevertheless binds the user directly, so the terms must be shown and accepted
-// before the download — with no credential UI, because there is no credential to add and
-// no access to request. MiniMax-H3 is the first: `MiniMaxAI/MiniMax-H3` is public, and the
-// MiniMax H3 Community License is non-transferable (§II), so SceneWorks' own authorization
-// does not cover the user (sc-17227). Coupling the two would have failed open (no gate at
-// all) or demanded a token that does not exist.
-function requiresLicenseAcknowledgment(model) {
-  return model?.gated === true || model?.requiresLicenseAcknowledgment === true;
-}
-
-function readLicenseAck(modelId) {
-  if (!modelId) {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem(`${LICENSE_ACK_KEY_PREFIX}${modelId}`) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function writeLicenseAck(modelId, acknowledged) {
-  if (!modelId) {
-    return;
-  }
-  try {
-    const key = `${LICENSE_ACK_KEY_PREFIX}${modelId}`;
-    if (acknowledged) {
-      window.localStorage.setItem(key, "true");
-    } else {
-      window.localStorage.removeItem(key);
-    }
-  } catch {
-    // localStorage unavailable — the ack just won't persist this session. The
-    // in-memory state still gates the download for the current view.
-  }
-}
+// The predicate and the localStorage accessors moved to `../licenseAcknowledgment.js` (sc-17227):
+// this screen is only ONE of the surfaces that can start a download, and the gate is now enforced
+// at the shared choke point (`createModelDownloadJob`) plus server-side, with the same predicate.
+// See that module for why the acknowledgment is independent of the Hugging Face credential.
 
 // The pre-download license gate. Two independent requirements share one box (sc-17227):
 //
@@ -1225,14 +1190,23 @@ export function ModelManagerScreen() {
     const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
     const gated = Boolean(model.gated);
     const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
-    // License-acknowledgment gate (sc-7872, decoupled from the credential by sc-17227): an
-    // uninstalled model whose licence must be acknowledged can't be downloaded until the user
-    // accepts it in-app. Already-installed models (no notice shown) are never blocked. The
-    // requirement comes from `gated` OR the standalone `requiresLicenseAcknowledgment` — the
+    // License-acknowledgment gate (sc-7872, decoupled from the credential by sc-17227): a model
+    // whose licence must be acknowledged can't be downloaded until the user accepts it in-app.
+    // The requirement comes from `gated` OR the standalone `requiresLicenseAcknowledgment` — the
     // latter covers a public repo whose licence still binds the user (MiniMax-H3).
+    //
+    // The gate applies wherever a DOWNLOAD is still on offer, which is "not installed" OR
+    // "installed but an update is offered" (sc-17227). The `updateAvailable` half matters twice:
+    // a `breaking_update` with stale files present reports `installed: false` + `updateAvailable:
+    // true`, so the Update button was the one download control the gate did not cover; and an
+    // installed model whose stored ack was lost (desktop localStorage does not survive relaunch)
+    // would otherwise be refused at the choke point with no way to re-accept, because the notice
+    // renders only where this predicate is true. An installed model with nothing to download shows
+    // no notice — the acknowledgment is a pre-download step, and re-blocking it would be noise.
     const licenseGated = requiresLicenseAcknowledgment(model);
+    const licenseGateApplies = licenseGated && (!installed || model.updateAvailable === true);
     const licenseAcknowledged = licenseAcks[model.id] === true;
-    const licenseAckRequired = licenseGated && !installed && !licenseAcknowledged;
+    const licenseAckRequired = licenseGateApplies && !licenseAcknowledged;
     // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
     // + multi-select instead of the single Download button. Single-variant models are unchanged.
     const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
@@ -1292,7 +1266,7 @@ export function ModelManagerScreen() {
             ))}
           </ul>
         ) : null}
-        {licenseGated && !installed ? (
+        {licenseGateApplies ? (
           <LicenseGateNotice
             credentialRequired={gated}
             host={model.credentialHost}
@@ -1352,9 +1326,11 @@ export function ModelManagerScreen() {
                     Boolean(downloadJob) ||
                     Boolean(convertJob) ||
                     Boolean(pendingUpdate[model.id]) ||
-                    !mlxEnoughMemory
+                    !mlxEnoughMemory ||
+                    licenseAckRequired
                   }
                   onClick={() => handleUpdateModel(model)}
+                  title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
                   type="button"
                 >
                   {convertJob

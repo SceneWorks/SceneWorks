@@ -465,6 +465,21 @@ impl HuggingFaceCacheHealth {
     }
 }
 
+/// Machine-readable code on the license-acknowledgment rejection (sc-17227). Mirrored in the web
+/// client as `LICENSE_ACK_ERROR_CODE` (`apps/web/src/licenseAcknowledgment.js`) so both halves of
+/// the gate name the same refusal rather than matching on prose.
+pub(crate) const LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE: &str = "license_acknowledgment_required";
+
+/// True when the catalog entry declares that the user must accept its license before the weights
+/// may be downloaded (`requiresLicenseAcknowledgment`, sc-17227). Deliberately does NOT include
+/// `gated`: see the call site for why the two are enforced differently.
+fn model_requires_license_acknowledgment(model: &Value) -> bool {
+    model
+        .get("requiresLicenseAcknowledgment")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -479,6 +494,30 @@ pub(crate) async fn create_model_download_job(
             detail: "Model not found".to_owned(),
             code: None,
         })?;
+    // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
+    //
+    // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
+    // only runs in the client. This endpoint is reachable from a browser on another machine (the
+    // remote-access lane, epic 4484), from a workflow envelope's suggested action, and from curl,
+    // and no client-side check binds any of those.
+    //
+    // Scoped to `requiresLicenseAcknowledgment` — NOT to `gated`. A gated model's download fails at
+    // Hugging Face with a 401 without a saved credential, so an unacknowledged fetch never lands its
+    // weights; adding the requirement there would 4xx every existing gated download whose client
+    // predates the field, for no gain. A `requiresLicenseAcknowledgment` model's repo is PUBLIC —
+    // nothing upstream refuses it — so this rejection is the only thing between the request and the
+    // weights, which is why the flag defaults to `false` and must be asserted, not assumed.
+    if model_requires_license_acknowledgment(&model) && !payload.license_acknowledged {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            detail: format!(
+                "Model '{model_id}' requires accepting its license before download. Accept the \
+                 license on the Models screen, or send `licenseAcknowledged: true` to assert that \
+                 the user has accepted it."
+            ),
+            code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        });
+    }
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
     // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
     // is a 400 rather than a silent wrong-tier install.

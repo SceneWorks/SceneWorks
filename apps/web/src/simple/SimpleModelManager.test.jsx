@@ -557,3 +557,101 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
     expect(metaText(container)).toEqual(["—"]);
   });
 });
+
+// sc-17227 BLOCKER 1 — the Simple UI is one of the surfaces the Models-screen licence gate did not
+// bind. It lists every catalog model of the active tab with no licence filter, renders no gate box,
+// no checkbox and no notice, and its Download button called `createModelDownloadJob` directly. That
+// was survivable for every previously gated model because Hugging Face answered 401 without a
+// credential; `MiniMaxAI/MiniMax-H3` is a PUBLIC repo, so here the checkbox is the only gate and
+// skipping it lands the weights.
+describe("SimpleModelManager license gate (sc-17227)", () => {
+  let container;
+  let root;
+
+  // A `requiresLicenseAcknowledgment` model WITHOUT `gated` — the MiniMax-H3 shape.
+  const ACK_MODEL = {
+    id: "minimax_h3",
+    name: "MiniMax-H3",
+    type: "video",
+    installState: "missing",
+    downloadable: true,
+    requiresLicenseAcknowledgment: true,
+    hasVariantMatrix: false,
+    variants: [variant("default", "missing", null, 18780109783)],
+  };
+
+  async function clickDownload() {
+    const button = [...container.querySelectorAll(".su-row-action")].find(
+      (node) => node.textContent === "Download",
+    );
+    expect(button, "the Download row action").toBeTruthy();
+    await act(async () => {
+      button.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    window.localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  it("does not download an unacknowledged model, and routes to the screen that can accept", async () => {
+    const createModelDownloadJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(root, { models: [ACK_MODEL], createModelDownloadJob });
+    // The tab defaults to Image; H3 is a video entry, so switch first.
+    const videoTab = [...container.querySelectorAll(".su-tab")].find(
+      (node) => node.textContent === "Video",
+    );
+    await act(async () => {
+      videoTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    // Simple genuinely has no licence UI — this is the reason the refusal has to hand off.
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+
+    await clickDownload();
+
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+    expect(simpleUi.openInAdvanced).toHaveBeenCalledWith("Models");
+    // Assert WHICH message, not merely that something was toasted.
+    expect(simpleUi.toast).toHaveBeenCalledWith(
+      "MiniMax-H3 needs its license accepted first — opening Models.",
+    );
+  });
+
+  it("downloads once the license is acknowledged, and leaves unlicensed models alone", async () => {
+    const createModelDownloadJob = vi.fn(async () => ({ id: "job-1" }));
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    await render(root, { models: [ACK_MODEL], createModelDownloadJob });
+    const videoTab = [...container.querySelectorAll(".su-tab")].find(
+      (node) => node.textContent === "Video",
+    );
+    await act(async () => {
+      videoTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    await clickDownload();
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "minimax_h3" }));
+    expect(simpleUi.openInAdvanced).not.toHaveBeenCalled();
+
+    // A model with no licence requirement is untouched by the gate — this must not become a
+    // blanket "Simple can't download".
+    vi.clearAllMocks();
+    await render(root, { models: [zImage()], createModelDownloadJob });
+    const imageTab = [...container.querySelectorAll(".su-tab")].find(
+      (node) => node.textContent === "Image",
+    );
+    await act(async () => {
+      imageTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    await clickDownload();
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image" }));
+    expect(simpleUi.openInAdvanced).not.toHaveBeenCalled();
+  });
+});

@@ -40,20 +40,53 @@ Three consequences follow, and they are the reason this plan looks the way it do
 
 ## Safeguards in force
 
-### S1 — The model is not downloadable until the user accepts the licence (technical, enforced)
+### S1 — No download starts without an acknowledgment, on every surface (technical, enforced)
 
 `config/manifests/builtin.models.jsonc` declares `requiresLicenseAcknowledgment: true` on both
-`minimax_h3` and `minimax_h3_ref`. The Models screen renders a licence gate on any uninstalled
-model carrying that flag and **keeps the Download button disabled until the user checks the
-acknowledgment box** (`apps/web/src/screens/ModelManagerScreen.jsx`,
-`requiresLicenseAcknowledgment` → `licenseAckRequired`). The acceptance persists per model id.
+`minimax_h3` and `minimax_h3_ref`. Enforcement is at the **choke point**, not on a screen:
+
+* **The acknowledgment UI** lives on the Models screen. It renders the licence gate wherever a
+  download is still on offer — the model is not installed, or an update is offered — and **keeps
+  the Download button, every quant-tier checkbox, the tier panel's download button and the Update
+  button disabled until the box is checked** (`apps/web/src/screens/ModelManagerScreen.jsx`,
+  `licenseGateApplies` → `licenseAckRequired`). The acceptance persists per model id.
+* **Every download-starting surface is bound by one predicate.** `createModelDownloadJob`
+  (`apps/web/src/hooks/useModelsAndLoras.js`) refuses when
+  `licenseAcknowledgmentBlocked(model)` — and that is the function the Models screen, the Simple
+  UI's model manager, the first-run Setup Wizard, the studio availability gates, the workflow drop
+  and the Update button all call. The predicate is exported from
+  `apps/web/src/licenseAcknowledgment.js` precisely so a new surface cannot reintroduce its own
+  answer. Two surfaces additionally decline to *offer* what they cannot gate: the Setup Wizard does
+  not list a model requiring acknowledgment at all (it has no licence UI, and first-run bulk-queues
+  what is ticked), and the Simple UI hands off to the Models screen rather than toasting a refusal
+  the user could not act on.
+* **The API refuses independently.** `POST /api/v1/models/:id/download` answers **403** with
+  `code: "license_acknowledgment_required"` unless the request carries `licenseAcknowledged: true`
+  (`apps/rust-api/src/models.rs`, `model_requires_license_acknowledgment`). This is the half no
+  client-side check can provide: the endpoint is reachable from a browser on another machine (the
+  remote-access lane, epic 4484), from a workflow envelope's suggested action, and from `curl`. The
+  field defaults to `false`, so a client that has never heard of it is refused rather than let
+  through.
 
 This flag is deliberately **decoupled from `gated`** (sc-17227). `gated` means "the download needs a
 Hugging Face credential"; `MiniMaxAI/MiniMax-H3` is a **public** repo, so before the decoupling the
 gate could only either fail open or demand a token that does not exist.
 
-Covered by `apps/web/src/screens/ModelManagerScreen.test.jsx`
-("blocks a license-acknowledgment download until the box is checked (sc-17227)") and by
+**What this does not claim.** The gate stops an *unacknowledged* download; it is not an
+authorization check and cannot be. A request that sets `licenseAcknowledged: true` by hand is
+allowed — but that request is itself an affirmative assertion that the user has accepted, which is
+what §V.2 asks us to obtain. Nor does accepting make an otherwise unauthorized use authorized: a
+user in an Excluded Territory who ticks the box is still not licensed (§V.4), which is the open
+question in [Open, and not resolvable here](#open-and-not-resolvable-here), not something this
+safeguard resolves.
+
+Covered per surface — Simple UI, Setup Wizard, availability gate, Update button and the server —
+by `apps/web/src/screens/ModelManagerScreen.test.jsx`,
+`apps/web/src/simple/SimpleModelManager.test.jsx`,
+`apps/web/src/screens/SetupWizard.licenseGate.test.jsx`,
+`apps/web/src/hooks/useModelsAndLoras.licenseGate.test.jsx`,
+`apps/rust-api/src/tests/catalog.rs`
+(`license_acknowledgment_model_download_is_refused_without_the_acknowledgment`), and by
 `tests/test_builtin_manifest_audit.py::test_minimax_h3_requires_license_acknowledgment_without_a_credential`.
 
 ### S2 — The user is told which restrictions apply, in the gate itself (§V.2 notification)
@@ -67,12 +100,26 @@ box above the checkbox. It names, with section citations:
 * the **Acceptable Use Policy** (§V.1, Exhibit A), calling out **item 12**, the
   machine-generated-content disclosure, and stating plainly that SceneWorks does not make that
   disclosure on the user's behalf;
-* the **$20 M revenue ceiling** (§IV.1) above which separate written authorization is required;
+* the **$20 M yearly-revenue ceiling** (§IV.1) above which separate written authorization is
+  required — the licence's own measure is revenue, not earnings, and the notice says so;
+* the **bar on improving other AI models** (§V.3): the Works and their Outputs may not be used to
+  improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives.
+  This one is called out because SceneWorks ships a **LoRA trainer, dataset captioning and a
+  training studio** — it is the §V restriction the product's own feature set is most likely to
+  reach, and a user reading a three-item list would reasonably have concluded training on H3 output
+  was unrestricted;
 * that the licence is **non-transferable** (§II) and that a "Licensee" is whoever uses the Works
-  (§I.9) — i.e. the user, not only SceneWorks.
+  (§I.9) — i.e. the user, not only SceneWorks;
+* that the Excluded-Territory scope is **"not yet", not "not ever"** — §II records that MiniMax
+  continues to evaluate those territories and invites anyone in them to ask about a licence, so the
+  notice gives the contact address the agreement names (`api@minimax.io`, §IV.1) rather than
+  leaving the territory line reading as a permanent bar.
 
 `tests/test_builtin_manifest_audit.py::test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of`
-asserts each of those substantively; dropping any one territory or the disclosure sentence fails it.
+asserts each of those substantively; dropping any one territory, the disclosure sentence, the §V.3
+item or the revenue wording fails it.
+`…::test_minimax_h3_shipped_notice_names_the_same_restrictions` pins the same set in the §III.4
+NOTICE that ships in the application, which is the only copy a user without a checkout has.
 
 ### S3 — Full licence text ships with the app and is not reachable only online
 
@@ -87,6 +134,15 @@ shipped model has no wired licence entry, so this cannot silently rot.
 the model card (`.model-card-attribution`). §IV.2 requires the exact string *MiniMax H3*; the
 hyphenated product name `MiniMax-H3` does not contain it, which is why the attribution is a separate
 field rather than an assumption about the model's display name.
+
+**This is not the whole obligation.** §IV.2 says "prominently display … on the user interface", and
+the Models card is one screen a user may never revisit after installing. The **generation
+surfaces** — Video Studio, the Simple UI's video studio, the queue and the asset detail view — are
+where the model is actually used, and they do not carry the attribution today. Landing it there is
+**sc-17161**'s work (the user-facing lane for the family), and it is a precondition for shipping,
+not an optional extra: until it lands, §IV.2 is discharged only on the Models screen. The manifest
+field is already the single source, so those surfaces read `model.ui.attribution` rather than
+hard-coding a second copy.
 
 ### S5 — Upstream safety behaviour is not weakened
 
@@ -139,9 +195,12 @@ This document, the licence corpus, and the gate are reviewed **whenever any of t
 upstream licence or Acceptable Use Policy is revised (Exhibit A carries its own "Last revised" date —
 currently **August 2, 2026**); the H3 manifest entries change; the gate code changes; or a report
 under S6 is received. Absent any of those, at each release that ships the family. The mechanical part
-of the review is already automated — `npm run check:license-coverage`, the manifest audits in
-`tests/test_builtin_manifest_audit.py`, and the gate tests in `ModelManagerScreen.test.jsx` run in CI
-and fail on drift.
+of the review is already automated — `npm run check:license-coverage`, the manifest and shipped-NOTICE
+audits in `tests/test_builtin_manifest_audit.py`, the per-surface gate tests listed under S1, and the
+server-side refusal tests in `apps/rust-api/src/tests/catalog.rs` all run in CI and fail on drift.
+Each of those guards has been mutation-checked individually: removing the choke-point refusal, the
+server rejection, the Setup Wizard exclusion, the Simple UI hand-off, the Update-button guard, or any
+one named restriction from either notice fails a test rather than passing quietly.
 
 ## Exhibit A item 12 — measured, not asserted
 

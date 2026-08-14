@@ -528,6 +528,108 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(container.querySelector(".model-license-ack")).toBeNull();
   });
 
+  // sc-17227 BLOCKER 1, Update-button surface. The convert-at-install "Update" control is a
+  // DOWNLOAD (`handleUpdateModel` → `onDownloadModel`) and it was the one download control the
+  // gate did not cover, because the gate keyed on `!installed` alone. A `breaking_update` with
+  // stale files present reports exactly the shape below — `installState: "missing"` with
+  // `updateAvailable: true` — so the notice rendered but this button stayed live next to it.
+  it("blocks the convert-at-install Update button until the license is accepted (sc-17227)", async () => {
+    await render([
+      {
+        ...LICENSE_ACK_ONLY_MODEL,
+        installState: "missing",
+        updateAvailable: true,
+        mlxConversionState: "converted",
+      },
+    ]);
+    await selectTab(container, "Video Models");
+    const updateButton = [...container.querySelectorAll(".mlx-status button")].find(
+      (button) => button.textContent === "Update",
+    );
+    expect(updateButton, "the MLX Update button").toBeTruthy();
+    expect(updateButton.disabled).toBe(true);
+    expect(updateButton.getAttribute("title")).toBe("Accept the license above before downloading.");
+    await click(updateButton);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    expect(updateButton.disabled).toBe(false);
+    await click(updateButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "minimax_h3" }),
+    );
+  });
+
+  // sc-17227: the gate follows the DOWNLOAD, not the install state. An installed model offering an
+  // update is about to fetch new weights under the same licence, so the notice must come back —
+  // otherwise the choke point would refuse the Update with no surface on which to re-accept, which
+  // is reachable in practice because desktop localStorage does not survive a relaunch.
+  it("re-raises the gate on an installed model when an update is offered (sc-17227)", async () => {
+    await render([
+      {
+        ...LICENSE_ACK_ONLY_MODEL,
+        installState: "installed",
+        updateAvailable: true,
+        mlxConversionState: "converted",
+      },
+    ]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    expect(container.querySelector(".model-license-ack input")).toBeTruthy();
+    const updateButton = [...container.querySelectorAll(".mlx-status button")].find(
+      (button) => button.textContent === "Update",
+    );
+    expect(updateButton.disabled).toBe(true);
+  });
+
+  // sc-17227 review MINOR 1. Mutating the `useState` initializer's predicate back to `model.gated`
+  // left all 64 tests green, because the sc-7873 `useEffect([models])` re-seed runs on mount too
+  // and `act` flushes it before any assertion — so no DOM-based test can tell the two apart.
+  //
+  // The initializer's actual job is the FIRST PAINT: a returning user must not see the gate flash
+  // blocked before an effect corrects it. `renderToString` is the one render path that runs the
+  // initializer and NOT the effects, so it isolates exactly that. Mounted with the catalog already
+  // populated — the case the async-catalog test above deliberately does not cover.
+  it("seeds the ack in the initializer itself, before any effect runs (sc-17227)", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    const { renderToString } = await import("react-dom/server");
+    const markup = renderToString(
+      <AppContext.Provider
+        value={{
+          activeProject: null,
+          jobs: [],
+          loras: [],
+          // Typed `image` purely so the card lands on the default tab: there is no click to
+          // switch tabs in a string render. The gate reads no model type.
+          models: [{ ...LICENSE_ACK_ONLY_MODEL, type: "image" }],
+          presets: [],
+          jobAction: () => {},
+          setActiveView,
+          deleteLora: () => {},
+          deleteModel: () => {},
+          createModelDownloadJob,
+          createModelConvertJob: () => {},
+          createLoraImportJob: () => {},
+          createModelImportJob: () => {},
+        }}
+      >
+        <ModelManagerScreen />
+      </AppContext.Provider>,
+    );
+    // The acknowledgment checkbox is rendered checked on the very first pass, and the Download
+    // button is not carrying the blocked title. Both come from the initializer alone.
+    expect(markup).toContain('class="model-license-ack"');
+    expect(markup).toMatch(/model-license-ack[^]*?checked=""/);
+    expect(markup).not.toContain("Accept the license above before downloading.");
+  });
+
   it("offers a one-click Fix on a torn tier that repairs by re-downloading it (sc-13383)", async () => {
     await render([TORN_TIER_MODEL]);
     const tierRows = [...container.querySelectorAll(".model-tier-row")];
