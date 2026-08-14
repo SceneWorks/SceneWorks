@@ -1,16 +1,16 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:22a67f01004e8bbc4758c605f8f3113987ec997065346742092edd179d83148f",
+    "sceneWorksRevision": "source-tree:adb25b92aa393f98c265212c277dbb0991e1468393d655874f5e2cc2e7a29d09",
     "inferenceRevision": "82b45a5f621608c037b2b2286b3c8b078d9bdf81",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "5a18daca4b439047ae3eb2a9667079903fdd42299518992beb3f7b9474cb1e1a"
+        "sha256": "6bae2d5f3224fdb1feee4d63e895c938956843ee5890c6ccc5d5611169d3fa39"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "642c7edc54bf42ca9463cb948f67d081628625d51bfc0b854dfd503977eb3dc4"
+        "sha256": "cae530d0145366a73d0f54ad2cb39451a8aca389207db18f82e5fa151c57ff0c"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
@@ -18,7 +18,7 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "946f738ae254d7c95f58a3af8ec26cae46f00b8c4b7a3eb8e00b50c74fb2b3e9"
+        "sha256": "5a5d1f4ed78b5f384117c0a6704a2ea952e95fae230f38df8eece702f9811de6"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -50,7 +50,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "7c6a6db8a8879b88f3b8b6cbef8abcf613667b328b99823392aaa8096ceaa318"
+        "sha256": "60a2a5bcd65ac838a8687f40cb37a624e9c43076e99ff790b7a8eac12c1206ac"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
@@ -58,7 +58,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "7b89df90e64268ce95738e11e4b118d1f6ed0db8a62009a757f50edd9b264c81"
+        "sha256": "e5f1d7b19dd7bb40dc70e9965cecde0e50edcb21f6818ddf80a189726a00eb5e"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -128,12 +128,12 @@
   ],
   "summary": {
     "imageModels": 53,
-    "cells": 8540,
-    "publishedCells": 208,
-    "elidedCells": 8332,
+    "cells": 6995,
+    "publishedCells": 163,
+    "elidedCells": 6832,
     "elidedByState": {
-      "Implemented/unverified": 2923,
-      "Missing": 5409
+      "Implemented/unverified": 2322,
+      "Missing": 4510
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -613,7 +613,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -635,7 +634,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -678,7 +676,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -700,7 +697,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -743,7 +739,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -765,7 +760,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -809,7 +803,6 @@
           ],
           "modes": [
             "character_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -833,7 +826,6 @@
           ],
           "modes": [
             "character_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -878,7 +870,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -899,7 +890,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -944,7 +934,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -968,7 +957,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1014,7 +1002,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1039,7 +1026,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1085,7 +1071,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1110,7 +1095,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1154,7 +1138,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1177,7 +1160,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1357,7 +1339,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1384,7 +1365,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1432,7 +1412,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1459,7 +1438,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1568,7 +1546,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1594,7 +1571,6 @@
           "modes": [
             "character_image",
             "edit_image",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1771,7 +1747,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1793,7 +1768,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1836,7 +1810,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -1858,7 +1831,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -2338,7 +2310,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -2361,7 +2332,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -2543,7 +2513,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -2570,7 +2539,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -2614,7 +2582,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -2636,7 +2603,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -2995,7 +2961,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -3022,7 +2987,6 @@
             "edit_image",
             "image_detail",
             "image_inpaint",
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -3468,7 +3432,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -3491,7 +3454,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -3600,7 +3562,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -3623,7 +3584,6 @@
             "q8"
           ],
           "modes": [
-            "style_variations",
             "text_to_image"
           ],
           "overlays": [
@@ -5629,111 +5589,110 @@
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 6,
+      "elided": 6,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 6
+        "Implemented/unverified": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -5741,135 +5700,134 @@
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_base",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 6,
+      "elided": 6,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 6
+        "Implemented/unverified": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -5877,135 +5835,134 @@
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_flash",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 6,
+      "elided": 6,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 6
+        "Implemented/unverified": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -6013,53 +5970,52 @@
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "chroma1_hd",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "flux_dev",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 24,
+      "coordinates": 16,
       "published": 1,
-      "elided": 23,
-      "implemented": 18,
+      "elided": 15,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 18,
-        "Missing": 6
+        "Implemented/unverified": 12,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
-          "q4": 9,
-          "q8": 9
+          "q4": 6,
+          "q8": 6
         },
         "mode": {
           "character_image": 6,
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
-          "control": 6,
-          "identity": 6,
+          "control": 4,
+          "identity": 4,
           "lora": 0,
-          "none": 6
+          "none": 4
         }
       }
     },
@@ -6067,29 +6023,28 @@
       "modelId": "flux_dev",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 24,
+      "coordinates": 16,
       "published": 1,
-      "elided": 23,
-      "implemented": 18,
+      "elided": 15,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 18,
-        "Missing": 6
+        "Implemented/unverified": 12,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
-          "q4": 9,
-          "q8": 9
+          "q4": 6,
+          "q8": 6
         },
         "mode": {
           "character_image": 6,
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
-          "control": 6,
-          "identity": 6,
+          "control": 4,
+          "identity": 4,
           "lora": 0,
-          "none": 6
+          "none": 4
         }
       }
     },
@@ -6097,29 +6052,28 @@
       "modelId": "flux_dev",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 24,
+      "coordinates": 16,
       "published": 1,
-      "elided": 23,
-      "implemented": 18,
+      "elided": 15,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 18,
-        "Missing": 6
+        "Implemented/unverified": 12,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
-          "q4": 9,
-          "q8": 9
+          "q4": 6,
+          "q8": 6
         },
         "mode": {
           "character_image": 6,
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
-          "control": 6,
-          "identity": 6,
+          "control": 4,
+          "identity": 4,
           "lora": 0,
-          "none": 6
+          "none": 4
         }
       }
     },
@@ -6127,9 +6081,86 @@
       "modelId": "flux_dev",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 24,
+      "coordinates": 16,
       "published": 1,
-      "elided": 23,
+      "elided": 15,
+      "implemented": 16,
+      "states": {
+        "Implemented/unverified": 16
+      }
+    },
+    {
+      "modelId": "flux_dev",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 16,
+      "published": 1,
+      "elided": 15,
+      "implemented": 12,
+      "states": {
+        "Implemented/unverified": 12,
+        "Missing": 4
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 6,
+          "q8": 6
+        },
+        "mode": {
+          "character_image": 6,
+          "text_to_image": 6
+        },
+        "overlay": {
+          "control": 4,
+          "identity": 4,
+          "lora": 0,
+          "none": 4
+        }
+      }
+    },
+    {
+      "modelId": "flux_dev",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "flux_dev",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "flux_dev",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
+      "implemented": 0,
+      "states": {
+        "Missing": 24
+      }
+    },
+    {
+      "modelId": "flux_dev",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 24,
+      "published": 0,
+      "elided": 24,
       "implemented": 24,
       "states": {
         "Implemented/unverified": 24
@@ -6137,453 +6168,367 @@
     },
     {
       "modelId": "flux_dev",
-      "backend": "candle",
-      "rung": "staged_residency",
-      "coordinates": 24,
-      "published": 1,
-      "elided": 23,
-      "implemented": 18,
-      "states": {
-        "Implemented/unverified": 18,
-        "Missing": 6
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 9,
-          "q8": 9
-        },
-        "mode": {
-          "character_image": 6,
-          "style_variations": 6,
-          "text_to_image": 6
-        },
-        "overlay": {
-          "control": 6,
-          "identity": 6,
-          "lora": 0,
-          "none": 6
-        }
-      }
-    },
-    {
-      "modelId": "flux_dev",
-      "backend": "mlx",
-      "rung": "bounded_attention",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux_dev",
-      "backend": "mlx",
-      "rung": "bounded_decode",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux_dev",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux_dev",
-      "backend": "mlx",
-      "rung": "resident",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 36,
-      "states": {
-        "Implemented/unverified": 36
-      }
-    },
-    {
-      "modelId": "flux_dev",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 36,
-      "states": {
-        "Implemented/unverified": 36
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "candle",
-      "rung": "bounded_attention",
-      "coordinates": 8,
-      "published": 1,
-      "elided": 7,
-      "implemented": 4,
-      "states": {
-        "Implemented/unverified": 4,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 2,
-          "q8": 2
-        },
-        "mode": {
-          "style_variations": 2,
-          "text_to_image": 2
-        },
-        "overlay": {
-          "lora": 0,
-          "none": 4
-        }
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "candle",
-      "rung": "bounded_decode",
-      "coordinates": 8,
-      "published": 1,
-      "elided": 7,
-      "implemented": 4,
-      "states": {
-        "Implemented/unverified": 4,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 2,
-          "q8": 2
-        },
-        "mode": {
-          "style_variations": 2,
-          "text_to_image": 2
-        },
-        "overlay": {
-          "lora": 0,
-          "none": 4
-        }
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "candle",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 8,
-      "published": 1,
-      "elided": 7,
-      "implemented": 4,
-      "states": {
-        "Implemented/unverified": 4,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 2,
-          "q8": 2
-        },
-        "mode": {
-          "style_variations": 2,
-          "text_to_image": 2
-        },
-        "overlay": {
-          "lora": 0,
-          "none": 4
-        }
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "candle",
-      "rung": "resident",
-      "coordinates": 8,
-      "published": 1,
-      "elided": 7,
-      "implemented": 8,
-      "states": {
-        "Implemented/unverified": 8
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "candle",
-      "rung": "staged_residency",
-      "coordinates": 8,
-      "published": 1,
-      "elided": 7,
-      "implemented": 4,
-      "states": {
-        "Implemented/unverified": 4,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 2,
-          "q8": 2
-        },
-        "mode": {
-          "style_variations": 2,
-          "text_to_image": 2
-        },
-        "overlay": {
-          "lora": 0,
-          "none": 4
-        }
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "mlx",
-      "rung": "bounded_attention",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "mlx",
-      "rung": "bounded_decode",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
-      "states": {
-        "Missing": 12
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "mlx",
-      "rung": "resident",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 12,
-      "states": {
-        "Implemented/unverified": 12
-      }
-    },
-    {
-      "modelId": "flux_schnell",
-      "backend": "mlx",
-      "rung": "staged_residency",
-      "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 12,
-      "states": {
-        "Implemented/unverified": 12
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "candle",
-      "rung": "bounded_attention",
       "coordinates": 24,
-      "published": 1,
-      "elided": 23,
-      "implemented": 16,
-      "states": {
-        "Implemented/unverified": 16,
-        "Missing": 8
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 8,
-          "q8": 8
-        },
-        "mode": {
-          "character_image": 4,
-          "edit_image": 4,
-          "style_variations": 4,
-          "text_to_image": 4
-        },
-        "overlay": {
-          "control": 8,
-          "identity": 0,
-          "none": 8
-        }
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "candle",
-      "rung": "bounded_decode",
-      "coordinates": 24,
-      "published": 1,
-      "elided": 23,
-      "implemented": 16,
-      "states": {
-        "Implemented/unverified": 16,
-        "Missing": 8
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 8,
-          "q8": 8
-        },
-        "mode": {
-          "character_image": 4,
-          "edit_image": 4,
-          "style_variations": 4,
-          "text_to_image": 4
-        },
-        "overlay": {
-          "control": 8,
-          "identity": 0,
-          "none": 8
-        }
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "candle",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 24,
-      "published": 1,
-      "elided": 23,
-      "implemented": 16,
-      "states": {
-        "Implemented/unverified": 16,
-        "Missing": 8
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 8,
-          "q8": 8
-        },
-        "mode": {
-          "character_image": 4,
-          "edit_image": 4,
-          "style_variations": 4,
-          "text_to_image": 4
-        },
-        "overlay": {
-          "control": 8,
-          "identity": 0,
-          "none": 8
-        }
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "candle",
-      "rung": "resident",
-      "coordinates": 24,
-      "published": 1,
-      "elided": 23,
+      "published": 0,
+      "elided": 24,
       "implemented": 24,
       "states": {
         "Implemented/unverified": 24
       }
     },
     {
-      "modelId": "flux2_dev",
+      "modelId": "flux_schnell",
       "backend": "candle",
-      "rung": "staged_residency",
-      "coordinates": 24,
-      "published": 1,
-      "elided": 23,
-      "implemented": 16,
-      "states": {
-        "Implemented/unverified": 16,
-        "Missing": 8
-      },
-      "implementedBy": {
-        "tier": {
-          "q4": 8,
-          "q8": 8
-        },
-        "mode": {
-          "character_image": 4,
-          "edit_image": 4,
-          "style_variations": 4,
-          "text_to_image": 4
-        },
-        "overlay": {
-          "control": 8,
-          "identity": 0,
-          "none": 8
-        }
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "mlx",
-      "rung": "bounded_decode",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux2_dev",
-      "backend": "mlx",
-      "rung": "resident",
-      "coordinates": 36,
-      "published": 2,
-      "elided": 34,
+      "coordinates": 4,
+      "published": 1,
+      "elided": 3,
       "implemented": 2,
       "states": {
         "Implemented/unverified": 2,
-        "Missing": 34
+        "Missing": 2
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 4,
+      "published": 1,
+      "elided": 3,
+      "implemented": 2,
+      "states": {
+        "Implemented/unverified": 2,
+        "Missing": 2
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 4,
+      "published": 1,
+      "elided": 3,
+      "implemented": 2,
+      "states": {
+        "Implemented/unverified": 2,
+        "Missing": 2
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 4,
+      "published": 1,
+      "elided": 3,
+      "implemented": 4,
+      "states": {
+        "Implemented/unverified": 4
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 4,
+      "published": 1,
+      "elided": 3,
+      "implemented": 2,
+      "states": {
+        "Implemented/unverified": 2,
+        "Missing": 2
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 0,
+      "states": {
+        "Missing": 6
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 6,
+      "states": {
+        "Implemented/unverified": 6
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 6,
+      "states": {
+        "Implemented/unverified": 6
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 18,
+      "published": 1,
+      "elided": 17,
+      "implemented": 12,
+      "states": {
+        "Implemented/unverified": 12,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 6,
+          "q8": 6
+        },
+        "mode": {
+          "character_image": 4,
+          "edit_image": 4,
+          "text_to_image": 4
+        },
+        "overlay": {
+          "control": 6,
+          "identity": 0,
+          "none": 6
+        }
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 18,
+      "published": 1,
+      "elided": 17,
+      "implemented": 12,
+      "states": {
+        "Implemented/unverified": 12,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 6,
+          "q8": 6
+        },
+        "mode": {
+          "character_image": 4,
+          "edit_image": 4,
+          "text_to_image": 4
+        },
+        "overlay": {
+          "control": 6,
+          "identity": 0,
+          "none": 6
+        }
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 18,
+      "published": 1,
+      "elided": 17,
+      "implemented": 12,
+      "states": {
+        "Implemented/unverified": 12,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 6,
+          "q8": 6
+        },
+        "mode": {
+          "character_image": 4,
+          "edit_image": 4,
+          "text_to_image": 4
+        },
+        "overlay": {
+          "control": 6,
+          "identity": 0,
+          "none": 6
+        }
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 18,
+      "published": 1,
+      "elided": 17,
+      "implemented": 18,
+      "states": {
+        "Implemented/unverified": 18
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 18,
+      "published": 1,
+      "elided": 17,
+      "implemented": 12,
+      "states": {
+        "Implemented/unverified": 12,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "q4": 6,
+          "q8": 6
+        },
+        "mode": {
+          "character_image": 4,
+          "edit_image": 4,
+          "text_to_image": 4
+        },
+        "overlay": {
+          "control": 6,
+          "identity": 0,
+          "none": 6
+        }
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 27,
+      "published": 0,
+      "elided": 27,
+      "implemented": 0,
+      "states": {
+        "Missing": 27
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 27,
+      "published": 0,
+      "elided": 27,
+      "implemented": 0,
+      "states": {
+        "Missing": 27
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 27,
+      "published": 0,
+      "elided": 27,
+      "implemented": 0,
+      "states": {
+        "Missing": 27
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 27,
+      "published": 2,
+      "elided": 25,
+      "implemented": 2,
+      "states": {
+        "Implemented/unverified": 2,
+        "Missing": 25
       },
       "implementedBy": {
         "tier": {
@@ -6594,7 +6539,6 @@
         "mode": {
           "character_image": 0,
           "edit_image": 0,
-          "style_variations": 0,
           "text_to_image": 2
         },
         "overlay": {
@@ -6608,42 +6552,41 @@
       "modelId": "flux2_dev",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
+      "elided": 27,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 27
       }
     },
     {
       "modelId": "flux2_klein_9b_kv",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -6651,30 +6594,29 @@
       "modelId": "flux2_klein_9b_kv",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -6682,30 +6624,29 @@
       "modelId": "flux2_klein_9b_kv",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -6713,42 +6654,41 @@
       "modelId": "flux2_klein_9b_kv",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 36,
+      "elided": 27,
+      "implemented": 27,
       "states": {
-        "Implemented/unverified": 36
+        "Implemented/unverified": 27
       }
     },
     {
       "modelId": "flux2_klein_9b_kv",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -6756,88 +6696,87 @@
       "modelId": "flux2_klein_9b_kv",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
+      "elided": 27,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 27
       }
     },
     {
       "modelId": "flux2_klein_9b_kv",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
+      "elided": 27,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 27
       }
     },
     {
       "modelId": "flux2_klein_9b_kv",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
+      "elided": 27,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 27
       }
     },
     {
       "modelId": "flux2_klein_9b_kv",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 36,
+      "elided": 27,
+      "implemented": 27,
       "states": {
-        "Implemented/unverified": 36
+        "Implemented/unverified": 27
       }
     },
     {
       "modelId": "flux2_klein_9b_kv",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 36,
+      "elided": 27,
+      "implemented": 27,
       "states": {
-        "Implemented/unverified": 36
+        "Implemented/unverified": 27
       }
     },
     {
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 9,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "default": 4
+          "default": 3
         },
         "mode": {
           "character_image": 1,
           "edit_image": 1,
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 4
+          "none": 3
         }
       }
     },
@@ -6845,28 +6784,27 @@
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 9,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "default": 4
+          "default": 3
         },
         "mode": {
           "character_image": 1,
           "edit_image": 1,
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 4
+          "none": 3
         }
       }
     },
@@ -6874,28 +6812,27 @@
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 9,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "default": 4
+          "default": 3
         },
         "mode": {
           "character_image": 1,
           "edit_image": 1,
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 4
+          "none": 3
         }
       }
     },
@@ -6903,40 +6840,39 @@
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 9,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "default": 4
+          "default": 3
         },
         "mode": {
           "character_image": 1,
           "edit_image": 1,
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 4
+          "none": 3
         }
       }
     },
@@ -6944,90 +6880,89 @@
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
+      "elided": 9,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 9
       }
     },
     {
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
+      "elided": 9,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 9
       }
     },
     {
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
+      "elided": 9,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 9
       }
     },
     {
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "flux2_klein_9b_true_v2",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 9,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "flux2_klein_9b",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -7035,30 +6970,29 @@
       "modelId": "flux2_klein_9b",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -7066,30 +7000,29 @@
       "modelId": "flux2_klein_9b",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -7097,42 +7030,41 @@
       "modelId": "flux2_klein_9b",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 36,
+      "elided": 27,
+      "implemented": 27,
       "states": {
-        "Implemented/unverified": 36
+        "Implemented/unverified": 27
       }
     },
     {
       "modelId": "flux2_klein_9b",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 12,
+      "elided": 27,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 24
+        "Implemented/unverified": 9,
+        "Missing": 18
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "character_image": 3,
           "edit_image": 3,
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 12
+          "none": 9
         }
       }
     },
@@ -7140,60 +7072,60 @@
       "modelId": "flux2_klein_9b",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
+      "elided": 27,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 27
       }
     },
     {
       "modelId": "flux2_klein_9b",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
+      "elided": 27,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 27
       }
     },
     {
       "modelId": "flux2_klein_9b",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
+      "elided": 27,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 27
       }
     },
     {
       "modelId": "flux2_klein_9b",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 36,
+      "elided": 27,
+      "implemented": 27,
       "states": {
-        "Implemented/unverified": 36
+        "Implemented/unverified": 27
       }
     },
     {
       "modelId": "flux2_klein_9b",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 36,
+      "coordinates": 27,
       "published": 0,
-      "elided": 36,
-      "implemented": 36,
+      "elided": 27,
+      "implemented": 27,
       "states": {
-        "Implemented/unverified": 36
+        "Implemented/unverified": 27
       }
     },
     {
@@ -7440,240 +7372,240 @@
       "modelId": "illustrious_xl_v1",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
-      "implemented": 54,
+      "elided": 45,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
       "modelId": "illustrious_xl_v1",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
-      "implemented": 54,
+      "elided": 45,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
-      "implemented": 54,
+      "elided": 45,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
       "modelId": "illustrious_xl_v2",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
-      "implemented": 54,
+      "elided": 45,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
@@ -7800,115 +7732,114 @@
       "modelId": "kolors",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 48
+        "Missing": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 48
+        "Missing": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 48
+        "Missing": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
-      "implemented": 48,
+      "elided": 36,
+      "implemented": 36,
       "states": {
-        "Implemented/unverified": 48
+        "Implemented/unverified": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 48
+        "Missing": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 48
+        "Missing": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 48
+        "Missing": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
-      "implemented": 32,
+      "elided": 36,
+      "implemented": 24,
       "states": {
-        "Implemented/unverified": 32,
-        "Missing": 16
+        "Implemented/unverified": 24,
+        "Missing": 12
       },
       "implementedBy": {
         "tier": {
-          "bf16": 8,
-          "q4": 12,
-          "q8": 12
+          "bf16": 6,
+          "q4": 9,
+          "q8": 9
         },
         "mode": {
           "character_image": 8,
           "edit_image": 8,
-          "style_variations": 8,
           "text_to_image": 8
         },
         "overlay": {
           "control": 0,
-          "identity": 12,
-          "lora": 8,
-          "none": 12
+          "identity": 9,
+          "lora": 6,
+          "none": 9
         }
       }
     },
@@ -7916,24 +7847,24 @@
       "modelId": "kolors",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
-      "implemented": 48,
+      "elided": 36,
+      "implemented": 36,
       "states": {
-        "Implemented/unverified": 48
+        "Implemented/unverified": 36
       }
     },
     {
       "modelId": "kolors",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 48,
+      "coordinates": 36,
       "published": 0,
-      "elided": 48,
-      "implemented": 48,
+      "elided": 36,
+      "implemented": 36,
       "states": {
-        "Implemented/unverified": 48
+        "Implemented/unverified": 36
       }
     },
     {
@@ -8317,27 +8248,26 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 6,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8345,27 +8275,26 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 6,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8373,27 +8302,26 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 6,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8401,75 +8329,74 @@
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 2,
+      "elided": 6,
+      "implemented": 1,
       "states": {
-        "Implemented/unverified": 2,
-        "Missing": 10
+        "Implemented/unverified": 1,
+        "Missing": 5
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
+          "bf16": 1,
           "q4": 0,
           "q8": 0
         },
         "mode": {
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 1
         }
       }
     },
@@ -8477,135 +8404,134 @@
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens_turbo",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 2,
+      "elided": 6,
+      "implemented": 1,
       "states": {
-        "Implemented/unverified": 2,
-        "Missing": 10
+        "Implemented/unverified": 1,
+        "Missing": 5
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
+          "q4": 1,
           "q8": 0
         },
         "mode": {
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 1
         }
       }
     },
@@ -8613,24 +8539,24 @@
       "modelId": "lens",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "lens",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
@@ -10051,28 +9977,27 @@
       "modelId": "qwen_image",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 6,
+      "elided": 8,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 12
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "control": 0,
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -10080,28 +10005,27 @@
       "modelId": "qwen_image",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 6,
+      "elided": 8,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 12
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "control": 0,
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -10109,28 +10033,27 @@
       "modelId": "qwen_image",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 6,
+      "elided": 8,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 12
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "control": 0,
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -10138,40 +10061,39 @@
       "modelId": "qwen_image",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "qwen_image",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 6,
+      "elided": 8,
+      "implemented": 3,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 12
+        "Implemented/unverified": 3,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 3,
           "text_to_image": 3
         },
         "overlay": {
           "control": 0,
           "lora": 0,
-          "none": 6
+          "none": 3
         }
       }
     },
@@ -10179,28 +10101,27 @@
       "modelId": "qwen_image",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 3,
-      "elided": 15,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 6,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
           "control": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 3,
+          "none": 3
         }
       }
     },
@@ -10208,28 +10129,27 @@
       "modelId": "qwen_image",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 12,
+      "elided": 8,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 6,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
           "control": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 3,
+          "none": 3
         }
       }
     },
@@ -10237,28 +10157,27 @@
       "modelId": "qwen_image",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 3,
-      "elided": 15,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 6,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
           "control": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 3,
+          "none": 3
         }
       }
     },
@@ -10266,135 +10185,134 @@
       "modelId": "qwen_image",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "qwen_image",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
+      "elided": 6,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 4,
+      "elided": 6,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 4
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 4,
+          "q4": 2,
           "q8": 0
         },
         "mode": {
-          "style_variations": 2,
           "text_to_image": 2
         },
         "overlay": {
-          "lora": 2,
-          "none": 2
+          "lora": 1,
+          "none": 1
         }
       }
     },
@@ -10402,140 +10320,139 @@
       "modelId": "realvisxl_lightning",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "realvisxl_lightning",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 6,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 6,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
-      "implemented": 30,
+      "elided": 45,
+      "implemented": 25,
       "states": {
-        "Implemented/unverified": 30,
-        "Missing": 24
+        "Implemented/unverified": 25,
+        "Missing": 20
       },
       "implementedBy": {
         "tier": {
-          "bf16": 6,
-          "q4": 12,
-          "q8": 12
+          "bf16": 5,
+          "q4": 10,
+          "q8": 10
         },
         "mode": {
           "character_image": 5,
           "edit_image": 5,
           "image_detail": 5,
           "image_inpaint": 5,
-          "style_variations": 5,
           "text_to_image": 5
         },
         "overlay": {
           "identity": 0,
-          "lora": 12,
-          "none": 18
+          "lora": 10,
+          "none": 15
         }
       }
     },
@@ -10543,24 +10460,24 @@
       "modelId": "realvisxl",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
-      "implemented": 54,
+      "elided": 45,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
       "modelId": "realvisxl",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
-      "implemented": 54,
+      "elided": 45,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
@@ -11167,101 +11084,101 @@
       "modelId": "sdxl",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 0,
-      "elided": 54,
+      "elided": 45,
       "implemented": 0,
       "states": {
-        "Missing": 54
+        "Missing": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 3,
-      "elided": 51,
-      "implemented": 6,
+      "elided": 42,
+      "implemented": 5,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 48
+        "Implemented/unverified": 5,
+        "Missing": 40
       },
       "implementedBy": {
         "tier": {
-          "bf16": 6,
+          "bf16": 5,
           "q4": 0,
           "q8": 0
         },
@@ -11270,13 +11187,12 @@
           "edit_image": 1,
           "image_detail": 1,
           "image_inpaint": 1,
-          "style_variations": 1,
           "text_to_image": 1
         },
         "overlay": {
           "identity": 0,
           "lora": 0,
-          "none": 6
+          "none": 5
         }
       }
     },
@@ -11284,24 +11200,24 @@
       "modelId": "sdxl",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 3,
-      "elided": 51,
-      "implemented": 54,
+      "elided": 42,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
       "modelId": "sdxl",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 54,
+      "coordinates": 45,
       "published": 3,
-      "elided": 51,
-      "implemented": 54,
+      "elided": 42,
+      "implemented": 45,
       "states": {
-        "Implemented/unverified": 54
+        "Implemented/unverified": 45
       }
     },
     {
@@ -12148,28 +12064,27 @@
       "modelId": "z_image_turbo",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 12,
+      "elided": 9,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 6,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
           "control": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 3,
+          "none": 3
         }
       }
     },
@@ -12177,28 +12092,27 @@
       "modelId": "z_image_turbo",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 12,
+      "elided": 9,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 6,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
           "control": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 3,
+          "none": 3
         }
       }
     },
@@ -12206,52 +12120,51 @@
       "modelId": "z_image_turbo",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 18,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image_turbo",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 18,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image_turbo",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 12,
+      "elided": 9,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 6,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "style_variations": 6,
           "text_to_image": 6
         },
         "overlay": {
           "control": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 3,
+          "none": 3
         }
       }
     },
@@ -12259,180 +12172,180 @@
       "modelId": "z_image_turbo",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image_turbo",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image_turbo",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image_turbo",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image_turbo",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 8,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 18,
-      "published": 18,
+      "coordinates": 9,
+      "published": 9,
       "elided": 0,
-      "implemented": 18,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 18,
-      "published": 18,
+      "coordinates": 9,
+      "published": 9,
       "elided": 0,
-      "implemented": 18,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
-      "published": 18,
+      "coordinates": 9,
+      "published": 9,
       "elided": 0,
-      "implemented": 18,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 18,
-      "published": 18,
+      "coordinates": 9,
+      "published": 9,
       "elided": 0,
-      "implemented": 18,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 18,
-      "published": 18,
+      "coordinates": 9,
+      "published": 9,
       "elided": 0,
-      "implemented": 18,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 18,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 18,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 18,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 18,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     },
     {
       "modelId": "z_image",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 18,
+      "coordinates": 9,
       "published": 0,
-      "elided": 18,
-      "implemented": 18,
+      "elided": 9,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 9
       }
     }
   ],
@@ -23205,897 +23118,6 @@
       }
     },
     {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "e3eebc0d0cc4ce2fb291316581aab1b08ac82da99f2489157f619a46aa82f054",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "ed4b2ee2d3f5207ec81dd34efde7edb7024f342ba0b4f06d55e81dd31b7a00df",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:lora:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:lora:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:lora:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:lora:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "5efeff01a8e423d939ad408727fc098af50e42a67ba5374c9681d4a206703f1e",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:lora:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "bfda46f1ea678d7c9f96c9fa7f150a8d0da0fff8b010859191f51cc9c26e3ef8",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:none:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:none:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:none:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:none:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "09e05882222bb87d2b12b6c64503fddc619174b39e972a49f57fc2aa42351357",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:style_variations:none:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "2f4b535fac4cede9af14f4fffcdbdd0915a7a509b6ec95442617a0dbb0a8c215",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
       "id": "z_image:z_image:candle:bf16:text_to_image:control:bounded_attention",
       "modelId": "z_image",
       "resolvedRoute": "z_image",
@@ -24987,897 +24009,6 @@
       }
     },
     {
-      "id": "z_image:z_image:candle:q4:style_variations:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "72a51e1413d4dd7c5613c9ea52098f05844db985f24e221e480c145a4afd2841",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "825c5fe1a914d3d427cc53318bf433fe2e922075c5a4216cc9bdd6c3b68086a2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:lora:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:lora:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:lora:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:lora:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "2fd380f629918ccdea7388921ac930d3262eb2e9539eed9e42ae7127517936a4",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:lora:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "8a75701b920d6476f5eb2410da1b4d88873097593c20b9a8b76663533cbf4f5a",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:none:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:none:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:none:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:none:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "441a995ef3016f75312f0527bc6d43bba11f955e2e9cd2e9ad54d8dbb8a463ba",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:none:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "b59231be171951be219bf5b6f9de9adde1a8fa68610740f35f0839eb59c97bd9",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
       "id": "z_image:z_image:candle:q4:text_to_image:control:bounded_attention",
       "modelId": "z_image",
       "resolvedRoute": "z_image",
@@ -26766,897 +24897,6 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "94041e1e401911acbfac5c16894f8af46fa0fcad79735c2f8975b97cbf9458bb",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "103f92ab5e4d84dcf333487923af265a55cbbccbfd11d631b9fb985a9ab83894",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:lora:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:lora:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:lora:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:lora:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "560de670e3ab12d05f031081bc321be363028f6afaefd02ee78b692918cad21b",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:lora:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "86f44d0ebec5ea3a0d07e90f42bab856a03fb657cb22ace792e998861940067c",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:none:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:none:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:none:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:none:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "a617ecda9603159d5385ec7615d049ee005ecefb62308ca1497401ad3895c1db",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:none:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "none",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "e98ef3f90cf0d085c37575048c3d2fd7715cd355672206bde6cea1113b92d9b5",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
       }
     },
     {
@@ -32981,21 +30221,6 @@
     "sensenova_u1_8b_infographic_v3": [],
     "sensenova_u1_8b_infographic_v3_fast": [],
     "z_image": [
-      "z_image:z_image:candle:bf16:style_variations:control:bounded_attention",
-      "z_image:z_image:candle:bf16:style_variations:control:bounded_decode",
-      "z_image:z_image:candle:bf16:style_variations:control:bounded_transformer_residency",
-      "z_image:z_image:candle:bf16:style_variations:control:resident",
-      "z_image:z_image:candle:bf16:style_variations:control:staged_residency",
-      "z_image:z_image:candle:bf16:style_variations:lora:bounded_attention",
-      "z_image:z_image:candle:bf16:style_variations:lora:bounded_decode",
-      "z_image:z_image:candle:bf16:style_variations:lora:bounded_transformer_residency",
-      "z_image:z_image:candle:bf16:style_variations:lora:resident",
-      "z_image:z_image:candle:bf16:style_variations:lora:staged_residency",
-      "z_image:z_image:candle:bf16:style_variations:none:bounded_attention",
-      "z_image:z_image:candle:bf16:style_variations:none:bounded_decode",
-      "z_image:z_image:candle:bf16:style_variations:none:bounded_transformer_residency",
-      "z_image:z_image:candle:bf16:style_variations:none:resident",
-      "z_image:z_image:candle:bf16:style_variations:none:staged_residency",
       "z_image:z_image:candle:bf16:text_to_image:control:bounded_attention",
       "z_image:z_image:candle:bf16:text_to_image:control:bounded_decode",
       "z_image:z_image:candle:bf16:text_to_image:control:bounded_transformer_residency",
@@ -33011,21 +30236,6 @@
       "z_image:z_image:candle:bf16:text_to_image:none:bounded_transformer_residency",
       "z_image:z_image:candle:bf16:text_to_image:none:resident",
       "z_image:z_image:candle:bf16:text_to_image:none:staged_residency",
-      "z_image:z_image:candle:q4:style_variations:control:bounded_attention",
-      "z_image:z_image:candle:q4:style_variations:control:bounded_decode",
-      "z_image:z_image:candle:q4:style_variations:control:bounded_transformer_residency",
-      "z_image:z_image:candle:q4:style_variations:control:resident",
-      "z_image:z_image:candle:q4:style_variations:control:staged_residency",
-      "z_image:z_image:candle:q4:style_variations:lora:bounded_attention",
-      "z_image:z_image:candle:q4:style_variations:lora:bounded_decode",
-      "z_image:z_image:candle:q4:style_variations:lora:bounded_transformer_residency",
-      "z_image:z_image:candle:q4:style_variations:lora:resident",
-      "z_image:z_image:candle:q4:style_variations:lora:staged_residency",
-      "z_image:z_image:candle:q4:style_variations:none:bounded_attention",
-      "z_image:z_image:candle:q4:style_variations:none:bounded_decode",
-      "z_image:z_image:candle:q4:style_variations:none:bounded_transformer_residency",
-      "z_image:z_image:candle:q4:style_variations:none:resident",
-      "z_image:z_image:candle:q4:style_variations:none:staged_residency",
       "z_image:z_image:candle:q4:text_to_image:control:bounded_attention",
       "z_image:z_image:candle:q4:text_to_image:control:bounded_decode",
       "z_image:z_image:candle:q4:text_to_image:control:bounded_transformer_residency",
@@ -33041,21 +30251,6 @@
       "z_image:z_image:candle:q4:text_to_image:none:bounded_transformer_residency",
       "z_image:z_image:candle:q4:text_to_image:none:resident",
       "z_image:z_image:candle:q4:text_to_image:none:staged_residency",
-      "z_image:z_image:candle:q8:style_variations:control:bounded_attention",
-      "z_image:z_image:candle:q8:style_variations:control:bounded_decode",
-      "z_image:z_image:candle:q8:style_variations:control:bounded_transformer_residency",
-      "z_image:z_image:candle:q8:style_variations:control:resident",
-      "z_image:z_image:candle:q8:style_variations:control:staged_residency",
-      "z_image:z_image:candle:q8:style_variations:lora:bounded_attention",
-      "z_image:z_image:candle:q8:style_variations:lora:bounded_decode",
-      "z_image:z_image:candle:q8:style_variations:lora:bounded_transformer_residency",
-      "z_image:z_image:candle:q8:style_variations:lora:resident",
-      "z_image:z_image:candle:q8:style_variations:lora:staged_residency",
-      "z_image:z_image:candle:q8:style_variations:none:bounded_attention",
-      "z_image:z_image:candle:q8:style_variations:none:bounded_decode",
-      "z_image:z_image:candle:q8:style_variations:none:bounded_transformer_residency",
-      "z_image:z_image:candle:q8:style_variations:none:resident",
-      "z_image:z_image:candle:q8:style_variations:none:staged_residency",
       "z_image:z_image:candle:q8:text_to_image:control:bounded_attention",
       "z_image:z_image:candle:q8:text_to_image:control:bounded_decode",
       "z_image:z_image:candle:q8:text_to_image:control:bounded_transformer_residency",

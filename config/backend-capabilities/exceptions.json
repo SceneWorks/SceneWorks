@@ -1,5 +1,161 @@
 {
-  "schemaVersion": 1,
-  "authorizedApprovers": [],
-  "records": []
+  "schemaVersion": 2,
+  "authorizedApprovers": [
+    {
+      "name": "Michael Trefry",
+      "authority": "epic-9083"
+    },
+    {
+      "name": "Michael Trefry",
+      "authority": "epic-8433"
+    },
+    {
+      "name": "Michael Trefry",
+      "authority": "epic-8588"
+    },
+    {
+      "name": "Michael Trefry",
+      "authority": "epic-7434"
+    }
+  ],
+  "records": [
+    {
+      "id": "epic-9083-precision-sequencing",
+      "category": "precision",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these exact 27 MLX-only precision-tier cells under epic-9083 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "approver": "Michael Trefry",
+      "authority": "epic-9083",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Unsupported Candle precision controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when epic-9083 ships the named Candle precision-tier work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/anima_aesthetic/precisionTier/q4",
+        "models/anima_aesthetic/precisionTier/q8",
+        "models/anima_base/precisionTier/q4",
+        "models/anima_base/precisionTier/q8",
+        "models/anima_turbo/precisionTier/q4",
+        "models/anima_turbo/precisionTier/q8",
+        "models/chroma1_base/precisionTier/q4",
+        "models/chroma1_base/precisionTier/q8",
+        "models/chroma1_flash/precisionTier/q4",
+        "models/chroma1_flash/precisionTier/q8",
+        "models/chroma1_hd/precisionTier/q4",
+        "models/chroma1_hd/precisionTier/q8",
+        "models/flux2_klein_9b_true_v2/precisionTier/q4",
+        "models/flux2_klein_9b_true_v2/precisionTier/q8",
+        "models/flux_dev/precisionTier/q4",
+        "models/flux_dev/precisionTier/q8",
+        "models/flux_schnell/precisionTier/q4",
+        "models/flux_schnell/precisionTier/q8",
+        "models/ltx_2_3/precisionTier/q8",
+        "models/sana_1600m/precisionTier/q4",
+        "models/sana_1600m/precisionTier/q8",
+        "models/sana_sprint_1600m/precisionTier/q4",
+        "models/sana_sprint_1600m/precisionTier/q8",
+        "models/scail2_14b/precisionTier/q4",
+        "models/scail2_14b/precisionTier/q8",
+        "models/wan_2_2_vace_fun_14b/precisionTier/q4",
+        "models/wan_2_2_vace_fun_14b/precisionTier/q8"
+      ]
+    },
+    {
+      "id": "epic-8433-krea-realtime-operation-sequencing",
+      "category": "operation",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these exact three MLX-only Krea Realtime operation cells under epic-8433 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "approver": "Michael Trefry",
+      "authority": "epic-8433",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Unsupported Candle Krea Realtime operation controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when epic-8433 ships the named Krea Realtime Candle operation work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/krea_realtime_14b/operationAndMode/image_to_video",
+        "models/krea_realtime_14b/operationAndMode/text_to_video",
+        "models/krea_realtime_14b/operationAndMode/video_to_video"
+      ]
+    },
+    {
+      "id": "epic-8433-krea-realtime-conditioning-sequencing",
+      "category": "conditioning",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these exact two MLX-only Krea Realtime conditioning cells under epic-8433 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "approver": "Michael Trefry",
+      "authority": "epic-8433",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Unsupported Candle Krea Realtime conditioning controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when epic-8433 ships the named Krea Realtime Candle conditioning work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/krea_realtime_14b/conditioningShape/reference",
+        "models/krea_realtime_14b/conditioningShape/videoClip"
+      ]
+    },
+    {
+      "id": "epic-8433-krea-realtime-adapter-sequencing",
+      "category": "adapter",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these exact two MLX-only Krea Realtime adapter cells under epic-8433 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "approver": "Michael Trefry",
+      "authority": "epic-8433",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Unsupported Candle Krea Realtime adapter controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when epic-8433 ships the named Krea Realtime Candle adapter work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/krea_realtime_14b/userAdapters/lora",
+        "models/krea_realtime_14b/userAdapters/lokr"
+      ]
+    },
+    {
+      "id": "epic-8433-krea-realtime-precision-sequencing",
+      "category": "precision",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these exact three MLX-only Krea Realtime precision-tier cells under epic-8433 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "approver": "Michael Trefry",
+      "authority": "epic-8433",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Unsupported Candle Krea Realtime precision controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when epic-8433 ships the named Krea Realtime Candle precision-tier work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/krea_realtime_14b/precisionTier/bf16",
+        "models/krea_realtime_14b/precisionTier/q4",
+        "models/krea_realtime_14b/precisionTier/q8"
+      ]
+    },
+    {
+      "id": "epic-8588-conditioning-sequencing",
+      "category": "conditioning",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these exact six MLX-only conditioning cells under epic-8588 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "approver": "Michael Trefry",
+      "authority": "epic-8588",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Unsupported Candle conditioning controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when epic-8588 ships the named Candle conditioning work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/illustrious_xl_v1/conditioningShape/control",
+        "models/illustrious_xl_v2/conditioningShape/control",
+        "models/realvisxl/conditioningShape/control",
+        "models/realvisxl_lightning/conditioningShape/control",
+        "models/scail2_14b/conditioningShape/multiReference",
+        "models/sdxl/conditioningShape/control"
+      ]
+    },
+    {
+      "id": "epic-7434-cfg-pp-guidance-sequencing",
+      "category": "guidance",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these exact four MLX-only CFG++ guidance cells under sc-8257 / epic-7434 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "approver": "Michael Trefry",
+      "authority": "epic-7434",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Unsupported Candle CFG++ guidance controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when sc-8257 under epic-7434 ships the named Candle CFG++ guidance work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/illustrious_xl_v1/guidanceMethod/cfg_pp",
+        "models/illustrious_xl_v2/guidanceMethod/cfg_pp",
+        "models/realvisxl/guidanceMethod/cfg_pp",
+        "models/sdxl/guidanceMethod/cfg_pp"
+      ]
+    }
+  ]
 }

@@ -94,6 +94,11 @@ const QWEN_EDIT_CANDLE_LIGHTNING_STEPS: u32 = 4;
 const QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle Qwen-Image-Edit assets + telemetry.
 pub(super) const QWEN_EDIT_CANDLE_ENGINE: &str = "candle_qwen_edit";
+/// Current catalog ids whose bespoke Candle Qwen-Edit lane carries the live [`PreviewSink`] below.
+/// Stage 2 of the checked-in preview catalog parses this declaration from the same source that wires
+/// the sink, because this bespoke provider does not appear in the generic media registry dump.
+pub(super) const QWEN_EDIT_CANDLE_PREVIEW_MODELS: &[&str] =
+    &["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"];
 /// The SceneWorks pre-packed Qwen-Image-Edit-2511 quant-matrix turnkey (sc-8669, epic 8506): self-
 /// contained `q4/` (manifest default) + `q8/` + `bf16/` subdirs, only the transformer packed (the
 /// Qwen2.5-VL TE + VAE stay dense bf16 in every tier). Shared by all four edit ids + the Lightning
@@ -120,13 +125,8 @@ pub(super) const QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION: &str =
 /// from `transformer/config.json`). The `-2511_lightning` distill is the same `-2511` base with the
 /// lightx2v 4-step LoRA folded into the MMDiT at load + the CFG-off static-shift lightning schedule (sc-6220).
 fn is_qwen_edit_candle_model(model: &str) -> bool {
-    matches!(
-        model,
-        "qwen_image_edit"
-            | "qwen_image_edit_2509"
-            | "qwen_image_edit_2511"
-            | "qwen_image_edit_2511_lightning"
-    )
+    QWEN_EDIT_CANDLE_PREVIEW_MODELS.contains(&model)
+        || matches!(model, "qwen_image_edit" | "qwen_image_edit_2509")
 }
 
 /// The Qwen-Image-Edit-2511-Lightning few-step distill variant (sc-6220): `QwenEdit` folds the lightx2v

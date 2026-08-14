@@ -128,9 +128,9 @@ fn fit_edit_references(
 // resolve on the candle lane too (video_jobs.rs + the candle edit handlers call `fit_engine_image`).
 
 // ---------------------------------------------------------------------------
-// FLUX.2-klein edit / reference (macOS, sc-3029): the `flux2_klein_9b_edit` and
-// `flux2_klein_9b_kv_edit` variants. FLUX.2-klein is MLX-only (no torch), so this
-// is where its edit/reference jobs run. One output per requested count, each
+// FLUX.2-klein edit / reference (macOS MLX, sc-3029): the `flux2_klein_9b_edit` and
+// `flux2_klein_9b_kv_edit` variants. This is the MLX implementation; the native Candle/CUDA sibling
+// runs off-Mac and there is no Python fallback. One output per requested count, each
 // conditioned on the shared reference image(s); the -kv variant auto-engages the
 // reference-K/V cache (~2.4× edit speedup).
 // ---------------------------------------------------------------------------
@@ -692,9 +692,9 @@ async fn generate_flux2_edit_stream(
 // the `flux2_dev_control` registry generator — a VACE ControlNet on the dev base.
 // One image per library pose, each conditioned on a DWPose skeleton fed to the
 // `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` branch (TRUE pose lock, not the
-// best-effort `[skeleton, reference]` tier above). FLUX.2 is MLX-only, so this is
-// the only strict-pose path for dev (no candle sibling). Mirrors the Z-Image MLX
-// control path (`generate_zimage_control_stream`).
+// best-effort `[skeleton, reference]` tier above). This is the MLX strict-pose implementation;
+// Candle/CUDA owns the corresponding off-Mac `Flux2Control` lane. Mirrors the Z-Image MLX control
+// path (`generate_zimage_control_stream`).
 // ---------------------------------------------------------------------------
 
 /// The engine registry id for the FLUX.2-dev Fun-Controlnet-Union variant (sc-2292).

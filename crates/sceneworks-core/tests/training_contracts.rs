@@ -111,9 +111,9 @@ fn builtin_targets_gate_network_types() {
     // the Wan2.2 5B video backend (sc-2211). Krea 2 (epic 7565) is the first *native-MLX*
     // LoKr target: its `mlx-gen-krea` trainer reports `supports_lokr` and builds LoKr targets
     // natively, and the Turbo inference loader applies LoKr through the shared adapter seam
-    // (sc-7911). SD3.5 Large + Medium (epic 7841 T3 sc-7884) are likewise native-MLX LoKr
-    // targets — the `mlx-gen-sd3` trainer reports `supports_lokr` and the `apply_sd3_adapters`
-    // seam loads both. LTX (on both native backends) and the Wan MoE targets stay lora-only.
+    // (sc-7911). SD3.5 Large + Medium (epic 7841 T3 sc-7884) likewise expose native MLX and
+    // Candle LoKr targets; both providers report `supports_lokr` and share the
+    // `apply_sd3_adapters` inference seam. LTX and the Wan MoE targets stay lora-only.
     let lokr_targets: Vec<&str> = registry
         .targets
         .iter()
@@ -694,10 +694,10 @@ fn builtin_registry_exposes_krea_target() {
 
 #[test]
 fn builtin_registry_exposes_sd3_targets() {
-    // SD3.5 (epic 7841 T3 sc-7884) exposes TWO native-MLX LoRA/LoKr training bases on the shared
+    // SD3.5 (epic 7841 T3 sc-7884) exposes TWO native MLX/Candle LoRA/LoKr training bases on the shared
     // `sd3_lora` kernel: Large (`mlx-gen-sd3` trainer id `sd3_5_large`) and the MMDiT-X Medium
     // (`sd3_5_medium`). Both stamp `family: sd3` and apply back at their base via the
-    // `apply_sd3_adapters` seam (family-match, no base-model gating). Native MLX, Apple-Silicon only.
+    // `apply_sd3_adapters` seam (family-match, no base-model gating) on both native backends.
     let registry = builtin_training_targets();
 
     let joint_modules = serde_json::json!([

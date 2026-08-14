@@ -3167,7 +3167,7 @@ fn mage_flow_image_job_with_a_lora_is_claimed_by_the_mlx_worker() {
             .claim_next_job("worker-torch")
             .expect("torch claim ok")
             .is_none(),
-        "Mage-Flow is MLX-only; the generic torch descriptor must not claim it"
+        "Mage-Flow uses native backends; the generic torch descriptor must not claim it"
     );
     let claimed = store
         .claim_next_job("worker-mlx")
@@ -4524,7 +4524,8 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     let flux_schnell = model_mac_support("flux_schnell", "image", None);
     assert!(flux_schnell.features.reference);
     assert!(!flux_schnell.features.edit);
-    // SDXL + FLUX.2 do reference/edit on MLX (epic 3041 / MLX-only family) → enabled.
+    // SDXL + FLUX.2 do reference/edit on the native MLX lane (epic 3041), with native Candle
+    // siblings off-Mac → enabled.
     let sdxl = model_mac_support("sdxl", "image", None);
     assert!(sdxl.features.reference);
     assert!(sdxl.features.edit);
@@ -4583,9 +4584,8 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
             .get("first_last_frame"),
         Some(&false)
     );
-    // Bernini (epic 4699) is MLX-routed text-to-video only. Its renderer is
-    // Wan2.2-T2V, so still-image-to-video is off; the editing/reference video
-    // modes are net-new vocabulary (sc-4703), off until then.
+    // Bernini (epic 4699) has native MLX and Candle lanes for text generation plus its shipped
+    // reference/edit modes. The assertions below keep genuinely unsupported video shapes off.
     let bernini = model_mac_support("bernini", "video", None);
     assert!(bernini.supported, "bernini should be MLX-supported");
     assert!(bernini.reason.is_none());
@@ -6423,8 +6423,8 @@ fn flux2_klein_variants_route_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // All three FLUX.2-klein txt2img variants + FLUX.2-dev (MLX-only family) route to the mlx
-    // worker (dev is txt2img-only today — epic 5914 / sc-5921).
+    // All three FLUX.2-klein txt2img variants + FLUX.2-dev route to the MLX worker on Mac; the
+    // corresponding Candle/CUDA routes own them off-Mac.
     for model in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -6479,8 +6479,8 @@ fn flux2_edit_reference_job_routes_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // FLUX.2 is MLX-only, so an edit/reference job (sc-3029) routes to the mlx worker
-    // (sc-3025 kept these on Python; the edit path now exists on Rust).
+    // A FLUX.2 edit/reference job (sc-3029) routes to the MLX worker on Mac; the native Candle edit
+    // lane owns the same shape off-Mac (sc-3025 originally kept these on Python).
     let job = store
         .create_job(image_job_with(
             json!({

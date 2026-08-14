@@ -1265,7 +1265,7 @@ describe("SceneWorks app shell", () => {
               name: "Kolors",
               type: "image",
               family: "kolors",
-              capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+              capabilities: ["text_to_image", "edit_image", "character_image"],
             },
           ],
           latestAssets: [],

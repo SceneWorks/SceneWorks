@@ -1730,9 +1730,8 @@ async fn run_utility_job(
             JobType::DatasetParquetImport => run_dataset_parquet_import_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Parquet dataset import failed.", error)),
-            // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
-            // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
-            // precise unsupported error (no candle CLIP embedder yet).
+            // Dataset Doctor CLIP-embedding analysis (sc-6535): the native MLX or Candle worker embeds
+            // every dataset image (clip_vit_l14) and POSTs the content-hash sidecar.
             JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset analysis failed.", error)),

@@ -4591,8 +4591,11 @@ mod model_size_concurrency_tests {
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
         // each gain its exact pinned download context while macOS keeps the same one.
+        // sc-18481 retired AuraSR from the installable catalog because every production backend
+        // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
+        // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
         for (os, expected_distinct_contexts) in
-            [("macos", 87_usize), ("windows", 85), ("linux", 85)]
+            [("macos", 86_usize), ("windows", 84), ("linux", 84)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
