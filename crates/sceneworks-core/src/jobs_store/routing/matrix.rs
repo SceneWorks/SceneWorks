@@ -4342,6 +4342,128 @@ mod tests {
     }
 
     #[test]
+    fn approved_exception_register_covers_every_residual_mlx_only_cell_exactly_once() {
+        let register: ExceptionRegister =
+            serde_json::from_str(EXCEPTIONS).expect("approved exception register parses");
+        validate_exceptions(&register).expect("approved exception register validates");
+
+        assert_eq!(register.schema_version, 2);
+        assert_eq!(register.authorized_approvers.len(), 4);
+        let authorized: BTreeSet<_> = register
+            .authorized_approvers
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.authority.as_str()))
+            .collect();
+        assert_eq!(
+            authorized,
+            BTreeSet::from([
+                ("Michael Trefry", "epic-9083"),
+                ("Michael Trefry", "epic-8433"),
+                ("Michael Trefry", "epic-8588"),
+                ("Michael Trefry", "epic-7434"),
+            ])
+        );
+
+        assert_eq!(register.records.len(), 7);
+        let expected_groups = BTreeMap::from([
+            (("epic-9083", "precision"), 27usize),
+            (("epic-8433", "operation"), 3usize),
+            (("epic-8433", "conditioning"), 2usize),
+            (("epic-8433", "adapter"), 2usize),
+            (("epic-8433", "precision"), 3usize),
+            (("epic-8588", "conditioning"), 6usize),
+            (("epic-7434", "guidance"), 4usize),
+        ]);
+        let actual_groups: BTreeMap<_, _> = register
+            .records
+            .iter()
+            .map(|record| {
+                assert_eq!(record.approver, "Michael Trefry");
+                assert_eq!(record.approved_date, "2026-08-14");
+                assert_eq!(record.decision_type, DecisionType::SequencingChoice);
+                assert!(record.evidence.contains("directly approved"));
+                assert!(record.evidence.contains("#activity-19457"));
+                assert!(record.user_facing_behavior.contains("hidden or disabled"));
+                assert!(record.user_facing_behavior.contains("explanation"));
+                assert!(record.user_facing_behavior.contains("fail closed"));
+                assert!(record.revisit_condition.contains("generated matrix"));
+                assert!(record.revisit_condition.contains("routing tests"));
+                assert!(record.revisit_condition.contains("runtime evidence"));
+                (
+                    (record.authority.as_str(), record.category.as_str()),
+                    record.cells.len(),
+                )
+            })
+            .collect();
+        assert_eq!(actual_groups, expected_groups);
+
+        let exception_paths: BTreeSet<_> = register
+            .records
+            .iter()
+            .flat_map(|record| record.cells.iter().cloned())
+            .collect();
+        assert_eq!(
+            exception_paths.len(),
+            47,
+            "every approved cell appears once"
+        );
+        assert_eq!(
+            register
+                .records
+                .iter()
+                .map(|record| record.cells.len())
+                .sum::<usize>(),
+            exception_paths.len(),
+            "no approved cell may appear in more than one record"
+        );
+
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        assert_eq!(matrix.summary.exception_count, 7);
+        let mut residual_paths = BTreeSet::new();
+        for model in &matrix.models {
+            for (axis, cells) in [
+                ("operationAndMode", model.operation_and_mode.as_slice()),
+                ("conditioningShape", model.conditioning_shape.as_slice()),
+                ("userAdapters", model.user_adapters.as_slice()),
+                ("precisionTier", model.precision_tier.as_slice()),
+                ("guidanceMethod", model.guidance_method.as_slice()),
+            ] {
+                for cell in cells {
+                    if cell.mlx == Some(true) && cell.candle != Some(true) {
+                        residual_paths
+                            .insert(format!("models/{}/{axis}/{}", model.id, cell.capability));
+                    }
+                }
+            }
+            if model.preview.mlx == Some(true) && model.preview.candle != Some(true) {
+                residual_paths.insert(format!("models/{}/preview", model.id));
+            }
+        }
+        for job in &matrix.gpu_job_types {
+            for request in &job.requests {
+                if request.mlx == Some(true) && request.candle != Some(true) {
+                    residual_paths.insert(format!(
+                        "gpuJobTypes/{}/{}",
+                        job.job_type, request.capability
+                    ));
+                }
+            }
+        }
+        for row in &matrix.training_kernels {
+            if row.support.mlx == Some(true) && row.support.candle != Some(true) {
+                residual_paths.insert(format!(
+                    "trainingKernels/{}/{}",
+                    row.target, row.network_type
+                ));
+            }
+        }
+        assert_eq!(
+            residual_paths, exception_paths,
+            "the approved register must exactly cover the generated residual MLX-only set"
+        );
+    }
+
+    #[test]
     fn rich_runtime_mutations_change_descriptor_and_dispatch_answers() {
         let original = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
         let upscale = probe_job(
