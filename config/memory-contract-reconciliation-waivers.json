@@ -1,7 +1,7 @@
 {
   "$schema": "../packages/schemas/memory-contract-reconciliation-waivers.schema.json",
   "schemaVersion": 1,
-  "inferenceRevision": "56285e040a57f71c628f3ee15e983890a509cc27",
+  "inferenceRevision": "7c45f22aa671e16de72929e1781ac66994c21f7f",
   "waivers": [
     {
       "leg": "engine_manifest",
