@@ -1210,9 +1210,11 @@ mod tests {
         // which makes a `_comfyui_` filename here a HARD ERROR at install rather than a degradation.
         //
         // Deliberately a SUBSTRING scan over every registered file rather than a re-assertion of the
-        // four expected names: the sibling test above pins those names, so it would catch a swap, but
-        // it would say nothing about a FIFTH entry added later. This one fails on any `_comfyui_`
-        // file that ever appears under this family, which is the property that actually matters.
+        // four expected names. The sibling test above pins those names AND the count, so it catches
+        // both a swap and a bare fifth entry — but it checks only the names listed in
+        // `MINIMAX_H3_TURBO_FILES`, so the moment that table is legitimately extended to cover a new
+        // file, it vouches for whatever name was written into it. This scan keeps failing on any
+        // `_comfyui_` file that ever appears under this family, which is the property that matters.
         for lora in builtin_loras() {
             if lora["family"] != serde_json::json!("minimax-h3") {
                 continue;

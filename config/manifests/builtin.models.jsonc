@@ -13409,7 +13409,7 @@
       // so omitting it would leave Ref2VA unable to take the very adapter distilled for it
       // (`minimax_h3_ref2v_turbo_4step`). The values match `minimax_h3` exactly on purpose — family
       // membership cannot express the fl2v-vs-ref2v pairing, which is a labelling convention today
-      // rather than an enforced constraint.
+      // rather than an enforced constraint (tracked on sc-19563).
       "loraCompatibility": {
         "families": ["minimax-h3"],
         "types": ["style", "motion", "character", "enhance"]

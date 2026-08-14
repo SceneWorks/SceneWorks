@@ -2524,13 +2524,18 @@ mod base_model_gating_tests {
 
     /// sc-18725: the end-to-end submit gate for the turbo accelerators, on BOTH H3 partitions.
     ///
-    /// This is the reachability proof for the `loraCompatibility` declaration, not just its
-    /// existence: the model surfaces here carry exactly what the manifest now declares, and the LoRA
-    /// carries exactly what `builtin.loras.jsonc` now declares, so a withdrawn or mistyped
-    /// `families` list turns this red. It also pins that detection reports `minimax-h3` — before
-    /// sc-18725 it reported `None`, which let the file through this gate by ACCIDENT (the detected-
-    /// family check is skipped on `None`) while leaving a user-imported copy family-less and hidden
-    /// by the web picker's fail-closed rule.
+    /// The model surfaces and the LoRA below are `json!` fixtures that MIRROR what
+    /// `builtin.models.jsonc` and `builtin.loras.jsonc` declare — this test reads neither manifest,
+    /// so a withdrawn or mistyped `families` list does NOT turn it red. What it proves is that
+    /// `validate_lora_specs_for_model` accepts that shape on both partitions. The manifest side is
+    /// held in `sceneworks-core`, by `both_minimax_h3_partitions_advertise_the_minimax_h3_lora_family`
+    /// (the model declarations) and `minimax_h3_turbo_loras_are_registered_and_sha_pinned` (the LoRA
+    /// entries), which do read the embedded manifests. Keep these fixtures in step with them by hand.
+    ///
+    /// It also pins that detection reports `minimax-h3` — before sc-18725 it reported `None`, which
+    /// let the file through this gate by ACCIDENT (the detected-family check is skipped on `None`)
+    /// while leaving a user-imported copy family-less and hidden by the web picker's fail-closed
+    /// rule.
     #[test]
     fn minimax_h3_turbo_lora_passes_the_submit_gate_on_both_partitions() {
         let tmp = tempfile::tempdir().unwrap();

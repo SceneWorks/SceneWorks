@@ -265,7 +265,7 @@
       // per-model-id field, and the API's base-model gate is hardcoded to `wan-video`. Cross-selecting
       // an fl2v file onto Ref2VA (or this onto t2va) is shape-valid and folds cleanly — it is a
       // quality mismatch, not a failure. Enforcing the pairing needs a new per-model-id gate on both
-      // the LoRA schema and `validate_lora_specs_for_model`; surfaced on sc-18725 for triage.
+      // the LoRA schema and `validate_lora_specs_for_model`; tracked on sc-19563 (epic 17137).
       "id": "minimax_h3_ref2v_turbo_4step",
       "name": "MiniMax-H3 Ref2VA Turbo (4-step)",
       "family": "minimax-h3",

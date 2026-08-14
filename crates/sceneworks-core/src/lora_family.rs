@@ -3008,9 +3008,11 @@ mod tests {
 
     #[test]
     fn detects_minimax_h3_from_the_token_refiner_alone() {
-        // The marker must clear the `MIN_KEY_MATCHES` floor on its own, the way the Krea and Anima
-        // unique-key entries do — 24 of the 624 published tensors target the refiner, and a sparse
-        // adapter touching only it must still classify rather than fall through as family-less.
+        // The marker must classify on its own, EXEMPT from the `MIN_KEY_MATCHES` floor the bucket
+        // scorer applies, the way the Krea and Anima unique-key entries are — `detect_unique_key_family`
+        // runs ahead of the scorer and never consults the floor. 24 of the 624 published tensors
+        // target the refiner, and a sparse adapter touching only it must still classify rather than
+        // fall through as family-less.
         let keys: Vec<String> = minimax_h3_diffusers_keys()
             .into_iter()
             .filter(|key| key.starts_with("token_refiner."))
