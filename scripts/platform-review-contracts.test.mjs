@@ -2004,7 +2004,19 @@ test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct",
       "the product-faithful mux must end at the six-second audio boundary",
     );
     assert.match(workflow, /\$renderedDurationSeconds = 153\.0 \/ 25\.0/);
-    assert.match(workflow, /\$productDurationSeconds = 6\.0/);
+    assert.match(workflow, /\$requestedProductDurationSeconds = 6\.0/);
+    assert.match(
+      workflow,
+      /\$audioDurationSeconds = \[Convert\]::ToDouble\(\$metadata\.result\.audio\.durationSeconds, \[Globalization\.CultureInfo\]::InvariantCulture\)/,
+      "the synchronized audio timeline must come from renderer metadata",
+    );
+    assert.match(
+      workflow,
+      /\$audioDurationSeconds -lt \$requestedProductDurationSeconds -or \$audioDurationSeconds -gt \$renderedDurationSeconds/,
+      "renderer audio must remain bounded by the request and rendered-frame timelines",
+    );
+    assert.match(workflow, /\$productBoundarySeconds = \[Math\]::Min\(\$renderedDurationSeconds, \$audioDurationSeconds\)/);
+    assert.match(workflow, /\$productVideoDurationSeconds = \$productFrames \/ 25\.0/);
     assert.match(
       workflow,
       /\$durationToleranceSeconds = 1\.0 \/ 25\.0/,
@@ -2013,10 +2025,11 @@ test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct",
     for (const invocation of [
       "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
       "Assert-DurationNear 'complete rendered-frame container' $renderedProbe.format.duration $renderedDurationSeconds",
-      "Assert-DurationNear 'source WAV container' $wavProbe.format.duration $productDurationSeconds",
-      "Assert-DurationNear 'product MP4 video stream' $video.duration $productDurationSeconds",
-      "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productDurationSeconds",
-      "Assert-DurationNear 'product MP4 container' $probe.format.duration $productDurationSeconds",
+      "Assert-DurationNear 'source WAV stream' $wavAudio.duration $audioDurationSeconds",
+      "Assert-DurationNear 'source WAV container' $wavProbe.format.duration $audioDurationSeconds",
+      "Assert-DurationNear 'product MP4 video stream' $video.duration $productVideoDurationSeconds",
+      "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds",
+      "Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds",
     ]) {
       assert.ok(workflow.includes(invocation), `${invocation} must remain exact`);
     }
@@ -2202,7 +2215,7 @@ test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct",
       documents: {
         ...documents,
         workflow: documents.workflow.replace(
-          "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productDurationSeconds",
+          "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds",
           "",
         ),
       },
@@ -2214,7 +2227,7 @@ test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct",
         ...documents,
         workflow: documents.workflow.replace(
           "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
-          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $productDurationSeconds",
+          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $productBoundarySeconds",
         ),
       },
     },
@@ -2224,7 +2237,7 @@ test("the LTX Eros CUDA baseline keeps renderer and product timelines distinct",
       documents: {
         ...documents,
         workflow: documents.workflow.replace(
-          "Assert-DurationNear 'product MP4 container' $probe.format.duration $productDurationSeconds",
+          "Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds",
           "Assert-DurationNear 'product MP4 container' $probe.format.duration $renderedDurationSeconds",
         ),
       },
