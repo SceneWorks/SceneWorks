@@ -607,10 +607,13 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // re-declare it, but the family default shouldn't claim what it can't do.
         ("image", "z-image") => vec!["text_to_image", "style_variations"],
         ("image", "qwen-image") => vec!["text_to_image", "style_variations"],
-        ("image", "lens") => vec!["text_to_image", "style_variations"],
+        // Lens and Chroma have no distinct style-variation execution mode. Their builtin entries
+        // and imported-family defaults must agree so an imported checkpoint cannot restore the
+        // hidden no-op removed by sc-18481.
+        ("image", "lens") => vec!["text_to_image"],
         ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa", "interleave"],
         ("image", "flux") => vec!["text_to_image", "style_variations"],
-        ("image", "chroma") => vec!["text_to_image", "style_variations"],
+        ("image", "chroma") => vec!["text_to_image"],
         ("image", "kolors") => vec!["text_to_image", "character_image", "style_variations"],
         ("image", "sdxl") => vec!["text_to_image", "edit_image", "style_variations"],
         // SD3 / SD3.5 (epic 7841, native MLX). Text-to-image flow-matching MMDiT;
@@ -2784,7 +2787,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("chroma"), Some("chroma_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "chroma"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -4422,6 +4425,21 @@ mod tests {
         );
         assert_eq!(entry["loraCompatibility"]["families"], json!(["wan-video"]));
         assert_eq!(entry["downloads"], json!([]));
+    }
+
+    #[test]
+    fn imported_lens_and_chroma_defaults_do_not_restore_removed_style_variations() {
+        for (family, adapter) in [("lens", "lens_turbo"), ("chroma", "chroma_diffusers")] {
+            let mut entry = serde_json::Map::new();
+            apply_model_manifest_defaults(&mut entry, "image", Some(family));
+
+            assert_eq!(entry["adapter"], adapter, "{family} adapter default");
+            assert_eq!(
+                entry["capabilities"],
+                json!(["text_to_image"]),
+                "imported {family} must not reintroduce the hidden style-variation no-op"
+            );
+        }
     }
 
     #[test]

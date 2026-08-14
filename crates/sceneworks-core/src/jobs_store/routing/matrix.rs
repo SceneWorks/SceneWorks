@@ -2508,6 +2508,7 @@ fn validate_exceptions(register: &ExceptionRegister) -> Result<(), String> {
                 | "conditioning"
                 | "adapter"
                 | "precision"
+                | "guidance"
                 | "preview"
                 | "training"
                 | "utility"
@@ -3523,6 +3524,38 @@ mod tests {
             &[missing]
         )
         .is_err());
+    }
+
+    #[test]
+    fn exception_register_accepts_authorized_guidance_cell() {
+        let exception = ExceptionRecord {
+            id: "approved-cfg-pp".to_owned(),
+            category: "guidance".to_owned(),
+            approver: "Guidance Owner".to_owned(),
+            authority: "epic-7434".to_owned(),
+            approved_date: "2026-08-13".to_owned(),
+            user_facing_behavior: "CFG++ is disabled on Candle with an explanation.".to_owned(),
+            revisit_condition: "Revisit when the Candle CFG++ specialist work ships.".to_owned(),
+            cells: vec!["models/sdxl/guidanceMethod/cfg_pp".to_owned()],
+        };
+        let register = ExceptionRegister {
+            schema_version: 1,
+            authorized_approvers: vec![AuthorizedApprover {
+                name: "Guidance Owner".to_owned(),
+                authority: "epic-7434".to_owned(),
+            }],
+            records: vec![exception],
+        };
+
+        validate_exceptions(&register).expect("authorized guidance exception should validate");
+        let matrix = backend_capability_matrix().unwrap();
+        validate_obligations(
+            &matrix.models,
+            &matrix.gpu_job_types,
+            &matrix.training_kernels,
+            &register.records,
+        )
+        .expect("authorized guidance exception should target the exact MLX-only CFG++ cell");
     }
 
     #[test]
