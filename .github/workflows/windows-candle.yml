@@ -157,7 +157,7 @@ on:
         required: false
         type: string
       run_ltx_eros_acceptance:
-        description: "Capture the fixed SC-18902 current-route LTX-2.3 10Eros CUDA baseline"
+        description: "Reproduce the fixed SC-18902 rejected historical LTX-2.3 10Eros CUDA baseline"
         required: false
         type: boolean
         default: false
@@ -612,11 +612,11 @@ jobs:
             ${{ runner.temp }}\engine-capability-facts-verify\audio\capabilities.candle.json
           if-no-files-found: warn
           retention-days: 7
-      # SC-18902's product decision requires an actual Eros render, not source inference. These
-      # dispatch-only steps run after the ordinary PR verdicts so the capability dump remains last
-      # on the PR path. This captures only the current no-adapter Candle route. A candidate is
-      # intentionally absent: the published cond_safe LoRA has 3,320 keys while the current Candle
-      # adapter surface accepts only 768, so filtering it would not be an honest comparison.
+      # SC-18902's product decision required an actual Eros render, not source inference. These
+      # dispatch-only steps are retained only to reproduce that rejected historical baseline; they
+      # do not restore an Eros Candle product route. A candidate is intentionally absent: the
+      # published cond_safe LoRA has 3,320 keys while the retained Candle adapter surface accepts
+      # only 768, so filtering it would not be an honest comparison.
       - name: Validate the fixed LTX Eros acceptance dispatch
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
         shell: powershell
