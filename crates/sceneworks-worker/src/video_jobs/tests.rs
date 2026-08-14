@@ -10648,9 +10648,12 @@ fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
 /// legal frame counts with a soundtrack fitted to the picture, and decode the resulting mp4 back.
 /// Every frame must survive.
 ///
-/// Under `-shortest` this fails at 124, 175, 226, 277 and 328 — the five counts whose fitted track
-/// rounds a third of a sample SHORT. Sampling only 141/192/243/294/345 (the exactly-aligned five)
-/// would pass for either policy, which is why the loop is the whole lattice.
+/// Two axes, and they fail independently. **Completeness:** every frame the engine produced is in
+/// the file. **Truthfulness (AC2):** the container advertises the duration of the picture it holds
+/// — see [`assert_duration_matches_picture`]. Under `-shortest` both go red, at 124, 175, 226, 277
+/// and 328: the five counts whose fitted track rounds a third of a sample SHORT. Sampling only
+/// 141/192/243/294/345 (the exactly-aligned five) would pass for either policy, which is why the
+/// loop is the whole lattice.
 ///
 /// 64x64 keeps fourteen encodes cheap; the policy is about timestamps, not pixels. Skips when no
 /// ffmpeg is reachable, like the sibling encode tests.
@@ -10694,9 +10697,17 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
         encode_media(&media_path, decoded, None, None)
             .await
             .expect("encode + mux");
+        let held = probe_frame_count(&media_path).expect("a decodable frame count");
+        // The container must advertise the duration it ACTUALLY holds. Measured against the frame
+        // count the file carries rather than the count we asked for, because that is what
+        // "truthful" means and it is what gives this assertion reach independent of the count
+        // check below. MEASURED: reverting to `-shortest` leaves the container still advertising
+        // the nominal 5.170 s at 124 while the file holds 122 frames (5.083 s) — so the same bound
+        // written against `count` is GREEN under that mutation at all fourteen rungs and guards
+        // nothing. This form is red at all five trimming counts.
+        assert_duration_matches_picture(&media_path, held, fps);
         assert_eq!(
-            probe_frame_count(&media_path),
-            Some(count),
+            held, count,
             "{frames} frames: the muxed mp4 must hold every frame the engine produced"
         );
         checked += 1;
@@ -10730,14 +10741,30 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
     encode_media(&media_path, decoded, None, None)
         .await
         .expect("encode + mux");
-    let advertised = probe_duration_seconds(&media_path).expect("a container duration");
+    // The same bound as the loop, not a loose `< 6.0`: 0.83 s of slop around a 5.1667 s picture
+    // would have passed a container advertising anything from the picture's length to sixteen
+    // extra frames of it. Unbounded, this command produces 10.33 s here.
+    let held = probe_frame_count(&media_path).expect("a decodable frame count");
+    assert_duration_matches_picture(&media_path, held, fps);
+    assert_eq!(held, frames);
+}
+
+/// The container's advertised duration must be the duration of the picture it actually holds
+/// (sc-19425 AC2) — a player reading `mvhd` and a decoder counting frames must agree.
+///
+/// The tolerance is 20 ms, which sits between two measured quantities. Below it: ffmpeg prints
+/// `Duration:` to centiseconds, so the read itself carries ±5 ms, and across all fourteen lattice
+/// rungs the residual is exactly that ±5 ms and never more. Above it: one frame at 24 fps is
+/// 41.7 ms, so 20 ms is under HALF a frame interval and a container off by even a single frame
+/// cannot pass (measured: 45 ms at the one-frame rungs, 87–123 ms at the two- and three-frame ones).
+fn assert_duration_matches_picture(path: &Path, held_frames: usize, fps: u32) {
+    let advertised = probe_duration_seconds(path).expect("a container duration");
+    let picture = held_frames as f64 / f64::from(fps.max(1));
     assert!(
-        advertised < 6.0,
-        "an oversized soundtrack must not stretch the container: {advertised} s around \
-         {} s of picture",
-        frames as f64 / f64::from(fps)
+        (advertised - picture).abs() < 0.02,
+        "the container advertises {advertised} s for the {held_frames} frames it holds \
+         ({picture} s of picture)"
     );
-    assert_eq!(probe_frame_count(&media_path), Some(frames));
 }
 
 /// The container's own advertised `Duration:` — the number a player shows, read off the same
