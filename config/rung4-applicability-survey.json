@@ -28,15 +28,275 @@
       "unmeasured": "No request-peak measurement exists for this family/backend at the pinned revision."
     },
     "requestPeak.byTier": "Optional per-tier override of the family/backend request-peak finding. Required when measurements differ by numeric tier; omitted tiers inherit requestPeak.finding.",
-    "requestPeak.scopes": "Optional exact cell selectors for measurements narrower than a whole family/backend or tier. Each selector may name entries, tiers, modes, and overlays; omitted dimensions are wildcards. A matching selector overrides byTier and finding."
+    "requestPeak.scopes": "Optional exact cell selectors for measurements narrower than a whole family/backend or tier. Each selector may name entries, tiers, modes, and overlays; omitted dimensions are wildcards. A matching selector overrides byTier and finding.",
+    "outOfMatrixFamilies": "Surveyed families the matrix CANNOT carry a verdict for, keyed by the family's epic id rather than by a familyGroup id it does not have. `families` is fenced to the image catalog in both directions — the generator builds from `manifest.models.filter(type === \"image\")`, and assertRung4SurveyCoversEveryFamily rejects a survey key the catalog does not advertise — so a video family placed under `families` fails generation outright rather than producing a row. These records are validated by parseOutOfMatrixRung4Families on every generation and are deliberately NOT published into the matrix: they are the survey's own upkeep, so the work is recorded where the next reader looks instead of nowhere. A record whose catalog entries the matrix has since learned is a hard error, which is what moves it into `families` on the day the ladder gains the lane.",
+    "outOfMatrixFamilies[].backends[].stacks": "Per-stack rung-4 applicability, one entry per separately-indexed stack, each with its own `structuralApplicability` and `reason`. Wider than `families[].blockStacks`, which is denoise-phase only by design: these families are surveyed before any lane exists, and the stack that sets the floor may sit in another phase entirely (MiniMax-H3's does). The family verdict is DERIVED from this list by `deriveOutOfMatrixApplicability` and rejected if it disagrees — one windowable stack and no unwindowable remainder is `full`, no windowable stack at all is `none`, and everything else is `partial`, so the family answer cannot be asserted independently of its stacks. That rule reproduces 38 of the 40 verdicts `families` already carries, not all 40: Qwen-Image (`families.15511`) records `full` on BOTH backends while holding two `blockStacks`, because the second is control-route-only (`entries: [\"qwen_image_control\"]`) and is not resident on the routes its verdict covers, and the derivation has no notion of route scoping. Route scoping is deliberately not modelled, because no out-of-matrix record needs it to land on the right answer — MiniMax-H3's own route-conditional stack (`text_encoder.vision_tower`, the `fl2va` keyframe path only) is `partial` under either rule. Treat the derivation as the survey's vocabulary for stacks that are unconditionally resident, with route conditionality recorded in a stack's `blocks` or `reason` prose and not yet in the arithmetic.",
+    "outOfMatrixFamilies[].backends[].contractRevision": "The inference revision this backend record's `inference:` evidence paths and quoted constants resolve at, as an abbreviated git sha. Required, and it exists because these records are the one part of the survey the matrix's own `generatedFrom.inferenceRevision` does not date: a `families` verdict is surveyed against crates the Cargo pin already carries, while an out-of-matrix record is surveyed BEFORE the lane exists and may cite crates the pinned tree does not contain. MiniMax-H3's do — at the pinned 014134e3 neither `mlx-gen-minimax-h3` nor `candle-gen-minimax-h3` is present."
   },
   "notes": [
-    "Rung 4 requires rung 1 engaged in the same request (gen_core::memory_strategy BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES). That prerequisite is NOT restated per family here: the generator reads it from the same rung-1 predicate it already uses for the staged_residency cells, so a family that gains rung-1 capability stops reporting the prerequisite gap without a survey edit.",
+    "Rung 4's SOLE shared prerequisite is `LoadShape::DeferredMaterialization`. `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES` names that edge and nothing else — inference `crates/contracts/gen-core/src/memory_strategy.rs:290-293`, the `LoadShape::DeferredMaterialization` identifier itself on line 292, at pinned rev 014134e3. SC-15998 measured the four combinations independently on MLX/Metal and REMOVED the rung-1 edge this note used to assert, because it had encoded one provider's coupled loader shape as universal arithmetic. Three separate facts now have to be kept apart, and this note is where they are stated once. (1) The SHARED graph has no rung edge at all. (2) A PROVIDER may append its own through `MemoryProviderContract::additional_prerequisites`, and several do: mlx-gen-anima and mlx-gen-chroma push `BoundedTransformerResidency -> StagedResidency (EngagedInSameRequest)` when the load is `streamable`, while mlx-gen-bernini deliberately pushes none. So a family entry below saying its window needs rung 1 in the same request can be perfectly true — it is a claim about that provider, checked against that provider, and it belongs in that entry rather than up here. (3) The GENERATOR does a third thing: `strategyStatus`'s rung-4 arm gates every family's implementation claim on `stagedResidencyIsAvailable`, the same rung-1 predicate the staged_residency cells use, for every family whether or not its provider declares the edge. That blanket proxy is measurably inert on today's catalog — removing both RUNG-4 call sites, which are the two the rung-4 arm makes and NOT the rung-1 arm's own use of the same predicate, regenerates a byte-identical docs/generated/memory-matrix.json (957,908 B) and .md (16,560 B) (sc-18664) — but it is not the contract rule, and replacing it needs a per-(family, backend) record of each provider's own prerequisite edges that this survey does not yet carry. sc-18664 records the divergence and deliberately does not rewrite any family verdict from it; deriving those edges is separate work.",
     "Structural applicability is about the DENOISE trunk. The component-scope axis (Dit / TextEncoder / Both) is a published rung-4 parameter, not a separate rung; where a family's text encoder changes the answer it is recorded in `findings`.",
     "Overlay compatibility is a property of the provider's ADAPTER MECHANISM, not of the architecture: a provider that installs adapters as forward-time residuals can replay them onto a materialized block, while one that folds a delta into the base weight at load cannot. Only the two families with code evidence either way carry an `overlays` finding.",
     "Why `unmeasured` is the honest answer almost everywhere, and why a static proxy will not do. docs/sc-16195/resolution-sweep.json measures, at 1024x1024 on the RESIDENT hold-all path, weight residency against activation transient: illustrious q8 4.74 vs 14.04 GiB, sdxl bf16 6.48 vs 14.04, z-image-turbo q4 5.38 vs 14.04, lens q4 16.46 vs 14.04, qwen-image q8 33.45 vs 7.66, krea-2-turbo q8 18.06 vs 7.67. Weight residency is a MINORITY of that peak on three of the six tiers, which is enough to show rung 4 cannot be assumed to move the request peak — but not enough to predict that it will not, because rung 4 is only ever selected in composition with rungs 2 and 3, which attack exactly the transient term those rows are dominated by. Z-Image is the worked case: its resident-path row looks transient-bound, and once the ladder is engaged its request peak is decode-bound at ~4.36 GiB and rung 4 still moved it. So this axis is decided by a per-family measurement of the rung-3 composition against the rung-4 composition, which is what Krea's Candle evidence records and what no other family has.",
     "What `blockStacks` covers, stated once. It inventories the stacks resident during the DENOISE phase — the trunk a rung-4 window would bound, plus any second network held alongside it (a control branch, an identity path, a second expert), because those set the share of resident transformer weight the rung can actually move. It does NOT inventory text-encoder or vision-tower stacks: those belong to the conditioning phase, they are what rung 1 sheds, and the component-scope parameter (Dit / TextEncoder / Both) is the axis that addresses them. Where a family's encoder changes the rung-4 answer it is recorded in `findings` instead."
   ],
+  "outOfMatrixFamilies": {
+    "17137": {
+      "name": "MiniMax-H3 (Hailuo 3.0)",
+      "modality": "video",
+      "story": 18664,
+      "catalogEntries": ["minimax_h3", "minimax_h3_ref"],
+      "whyOutOfMatrix": "The memory matrix is image-only by construction: scripts/generate-memory-matrix.mjs builds from `manifest.models.filter((model) => model.type === \"image\")`, and `minimax_h3` / `minimax_h3_ref` are `\"type\": \"video\"`. Putting this family under `families` is not merely inert, it fails generation — assertRung4SurveyCoversEveryFamily runs the survey -> catalog direction too and throws `family SC-… carries a mlx verdict, but the catalog advertises no mlx entry in that family — the verdict reaches no cell (SC-15969)`, which was reproduced against this exact record before it was placed here. There is also no `familyGroup` id to key it by, because `familyGroup` throws on `minimax_h3`. So the honest shape is a record the generator validates and does not publish, keyed by the epic id, rather than a family row the ladder cannot express. One consequence has to be stated rather than left to be inferred: this record is NOT dated by the matrix's own `generatedFrom.inferenceRevision`. Every `inference:` path and every byte constant below resolves at 79f02e6d0eaca861a0698ee490b70daa7441e321, a descendant of the pinned 014134e3 at which neither `mlx-gen-minimax-h3` nor `candle-gen-minimax-h3` exists at all. Each backend carries that sha in `contractRevision`, which the generator requires; the corrected `notes[0]` prerequisite claim is separately anchored at 014134e3, where gen-core's contract constant does live.",
+      "backends": {
+        "mlx": {
+          "contractSupport": "missing",
+          "contractRevision": "79f02e6d0eaca861a0698ee490b70daa7441e321",
+          "contractSource": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
+          "contractReason": "Rung 4 is `MemoryStrategySupport::Missing`, NOT `StructurallyNotApplicable`, and the reason is the loader rather than the architecture: `LOAD_SHAPE = LoadShape::EagerMaterialization` because `MiniMaxH3Dit::load_dir` builds the whole 50-block stack, so rung 4's sole shared prerequisite `LoadShape::DeferredMaterialization` is unsatisfied. `lifecycle.transformer_window_materialization` is `false` for the same reason. sc-18662 is the story that changes it. Rungs 0 and 1 are `Implemented` — the staged phase order is structural in `generate_impl`, which releases each heavy component and drains the allocator cache before mapping the next.",
+          "structuralApplicability": "partial",
+          "derivedFrom": "stacks",
+          "nonWindowableStacks": ["vae.encoder", "audio_vae.decode"],
+          "implementation": "none",
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 window has ever run on this family on any backend, so there is no rung-3-composition vs rung-4-composition measurement to read — the axis this survey's `unmeasured` note says is the only one that decides the question. What IS measured is stage-attributed and belongs to no rung: the conditioning stage peaks at 53.07 GB (`CONDITIONING_STAGE_PEAK_BYTES`), and the DiT's denoise residency is 40.43 GB at bf16 against 11.63 GB at q4 (`DENOISE_RESIDENT_BF16_BYTES` / `DENOISE_RESIDENT_Q4_BYTES`). The earlier epic framing — that H3's peak is flat because it is activation-dominated, or set by denoise, so the quant tiers buy disk but not memory — is RETRACTED and must not be reproduced from this row. The flatness is an artifact of which stage takes the high-water mark first: the dense Qwen3-VL-32B text encoder runs before the DiT is mapped and `reset_peak_memory()` fires before `generate`, so the conditioning mark masks every later stage. Quantization is packed end to end on the DiT path and the 28.80 GB bf16 -> q4 delta is real."
+          },
+          "stacks": [
+            {
+              "id": "text_encoder.language_model",
+              "component": "text_encoder",
+              "stack": "model.language_model.layers",
+              "phase": "conditioning",
+              "blocks": "50 uniform `Qwen3DecoderLayer` — `SELECT_HIDDEN` = 50 of the checkpoint's 64, and layers 50-63 are never loaded or run",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "componentBytes": 66714912872,
+              "reason": "`MiniMaxH3TextEncoder` holds `layers: Vec<Qwen3DecoderLayer>` built from one constructor over `0..select_hidden`, with only the token embedding outside it — the uniform sequential shape a BlockPlan bounds. This is also the stack that matters most here: it is the 53.07 GB conditioning mark, and rung 4's `TransformerComponent` scope axis (Dit / TextEncoder / Both) already exists to address exactly it. `componentBytes` is the whole `text_encoder/` component (66,714,912,872 B, `TEXT_ENCODER_BYTES`), not this stack's share, which no source splits out."
+            },
+            {
+              "id": "text_encoder.vision_tower",
+              "component": "text_encoder",
+              "stack": "model.visual.blocks",
+              "phase": "conditioning",
+              "blocks": "Qwen3-VL vision tower — 351 `model.visual.*` tensors, `fl2va` keyframe path only",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "reason": "Reuses `mlx_gen_boogu::vision::VisionTower`, which holds `blocks: Vec<Block>` with `patch_embed` / `pos_embed` / mergers outside it. Uniform in its own right, but separately indexed from the language tower and only present when a keyframe is conditioned — so it needs its own plan, which is one of the two reasons the family answer is `partial` rather than `full`."
+            },
+            {
+              "id": "transformer.blocks",
+              "component": "transformer",
+              "stack": "transformer_blocks",
+              "phase": "denoise",
+              "blocks": "50 uniform `DitBlock` (`num_layers` = 50, mirrored as `DIT_BLOCKS`)",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "componentBytes": 66280504216,
+              "reason": "`MiniMaxH3Dit` holds `blocks: Vec<DitBlock>` built over `0..cfg.num_layers` from one constructor, with `context_embedder`, `norm_out` and the two output heads outside it. The denoise-resident cost is 40.43 GB at bf16 and 11.63 GB at q4, after the AdaLN precompute-and-evict drops 26,020,915,200 B (`ADALN_EVICTED_BYTES`) — a typed resident-component exclusion the ladder cannot yet see, which is sc-18665."
+            },
+            {
+              "id": "transformer.token_refiner",
+              "component": "transformer",
+              "stack": "token_refiner.refiner_blocks",
+              "phase": "denoise",
+              "blocks": "2 `TokenRefinerBlock` (`num_refiner_layers` = 2)",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "reason": "Uniform in itself and therefore windowable in itself, but it is a second index of a different block KIND — same leaf names and widths as a `transformer_blocks` entry with two removals, no AdaLN modulation and no MM-RoPE — so one BlockPlan cannot cover both. It is also evaluated once at construction rather than per step, because its rows depend only on the prompt, so a window over it would bound a cost the denoise loop does not repeat. Recorded rather than folded into the trunk: 24 of the lightx2v step-distill LoRAs' 624 tensors land here (sc-18724), so it is not decoration."
+            },
+            {
+              "id": "vae.decoder",
+              "component": "vae",
+              "stack": "decoder.blocks",
+              "phase": "decode",
+              "blocks": "36-layer / 2048-dim ViT3D `TransformerBlock`",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "componentBytes": 10415558888,
+              "reason": "`ViT3dDecoder` holds `blocks: Vec<TransformerBlock>` with `proj_in`, the register tokens, `norm_out` and a single `proj_out` outside it. Unusual and worth stating plainly: this VAE decoder is a transformer, not a conv stack, so rung 4 has something to bound in the DECODE phase — which no image family in `families` has."
+            },
+            {
+              "id": "vae.encoder",
+              "component": "vae",
+              "stack": "encoder (MiniMaxH3VideoEncoder3d + quant_conv)",
+              "phase": "conditioning",
+              "blocks": "n/a — 3-D causal CNN, 118 published tensors, no attention and no mid-block",
+              "windowable": false,
+              "structuralApplicability": "none",
+              "structural": [
+                {
+                  "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/vae_encoder.rs",
+                  "reason": "\"The two halves share nothing structurally. The decoder is a 36-layer ViT; the encoder is a plain conv stack with no attention and no mid-block.\" It is live rather than theoretical: `fl2va` conditions a keyframe through both the vision tower and this encoder, so there is no keyframe conditioning without it."
+                }
+              ],
+              "reason": "No sequential transformer block stack exists, so the rung has nothing to bound here."
+            },
+            {
+              "id": "audio_vae.decode",
+              "component": "audio_vae",
+              "stack": "DacAudioVAE decode half",
+              "phase": "decode",
+              "blocks": "n/a — `dec_in_proj` then BigVGAN: 7 `ConvTranspose1d` upsamples, each followed by the mean of 3 `AMPBlock1`",
+              "windowable": false,
+              "structuralApplicability": "none",
+              "componentBytes": 605429340,
+              "structural": [
+                {
+                  "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/audio_vae.rs",
+                  "reason": "A DAC-lineage encoder plus BigVGAN decoder, conv end to end — only the decode half is ported (173 of the checkpoint's 1087 tensors are the absent encode half). There is no attention anywhere in it."
+                }
+              ],
+              "reason": "No sequential transformer block stack exists, so the rung has nothing to bound here. The provider contract reaches the same conclusion from the other direction, recording the audio VAE as explicitly out of scope for rung 2's tiling at 0.61 GB."
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
+              "reason": "The family's `MemoryProviderContract`. Rungs 0 and 1 `Implemented`; rungs 2, 3 and 4 `Missing` with a story each (sc-18660 / sc-18661 / sc-18662). Publishes `LOAD_SHAPE`, `DIT_BLOCKS` = 50, the four component byte constants and the three stage-attributed peaks quoted in this record."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/text_encoder/encoder.rs",
+              "reason": "`MiniMaxH3TextEncoder` — `layers: Vec<Qwen3DecoderLayer>` loading only `0..select_hidden`, which is what makes the conditioning stack uniform and windowable."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/dit/model.rs",
+              "reason": "`MiniMaxH3Dit` — `blocks: Vec<DitBlock>` over `0..num_layers` alongside a separately-indexed `refiner: TokenRefiner`, and the note that the refiner is evaluated at construction rather than inside every forward."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/dit/refiner.rs",
+              "reason": "The 2-block refiner's two removals against a `transformer_blocks` entry — no AdaLN and no rotary — which is what makes it a different block KIND rather than more of the same stack."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/decoder.rs",
+              "reason": "`ViT3dDecoder` — `blocks: Vec<TransformerBlock>`, 36 layers at 2048 dim, doing all 16x spatial and 4x temporal upsampling in a single `proj_out`."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/vae_encoder.rs",
+              "reason": "The conv encode half, and why `fl2va` makes it resident rather than optional."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/audio_vae.rs",
+              "reason": "The DAC + BigVGAN decode path, conv throughout."
+            },
+            {
+              "source": "config/manifests/builtin.models.jsonc#models/minimax_h3/type",
+              "reason": "`\"type\": \"video\"`, which is why this record is out of matrix at all."
+            }
+          ],
+          "summary": "Four components, seven separately-indexed stacks, five of them windowable and two of them conv. The DiT trunk (50 uniform `DitBlock`), the Qwen3-VL-32B language tower (50 of 64 `Qwen3DecoderLayer`), the vision tower, the 2-block token refiner and the 36-layer ViT3D video decoder are each a uniform stack needing its own plan; the video VAE's 3-D causal CNN encoder and the DAC/BigVGAN audio decoder cannot be windowed at all. That is `partial` by the survey's own vocabulary in both of its clauses at once, and it is derived from the stack list rather than asserted. Implementation is `none` and the reason is the loader, not the architecture: `LOAD_SHAPE` is `EagerMaterialization`, so rung 4's sole shared prerequisite is unsatisfied and the contract says `Missing` rather than `StructurallyNotApplicable`.",
+          "findings": [
+            "The stack that would repay a window most is NOT in the denoise phase. The 53.07 GB conditioning mark is the dense text encoder in isolation, and it is a uniform 50-layer stack — so on this family the `TextEncoder` component scope is the interesting one and the `Dit` scope is the smaller prize, which inverts the shape every image family in `families` has. That is a claim about which stack sets the floor, not a measurement that a window moves it; the request peak stays `unmeasured` until sc-18662 can run one.",
+            "This is the first family whose DECODE phase holds a transformer block stack (36-layer ViT3D). Rung 2 bounds decode by tiling and rung 4 bounds transformer residency; on this family they address the same component, and neither is implemented yet (sc-18660, sc-18662). Worth knowing before either is sized, because the image-lane intuition that rungs 2 and 4 attack disjoint components does not hold here.",
+            "Rung 3 is `Missing` rather than `StructurallyNotApplicable` on purpose, and the reasoning is MLX-only: measured peak tracks 4·B·H·S·D (5.966 GB measured against 5.965 GB predicted at S = 104,030) because MLX's fused SDPA already streams the scores. Candle materializes them. Do not carry the MLX verdict across, and do not read it as a rung-4 statement — it is about attention scratch, not weight residency."
+          ]
+        },
+        "candle": {
+          "contractSupport": "missing",
+          "contractRevision": "79f02e6d0eaca861a0698ee490b70daa7441e321",
+          "contractSource": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
+          "contractReason": "Rung 4 is `MemoryStrategySupport::Missing` for the same load-shape reason as MLX — `LOAD_SHAPE = LoadShape::EagerMaterialization`, `MiniMaxH3Dit::load` builds the whole stack — plus a second one this backend has and MLX does not: `host_to_device_block_materialization` is `false` because there is no block-wise host->device path in the crate at all. `block_materialization` is answered anyway as `MemoryWindowMaterialization::DeviceFormatTransfer` and sc-18662 must re-verify it if a packed candle tier ever lands. Rung 1 is `Missing` too here, and `calibration` is `None`: this crate ships no pipeline and no text encoder (sc-17156), so there is nothing to stage and no fitted curve.",
+          "structuralApplicability": "partial",
+          "derivedFrom": "stacks",
+          "nonWindowableStacks": ["vae.encoder", "audio_vae.decode"],
+          "implementation": "none",
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "This backend has no measurements of its own at all — `MemoryProviderContract::calibration` is `None` and the crate has no end-to-end path (sc-17156). The 53.07 GB conditioning figure and the 40.43 / 11.63 GB denoise residencies quoted on the MLX record were taken on MLX and are NOT transferable here."
+          },
+          "stacks": [
+            {
+              "id": "transformer.blocks",
+              "component": "transformer",
+              "stack": "transformer_blocks",
+              "phase": "denoise",
+              "blocks": "50 uniform `DitBlock` (`num_layers` = 50)",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "componentBytes": 66280504216,
+              "reason": "`MiniMaxH3Dit` holds `blocks: Vec<DitBlock>` alongside `projections`, `refiner` and `rope`. The checkpoint facts are deliberately identical to the MLX sibling's — they are facts about the snapshot, not about a backend, and the two contracts pin the same constants so they cannot drift."
+            },
+            {
+              "id": "transformer.token_refiner",
+              "component": "transformer",
+              "stack": "token_refiner.refiner_blocks",
+              "phase": "denoise",
+              "blocks": "2 `TokenRefinerBlock`",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "reason": "Separately indexed from the trunk and of a different block kind, exactly as on MLX, so it needs its own plan."
+            },
+            {
+              "id": "vae.decoder",
+              "component": "vae",
+              "stack": "decoder.blocks",
+              "phase": "decode",
+              "blocks": "36-layer / 2048-dim ViT3D `TransformerBlock`",
+              "windowable": true,
+              "structuralApplicability": "full",
+              "componentBytes": 10415558888,
+              "reason": "The same ViT3D decoder as the MLX port — a transformer, not a conv stack."
+            },
+            {
+              "id": "vae.encoder",
+              "component": "vae",
+              "stack": "encoder (video VAE encode half)",
+              "phase": "conditioning",
+              "blocks": "n/a — 3-D causal CNN",
+              "windowable": false,
+              "structuralApplicability": "none",
+              "structural": [
+                {
+                  "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/decoder.rs",
+                  "reason": "\"The encoder is the conv half; only the decoder is ported here.\" The crate ships that encoder (`vae_encoder.rs`) and no text encoder, which is the shipped-surface difference against the MLX sibling."
+                }
+              ],
+              "reason": "No sequential transformer block stack exists, so the rung has nothing to bound here."
+            },
+            {
+              "id": "audio_vae.decode",
+              "component": "audio_vae",
+              "stack": "DacAudioVAE decode half",
+              "phase": "decode",
+              "blocks": "n/a — conv: DAC-lineage encoder plus BigVGAN decoder",
+              "windowable": false,
+              "structuralApplicability": "none",
+              "componentBytes": 605429340,
+              "structural": [
+                {
+                  "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/audio_vae.rs",
+                  "reason": "Conv end to end, no attention — the same architecture the MLX port describes, ported to this backend."
+                }
+              ],
+              "reason": "No sequential transformer block stack exists, so the rung has nothing to bound here."
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
+              "reason": "The candle `MemoryProviderContract`: only rung 0 `Implemented`, everything else `Missing` with a story each, `calibration: None`, `MemoryFormulaKind::AssetBytesPlusHeadroom`, and `MemoryLifecycleCapabilities::default()` because nothing in the crate releases, tiles, chunks or windows."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/dit/model.rs",
+              "reason": "`MiniMaxH3Dit` with `blocks: Vec<DitBlock>` and a separately-indexed `refiner`."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/decoder.rs",
+              "reason": "The ViT3D transformer decoder and the statement that the encoder is the conv half."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/audio_vae.rs",
+              "reason": "The DAC + BigVGAN conv decode path."
+            }
+          ],
+          "summary": "The same checkpoint, a smaller shipped surface: this crate has the DiT, the joint denoise, both VAE decoders and the video VAE encoder, and no text encoder and no generator (sc-17156). So the conditioning stacks that dominate the MLX record are absent here, and the five stacks that remain still split three windowable to two conv — `partial`, derived from the list. Implementation is `none` and the contract says `Missing` on the same load-shape ground as MLX, with the extra candle-only fact that no block-wise host->device materialization path exists at all.",
+          "findings": [
+            "Rung 1 is `Missing` on this backend, which on MLX it is not. That is a shipped-surface fact (no pipeline to stage), not an architectural one, and it means the generator's blanket `stagedResidencyIsAvailable` gate and this family's real prerequisite would agree here by accident if this family were ever routed into the matrix — see the corrected prerequisite note.",
+            "MLX's fused-SDPA argument for rung 3 does not transfer: candle materializes attention scores, so bounding attention may buy real memory here even though it appears to buy none on MLX. Recorded because the two backends' rung-3 verdicts must not be copied across, and rung 4's value is judged against the rung-3 composition."
+          ]
+        }
+      }
+    }
+  },
   "families": {
     "15509": {
       "name": "Mage-Flow",
