@@ -1595,8 +1595,12 @@ fn no_candle_raw_settings_builder_records_its_own_frame_count() {
         );
     }
     // And the stamp still writes the clip's real length on this lane.
-    let stamped = EncodedClip { frames: 7, fps: 25 }
-        .record_frame_count(bernini_raw_settings(&req("bernini")));
+    let stamped = EncodedClip {
+        frames: 7,
+        fps: 25,
+        has_audio: false,
+    }
+    .record_frame_count(bernini_raw_settings(&req("bernini")));
     assert_eq!(stamped["frameCount"], json!(7));
 }
 
