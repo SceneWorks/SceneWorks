@@ -2465,20 +2465,17 @@ mod tests {
     /// Not a suppression list — an inventory that the guard asserts is EXACT, so fixing an entry
     /// turns the test red until the entry is deleted, and a NEW divergence turns it red too. Empty
     /// is the target state; every row here is a filed, surfaced defect, never a quiet exemption.
-    const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[
-        // sc-19504 (found by this guard, sc-17159). `wan_2_2_i2v_14b` advertises `first_last_frame`
-        // and no lane serves it: the mlx `wan2_2_i2v_14b` descriptor declares
-        // `conditioning: [Reference]` with NO `Keyframe` at the pinned inference revision
-        // (`mlx-gen-wan/src/model.rs`, verified against 014134e3), and the candle i2v gate requires
-        // `mode == "image_to_video"`, so a FLF request on this model queues forever. Whether the
-        // fix is dropping the capability or adding an engine keyframe path is a product/engine
-        // decision, which is why it is recorded rather than silently patched here.
-        (
-            "wan_2_2_i2v_14b",
-            "first_last_frame",
-            "no Keyframe conditioning on the 14B I2V descriptor; candle i2v serves image_to_video only (sc-19504)",
-        ),
-    ];
+    /// EMPTY, which is the target state and is now the SHIPPED state (sc-19504).
+    ///
+    /// Its one and only row was `wan_2_2_i2v_14b` + `first_last_frame`, recorded by sc-17159 because
+    /// the choice between "serve it" and "stop advertising it" was a product/engine call. sc-19504
+    /// made it: the capability was WITHDRAWN from the manifest. Neither engine has a keyframe path
+    /// on the A14B — both the MLX and the candle I2V-A14B descriptors declare a single
+    /// `ConditioningKind::Reference`, and each `build_i2v_y` hard-pins its 4-channel temporal mask
+    /// to latent frame 0 — and the checkpoint's `in_dim 36` patch embedding was trained on
+    /// "frame 0 image, rest zeros", so a second pinned frame is out-of-distribution rather than an
+    /// unwired flag. The 5B's FLF rides a mask-blend architecture the A14B does not have.
+    const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[];
 
     /// **THE CLASS GUARD (sc-17159, GH #2074).** A video mode in a shipped model's `capabilities`
     /// is a promise to the user — the Video Studio builds its mode tabs from that array. This
@@ -2490,7 +2487,13 @@ mod tests {
     /// dispatch — everything but the API allow-list — and 400'd on every submission from the moment
     /// it shipped. This guard's own run found two more: `wan_2_2_vace_fun_14b` had no
     /// [`VIDEO_MODEL_CAPS`] row at all despite a dedicated `VideoRoute::ReplacePersonWanVaceFun` arm
-    /// (fixed in sc-17159), and `wan_2_2_i2v_14b`'s `first_last_frame` (recorded above).
+    /// (fixed in sc-17159), and `wan_2_2_i2v_14b`'s `first_last_frame` (withdrawn in sc-19504).
+    ///
+    /// It is the DECLARATION half only. It proves an advertised mode is claimable; it cannot prove
+    /// that an UNadvertised one is refused, because `VIDEO_JOB_MODES` is global and any caller may
+    /// name any admitted mode against any model. That half is the enqueue-time no-lane gate
+    /// ([`super::super::gaps::video_request_is_claimable_by_any_lane`], sc-19504), whose own guard is
+    /// `a_video_mode_no_lane_serves_is_refused_at_submission` (apps/rust-api tests/jobs.rs).
     ///
     /// Derived from the real tables on BOTH sides, never a restated list: the ADVERTISEMENT is read
     /// out of the shipped `builtin.models.jsonc` bytes, and the CLAIM is the real predicates
@@ -2564,6 +2567,55 @@ mod tests {
              Studio offers and NO lane will claim — the job queues forever next to an idle worker, \
              with no error (GH #2074). A pair in the constant and not in `found` has been fixed: \
              delete its row."
+        );
+    }
+
+    /// A video model's `ui.recommendedFor` is a SECOND advertisement of the same promise — the
+    /// studio reads it to highlight modes — and nothing derived it from `capabilities`, so the two
+    /// could drift silently (sc-19504: `wan_2_2_i2v_14b` listed `first_last_frame` in BOTH, and
+    /// withdrawing it from one would have left the other still recommending the mode that hangs).
+    ///
+    /// A subset, not an equality: recommending fewer modes than a model serves is an editorial
+    /// choice (`ltx_2_3_eros` recommends 2 of its 6). Recommending one it does not serve is not.
+    /// Scoped to video because an image model's `recommendedFor` is a different vocabulary
+    /// (`character` / `style`), not a mode list.
+    #[test]
+    fn every_recommended_video_mode_is_one_the_model_declares() {
+        let models = builtin_video_models();
+        let mut checked = 0_usize;
+        for model in &models {
+            let id = model
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .expect("every model row has an id");
+            let capabilities: BTreeSet<&str> = model
+                .get("capabilities")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("{id}: every shipped video model declares capabilities"))
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            let Some(recommended) = model
+                .get("ui")
+                .and_then(|ui| ui.get("recommendedFor"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for mode in recommended.iter().filter_map(serde_json::Value::as_str) {
+                checked += 1;
+                assert!(
+                    capabilities.contains(mode),
+                    "{id} recommends `{mode}` in ui.recommendedFor but does not declare it in \
+                     `capabilities` — the studio highlights a mode the model does not serve, and \
+                     the capability guards (which read `capabilities`) cannot see it"
+                );
+            }
+        }
+        assert!(
+            checked >= 12,
+            "only {checked} recommended modes were checked — the manifest read is wrong and this \
+             guard is vacuous"
         );
     }
 
