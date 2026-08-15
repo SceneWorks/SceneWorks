@@ -743,25 +743,41 @@ const CONTROL_PROVIDER_OVERRIDES = new Map([
   ["z_image_turbo:mlx", "z_image_turbo_control"],
 ]);
 
-// The pinned Z-Image crate exports one provider-id-specific contract for each of its four registry
-// variants from the same `memory_strategy_contract(provider_id, spec)` implementation. The manifest
-// stores the declaration once on each catalog base entry; allow only these source-proven aliases to
-// consume it. This is intentionally narrower than route equivalence: Qwen's separate control
-// provider, for example, remains unbounded and must not inherit the base declaration.
-const STATIC_CONTRACT_PROVIDER_ALIASES = new Map([
-  ["z_image_control", "z_image"],
-  ["z_image_turbo_control", "z_image_turbo"],
-]);
-
 function staticContractCoversProvider(contract, provider) {
   if (!contract) return false;
-  const aliasedProvider = STATIC_CONTRACT_PROVIDER_ALIASES.get(provider);
-  return contract.provider === provider ||
-    (aliasedProvider !== undefined && aliasedProvider === contract.provider);
+  return contract.implementations.some(
+    (implementation) => (implementation.runtimeProvider ?? contract.provider) === provider,
+  );
 }
 
-function providerFor(model, backend, overlay, route) {
+export function declarationModelForCoordinate({ backend, rung, route, provider, model, tier, mode, overlay, manifestById }) {
+  const routeLocalContract = model[backend]?.memoryStrategyContract;
+  const routeLocalImplementation = routeLocalContract?.implementations?.some(
+    (implementation) =>
+      (implementation.runtimeProvider ?? routeLocalContract.provider) === provider &&
+      implementation.rung === rung &&
+      implementation.tiers.includes(tier) &&
+      implementation.modes.includes(mode) &&
+      implementation.overlays.includes(overlay),
+  );
+  if (routeLocalImplementation) return model;
+  return model.id === "z_image_edit" && route.engine === "z_image_turbo"
+    ? manifestById.get("z_image_turbo")
+    : model;
+}
+
+export function providerFor(model, backend, overlay, route) {
   if (overlay !== "control") return route.engine;
+  const contract = model[backend]?.memoryStrategyContract;
+  const declared = [...new Set((contract?.implementations ?? [])
+    .filter((implementation) => implementation.overlays?.includes(overlay))
+    .map((implementation) => implementation.runtimeProvider ?? contract.provider))];
+  if (declared.length === 1) return declared[0];
+  if (declared.length > 1) {
+    throw new Error(
+      `${model.id}:${backend}:${overlay} declares ambiguous runtime providers: ${declared.join(", ")}`,
+    );
+  }
   return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? route.engine;
 }
 
@@ -1210,8 +1226,29 @@ export function assertRung4SurveyCoversEveryFamily(survey, models) {
  * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
  * reporting rung 4 as unreachable.
  */
-function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }) {
+export function stagedResidencyIsAvailable({
+  backend,
+  model,
+  route,
+  provider,
+  tier,
+  mode,
+  overlay,
+  sequentialEngines,
+  manifestById,
+}) {
+  const contract = model[backend]?.memoryStrategyContract;
+  const declaredStagedResidency = contract?.implementations?.some(
+    (implementation) =>
+      (implementation.runtimeProvider ?? contract.provider) === provider &&
+      implementation.tiers.includes(tier) &&
+      implementation.modes.includes(mode) &&
+      implementation.overlays.includes(overlay) &&
+      implementation.engagedRungs?.includes("staged_residency"),
+  );
+  if (declaredStagedResidency) return true;
   const declaredModel =
+    !model[backend]?.memoryStrategyContract &&
     model.id === "z_image_edit" && route.engine === "z_image_turbo"
       ? manifestById.get("z_image_turbo")
       : model;
@@ -1314,7 +1351,7 @@ function closureIsCurrent(binding, { backend, provider, inferenceClosureDigests 
   return binding.inferenceClosureDigest === live;
 }
 
-function strategyStatus({
+export function strategyStatus({
   backend,
   rung,
   route,
@@ -1328,14 +1365,20 @@ function strategyStatus({
   manifestById,
   inferenceClosureDigests,
 }) {
-  // `z_image_edit` is a catalog alias, not an inference provider. Its MLX jobs resolve to the
-  // `z_image_turbo` descriptor and therefore must consume that provider's static contract just as
-  // they already inherit its backend scope. Keeping the declaration on the real provider prevents
-  // the catalog alias from becoming a second, independently drifting implementation claim.
-  const declaredModel =
-    model.id === "z_image_edit" && route.engine === "z_image_turbo"
-      ? manifestById.get("z_image_turbo")
-      : model;
+  // A route-local row is authoritative for its exact provider coordinate. Missing sibling rungs may
+  // still inherit the resolved provider's declaration (the established MLX alias behavior), but a
+  // native route can never mask an explicitly authored alias row such as Candle Z-Image Edit.
+  const declaredModel = declarationModelForCoordinate({
+    backend,
+    rung,
+    route,
+    provider,
+    model,
+    tier,
+    mode,
+    overlay,
+    manifestById,
+  });
   // A routing-table lane without a per-backend manifest block is real but wholly untriaged: the
   // optional block is evidence/tuning metadata, not lane-existence metadata. Emit the full slice as
   // Missing so epic 15448 can see and own that work instead of either hiding the lane or inferring
@@ -1354,11 +1397,22 @@ function strategyStatus({
     rung !== "bounded_transformer_residency" ||
     (["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
       staticRung4Implementation !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }));
+      stagedResidencyIsAvailable({
+        backend,
+        model,
+        route,
+        provider,
+        tier,
+        mode,
+        overlay,
+        sequentialEngines,
+        manifestById,
+      }));
   const staticImplementation = staticContractCoversProvider(staticMemoryContract, provider)
     ? staticMemoryContract.implementations.find(
         (implementation) =>
           staticRung4Allowed &&
+          (implementation.runtimeProvider ?? staticMemoryContract.provider) === provider &&
           implementation.rung === rung &&
           implementation.tiers.includes(tier) &&
           implementation.modes.includes(mode) &&
@@ -1492,7 +1546,17 @@ function strategyStatus({
     !(model.id === "krea_2_turbo" && backend === "candle") &&
     (backend !== "candle" ||
       staticCandleOverlayIsAvailable({ model, route, overlay, manifestById })) &&
-    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
+    stagedResidencyIsAvailable({
+      backend,
+      model,
+      route,
+      provider,
+      tier,
+      mode,
+      overlay,
+      sequentialEngines,
+      manifestById,
+    })
   ) {
     return {
       state: "Implemented/unverified",
@@ -1593,7 +1657,17 @@ function strategyStatus({
     );
     const implementedHere =
       implementationParameters !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById });
+      stagedResidencyIsAvailable({
+        backend,
+        model,
+        route,
+        provider,
+        tier,
+        mode,
+        overlay,
+        sequentialEngines,
+        manifestById,
+      });
     if (verdict.structuralApplicability === "none") {
       return {
         state: "Structurally N/A",

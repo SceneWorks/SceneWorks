@@ -1697,6 +1697,81 @@
             "overlays": ["none", "lora"]
           }
         },
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "z_image_turbo_control",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "z_image_turbo_control",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "runtimeProvider": "z_image_turbo_control",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
+        },
         "minMemoryGb": 40,
         "vramGbByTier": { "q4": 18.4, "q8": 24.2, "bf16": 32.2 },
         "vramMeasuredPixels": 1048576,
@@ -1915,6 +1990,7 @@
             },
             {
               "rung": "bounded_decode",
+              "runtimeProvider": "z_image_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "style_variations"],
@@ -1937,6 +2013,7 @@
             },
             {
               "rung": "bounded_attention",
+              "runtimeProvider": "z_image_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "style_variations"],
@@ -1959,6 +2036,7 @@
             },
             {
               "rung": "bounded_transformer_residency",
+              "runtimeProvider": "z_image_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "style_variations"],
@@ -2106,6 +2184,25 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
+        }
+      },
+      "candle": {
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "image_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
             }
           ]
         }
@@ -3059,6 +3156,47 @@
         "quantize": 4,
         "standardTierLayout": true
       },
+      "candle": {
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "lens",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            }
+          ]
+        }
+      },
       "ui": {
         "label": "Lens (base)",
         "description": "Microsoft Lens base text-to-image (20-step, CFG 5.0): higher quality than Lens-Turbo, slower. Also the LoRA training base (sc-1583). gpt-oss-20b text encoder + FLUX.2 VAE; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
@@ -3201,7 +3339,7 @@
               "rung": "bounded_decode",
               "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -3212,7 +3350,7 @@
               "rung": "bounded_attention",
               "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
@@ -3223,7 +3361,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },

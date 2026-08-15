@@ -1,6 +1,7 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    attach_manifest_text_encoder, pid_effective_dims, pid_output_tier, pose_entries,
+    attach_manifest_text_encoder, candle_certified_hf_artifact_path, candle_certified_load_spec,
+    candle_resolved_tier_key, pid_effective_dims, pid_output_tier, pose_entries,
     resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_pid_weights,
     run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
     CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
@@ -44,8 +45,8 @@ const ZIMAGE_CTRL_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 /// the base control checkpoint. The base + Turbo Fun-Union safetensors are byte-structurally identical
 /// (same key layout), so the candle `ZImageControl` loader handles both; the diffusers checkpoint ships a
 /// single `.safetensors`. Mirrors the MLX `z_image_control` engine repo (`STRICT_CONTROL_ENGINES`).
-const ZIMAGE_CTRL_BASE_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
-const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
+pub(super) const ZIMAGE_CTRL_BASE_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
+pub(super) const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// Pinned revision for the default base `ZIMAGE_CTRL_BASE_REPO` (sc-9879, F-077 follow-up). Same
 /// defense-in-depth rationale as `ZIMAGE_CTRL_REVISION`; registered overlays carry their own
 /// catalog-authorized immutable revision, and the `lfs.oid` sha256 verify is retained.
@@ -301,6 +302,7 @@ fn zimage_control_raw_settings(
 pub(super) struct ZImageStrictControl {
     snapshot: PathBuf,
     load_spec: gen_core::LoadSpec,
+    memory: gen_core::GenerationMemory,
     controlnet: PathBuf,
     prompt: String,
     width: u32,
@@ -330,6 +332,7 @@ pub(super) fn zimage_strict_control_test_fixture(
     ZImageStrictControl {
         snapshot: path.clone(),
         load_spec: gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(path.clone())),
+        memory: gen_core::GenerationMemory::default(),
         controlnet: path,
         prompt: "p".to_owned(),
         width: 512,
@@ -427,7 +430,8 @@ impl CandleStrictControl for ZImageStrictControl {
         };
         self.load_spec
             .read_prepared_files_unchanged(|| {
-                let model = ZImageControl::load_with_spec(&paths, &self.load_spec)?;
+                let model =
+                    ZImageControl::load_with_memory_spec(&paths, &self.load_spec, self.memory)?;
                 match self.load_spec.pid.as_ref() {
                     Some(pid) => model.with_pid(pid),
                     None => Ok(model),
@@ -465,12 +469,10 @@ impl CandleStrictControl for ZImageStrictControl {
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.load_spec.pid.is_some(),
-            // Request-scoped lifecycle controls, new on this request in the `8ffa211a` inference pin
-            // (sc-17054). Nothing on the strict-control route selects them — the fit gate's
-            // `GenerationMemory` is plumbed on the generic generation path, not here — and the
-            // default is documented upstream as keeping the historical resident, unbounded path
-            // byte-for-byte unchanged. Wiring the control route to the fit gate is separate work.
-            memory: Default::default(),
+            // The exact declaration/provider selector owns this request-scoped lifecycle block.
+            // A refusal leaves it at the all-disabled default, preserving the historical dense path;
+            // an admitted strict-control contract threads the same value through load and request.
+            memory: self.memory,
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
@@ -499,10 +501,18 @@ pub(super) async fn generate_candle_zimage_control_stream(
 ) -> WorkerResult<()> {
     let request = &plan.request;
     let is_base = is_zimage_base_model(&request.model);
+    let engine_id = if is_base {
+        ZIMAGE_CTRL_BASE_ENGINE_ID
+    } else {
+        ZIMAGE_CTRL_ENGINE_ID
+    };
     let base = resolve_zimage_control_base(request, settings)?.ok_or_else(|| {
         let label = if is_base { "Z-Image" } else { "Z-Image-Turbo" };
         WorkerError::InvalidPayload(format!("Z-Image base ({label}) weights not found"))
     })?;
+    let (control_repo, control_file) = zimage_control_repo_file(request)?;
+    let control_revision =
+        trusted_control_weight_revision(request, engine_id, &control_repo, &control_file)?;
     let controlnet = ensure_zimage_control_weights(api, settings, job, request).await?;
 
     let steps = zimage_control_steps(request);
@@ -520,11 +530,6 @@ pub(super) async fn generate_candle_zimage_control_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model))
         .to_owned();
-    let engine_id = if is_base {
-        ZIMAGE_CTRL_BASE_ENGINE_ID
-    } else {
-        ZIMAGE_CTRL_ENGINE_ID
-    };
     // Base-mode real-CFG surface (sc-8680): resolve the guidance scale + negative prompt for the
     // undistilled base `z_image` control path. Inert on Turbo (the distilled path ignores both), so we
     // resolve them unconditionally and gate on `is_base` at request-build time.
@@ -559,15 +564,98 @@ pub(super) async fn generate_candle_zimage_control_stream(
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     let mut selected_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
+        .with_resolved_route(request.model.clone())
         .with_control(gen_core::WeightsSource::File(controlnet.clone()));
     if let Some(pid) = pid_weights.as_ref() {
         selected_spec = selected_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
     selected_spec = attach_manifest_text_encoder(selected_spec, engine_id, request, settings)?;
+    let tier = candle_resolved_tier_key(request, &base, false);
+    selected_spec = crate::memory_route_registry::evaluate_declared_candle_load_shape(
+        engine_id,
+        Some(tier),
+        crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode),
+        &request.model_manifest_entry,
+        selected_spec,
+        false,
+    );
+    let control_bytes = std::fs::metadata(&controlnet)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let artifact_is_certified = control_bytes > 0
+        && candle_certified_load_spec(
+            engine_id,
+            settings,
+            &selected_spec,
+            &request.model_manifest_entry,
+            tier,
+        )
+        && candle_certified_hf_artifact_path(
+            settings,
+            &control_repo,
+            &control_revision,
+            Path::new(&control_file),
+            &controlnet,
+        );
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        control_bytes,
+    );
+    // Declaration refusal is terminal. In particular, Control+PiD is not the declared
+    // SingleControl profile; it must keep the historical dense/default request memory and cannot
+    // re-enter the generic selector through its provider contract or estimate fallback.
+    let evaluation = if selected_spec.load_shape_declaration_result
+        == gen_core::LoadShapeDeclarationResult::Applied
+    {
+        crate::candle_memory_strategy::evaluate_shared_image(
+            engine_id,
+            &request.model,
+            &selected_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            Some("control"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            use_pid,
+            false,
+            budget,
+            needed,
+            control_bytes,
+            gen_core::MemoryCacheState::Cold,
+        )?
+    } else {
+        None
+    };
+    let memory = evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.memory)
+        .unwrap_or_default();
+    if let Some(evaluation) = evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+    }
 
     let provider = ZImageStrictControl {
         snapshot: base,
         load_spec: selected_spec,
+        memory,
         controlnet,
         prompt: request.prompt.clone(),
         width,

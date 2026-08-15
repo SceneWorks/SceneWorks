@@ -36,6 +36,7 @@ const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-req
 const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
 const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
+const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 pub(crate) struct CandleMemoryEvaluation {
@@ -661,6 +662,23 @@ pub(crate) fn evaluate_shared_image(
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    let contract_override = if spec.load_shape_declaration_result
+        == gen_core::LoadShapeDeclarationResult::Eligible
+    {
+        let mode = crate::memory_route_registry::MemoryRouteMode::from_request(request_mode_value);
+        let Some(contract) = crate::memory_route_registry::declared_candle_selector_contract(
+            engine_id,
+            Some(tier_key),
+            mode,
+            manifest,
+            spec,
+        ) else {
+            return Ok(None);
+        };
+        Some(contract)
+    } else {
+        None
+    };
     evaluate_shared_image_inner(
         engine_id,
         model_id,
@@ -678,7 +696,7 @@ pub(crate) fn evaluate_shared_image(
         predicted_peak_gb,
         runtime_overlay_bytes,
         cache_state,
-        None,
+        contract_override,
         None,
     )
 }
@@ -748,29 +766,10 @@ fn evaluate_shared_image_inner(
     contract_override: Option<gen_core::MemoryProviderContract>,
     request_evidence_revision_override: Option<&'static str>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
-    if !matches!(
-        engine_id,
-        "z_image"
-            | "z_image_turbo"
-            | "z_image_control"
-            | "z_image_turbo_control"
-            | "qwen_image"
-            | "qwen_image_edit"
-            | "flux1_schnell"
-            | "flux1_dev"
-            | "flux2_dev"
-            | "flux2_klein_9b"
-            | "mage_flow_base"
-            | "mage_flow"
-            | "mage_flow_turbo"
-            | "mage_flow_edit_base"
-            | "mage_flow_edit"
-            | "mage_flow_edit_turbo"
-    ) && contract_override.is_none()
-    {
-        return Ok(None);
-    }
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
+        "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
+            Z_IMAGE_REQUEST_EVIDENCE_REVISION
+        }
         "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
         "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
         "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
@@ -781,7 +780,7 @@ fn evaluate_shared_image_inner(
         | "mage_flow_edit_base"
         | "mage_flow_edit"
         | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
-        _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+        _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
     // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
@@ -1826,6 +1825,71 @@ mod tests {
             .collect();
         }
         contract
+    }
+
+    #[test]
+    fn eligible_lens_selector_contract_can_select_sequential_without_mutating_the_load_spec() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-lens-q4")))
+            .with_quant(Quant::Q4)
+            .with_resolved_route("lens")
+            .with_eligible_load_shape_declaration();
+        let mut contract = composition_probe_contract(true, true);
+        contract.provider_id = "lens".to_owned();
+        let evaluation = evaluate_shared_image_inner(
+            "lens",
+            "lens",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 7.0,
+                total_gb: 96.0,
+            }),
+            Some(8.0),
+            0,
+            MemoryCacheState::Cold,
+            Some(contract),
+            None,
+        )
+        .expect("weights-free Lens selector")
+        .expect("the staged estimate fits while resident does not");
+        assert_ne!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert!(
+            evaluation
+                .memory
+                .expect("optimized selection carries request memory")
+                .stage_residency
+        );
+        assert_eq!(
+            spec.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::Eligible
+        );
+        assert_eq!(spec.load_shape, gen_core::LoadShape::EagerMaterialization);
     }
 
     /// sc-18253: the staged manifest row prices the staged WORKING SET, so it is only a sound

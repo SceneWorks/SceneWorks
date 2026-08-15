@@ -1204,7 +1204,6 @@ const FLUX2_DEV_MLX_TURNKEY_REVISION: &str =
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION: &str =
     "acf05e8d5103838baba6a5e32dc91d6997a56023";
-
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2770,12 +2769,19 @@ fn candle_certified_artifact_path(
     tier: &str,
 ) -> bool {
     let (repo, revision) = match engine_id {
-        "z_image" | "z_image_turbo" =>
-            (ZIMAGE_MLX_TURNKEY_REPO, ZIMAGE_MLX_TURNKEY_REVISION),
-        "flux1_schnell" =>
-            ("SceneWorks/flux1-schnell-mlx", FLUX1_SCHNELL_MLX_TURNKEY_REVISION),
-        "flux1_dev" => ("SceneWorks/flux1-dev-mlx", FLUX1_DEV_MLX_TURNKEY_REVISION),
-        "flux2_dev" => ("SceneWorks/flux2-dev-mlx", FLUX2_DEV_MLX_TURNKEY_REVISION),
+        "z_image" | "z_image_turbo" => (ZIMAGE_MLX_TURNKEY_REPO, ZIMAGE_MLX_TURNKEY_REVISION),
+        "flux1_schnell" => (
+            "SceneWorks/flux1-schnell-mlx",
+            FLUX1_SCHNELL_MLX_TURNKEY_REVISION,
+        ),
+        "flux1_dev" => (
+            "SceneWorks/flux1-dev-mlx",
+            FLUX1_DEV_MLX_TURNKEY_REVISION,
+        ),
+        "flux2_dev" => (
+            "SceneWorks/flux2-dev-mlx",
+            FLUX2_DEV_MLX_TURNKEY_REVISION,
+        ),
         "flux2_klein_9b" => (
             "SceneWorks/flux2-klein-9b-mlx",
             FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION,
@@ -2804,7 +2810,7 @@ fn is_mage_engine(engine_id: &str) -> bool {
 /// Optimized evidence is admissible only when every descriptor-required component matches the
 /// exact manifest repo, revision, tier, and subdirectory that the eventual provider load receives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_certified_load_spec(
+pub(super) fn candle_certified_load_spec(
     engine_id: &str,
     settings: &Settings,
     spec: &LoadSpec,
@@ -2814,20 +2820,14 @@ fn candle_certified_load_spec(
     let WeightsSource::Dir(weights_dir) = &spec.weights else {
         return false;
     };
-    if !is_mage_engine(engine_id) {
+    if !is_mage_engine(engine_id)
+        && !crate::memory_route_registry::candle_declaration_owns_load_shape(engine_id)
+    {
         return candle_certified_artifact_path(engine_id, settings, weights_dir, tier);
     }
-
     let Some(downloads) = manifest_entry.get("downloads").and_then(Value::as_array) else {
         return false;
     };
-    let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
-        return false;
-    };
-    if spec.components.len() != descriptor.required_components.len() {
-        return false;
-    }
-
     let certify = |component_id: Option<&str>, actual: &Path| {
         let mut matches = downloads.iter().filter(|download| {
             download.get("provider").and_then(Value::as_str) == Some("huggingface")
@@ -2860,6 +2860,18 @@ fn candle_certified_load_spec(
             actual,
         )
     };
+
+    if !is_mage_engine(engine_id) {
+        return spec.components.is_empty()
+            && (spec.text_encoder.is_none() || spec.validate_prepared_file_pins().is_ok())
+            && certify(None, weights_dir);
+    }
+    let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
+        return false;
+    };
+    if spec.components.len() != descriptor.required_components.len() {
+        return false;
+    }
 
     certify(None, weights_dir)
         && descriptor.required_components.iter().all(|component_id| {
@@ -2902,7 +2914,7 @@ mod mage_artifact_certification_tests {
         }
     }
 
-    fn mage_manifest(model_id: &str) -> JsonObject {
+    fn model_manifest(model_id: &str) -> JsonObject {
         let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -2917,7 +2929,7 @@ mod mage_artifact_certification_tests {
             .find(|model| model["id"] == model_id)
             .and_then(Value::as_object)
             .cloned()
-            .expect("Mage manifest entry")
+            .expect("model manifest entry")
     }
 
     fn cached_snapshot(data_dir: &Path, repo: &str, revision: &str) -> PathBuf {
@@ -2938,7 +2950,7 @@ mod mage_artifact_certification_tests {
         ]);
         let data = tempfile::tempdir().expect("temp data dir");
         let settings = settings(data.path());
-        let manifest = mage_manifest("mage_flow_base");
+        let manifest = model_manifest("mage_flow_base");
         let downloads = manifest["downloads"].as_array().expect("downloads");
         let revision_for = |component_id: Option<&str>| {
             let download = downloads
@@ -2993,6 +3005,71 @@ mod mage_artifact_certification_tests {
             &incomplete,
             &manifest,
             "q4",
+        ));
+    }
+
+    #[test]
+    fn strict_z_control_requires_independent_primary_and_control_certification() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
+        let data = tempfile::tempdir().expect("temp data dir");
+        let settings = settings(data.path());
+        let manifest = model_manifest("z_image");
+        let primary = manifest["downloads"]
+            .as_array()
+            .expect("downloads")
+            .iter()
+            .find(|download| download["variant"] == "q4")
+            .expect("q4 primary download");
+        let primary_repo = primary["repo"].as_str().expect("primary repo");
+        let primary_revision = primary["revision"].as_str().expect("primary revision");
+        let primary_path = cached_snapshot(data.path(), primary_repo, primary_revision).join("q4");
+        fs::create_dir_all(&primary_path).expect("primary tier");
+
+        let control_root = cached_snapshot(
+            data.path(),
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REPO,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REVISION,
+        );
+        let control_path =
+            control_root.join(crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_FILE);
+        fs::write(&control_path, b"control").expect("control file");
+        let spec = LoadSpec::new(WeightsSource::Dir(primary_path.clone()))
+            .with_resolved_route("z_image")
+            .with_control(WeightsSource::File(control_path.clone()));
+
+        assert!(candle_certified_load_spec(
+            "z_image_control",
+            &settings,
+            &spec,
+            &manifest,
+            "q4",
+        ));
+        assert!(candle_certified_hf_artifact_path(
+            &settings,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REPO,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REVISION,
+            Path::new(crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_FILE),
+            &control_path,
+        ));
+        assert!(!candle_certified_load_spec(
+            "z_image_control",
+            &settings,
+            &LoadSpec::new(WeightsSource::Dir(data.path().join("substituted-primary")))
+                .with_resolved_route("z_image")
+                .with_control(WeightsSource::File(control_path)),
+            &manifest,
+            "q4",
+        ));
+        assert!(!candle_certified_hf_artifact_path(
+            &settings,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REPO,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REVISION,
+            Path::new(crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_FILE),
+            &data.path().join("substituted-control.safetensors"),
         ));
     }
 }
@@ -3863,6 +3940,36 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
 /// function's test module is itself macOS-excluded, so admitting bare `test` would leave it unused
 /// in a macOS test build and dead-code-error again under `-D warnings`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn apply_declared_candle_image_load_shape(
+    engine_id: &str,
+    resolved_tier: Option<&str>,
+    request_mode: &str,
+    manifest: &JsonObject,
+    spec: LoadSpec,
+    sequential_selected: bool,
+) -> LoadSpec {
+    let mode = crate::memory_route_registry::MemoryRouteMode::from_request(request_mode);
+    let spec = crate::memory_route_registry::evaluate_declared_candle_load_shape(
+        engine_id,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        sequential_selected,
+    );
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Candle,
+        engine_id,
+        mode.unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
+        spec,
+        sequential_selected,
+    )
+}
+
+/// Unchanged legacy shaper for bespoke Candle call sites that do not carry a complete manifest
+/// declaration coordinate. Declaration-owned routes use [`apply_declared_candle_image_load_shape`]
+/// only after assembling their exact route, tier, mode, source, components, and selected encoder.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     crate::memory_route_registry::apply_registered_load_shape(
         crate::memory_route_registry::MemoryRouteBackend::Candle,
@@ -3874,8 +3981,21 @@ fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn apply_candle_qwen_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
-    apply_candle_image_load_shape(engine_id, spec)
+fn apply_candle_qwen_load_shape(
+    engine_id: &str,
+    resolved_tier: &str,
+    request_mode: &str,
+    manifest: &JsonObject,
+    spec: LoadSpec,
+) -> LoadSpec {
+    apply_declared_candle_image_load_shape(
+        engine_id,
+        Some(resolved_tier),
+        request_mode,
+        manifest,
+        spec,
+        false,
+    )
 }
 
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -3887,6 +4007,10 @@ mod candle_image_load_shape_tests {
         LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
             "qwen-image-fixture",
         )))
+    }
+
+    fn legacy_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+        apply_candle_image_load_shape(engine_id, spec)
     }
 
     #[test]
@@ -3906,7 +4030,7 @@ mod candle_image_load_shape_tests {
             "mage_flow_edit_turbo",
         ] {
             assert_eq!(
-                apply_candle_image_load_shape(engine_id, fixture_spec()).load_shape,
+                legacy_shape(engine_id, fixture_spec()).load_shape,
                 gen_core::LoadShape::DeferredMaterialization
             );
         }
@@ -3939,7 +4063,7 @@ mod candle_image_load_shape_tests {
         ];
         for (engine_id, spec) in cases {
             assert_eq!(
-                apply_candle_image_load_shape(engine_id, spec).load_shape,
+                legacy_shape(engine_id, spec).load_shape,
                 gen_core::LoadShape::EagerMaterialization
             );
         }
@@ -3965,7 +4089,7 @@ mod candle_image_load_shape_tests {
             fixture_spec().with_ip_adapter(WeightsSource::Dir(std::path::PathBuf::from("ip"))),
         ] {
             assert_eq!(
-                apply_candle_image_load_shape("flux1_dev", spec).load_shape,
+                legacy_shape("flux1_dev", spec).load_shape,
                 gen_core::LoadShape::DeferredMaterialization
             );
         }
@@ -3975,11 +4099,11 @@ mod candle_image_load_shape_tests {
             )))
             .with_ip_adapter(WeightsSource::Dir(std::path::PathBuf::from("ip")));
         assert_eq!(
-            apply_candle_image_load_shape("flux1_dev", combined).load_shape,
+            legacy_shape("flux1_dev", combined).load_shape,
             gen_core::LoadShape::EagerMaterialization
         );
         assert_eq!(
-            apply_candle_image_load_shape(
+            legacy_shape(
                 "flux2_dev",
                 fixture_spec().with_control(WeightsSource::File(std::path::PathBuf::from(
                     "control.safetensors",
@@ -8270,7 +8394,7 @@ mod krea_turbo_memory_route_tests {
 /// resolved bits. Opaque/flat paths retain the request-derived behavior because there is no tier
 /// basename to make a stronger artifact claim.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_resolved_tier_key(
+pub(super) fn candle_resolved_tier_key(
     request: &ImageRequest,
     weights_dir: &Path,
     convrot_resolved: bool,
@@ -8356,7 +8480,18 @@ mod candle_resolved_tier_contract_tests {
 
     fn mage_spec(engine_id: &str, weights: &Path, quant: Option<Quant>) -> LoadSpec {
         let mut spec = load_spec(weights.to_path_buf(), quant, Vec::new(), None);
-        spec = apply_candle_image_load_shape(engine_id, spec);
+        spec = apply_declared_candle_image_load_shape(
+            engine_id,
+            weights.file_name().and_then(|value| value.to_str()),
+            if engine_id.contains("_edit") {
+                "edit_image"
+            } else {
+                "image_generation"
+            },
+            &JsonObject::new(),
+            spec,
+            false,
+        );
         let descriptor = crate::inference_runtime::media_descriptor(engine_id)
             .unwrap_or_else(|| panic!("missing Mage descriptor {engine_id}"));
         descriptor.required_components.iter().fold(spec, |spec, id| {
@@ -9139,12 +9274,12 @@ async fn generate_candle_stream(
     // Implemented/unverified declarations do not authorize optimized execution: this bridge always
     // submits the conservative resident estimate and adds deeper candidates only when an exact
     // authoritative record exists in the packaged evidence bundle.
-    let mut shared_contract_spec = load_spec(weights_dir.clone(), quant, adapters.clone(), None);
+    let mut shared_contract_spec = load_spec(weights_dir.clone(), quant, adapters.clone(), None)
+        .with_resolved_route(request.model.clone());
     if let Some(pid) = pid_weights.as_ref() {
         shared_contract_spec =
             shared_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
-    shared_contract_spec = apply_candle_image_load_shape(engine_id, shared_contract_spec);
     // The selector and the eventual provider load must inspect the SAME artifact set. Mage's tier
     // directory contains only the DiT; its shared text encoder and VAE are caller-staged named
     // components. Evaluating the bare tier dir undercounts the provider contract and can admit a
@@ -9166,6 +9301,14 @@ async fn generate_candle_stream(
     shared_contract_spec =
         attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    shared_contract_spec = apply_declared_candle_image_load_shape(
+        engine_id,
+        Some(tier),
+        shared_request_mode,
+        &request.model_manifest_entry,
+        shared_contract_spec,
+        false,
+    );
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
         edit_reference.is_some() || img2img_reference.is_some(),
@@ -9645,6 +9788,14 @@ async fn generate_candle_stream(
     // Reuse the exact selector spec, including Mage's split text-encoder/VAE component paths. Only
     // the post-selection residency policy and optional ConvRot substitution may differ below.
     let mut spec = shared_contract_spec;
+    spec = apply_declared_candle_image_load_shape(
+        engine_id,
+        Some(tier),
+        shared_request_mode,
+        &request.model_manifest_entry,
+        spec,
+        use_sequential,
+    );
     if use_sequential {
         // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
         spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);

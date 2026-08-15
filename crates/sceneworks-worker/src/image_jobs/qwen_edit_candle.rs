@@ -528,7 +528,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let total = work.len();
     let negative = request.negative_prompt.clone();
     let prepared_provider_spec = attach_manifest_text_encoder(
-        load_spec(qwen_base.clone(), None, adapters.clone(), None),
+        load_spec(qwen_base.clone(), None, adapters.clone(), None)
+            .with_resolved_route(request.model.clone()),
         "qwen_image_edit",
         request,
         settings,
@@ -611,6 +612,9 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         };
         let strategy_spec = apply_candle_qwen_load_shape(
             QWEN_EDIT_PROVIDER_ID,
+            tier,
+            &request.mode,
+            &request.model_manifest_entry,
             match quant {
                 Some(quant) => prepared_provider_spec.clone().with_quant(quant),
                 None => prepared_provider_spec.clone(),

@@ -156,6 +156,10 @@ function manifestContracts(manifest) {
         throw new Error(`${model.id}:${backend} memoryStrategyContract has no provider`);
       }
       for (const implementation of contract.implementations ?? []) {
+        const runtimeProvider = implementation.runtimeProvider ?? contract.provider;
+        if (typeof runtimeProvider !== "string" || !runtimeProvider) {
+          throw new Error(`${model.id}:${backend}:${contract.provider} has an invalid runtimeProvider`);
+        }
         if (!RUNGS.includes(implementation.rung)) {
           throw new Error(`${model.id}:${backend}:${contract.provider} names unknown rung ${implementation.rung}`);
         }
@@ -164,7 +168,7 @@ function manifestContracts(manifest) {
         }
         rows.push({
           backend,
-          provider: contract.provider,
+          provider: runtimeProvider,
           modelId: model.id,
           rung: implementation.rung,
           tiers: sortedUnique(implementation.tiers),
