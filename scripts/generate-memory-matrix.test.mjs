@@ -23,10 +23,15 @@ import {
   RUNG4_APPLICABILITIES,
   RUNG4_IMPLEMENTATIONS,
   RUNG4_REQUEST_PEAKS,
+  SHARED_RUNG4_PREREQUISITES,
   assertGeneratorSourceDoesNotRestateTheRemovedEdge,
+  assertRung4CalibrationsDeclareTheRequiredLoadShape,
+  assertRung4PrerequisiteRecordsCoverEveryFamily,
   deriveOutOfMatrixApplicability,
   familyGroup,
+  parseRung4ContractPrerequisites,
   parseRung4Survey,
+  rung4ContractAdmits,
   familyStory,
   mlxRequiredHostBytes,
   observedPeakBytes,
@@ -137,6 +142,9 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "routingCandle",
     "routingCatalog",
     "routingMlx",
+    // sc-19542: the rung-4 arm admits from these per-provider prerequisite records, so they decide
+    // cell state and belong inside the fingerprint like every other deciding source.
+    "rung4ContractPrerequisites",
     "rung4Survey",
     "vramGate",
   ]);
@@ -1773,54 +1781,136 @@ test("Candle Krea's Implemented cells report the shared backend that makes them 
   assert.doesNotMatch(serialized, /does not go through.*BlockWindowBackend/i);
 });
 
-test("rung 4 is not claimed on MLX where its declared rung-1 prerequisite is absent", async () => {
-  // gen_core::memory_strategy makes rung 1 a prerequisite of rung 4, so a family with a perfectly
-  // windowable trunk still reports Missing where the entry cannot stage its phases. Mage-Flow and
-  // SenseNova are the epic's own uncovered-rung-1 MLX families; Candle capability is independent.
-  const matrix = await buildMatrix({ publish: false });
-  for (const modelId of ["mage_flow", "sensenova_u1_8b"]) {
-    const staged = matrix.cells.filter(
-      (cell) =>
-        cell.modelId === modelId &&
-        cell.backend === "mlx" &&
-        cell.rung === "staged_residency",
-    );
-    assert.ok(staged.length > 0);
-    assert.ok(
-      staged.every((cell) => cell.state === "Missing"),
-      `${modelId}: fixture assumes rung 1 is unavailable`,
-    );
-    const rung4 = matrix.cells.filter(
-      (cell) =>
-        cell.modelId === modelId &&
-        cell.backend === "mlx" &&
-        cell.rung === "bounded_transformer_residency",
-    );
-    assert.ok(
-      rung4.every((cell) => cell.state === "Missing"),
-      `${modelId}: rung 4 cannot be reachable without rung 1`,
-    );
-    assert.ok(
-      rung4.every((cell) => cell.rung4Survey.structuralApplicability !== "none"),
-      `${modelId}: the architecture is fine — the verdict must not read as Structurally N/A`,
-    );
+// ---------------------------------------------------------------------------
+// sc-19542 — the rung-4 arm admits from each provider's OWN declared prerequisite graph.
+// ---------------------------------------------------------------------------
+
+const PREREQUISITES_URL = new URL("../config/rung4-contract-prerequisites.json", import.meta.url);
+
+async function prerequisitesFixture() {
+  return JSON.parse(await readFile(PREREQUISITES_URL, "utf8"));
+}
+
+/** `${group}:${backend}` -> whether that provider appends the rung-1 edge at the pinned revision. */
+async function declaredRung1Edges() {
+  const records = await prerequisitesFixture();
+  const declares = new Map();
+  for (const [group, family] of Object.entries(records.families)) {
+    for (const [backend, record] of Object.entries(family.backends)) {
+      declares.set(
+        `${group}:${backend}`,
+        record.additionalPrerequisites.some(
+          (edge) => edge.kind === "rung" && edge.rung === "staged_residency",
+        ),
+      );
+    }
   }
+  return declares;
+}
+
+test("rung 4 is refused exactly where the family's OWN prerequisite graph refuses it", async () => {
+  // sc-19542. The arm used to apply `stagedResidencyIsAvailable` to every family — a rung-1
+  // AVAILABILITY proxy, where rung 4's shared contract rule
+  // (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`) names `LoadShape::DeferredMaterialization` and no
+  // rung edge at all. The rung-1 edge is real but PER PROVIDER: it is appended through
+  // `MemoryProviderContract::additional_prerequisites`, and 21 of the 40 (family, backend) pairs
+  // append it while 19 do not.
+  //
+  // The expectation below is read out of those records rather than listed here, so this test
+  // maintains no names and no counts: whichever families declare the edge are the families the
+  // rung-1 predicate may hold back.
+  //
+  // What this one actually grades, stated so it is not over-read: the RECORDS' discrimination
+  // against the live catalog. Collapse them so every provider declares the edge — which is the data
+  // form of the blanket proxy — and the `exempt` branch empties and this reds. It does NOT catch the
+  // code-level regression: the two tests below it do, and were each mutation-checked against a
+  // restored blanket call site and against a neutered rung evaluator.
+  const matrix = await buildMatrix({ publish: false });
+  const declares = await declaredRung1Edges();
+  const cellsOf = (modelId, backend, rung) =>
+    matrix.cells.filter(
+      (cell) => cell.modelId === modelId && cell.backend === backend && cell.rung === rung,
+    );
+
+  const lanes = [
+    ...new Set(matrix.cells.map((cell) => `${cell.modelId}:${cell.backend}`)),
+  ].map((lane) => {
+    const [modelId, backend] = lane.split(":");
+    return { modelId, backend, key: `${familyGroup(modelId)}:${backend}` };
+  });
+
+  let heldBack = 0;
+  let exempt = 0;
+  for (const { modelId, backend, key } of lanes) {
+    const rung1 = cellsOf(modelId, backend, "staged_residency");
+    if (!rung1.length || rung1.some((cell) => cell.state !== "Missing")) continue;
+    if (declares.get(key)) {
+      heldBack += 1;
+      assert.ok(
+        cellsOf(modelId, backend, "bounded_transformer_residency").every(
+          (cell) => cell.state === "Missing",
+        ),
+        `${modelId}:${backend} appends the rung-1 edge and cannot stage, so rung 4 must be Missing`,
+      );
+    } else {
+      exempt += 1;
+    }
+  }
+  // Both partitions have to be occupied or the assertion above grades nothing — a lane set that is
+  // all-declaring would make it a restatement of the old blanket proxy, and an all-exempt one would
+  // make its loop body unreachable.
+  assert.ok(heldBack > 0, "no lane exercises the held-back branch");
+  assert.ok(exempt > 0, "no lane exercises the exempt branch — the gate would be indistinguishable from the blanket proxy");
 });
 
-test("the rung-1 gate holds the rung-4 claim, and is the ONLY thing separating these two families", async () => {
-  // The mutation check for the generator's rung-1 gate. Both fixtures below claim a rung-4
-  // implementation the real providers do not have; the ONLY difference between them is whether the
-  // entry advertises rung 1. Mage-Flow does not (the epic's uncovered-rung-1 set), SANA does. If the
-  // rung-4 arm stopped consulting `stagedResidencyIsAvailable`, the Mage-Flow half would go green.
+test("the rung-1 predicate reaches exactly the families whose provider declares that edge", async () => {
+  // AC5 as a behavioural property rather than a source-text convention, and the direct mutation
+  // check for the defect: switch the arm back to a blanket `stagedResidencyIsAvailable` and every
+  // record becomes sensitive, so the 19 that declare no edge fail here; drop the predicate entirely
+  // and the 21 that do declare one fail. The expectation is each record's own prerequisite list —
+  // the gate's own predicate — so there is nothing to keep in step by hand.
+  const declares = await declaredRung1Edges();
+  const records = await prerequisitesFixture();
+  const context = (rung1Available) => ({
+    backend: "candle",
+    // A Candle lane, because `stagedResidencyIsAvailable` reads its answer off the manifest block
+    // there, which makes the two contexts differ in exactly one fact.
+    model: { id: "fixture", candle: rung1Available ? { supportsSequentialOffload: true } : {} },
+    route: { engine: "fixture" },
+    sequentialEngines: new Set(),
+    manifestById: new Map(),
+  });
+
+  let sensitive = 0;
+  let insensitive = 0;
+  for (const [group, family] of Object.entries(records.families)) {
+    for (const [backend, record] of Object.entries(family.backends)) {
+      const key = `${group}:${backend}`;
+      const withRung1 = rung4ContractAdmits(record, context(true));
+      const withoutRung1 = rung4ContractAdmits(record, context(false));
+      assert.equal(
+        withRung1 !== withoutRung1,
+        declares.get(key),
+        `${family.name} (${backend}): the gate's sensitivity to rung-1 availability must match ` +
+          "whether this provider appends that edge",
+      );
+      if (withRung1 !== withoutRung1) sensitive += 1;
+      else insensitive += 1;
+    }
+  }
+  assert.ok(sensitive > 0 && insensitive > 0, "both branches must be occupied or this grades nothing");
+});
+
+test("a rung-4 implementation claim survives an absent rung 1 exactly when the provider allows it", async () => {
+  // The same property end to end, through the real generator. Three lanes, each claiming a rung-4
+  // implementation the real provider does not have:
   //
-  // sc-18664 corrected what this gate IS. It is not `gen_core::memory_strategy`'s shared
-  // prerequisite: SC-15998 removed that rung-1 edge and left `LoadShape::DeferredMaterialization` as
-  // rung 4's only shared one. It is a proxy for the edge INDIVIDUAL providers append through
-  // `additional_prerequisites` — mlx-gen-anima and mlx-gen-chroma push exactly this rung-1 edge when
-  // the load is streamable, while mlx-gen-bernini deliberately pushes none — applied uniformly
-  // because the survey carries no per-(family, backend) record of those edges to apply it from. The
-  // proxy is inert on today's catalog: removing both call sites regenerates a byte-identical
-  // artifact. This test pins the behaviour that exists; the survey's notes carry the divergence.
+  //   Mage-Flow MLX     appends the rung-1 edge, cannot stage  -> refused
+  //   SenseNova U1 MLX  appends none,             cannot stage  -> HONOURED (this is the arm that
+  //                                                               reds if the blanket proxy returns)
+  //   SANA MLX          appends the rung-1 edge,  can stage     -> honoured (so the refusal above is
+  //                                                               about the prerequisite, not about
+  //                                                               the claim being ignored)
   const claimImplemented = async (group, entry) => {
     const survey = await surveyFixture();
     const verdict = survey.families[group].backends.mlx;
@@ -1837,30 +1927,202 @@ test("the rung-1 gate holds the rung-4 claim, and is the ONLY thing separating t
       );
     return { rung1: of("staged_residency"), rung4: of("bounded_transformer_residency") };
   };
+  const declares = await declaredRung1Edges();
 
-  const withoutRung1 = await claimImplemented("15509", "mage_flow");
-  assert.ok(withoutRung1.rung1.length > 0 && withoutRung1.rung4.length > 0);
+  assert.equal(declares.get("15509:mlx"), true, "fixture assumes Mage-Flow MLX appends the edge");
+  const heldBack = await claimImplemented("15509", "mage_flow");
+  assert.ok(heldBack.rung1.length > 0 && heldBack.rung4.length > 0);
   assert.ok(
-    withoutRung1.rung1.every((cell) => cell.state === "Missing"),
+    heldBack.rung1.every((cell) => cell.state === "Missing"),
     "fixture assumes Mage-Flow advertises no MLX rung 1",
   );
   assert.ok(
-    withoutRung1.rung4.every((cell) => cell.state === "Missing"),
-    "a rung-4 implementation claim must not survive an absent rung-1 prerequisite",
+    heldBack.rung4.every((cell) => cell.state === "Missing"),
+    "a rung-4 claim must not survive an absent rung 1 where the provider declares that edge",
   );
 
-  const withRung1 = await claimImplemented("15523", "sana_1600m");
+  assert.equal(declares.get("15513:mlx"), false, "fixture assumes SenseNova MLX appends no edge");
+  const exempt = await claimImplemented("15513", "sensenova_u1_8b");
   assert.ok(
-    withRung1.rung1.every((cell) => cell.state === "Implemented/unverified"),
-    "fixture assumes SANA advertises MLX rung 1",
+    exempt.rung1.every((cell) => cell.state === "Missing"),
+    "fixture assumes SenseNova advertises no MLX rung 1 either",
   );
   assert.ok(
-    withRung1.rung4.every(
+    exempt.rung4.every(
       (cell) =>
         cell.state === "Implemented/unverified" &&
         cell.strategyParameters.transformerWindowSize === 1,
     ),
-    "with the prerequisite present the same claim IS honoured — so the assertion above is not vacuous",
+    "a provider that appends no rung-1 edge must not be held back by one — this is the cell the " +
+      "blanket proxy got wrong",
+  );
+
+  assert.equal(declares.get("15523:mlx"), true, "fixture assumes SANA MLX appends the edge");
+  const satisfied = await claimImplemented("15523", "sana_1600m");
+  assert.ok(
+    satisfied.rung1.every((cell) => cell.state === "Implemented/unverified"),
+    "fixture assumes SANA advertises MLX rung 1",
+  );
+  assert.ok(
+    satisfied.rung4.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.strategyParameters.transformerWindowSize === 1,
+    ),
+    "with the prerequisite satisfied the same claim IS honoured — so the refusal above is not vacuous",
+  );
+});
+
+test("the rung-4 prerequisite records cover every advertised lane, exactly and currently", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const advertised = new Set(
+    matrix.models.flatMap((model) =>
+      model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`),
+    ),
+  );
+  const base = await prerequisitesFixture();
+  const parse = (mutate) => {
+    const records = JSON.parse(JSON.stringify(base));
+    mutate(records);
+    return parseRung4ContractPrerequisites(JSON.stringify(records), {
+      pin: records.inferenceRevision,
+    });
+  };
+  const cover = (mutate) =>
+    assertRung4PrerequisiteRecordsCoverEveryFamily(parse(mutate), matrix.models);
+
+  // The clean file parses and covers every advertised lane, so each rejection below is graded
+  // against a passing baseline rather than against another failure.
+  assert.equal(parse(() => {}).size, advertised.size);
+  assert.doesNotThrow(() => cover(() => {}));
+
+  // Each guard mutated individually — a set-wide mutation would prove the set, not the members.
+  const anyGroup = Object.keys(base.families)[0];
+  assert.throws(
+    () =>
+      cover((records) => {
+        delete records.families[anyGroup].backends.mlx;
+      }),
+    /has no mlx rung-4 contract-prerequisite record/,
+  );
+  assert.throws(
+    () =>
+      cover((records) => {
+        records.families["99999"] = {
+          name: "invented",
+          backends: { mlx: { crate: "x", additionalPrerequisites: [] } },
+        };
+      }),
+    /the record reaches no cell/,
+  );
+  assert.throws(
+    () =>
+      parseRung4ContractPrerequisites(JSON.stringify(base), {
+        pin: "0".repeat(40),
+      }),
+    /is keyed to .* but Cargo pins/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.additionalPrerequisites = [
+          { kind: "invented-kind", source: "x" },
+        ];
+      }),
+    /has no evaluator in this gate/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        delete records.families[anyGroup].backends.mlx.additionalPrerequisites;
+      }),
+    /must be an array/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        delete records.families[anyGroup].backends.mlx.crate;
+      }),
+    /must name the inference crate/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.additionalPrerequisites = [
+          { kind: "rung", rung: "staged_residency", scope: "engaged_in_same_request" },
+        ];
+      }),
+    /must cite the provider file/,
+  );
+
+  // ...and the fence is WIRED, not merely correct. The assertions above call it directly, so they
+  // would all stay green if nothing in the generator ran it; this drives the same mutation through
+  // `buildMatrix`.
+  const dropped = JSON.parse(JSON.stringify(base));
+  delete dropped.families[anyGroup].backends.mlx;
+  await assert.rejects(
+    buildMatrix({
+      publish: false,
+      sourceOverrides: { rung4ContractPrerequisites: JSON.stringify(dropped) },
+    }),
+    /rung-4 contract-prerequisite record/,
+  );
+});
+
+test("rung 4's shared LoadShape edge is graded on every declared rung-4 calibration binding", async () => {
+  // The shared half of the prerequisite graph. `rung4ContractAdmits` cannot demote a coordinate on
+  // it — a cell has no load shape — but a calibration BINDING does, and today's rung-4 bindings
+  // carry `deferred_materialization` while their rungs 0-3 siblings carry `eager_materialization`.
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile(new URL(`../${SOURCE_PATHS.manifest}`, import.meta.url), "utf8")),
+  );
+  const images = manifest.models.filter((model) => model.type === "image");
+  const rung4Bindings = images.flatMap((model) =>
+    ["mlx", "candle"].flatMap((backend) =>
+      (model[backend]?.calibrations ?? []).filter(
+        (binding) => binding.rung === "bounded_transformer_residency",
+      ),
+    ),
+  );
+  // Non-vacuity, derived: with no rung-4 binding in the catalog the guard would grade nothing and
+  // stay green forever.
+  assert.ok(rung4Bindings.length > 0, "the catalog declares no rung-4 calibration binding to grade");
+  assert.doesNotThrow(() => assertRung4CalibrationsDeclareTheRequiredLoadShape(images));
+
+  // ...and it bites. Mutate ONE binding's load shape to the shape rung 4's shared edge forbids.
+  const mutated = JSON.parse(JSON.stringify(images));
+  const target = mutated
+    .flatMap((model) =>
+      ["mlx", "candle"].flatMap((backend) => model[backend]?.calibrations ?? []),
+    )
+    .find((binding) => binding.rung === "bounded_transformer_residency");
+  target.loadShape = "eager_materialization";
+  assert.throws(
+    () => assertRung4CalibrationsDeclareTheRequiredLoadShape(mutated),
+    /rung 4's shared prerequisite requires deferred_materialization/,
+  );
+
+  // The required shape is READ OUT OF the gate's constant, not restated in the guard.
+  assert.deepEqual(
+    SHARED_RUNG4_PREREQUISITES.map((prerequisite) => prerequisite.kind),
+    ["load-shape"],
+  );
+
+  // ...and it is WIRED. The assertions above call the guard directly and would all stay green if
+  // nothing in the generator ran it, so the same mutation is driven through `buildMatrix` — through
+  // the JSONC manifest, which is the form the generator actually reads.
+  const manifestBody = await readFile(
+    new URL(`../${SOURCE_PATHS.manifest}`, import.meta.url),
+    "utf8",
+  );
+  const eager = manifestBody.replace(
+    /"loadShape": "deferred_materialization"/,
+    '"loadShape": "eager_materialization"',
+  );
+  assert.notEqual(eager, manifestBody, "the manifest fixture must actually change");
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { manifest: eager } }),
+    /rung 4's shared prerequisite requires deferred_materialization/,
   );
 });
 
@@ -2194,9 +2456,19 @@ test("the ban on the removed rung-1 claim reaches the generator's OWN prose, not
   // the "one half of a pair moved" defect, so the generator's own source is now scanned too.
   const source = await readFile(new URL("./generate-memory-matrix.mjs", import.meta.url), "utf8");
   assertGeneratorSourceDoesNotRestateTheRemovedEdge(source);
-  // The corrected docstring says what the note says: a proxy for a provider-appended edge, not the
-  // contract rule, with the contract's actual sole prerequisite named.
-  assert.match(source, /BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES` is\n \* `&\[MemoryStrategyPrerequisite::LoadShape\(LoadShape::DeferredMaterialization\)\]`/);
+  // The generator's prose names rung 4's actual sole shared prerequisite, and names the constant it
+  // comes from. sc-19542 moved that statement from the `stagedResidencyIsAvailable` docstring — where
+  // it described a proxy — onto `SHARED_RUNG4_PREREQUISITES`, which is the gate's own copy of it, so
+  // the value is asserted as a VALUE here rather than only as prose.
+  assert.match(source, /BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES/);
+  assert.match(
+    source,
+    /`&\[MemoryStrategyPrerequisite::LoadShape\(LoadShape::DeferredMaterialization\)\]`/,
+  );
+  assert.deepEqual(
+    SHARED_RUNG4_PREREQUISITES.map((prerequisite) => [prerequisite.kind, prerequisite.shape]),
+    [["load-shape", "deferred_materialization"]],
+  );
   assert.match(source, /additional_prerequisites/);
 
   // The exact text the review found, verbatim from the pre-correction docstring and wrapped across
@@ -3031,6 +3303,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     mutate(next.providers);
     return JSON.stringify(next, null, 2);
   };
+  // sc-19542: the rung-4 prerequisite records are keyed to the pin the same way the closures are, so
+  // a moved-pin fixture has to re-key both or generation fails on the stale-config guard before it
+  // reaches the currency question this test is about.
+  const prerequisitesOnMovedPin = JSON.stringify({
+    ...(await prerequisitesFixture()),
+    inferenceRevision: movedPin,
+  });
 
   const pinOnlyQwen = await buildMatrix({
     publish: false,
@@ -3038,6 +3317,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
+      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures(() => {}),
     },
   });
@@ -3053,6 +3333,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
+      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:z_image_turbo"].digest = "f".repeat(64);
       }),
@@ -3070,6 +3351,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
+      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:qwen_image"].digest = "e".repeat(64);
       }),
