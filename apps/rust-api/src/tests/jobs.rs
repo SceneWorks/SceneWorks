@@ -7534,7 +7534,7 @@ fn every_declared_video_capability_is_submittable() {
 /// whose numbers the test itself chose (sc-17159 — a seeded probe would prove the ROUTE works, not
 /// that the shipped family is reachable).
 async fn shipped_manifest_app(temp_dir: &tempfile::TempDir) -> (axum::Router, String) {
-    shipped_manifest_app_on_os(temp_dir, std::env::consts::OS).await
+    shipped_manifest_app_on_os(temp_dir, "macos").await
 }
 
 /// The same app, told it is running on `os` (sc-19570). The ONLY difference from
@@ -7543,9 +7543,14 @@ async fn shipped_manifest_app(temp_dir: &tempfile::TempDir) -> (axum::Router, St
 ///
 /// It exists because macOS structurally cannot detect the defect sc-19570 fixed by running on
 /// itself: the per-mode reachability gate refuses exactly what no Windows/Linux lane will claim,
-/// and on a Mac that branch never executes. A guard that could only run off-Mac would never run —
-/// CI's rust lane is macOS — so its only evidence would be its own doc comment. Same precedent as
-/// sc-17227: tag the fixture with the FOREIGN OS so the check runs everywhere.
+/// and on a Mac that branch never executes. Tagging the fixture with the FOREIGN OS is what makes
+/// the check run everywhere, on the sc-17227 precedent.
+///
+/// The OS is always passed explicitly — never read from `std::env::consts::OS`. The two lanes that
+/// run this suite disagree (`parity-rust` is `ubuntu-latest`, the hosted workspace job is macOS),
+/// so reading the runner would make every assertion here mean something different depending on
+/// which lane executed it. [`shipped_manifest_app`] therefore pins macOS and these guards pin the
+/// foreign OS, and both lanes reach the same verdict.
 async fn shipped_manifest_app_on_os(
     temp_dir: &tempfile::TempDir,
     os: &str,

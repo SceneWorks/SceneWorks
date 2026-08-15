@@ -169,9 +169,17 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mlx_enforce_unsupported: false,
         candle_required: false,
         candle_enforce_unsupported: false,
-        // The real host OS by default, so every existing test keeps judging the platform it runs
-        // on; the sc-19570 off-Mac guards override it with a FOREIGN one.
-        host_os: std::env::consts::OS.to_owned(),
+        // Pinned to macOS rather than `std::env::consts::OS`, so the suite judges the SAME platform
+        // on every lane. The sc-19570 gate refuses MLX-only pairs off-Mac, and the tests that
+        // submit them are asserting mode-admission semantics ("the manifest declares it, so it is
+        // accepted"), not a claim about the runner — reading the real OS made those assertions mean
+        // different things on different lanes and turned seven of them red on `parity-rust`, which
+        // runs on `ubuntu-latest` and not, as sc-19570 assumed, on macOS.
+        //
+        // This cannot weaken the Mac lane: there `std::env::consts::OS` is already "macos", so the
+        // value is unchanged. The off-Mac guards do not rely on this default — they set a FOREIGN
+        // OS explicitly through `shipped_manifest_app_on_os`, which is what gives them their reach.
+        host_os: "macos".to_owned(),
         trust_loopback: false,
         // Placeholder for oneshot tests (the MCP self-client never dials it);
         // the live-listener MCP tests overwrite it with the bound address.
