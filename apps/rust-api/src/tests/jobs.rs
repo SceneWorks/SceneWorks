@@ -7542,9 +7542,15 @@ async fn shipped_manifest_app(temp_dir: &tempfile::TempDir) -> (axum::Router, St
 /// `std::env::consts::OS`.
 ///
 /// It exists because macOS structurally cannot detect the defect sc-19570 fixed by running on
-/// itself: the per-mode reachability gate refuses exactly what no Windows/Linux lane will claim,
-/// and on a Mac that branch never executes. Tagging the fixture with the FOREIGN OS is what makes
-/// the check run everywhere, on the sc-17227 precedent.
+/// itself: the per-mode reachability sweep terminates exactly what no Windows/Linux lane will
+/// claim, and on a Mac that branch never executes. Tagging the fixture with the FOREIGN OS is what
+/// makes the check run everywhere, on the sc-17227 precedent.
+///
+/// What varies with `os` is the JOB's outcome, never the response. `POST /api/v1/video/jobs`
+/// answers `201` for the same body on every value passed here — that is asserted directly by
+/// [`the_video_enqueue_contract_is_identical_on_every_platform`] — and only the created job's
+/// `status` differs. A guard that expects a different STATUS CODE per `os` is asserting the shape
+/// this story removed.
 ///
 /// The OS is always passed explicitly — never read from `std::env::consts::OS`. The two lanes that
 /// run this suite disagree (`parity-rust` is `ubuntu-latest`, the hosted workspace job is macOS),
@@ -8318,6 +8324,53 @@ async fn the_video_enqueue_contract_is_identical_on_every_platform() {
                 "{model} + {mode} on {os}: 201 must carry a job snapshot: {body}"
             );
         }
+    }
+}
+
+/// The cross-runtime PARITY fixture, pinned here so its platform-independence is proved by a test
+/// that runs on every lane (sc-19570).
+///
+/// `tests/test_rust_api_contract_snapshots.py::test_person_tracking_and_replace_person_contracts`
+/// submits this exact body and snapshots the whole response, including the job's `status`, `stage`
+/// and `error`. That suite runs on `ubuntu-latest` only, so a fixture whose job outcome depends on
+/// the host records a Linux-shaped snapshot no other lane can reproduce — and it did: the fixture
+/// used to omit `model`, inheriting the catalog default `ltx_2_3`, whose `replace_person` is
+/// MLX-only and now terminates at once off-Mac.
+///
+/// `wan_2_2` serves `replace_person` on both lanes, so this asserts `201` AND `queued` on all
+/// three platforms. If someone repoints that fixture at an MLX-only model, this goes red on a Mac
+/// developer's machine instead of only on the Linux CI lane hours later.
+#[tokio::test]
+async fn the_parity_replace_person_fixture_is_platform_independent() {
+    for os in ["macos", "windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "projectName": "Parity Project",
+                "model": "wan_2_2",
+                "mode": "replace_person",
+                "prompt": "hero walks through rain",
+                "sourceClipAssetId": "asset-video",
+                "personTrackId": "track_fixture",
+                "characterId": "character_fixture",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "on {os}: {body}");
+        assert_eq!(
+            body["status"], "queued",
+            "the parity fixture must enqueue identically on every platform, or its snapshot is \
+             only reproducible on the lane that recorded it — on {os}: {body}"
+        );
+        assert!(
+            body["error"].is_null(),
+            "on {os} the parity fixture must carry no error: {body}"
+        );
     }
 }
 

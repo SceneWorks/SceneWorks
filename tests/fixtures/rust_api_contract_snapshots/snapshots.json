@@ -2671,7 +2671,7 @@
       "lastFrameAssetId": null,
       "loras": [],
       "mode": "replace_person",
-      "model": "ltx_2_3",
+      "model": "wan_2_2",
       "modelManifestEntry": {},
       "negativePrompt": "",
       "personTrackId": "track_fixture",

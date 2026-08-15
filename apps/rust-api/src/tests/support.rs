@@ -170,11 +170,16 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         candle_required: false,
         candle_enforce_unsupported: false,
         // Pinned to macOS rather than `std::env::consts::OS`, so the suite judges the SAME platform
-        // on every lane. The sc-19570 gate refuses MLX-only pairs off-Mac, and the tests that
-        // submit them are asserting mode-admission semantics ("the manifest declares it, so it is
-        // accepted"), not a claim about the runner — reading the real OS made those assertions mean
-        // different things on different lanes and turned seven of them red on `parity-rust`, which
-        // runs on `ubuntu-latest` and not, as sc-19570 assumed, on macOS.
+        // on every lane. The two lanes that run it disagree — `parity-rust` is `ubuntu-latest`, the
+        // hosted workspace job is macOS — and reading the runner made every video assertion here
+        // mean something different depending on which one executed it.
+        //
+        // sc-19570's per-mode reachability verdict no longer changes a STATUS CODE (an HTTP
+        // contract is not platform-dependent; the route answers 201 everywhere), so this pin is no
+        // longer load-bearing for the seven admission tests it was introduced for. It still matters
+        // for the JOB state those tests observe: off-Mac an MLX-only pair comes back terminal
+        // `failed` rather than `queued`, which is correct behaviour and a moving target for a test
+        // asserting mode admission. Pinning keeps that variable out of tests that are not about it.
         //
         // This cannot weaken the Mac lane: there `std::env::consts::OS` is already "macos", so the
         // value is unchanged. The off-Mac guards do not rely on this default — they set a FOREIGN
