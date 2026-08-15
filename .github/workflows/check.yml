@@ -251,6 +251,14 @@ jobs:
             git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
           done < <(node scripts/backfill-closure-digests.mjs --revisions)
           node scripts/backfill-closure-digests.mjs --repo "$RUNNER_TEMP/inference" --verify
+          # sc-19542: the same posture for the rung-4 prerequisite records. `npm run check` can only
+          # assert that config/rung4-contract-prerequisites.json is KEYED to the live pin; whether
+          # the recorded `additional_prerequisites` edges are the ones each provider actually
+          # appends needs inference's source, which a SceneWorks checkout does not contain. The
+          # pinned tree is already fetched above, so re-deriving all 40 records costs seconds. The
+          # memory matrix's rung-4 arm admits cells from these records, so a record nothing grades
+          # is the same fail-open shape the blanket rung-1 proxy was.
+          node scripts/rung4-contract-prerequisites.mjs --repo "$RUNNER_TEMP/inference" --check
 
   # Split out because the smoke recompiles the whole workspace inside BuildKit and shares
   # nothing with the host's rust-cache — ~7m that used to land at the END of a 14m serial job,

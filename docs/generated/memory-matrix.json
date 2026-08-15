@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:37809aeff04aa641050414a531bbead8f1c5aad843dad771595aea15db98ce89",
+    "sceneWorksRevision": "source-tree:760e7a8f501a6bb5a877723ab6bc3e79cf6a4d0aa64fd093fb76602f1ba2b198",
     "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2376217958e576aa43912a0ffabb9302e030c9f993dce5d5bf7da7b5e1b8a68f"
+        "sha256": "3af47d21079ca99dc7e36eaee5347adc3226dcfa0ad103c71f3fe486aa3e774e"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -58,7 +58,11 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "16030374a9344c69e0325225ffe9706549386282548a53fbb4ab45efac8f4820"
+        "sha256": "ae1c058ee60040c38e3bae4c733ed269c7a8c60cccb454105a35344e362bb456"
+      },
+      "rung4ContractPrerequisites": {
+        "path": "config/rung4-contract-prerequisites.json",
+        "sha256": "54f063895770caa04c91c7b6a7017fb5379e3e23fab29b22729bf3cdf59059e2"
       },
       "cargo": {
         "path": "Cargo.toml",
