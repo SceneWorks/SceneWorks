@@ -24,8 +24,8 @@ Two entries ship from the same family:
 > - **H3-Regenerate-2K**, the in-context 2K upscaler. **2K is not reachable from these weights.** The
 >   checkpoint's canvas budget is about 1.03 megapixels — 1344x768 at 16:9 — and a request over the
 >   budget is refused rather than refitted. A 2K frame is more than twice that area, so plan the
->   shot at the sizes below. (The 21:9 pair is the same 1.03 MP, but its long edge is wider than the
->   engine's current per-edge cap — see *Sizes*.)
+>   shot at the sizes below — and note that the bound is the AREA, so a wider canvas buys you a
+>   shorter one rather than more pixels.
 > - **Sparse-attention inference.** The open weights run *dense* attention, which is why renders are
 >   measured in hours at the large canvas. It is not what caps the clip at 14.38 s — that ceiling is
 >   the checkpoint's own — but it is why the long end of the range is expensive.
@@ -79,13 +79,11 @@ budget. Ratios between 1:4 and 4:1 are accepted.
 | 1024x768 / 768x1024 | 4:3 and 3:4. |
 | 768x768 | Square. |
 | 1344x768 / 768x1344 | Full size, 16:9 and 9:16. The default, and the expensive one. |
-| 1536x672 / 672x1536 | 21:9 and its transpose. Same pixel budget as full size, same cost. **Not yet renderable — see below.** |
+| 1536x672 / 672x1536 | 21:9 and its transpose. Same pixel budget as full size, same cost. |
 
-> **The 21:9 pair needs an engine change that has not landed.** The area budget accommodates it —
-> 1536 x 672 is the same 1.03 MP as the 16:9 default — but the engine caps each *edge* at 1344
-> independently of the area, so a 1536-wide request is refused today even though the menu offers it.
-> Raising that cap to 1536 is tracked as **sc-17152**; until it merges, treat 1344x768 as the widest
-> canvas that actually renders. Every other bucket in the table is reachable now.
+Every bucket in the table is the same fixed area budget or less — the 21:9 pair is 1,032,192 px,
+byte for byte what 1344x768 is. **The bound is the area, not the long edge**, which is why a wider
+canvas is not automatically a bigger one.
 
 A keyframe is **stretched** onto the canvas, not letterboxed — crop your reference to the target
 shape first or the subject will distort.

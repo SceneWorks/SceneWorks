@@ -13367,13 +13367,23 @@
         //      `docs/reference/minimax-h3-withheld-upstream-components.md`.
         //
         //      ⚠️ DO NOT cite `max_size: 1344` as the 2K argument, which this comment previously
-        //      did — it contradicted this entry's own `limits.resolutions`. The per-edge cap is a
-        //      SEPARATE, independently-applied bound (see the `resolutions` note above), and it is
-        //      1344 today while the advertised 21:9 pair is 1536 px on the long edge. So
-        //      `1536x672` / `672x1536` are ADVERTISED BUT NOT YET RENDERABLE: the area passes and
-        //      the edge check refuses. sc-17152 raises the cap to 1536 and is the story that makes
-        //      those two buckets true; the prompt guide's *Sizes* section carries the same caveat
-        //      for the user. Every other advertised bucket is reachable now.
+        //      did. It read as a contradiction against this entry's own `limits.resolutions`, which
+        //      advertises `1536x672` / `672x1536` — 1536 > 1344 on the long edge — so the same PR
+        //      appeared to assert a 1344 per-edge ceiling and a 1536-wide bucket at once. The area
+        //      budget is the argument that actually carries the 2K claim and is not in tension with
+        //      anything, so it is the one stated above.
+        //
+        //      What the per-edge value IS for this family is NOT decidable from this repository and
+        //      is deliberately not asserted here in either direction. `pinned_engine_geometry.rs`
+        //      classifies both partitions `PinnedAreaCap::NotInThePinnedBundle` — the inference pin
+        //      (014134e3) carries no importable `providers::minimax_h3`, so
+        //      `shipped_manifest_matches_each_engines_real_geometry` cannot compare this entry's
+        //      geometry against the engine's at all. The only in-repo evidence about the 21:9 pair
+        //      is the `resolutions` note above, which records `1536x672` as a MEASURED
+        //      `resolve_canvas_size` output — i.e. a value the engine's own resolver produced, which
+        //      is evidence FOR reachability, not against it. sc-18650's pin bump makes the guard
+        //      importable and is what will settle it; until then neither the copy nor this comment
+        //      should claim the pair is refused.
         //   2. Dense attention, because the sparse-attention inference path is unreleased — which
         //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
         //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`
