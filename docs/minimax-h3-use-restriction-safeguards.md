@@ -55,12 +55,12 @@ machine (the remote-access lane, epic 4484), a workflow envelope's suggested act
 
 | Route | Gated? | Where |
 | --- | --- | --- |
-| `POST /api/v1/models/:id/download` | **Yes** — 403 `license_acknowledgment_required` unless the body carries `licenseAcknowledged: true`. Keyed on the catalog **id**. | `create_model_download_job`, `apps/rust-api/src/models.rs` |
+| `POST /api/v1/models/:id/download` | **Yes** — 403 `license_acknowledgment_required` unless the body carries `licenseAcknowledged: true`. Keyed on the catalog **id** *and* on the **repos the job would queue** (the selected download plus its co-requisites), so an entry that names a flagged entry's repo without carrying the flag itself is refused here exactly as it is on `/api/v1/jobs`. | `create_model_download_job`, `apps/rust-api/src/models.rs` |
 | `POST /api/v1/jobs` with `model_download` / `model_import` / `model_convert` / `lora_download` / `lora_import` | **Yes** — same 403 and same code, keyed on the payload's **repo** (and on a huggingface.co `sourceUrl`). | `validate_raw_job_payload`, `apps/rust-api/src/jobs.rs` → `ensure_job_payload_license_acknowledged` |
 | `POST /api/v1/models/import` (JSON) | **Yes** — same 403, same repo-keyed predicate. | `queue_model_import_job`, `apps/rust-api/src/models.rs` |
 | `POST /api/v1/models/import` (multipart) | **Yes** — the same gate, on the same predicate. The form is *not* usable as a bare remote fetch: without an upload `file` the parser answers 400 before the gate is reached. But it parses `repo`/`sourceUrl` alongside the file, and the worker prefers `repo` over the uploaded `sourcePath`, so a file-plus-`repo` request does reach the restricted weights — and is refused identically. | `model_import_request_from_multipart`, `apps/rust-api/src/models.rs` |
 | `POST /api/v1/loras/import` | **Yes** — same 403, same repo-keyed predicate. This route takes a caller-supplied `repo`/`sourceUrl` and **never consults the LoRA catalog** for it, so what the LoRA catalog declares has no bearing on what it can reach. | `queue_lora_import_job`, `apps/rust-api/src/loras.rs` |
-| `POST /api/v1/loras/:id/download` | **No gate needed** — it resolves the repo **from the catalog entry** named by the path id and 404s an id the catalog does not contain, so a caller cannot point it at a repo. A licence-restricted LoRA would still need one, since the gate above is keyed on the fetched repo and this route never reads the request for one. | `create_lora_download_job`, `apps/rust-api/src/loras.rs` |
+| `POST /api/v1/loras/:id/download` | **Yes** — same 403, same repo-keyed predicate, on the repo it resolves **from the catalog entry** named by the path id. A caller cannot point this route at a repo (an unknown id 404s, a body `repo` is inert), but that is a claim about who *chooses* the repo, not about whether the chosen repo is restricted — so it was gated. | `create_lora_download_job`, `apps/rust-api/src/loras.rs` |
 
 `model_convert` is on the list for a reason that is not obvious from its payload: it names no `repo`
 at all. Its LTX arm hands the payload's **`baseRepo`** to `ensure_ltx_upscaler_cached` →
@@ -138,12 +138,18 @@ button, and the partially-installed matrix), `apps/web/src/simple/SimpleModelMan
 generic requests against one app instance,
 `license_acknowledgment_model_import_is_refused_for_a_restricted_repo` covers the import route,
 `license_acknowledgment_lora_import_is_refused_for_a_restricted_repo` covers `/loras/import`,
-`license_acknowledgment_lora_download_is_keyed_on_the_catalog_not_the_caller` pins *why*
-`/loras/:id/download` needs no gate (so the row fails if that ever stops being true),
+`license_acknowledgment_lora_download_refuses_a_catalog_named_restricted_repo` covers
+`/loras/:id/download` (a catalog LoRA whose `source.repo` is restricted, plus the weaker
+caller-cannot-supply-a-repo claim it used to pin alone),
+`license_acknowledgment_typed_download_refuses_a_repo_another_entry_declares` constructs the
+entry-without-the-flag case on `/models/:id/download`,
 `license_acknowledgment_model_convert_is_refused_for_a_restricted_base_repo` covers `baseRepo`, and
 `license_acknowledgment_is_not_bypassed_by_a_git_suffix` covers the `.git` spelling. The
 manifest declarations are pinned by
-`tests/test_builtin_manifest_audit.py::test_minimax_h3_requires_license_acknowledgment_without_a_credential`.
+`tests/test_builtin_manifest_audit.py::test_minimax_h3_requires_license_acknowledgment_without_a_credential`,
+over a set of ids **derived** from the flag rather than listed, and
+`::test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself` keeps the shipped catalog
+free of the entry-without-the-flag shape.
 
 ### S2 — The user is told which restrictions apply, in the gate itself (§V.2 notification)
 
@@ -305,6 +311,3 @@ Two things remain, and neither is an engineering task:
    ticks the box is still not authorized. Whether SceneWorks ships the family publicly, ships it
    disabled by default, or does not ship it, is a ship/no-ship call that depends on item 1 and on
    any further answer from `api@minimax.io`.
-
-Until item 2 is settled, nothing in the user-facing lane should advertise the family; that
-constraint is carried by sc-17227's blocking links to sc-17161, sc-17162 and sc-17240.

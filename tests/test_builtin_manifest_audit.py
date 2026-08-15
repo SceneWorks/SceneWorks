@@ -2460,7 +2460,90 @@ def test_acestep_declares_its_distilled_guidance_axes_explicitly():
 # does not exist, and not declaring it left no gate at all.
 # --------------------------------------------------------------------------------------
 
-MINIMAX_H3_IDS = ("minimax_h3", "minimax_h3_ref")
+# The payload keys the API's licence gate reads when deciding whether a request will fetch a
+# restricted repo — `LICENSE_GATED_REPO_PAYLOAD_KEYS` in apps/rust-api/src/models.rs. Kept in the
+# same order and spelling so a reader can diff the two by eye.
+LICENSE_GATED_REPO_PAYLOAD_KEYS = ("repo", "baseRepo", "sourceRepo")
+
+
+def _license_gated_repos(model):
+    """Every Hugging Face repo `model`'s `downloads` name, canonicalized the way the API's
+    `huggingface_repo_key` canonicalizes: lower-cased, trailing slash and `.git` stripped."""
+    repos = set()
+    for download in model.get("downloads", []):
+        for key in LICENSE_GATED_REPO_PAYLOAD_KEYS:
+            repo = download.get(key)
+            if not isinstance(repo, str):
+                continue
+            repo = repo.strip().rstrip("/").strip()
+            if repo.lower().endswith(".git"):
+                repo = repo[: -len(".git")].rstrip("/").strip()
+            if repo:
+                repos.add(repo.lower())
+    return repos
+
+
+def _license_acknowledgment_repo_index(models):
+    """`owner/name` -> the id of the entry that declares it, for every repo a
+    `requiresLicenseAcknowledgment` entry names. Mirrors `license_acknowledgment_repo_index` in
+    apps/rust-api/src/models.rs, which is the predicate the running gate uses."""
+    index = {}
+    for model in models:
+        if model.get("requiresLicenseAcknowledgment") is not True:
+            continue
+        for repo in _license_gated_repos(model):
+            index.setdefault(repo, model["id"])
+    return index
+
+
+def _license_acknowledgment_models():
+    """Every catalog entry that must carry the acknowledgment contract, DERIVED from the flag
+    rather than listed.
+
+    This replaced a hard-coded `MINIMAX_H3_IDS = ("minimax_h3", "minimax_h3_ref")`. A tuple of ids
+    inside an audit whose job is to catch entries nobody remembered to list is self-defeating: a
+    new entry simply is not in the tuple, every loop below skips it, and CI stays green. Zero ids
+    are maintained here — add a flagged entry to the manifest and it is audited on the next run.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    flagged = {
+        model["id"]: model
+        for model in models
+        if model.get("requiresLicenseAcknowledgment") is True
+    }
+    # Without this the loops below iterate an empty dict and pass vacuously — the failure mode a
+    # derived set has and a literal tuple does not.
+    assert flagged, "no catalog entry declares requiresLicenseAcknowledgment"
+    return flagged
+
+
+def test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself():
+    """An entry that names a restricted repo in its `downloads` but does not itself declare
+    `requiresLicenseAcknowledgment` is a second door onto the same weights.
+
+    `POST /api/v1/models/:id/download` gated on the entry the PATH id names, so such an entry
+    downloaded those weights ungated while `POST /api/v1/jobs` naming the same repo answered 403.
+    The route now also consults the repo index (sc-17227), so this is no longer the only thing
+    standing between that shape and the weights — but the manifest is where the shape is authored,
+    and a shared restricted repo across two entries is one authoring decision away: the manifest
+    already uses co-requisite rows naming a shared repo for several families.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    index = _license_acknowledgment_repo_index(models)
+    assert index, "no repo is licence-gated; this guard would pass vacuously"
+
+    offenders = {}
+    for model in models:
+        if model.get("requiresLicenseAcknowledgment") is True:
+            continue
+        shared = sorted(_license_gated_repos(model) & index.keys())
+        if shared:
+            offenders[model["id"]] = [(repo, index[repo]) for repo in shared]
+
+    assert not offenders, (
+        "these entries name a licence-gated repo without declaring "
+        f"requiresLicenseAcknowledgment themselves: {offenders}"
+    )
 
 
 def test_minimax_h3_requires_license_acknowledgment_without_a_credential():
@@ -2470,9 +2553,7 @@ def test_minimax_h3_requires_license_acknowledgment_without_a_credential():
     screen would render "Add token in Settings" and "Request access on Hugging Face" for a
     credential and an access page that do not exist.
     """
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    for model_id in MINIMAX_H3_IDS:
-        entry = models[model_id]
+    for model_id, entry in _license_acknowledgment_models().items():
         assert entry["requiresLicenseAcknowledgment"] is True, model_id
         assert entry.get("gated") is not True, f"{model_id}: MiniMaxAI/MiniMax-H3 is a PUBLIC repo"
         assert "credentialHost" not in entry, model_id
@@ -2483,12 +2564,13 @@ def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
     """§V.2 requires notifying the user that the use restrictions apply — a bare "accept the
     license" checkbox does not. The notice must name the FOUR terms that decide whether the user
     may use the model at all, so assert on the SUBSTANCE, not on the field being non-empty."""
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    for model_id in MINIMAX_H3_IDS:
-        notice = models[model_id]["licenseNotice"]
+    for model_id, entry in _license_acknowledgment_models().items():
+        notice = entry["licenseNotice"]
         # §II / §I.9 — the licence binds the user, not only SceneWorks.
         assert "NON-TRANSFERABLE" in notice, model_id
-        # §I.5 / §V.4 — every Excluded Territory, named. A partial list would mislead.
+        # §I.5 / §V.4 — the agreement's DEFAULT Applicable Territory, every excluded region named.
+        # A partial list would mislead. These are named as the agreement's default scope, which is
+        # what the §II authorization below is an authorization beyond.
         for territory in (
             "European Union",
             "United Kingdom",
@@ -2496,9 +2578,17 @@ def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
             "United States of America",
         ):
             assert territory in notice, f"{model_id}: {territory} missing from licenseNotice"
-        # §II — the Excluded-Territory scope is "not yet", not "not ever": the agreement invites
-        # anyone there to ask about a licence. Omitting the route would make the territory line
-        # read as a flat, permanent bar.
+        # §II — the authorization SceneWorks holds, stated as the settled position it is. The copy
+        # this replaced described the territory scope as an OPEN question and pointed the reader at
+        # MiniMax to ask about obtaining a licence, which stopped being true once the grant was
+        # given (recorded verbatim on sc-17227). Both halves are pinned — the positive statement,
+        # and the two phrases of the superseded framing — so restoring the old copy fails here
+        # rather than silently reinstating a stale claim in shipped user-facing text.
+        assert "authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works" in notice, model_id
+        assert "the licence does not authorize use of the model" not in notice, model_id
+        assert "welcome to contact MiniMax about obtaining a licence" not in notice, model_id
+        # The contact address survives the rewrite: it is the agreement's own, and a reader's
+        # question about their OWN use still goes there.
         assert "api@minimax.io" in notice, model_id
         # §V.1 + Exhibit A item 12 — the disclosure obligation SceneWorks does NOT discharge for
         # the user (nothing in the app marks output as machine-generated), so it must be stated.
@@ -2550,9 +2640,8 @@ def test_minimax_h3_shipped_notice_names_the_same_restrictions():
 def test_minimax_h3_declares_the_section_iv_2_ui_attribution():
     """§IV.2: "You shall prominently display 'MiniMax H3' on the user interface". The exact string
     with a SPACE — the hyphenated `MiniMax-H3` product name does not contain it."""
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    for model_id in MINIMAX_H3_IDS:
-        attribution = models[model_id]["ui"]["attribution"]
+    for model_id, entry in _license_acknowledgment_models().items():
+        attribution = entry["ui"]["attribution"]
         assert "MiniMax H3" in attribution, model_id
         assert attribution == "Powered by MiniMax H3", model_id
 

@@ -75,6 +75,26 @@ pub(crate) async fn create_lora_download_job(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad_request("LoRA download source is missing a repo"))?
         .to_owned();
+    // Licence acknowledgment, keyed on the repo this download will FETCH (sc-17227) — the same
+    // predicate `POST /api/v1/jobs`, `/models/import` and `/loras/import` apply.
+    //
+    // This route had no licence check of any kind, which made it asymmetric with
+    // `create_model_download_job`: that route gates on its catalog entry, this one did not gate at
+    // all. The reason previously recorded for leaving it alone — that the repo comes from the
+    // catalog entry the path id names, so "a caller cannot supply a repo" — answers a different
+    // question. Who CHOOSES the repo is not who is bound by its licence: a catalog LoRA whose
+    // `source.repo` names a repo a `requiresLicenseAcknowledgment` model declares would have been
+    // fetched here with no acknowledgment, while the identical `lora_download` job posted to
+    // `/api/v1/jobs` was answered 403. Unreachable in the shipped LoRA catalog today; the route
+    // comment above notes the on-demand pull at first generation, which is the path that would
+    // surface it.
+    crate::models::ensure_license_acknowledged_for_source(
+        &state,
+        &[Some(repo.as_str())],
+        None,
+        payload.license_acknowledged,
+    )
+    .await?;
     // A single `file` or an explicit `files` list narrows the snapshot to the adapter
     // weights; an empty list lets the worker fetch the (small) repo.
     let mut files: Vec<String> = Vec::new();
@@ -120,6 +140,15 @@ pub(crate) async fn create_lora_download_job(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo));
     job_payload.insert("files".to_owned(), json!(files));
+    // Record the acknowledgment ON the job (sc-17227), for the reason `create_model_download_job`
+    // does: RETRY and DUPLICATE re-run `validate_raw_job_payload` over the STORED payload, and the
+    // repo-keyed gate there would otherwise refuse a download this route had already authorized.
+    if payload.license_acknowledged {
+        job_payload.insert(
+            crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
     if let Some(revision) = source
         .and_then(|source| source.get("revision"))
         .or_else(|| lora.get("revision"))

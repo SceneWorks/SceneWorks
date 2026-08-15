@@ -734,6 +734,51 @@ pub(crate) async fn create_model_download_job(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
+    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
+    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
+    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
+    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
+    let selected_variant = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let co_requisites =
+        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref());
+
+    // The REPO-keyed half of the same gate (sc-17227). The check above is keyed on the catalog id
+    // in the PATH, so it fires only when the entry that id names declares
+    // `requiresLicenseAcknowledgment` itself. Every other door — `POST /api/v1/jobs`,
+    // `/models/import`, `/loras/import` — is keyed on the repo the request will FETCH, resolved
+    // against `license_acknowledgment_repo_index`. That asymmetry left two doors onto one set of
+    // weights: an entry that does not carry the flag but whose `downloads` name a repo a flagged
+    // entry declares would have been fetched here while the generic queue answered 403 for the same
+    // repo. Shared co-requisite rows are exactly that shape, and the manifest already uses it.
+    //
+    // Unreachable in the shipped catalog today — every restricted repo reference lives inside an
+    // entry that carries the flag, and the manifest audit's
+    // `test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself` keeps it that way —
+    // but that is a property of the current manifest, not of this route. An
+    // ADDITION, not a replacement: the id check above keeps its own refusal text, which names the
+    // model the caller asked for rather than the repo that supplies it.
+    let queued_repos: Vec<String> = std::iter::once(&download)
+        .chain(co_requisites.iter())
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let queued_repos: Vec<Option<&str>> = queued_repos
+        .iter()
+        .map(|repo| Some(repo.as_str()))
+        .collect();
+    ensure_license_acknowledged_for_source(
+        &state,
+        &queued_repos,
+        None,
+        payload.license_acknowledged,
+    )
+    .await?;
+
     let job_payload = build_model_download_job_payload(
         &model,
         &model_id,
@@ -753,22 +798,11 @@ pub(crate) async fn create_model_download_job(
     // is a different artifact than the model's primary checkpoint and must not be reconciled
     // against the model's family.
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
-    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
-    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
-    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
-    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
-    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
-    let selected_variant = download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    for co_requisite in
-        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref())
-    {
+    for co_requisite in &co_requisites {
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
-            &co_requisite,
+            co_requisite,
             None,
             false,
             &state.settings.data_dir,
