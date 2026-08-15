@@ -15,6 +15,22 @@
       "_latentTokens": 21888,
       "_writableFrameCap": 682,
       "_outputVoxels": 176553984,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 20467690460,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 63328354560,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 141758042240,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -53,6 +69,22 @@
       "_latentTokens": 27280,
       "_writableFrameCap": 297,
       "_outputVoxels": 217169920,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 20467690460,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 77137772800,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 155567460480,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -91,6 +123,22 @@
       "_latentTokens": 33440,
       "_writableFrameCap": 297,
       "_outputVoxels": 267632640,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 20467690460,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 94295097600,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 172724785280,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -129,6 +177,22 @@
       "_latentTokens": 21888,
       "_writableFrameCap": 682,
       "_outputVoxels": 176553984,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 29728720716,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 63328354560,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 151019072496,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -167,6 +231,22 @@
       "_latentTokens": 27280,
       "_writableFrameCap": 297,
       "_outputVoxels": 217169920,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 29728720716,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 77137772800,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 164828490736,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -205,6 +285,22 @@
       "_latentTokens": 33440,
       "_writableFrameCap": 297,
       "_outputVoxels": 267632640,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 29728720716,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 94295097600,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 181985815536,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -243,6 +339,22 @@
       "_latentTokens": 21888,
       "_writableFrameCap": 682,
       "_outputVoxels": 176553984,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 47092811992,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 63328354560,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 168383163772,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -281,6 +393,22 @@
       "_latentTokens": 27280,
       "_writableFrameCap": 297,
       "_outputVoxels": 217169920,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 47092811992,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 77137772800,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 182192582012,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -319,6 +447,22 @@
       "_latentTokens": 33440,
       "_writableFrameCap": 297,
       "_outputVoxels": 267632640,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 47092811992,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 94295097600,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 199349906812,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",
@@ -357,6 +501,22 @@
       "_latentTokens": 7296,
       "_writableFrameCap": 682,
       "_outputVoxels": 57016320,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 47092811992,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 22685548800,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 127740358012,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row"
+      },
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "loadShape": "eager_materialization",

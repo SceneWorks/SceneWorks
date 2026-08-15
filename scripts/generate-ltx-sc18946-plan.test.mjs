@@ -8,8 +8,12 @@ import {
   buildPlans,
   FINGERPRINT,
   INFERENCE_REVISION,
+  INCIDENT_PREDICTED_DECODE_BYTES,
+  Q4_F305_CRASH_FOOTPRINT_BYTES,
   RUNG2_PARAMETERS,
+  SAFETY_DISPOSITIONS,
   SEED,
+  TIER_INVENTORY_BYTES,
   TIERS,
 } from "./generate-ltx-sc18946-plan.mjs";
 
@@ -133,4 +137,41 @@ test("host-risk coverage is explicitly planned rather than absent", () => {
   assert.equal(reproductions[0].target.tier, "bf16");
   assert.deepEqual(reproductions[0].target.geometry, { width: 768, height: 512, batch: 1, frames: 145 });
   assert.match(reproductions[0].fixture, /-fps24-seed18946$/);
+});
+
+test("SC-19642 classifies every row for pre-load refusal without inventing a safe host fraction", () => {
+  const rows = Object.values(plans).flatMap((plan) => plan.providers);
+  assert.equal(Q4_F305_CRASH_FOOTPRINT_BYTES, 96_970_084_480);
+  assert.deepEqual(TIER_INVENTORY_BYTES, {
+    q4: 20_467_690_460,
+    q8: 29_728_720_716,
+    bf16: 47_092_811_992,
+  });
+  for (const row of rows) {
+    const safety = row._measurementSafety;
+    assert.ok(Object.values(SAFETY_DISPOSITIONS).includes(safety.disposition));
+    assert.equal(safety.tierInventoryBytes, TIER_INVENTORY_BYTES[row.target.tier]);
+    assert.equal(safety.incidentCrashFootprintBytes, Q4_F305_CRASH_FOOTPRINT_BYTES);
+    assert.equal(safety.incidentPredictedDecodeBytes, INCIDENT_PREDICTED_DECODE_BYTES);
+    assert.equal(
+      safety.incidentCalibratedProjectionBytes,
+      Q4_F305_CRASH_FOOTPRINT_BYTES
+        + (TIER_INVENTORY_BYTES[row.target.tier] - TIER_INVENTORY_BYTES.q4)
+        + (safety.predictedDecodeBytes - INCIDENT_PREDICTED_DECODE_BYTES),
+    );
+    assert.ok(safety.projectionAssumptions.some((claim) => claim.includes("not a physical-footprint bound")));
+  }
+
+  // Mutation locks the safety terminal itself, not merely the presence of descriptive metadata.
+  const mutated = structuredClone(rows[0]);
+  mutated._measurementSafety.disposition = "capturable";
+  assert.ok(!Object.values(SAFETY_DISPOSITIONS).includes(mutated._measurementSafety.disposition));
+
+  const rung2 = plans["ltx-mlx-rung2-sweep.json"].providers;
+  assert.equal(rung2[0]._measurementSafety.disposition, SAFETY_DISPOSITIONS.INCIDENT_FORBIDDEN);
+  assert.equal(rung2[3]._measurementSafety.disposition, SAFETY_DISPOSITIONS.ARITHMETIC_UNMEASURABLE);
+  assert.ok(rung2.filter((_, index) => index !== 0 && index !== 3).every((row) =>
+    row._measurementSafety.disposition === SAFETY_DISPOSITIONS.SAFETY_REFUSED_OPEN));
+  assert.ok(rows.filter((row) => row.rung === "staged_residency")
+    .every((row) => row._measurementSafety.disposition === SAFETY_DISPOSITIONS.SAFETY_REFUSED_OPEN));
 });

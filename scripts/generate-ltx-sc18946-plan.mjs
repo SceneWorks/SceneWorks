@@ -18,6 +18,24 @@ export const SEED = 18946;
 // at a time, but the checked-in plan must preserve that reviewed operator order too.
 export const TIERS = Object.freeze(["q4", "q8", "bf16"]);
 export const RUNG2_PARAMETERS = Object.freeze({ decodeTileEdge: 384, decodeOverlap: 64 });
+// SC-19642: these are immutable bytes from the exact tier inventories prepared for this campaign.
+// The q4 f305 process later reached the incident footprint below and starved watchdogd. Every row
+// loads its complete tier plus the same Gemma stack before geometry-specific work, so a smaller
+// geometry is not evidence that the common load is safe. There is intentionally no host-size
+// multiplier here: no defensible upper bound or hard containment mechanism has been proved.
+export const TIER_INVENTORY_BYTES = Object.freeze({
+  q4: 20_467_690_460,
+  q8: 29_728_720_716,
+  bf16: 47_092_811_992,
+});
+export const Q4_F305_CRASH_FOOTPRINT_BYTES = 96_970_084_480;
+export const SAFETY_DISPOSITIONS = Object.freeze({
+  INCIDENT_FORBIDDEN: "incident_forbidden",
+  ARITHMETIC_UNMEASURABLE: "arithmetic_unmeasurable",
+  SAFETY_REFUSED_OPEN: "safety_refused_open",
+});
+export const INCIDENT_PREDICTED_DECODE_BYTES =
+  3_300_000_000 + 40 * (1280 * 704 * 305) + 300 * 384 * 384 * 96;
 const PROVIDER = "ltx_2_3";
 
 const singlePassRows = Object.freeze([
@@ -65,6 +83,23 @@ function providerRow(tier, [width, height, frames, fps, role, campaignPhase], ru
   const parameters = bounded ? RUNG2_PARAMETERS : {};
   const outputVoxels = width * height * frames;
   const latentTokens = ((frames - 1) / 8 + 1) * (width / 32) * (height / 32);
+  const predictedDecodeBytes = bounded
+    ? 3_300_000_000 + 40 * outputVoxels + 300 * 384 * 384 * 96
+    : 3_300_000_000 + 340 * outputVoxels;
+  const isIncident = tier === "q4" && bounded && width === 1280 && height === 704 && frames === 305;
+  // Only the q4 f449 comparison is monotonic: it retains the exact incident tier and 384x64
+  // carrier while increasing temporal extent. Inventory deltas across numeric tiers are not a
+  // physical-footprint lower bound because the incident's binding phase is unknown.
+  const monotonicRung2Refusal = tier === "q4" && bounded
+    && width === 1280 && height === 704 && frames > 305;
+  const disposition = isIncident
+    ? SAFETY_DISPOSITIONS.INCIDENT_FORBIDDEN
+    : monotonicRung2Refusal
+      ? SAFETY_DISPOSITIONS.ARITHMETIC_UNMEASURABLE
+      : SAFETY_DISPOSITIONS.SAFETY_REFUSED_OPEN;
+  const incidentCalibratedProjectionBytes = Q4_F305_CRASH_FOOTPRINT_BYTES
+    + (TIER_INVENTORY_BYTES[tier] - TIER_INVENTORY_BYTES.q4)
+    + (predictedDecodeBytes - INCIDENT_PREDICTED_DECODE_BYTES);
   const row = {
     name: `mlx-ltx-2-3-${tier}-${width}x${height}-f${frames}-fps${fps}-${rung}`,
     _role: role,
@@ -73,6 +108,26 @@ function providerRow(tier, [width, height, frames, fps, role, campaignPhase], ru
     _latentTokens: latentTokens,
     _writableFrameCap: writableFrameCap(width, height),
     _outputVoxels: outputVoxels,
+    _measurementSafety: {
+      disposition,
+      tierInventoryBytes: TIER_INVENTORY_BYTES[tier],
+      incidentCrashFootprintBytes: Q4_F305_CRASH_FOOTPRINT_BYTES,
+      incidentCase: "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+      commonLoad: "complete numeric tier plus shared Gemma stack before geometry-specific work",
+      predictedDecodeBytes,
+      incidentPredictedDecodeBytes: INCIDENT_PREDICTED_DECODE_BYTES,
+      incidentCalibratedProjectionBytes,
+      projectionAssumptions: [
+        "pinned provider decode cost is the only geometry-varying term used",
+        "immutable tier inventory delta is added byte-for-byte",
+        "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+      ],
+      reason: disposition === SAFETY_DISPOSITIONS.INCIDENT_FORBIDDEN
+        ? "exact q4 f305 incident case is permanently forbidden"
+        : disposition === SAFETY_DISPOSITIONS.ARITHMETIC_UNMEASURABLE
+          ? "same q4 tier and 384x64 carrier as the incident with greater temporal extent; every provider phase is fixed or nondecreasing in frames"
+          : "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row",
+    },
     evidenceScope: "authoritative",
     backend: "mlx",
     loadShape: "eager_materialization",
@@ -93,8 +148,7 @@ function providerRow(tier, [width, height, frames, fps, role, campaignPhase], ru
     cases: [{ parameters, expectedResult: "passed" }],
   };
   if (bounded) {
-    row._predictedDecodeBytes =
-      3_300_000_000 + 40 * outputVoxels + 300 * 384 * 384 * 96;
+    row._predictedDecodeBytes = predictedDecodeBytes;
     row._predictedDecodeFormula =
       "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes";
   }

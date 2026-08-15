@@ -116,6 +116,19 @@ const LTX_CALIBRATION_FINGERPRINT: &str = "sc-19109-ltx-2-3-mlx-memory-ladder-v1
 /// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18946`). Historical SC-18810
 /// evidence remains bound to seed 18808 and is never relabelled.
 const LTX_SEED: u64 = 18946;
+// SC-19642 incident evidence. These are the exact immutable tier inventories prepared for
+// SC-18946, not estimates. The q4 f305 provider reached the kernel-maintained physical footprint
+// below before the host watchdog panicked. A soft MLX allocator limit cannot make these safe: MLX
+// documents that one allocation may exceed it, and an in-process monitor can stall with Metal.
+const LTX_Q4_INVENTORY_BYTES: u64 = 20_467_690_460;
+const LTX_Q8_INVENTORY_BYTES: u64 = 29_728_720_716;
+const LTX_BF16_INVENTORY_BYTES: u64 = 47_092_811_992;
+const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = 96_970_084_480;
+const LTX_INCIDENT_FORBIDDEN: &str = "incident_forbidden";
+const LTX_ARITHMETIC_UNMEASURABLE: &str = "arithmetic_unmeasurable";
+const LTX_SAFETY_REFUSED_OPEN: &str = "safety_refused_open";
+const LTX_INCIDENT_PREDICTED_DECODE_BYTES: u64 =
+    3_300_000_000 + 40 * (1280 * 704 * 305) + 300 * 384 * 384 * 96;
 /// LTX's video VAE is x32 spatial and **x8 causal temporal**, so `out_f = 1 + (t_lat - 1) * 8` and
 /// the engine's `validate_request` hard-rejects any `num_frames` that is not `1 + 8k`. Latent
 /// temporal depth — not raw frame count — is the physically motivated regressor for a frames-aware
@@ -5301,6 +5314,99 @@ fn planned_ltx_capture(
     Ok((fps, seed))
 }
 
+/// Fail closed before any model path, provider registry, or MLX allocation is touched.
+///
+/// The q4 f305 incident forbids that exact case. It also invalidates the former assumption that a
+/// smaller geometry is safe: every SC-18946 row first loads its complete numeric tier and the same
+/// Gemma stack. q8/bf16 carry strictly larger immutable tier inventories, but there is no proved
+/// relationship from inventory bytes to a safe physical-footprint upper bound. Consequently every
+/// row is refused; only rows supported by incident or monotonic evidence are called unmeasurable,
+/// while the rest remain explicitly safety-refused/open. External polling is defense in depth,
+/// not admission.
+fn refuse_unsafe_ltx_capture(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    strategy: MemoryStrategy,
+) -> Result<(), String> {
+    let inventory_bytes = match tier {
+        "q4" => LTX_Q4_INVENTORY_BYTES,
+        "q8" => LTX_Q8_INVENTORY_BYTES,
+        "bf16" => LTX_BF16_INVENTORY_BYTES,
+        other => return Err(format!("unsupported SC-18946 safety tier {other:?}")),
+    };
+    let safety = protocol::planned(request)?
+        .get("_measurementSafety")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "SC-18946 row is missing required _measurementSafety; refusing before model load"
+                .to_owned()
+        })?;
+    let exact_u64 = |field: &str, expected: u64| -> Result<(), String> {
+        let actual = safety.get(field).and_then(Value::as_u64);
+        if actual == Some(expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "SC-18946 safety field {field} must be {expected}, got {actual:?}; refusing before model load"
+            ))
+        }
+    };
+    let bounded = strategy == MemoryStrategy::BoundedDecode;
+    let incident = tier == "q4"
+        && bounded
+        && geometry.width == 1280
+        && geometry.height == 704
+        && geometry.frames == 305;
+    let monotonic_rung2 = tier == "q4"
+        && bounded
+        && geometry.width == 1280
+        && geometry.height == 704
+        && geometry.frames > 305;
+    let expected_disposition = if incident {
+        LTX_INCIDENT_FORBIDDEN
+    } else if monotonic_rung2 {
+        LTX_ARITHMETIC_UNMEASURABLE
+    } else {
+        LTX_SAFETY_REFUSED_OPEN
+    };
+    if safety.get("disposition").and_then(Value::as_str) != Some(expected_disposition) {
+        return Err(format!(
+            "SC-18946 safety disposition must be {expected_disposition:?}; refusing before model load"
+        ));
+    }
+    exact_u64("tierInventoryBytes", inventory_bytes)?;
+    exact_u64(
+        "incidentCrashFootprintBytes",
+        LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+    )?;
+    exact_u64(
+        "incidentPredictedDecodeBytes",
+        LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+    )?;
+    let voxels = u64::from(geometry.width)
+        .saturating_mul(u64::from(geometry.height))
+        .saturating_mul(u64::from(geometry.frames));
+    let predicted_decode_bytes = if bounded {
+        3_300_000_000_u64
+            .saturating_add(40_u64.saturating_mul(voxels))
+            .saturating_add(300 * 384 * 384 * 96)
+    } else {
+        3_300_000_000_u64.saturating_add(340_u64.saturating_mul(voxels))
+    };
+    exact_u64("predictedDecodeBytes", predicted_decode_bytes)?;
+    let projection = i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+        + (i128::from(inventory_bytes) - i128::from(LTX_Q4_INVENTORY_BYTES))
+        + (i128::from(predicted_decode_bytes) - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES));
+    let projection = u64::try_from(projection)
+        .map_err(|_| "SC-18946 incident-calibrated projection must fit u64".to_owned())?;
+    exact_u64("incidentCalibratedProjectionBytes", projection)?;
+    Err(format!(
+        "SC-19642 pre-load safety refusal: SC-18946 {tier} is {expected_disposition}; exact tier inventory={inventory_bytes} bytes, incident q4 f305 physical footprint={} bytes, incident-calibrated projection={projection} bytes, and every geometry shares the complete tier plus Gemma load without a proved safe upper bound",
+        LTX_Q4_F305_CRASH_FOOTPRINT_BYTES
+    ))
+}
+
 /// The production A/V request. `video_mode` is deliberately left unset so the arm measures the same
 /// path a real job takes (`crates/sceneworks-worker/src/video_jobs/ltx.rs` only sets `"no_audio"`
 /// when the caller asks for it): the audio latents are denoised jointly with the video regardless,
@@ -6157,6 +6263,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
              implements {LTX_CALIBRATION_FINGERPRINT}"
         ));
     }
+    refuse_unsafe_ltx_capture(request, tier, geometry, selection.strategy)?;
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, tier, &selection)?;
     // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
@@ -7575,6 +7682,8 @@ mod ltx_tests {
     /// environment or the weights is present, so a test that mutates exactly one axis is testing
     /// that axis.
     fn ltx_request_json(width: u32, height: u32, frames: u32) -> Value {
+        let predicted_decode_bytes =
+            3_300_000_000_u64 + 340 * u64::from(width) * u64::from(height) * u64::from(frames);
         json!({
             "planned": {
                 "target": {
@@ -7593,9 +7702,71 @@ mod ltx_tests {
                     "parameters": {}
                 },
                 "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "_measurementSafety": {
+                    "disposition": LTX_SAFETY_REFUSED_OPEN,
+                    "tierInventoryBytes": LTX_Q8_INVENTORY_BYTES,
+                    "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+                    "predictedDecodeBytes": predicted_decode_bytes,
+                    "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+                    "incidentCalibratedProjectionBytes": i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+                        + (i128::from(LTX_Q8_INVENTORY_BYTES) - i128::from(LTX_Q4_INVENTORY_BYTES))
+                        + (i128::from(predicted_decode_bytes)
+                            - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES)),
+                },
                 "fixture": format!("ltx-2-3-mlx-q8-{width}x{height}-f{frames}-fps24-seed{LTX_SEED}")
             }
         })
+    }
+
+    fn set_ltx_request_tier(request: &mut Value, tier: &str, inventory: u64) {
+        request["planned"]["target"]["tier"] = json!(tier);
+        request["planned"]["fixture"] = json!(format!(
+            "ltx-2-3-mlx-{tier}-768x512-f97-fps24-seed{LTX_SEED}"
+        ));
+        request["planned"]["_measurementSafety"]["tierInventoryBytes"] = json!(inventory);
+
+        let predicted_decode_bytes = request["planned"]["_measurementSafety"]
+            ["predictedDecodeBytes"]
+            .as_u64()
+            .expect("fixture predicted decode bytes");
+        request["planned"]["_measurementSafety"]["incidentCalibratedProjectionBytes"] = json!(
+            i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+                + (i128::from(inventory) - i128::from(LTX_Q4_INVENTORY_BYTES))
+                + (i128::from(predicted_decode_bytes)
+                    - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES))
+        );
+    }
+
+    fn set_ltx_bounded_case(
+        request: &mut Value,
+        tier: &str,
+        inventory: u64,
+        frames: u32,
+        disposition: &str,
+    ) {
+        request["planned"]["target"]["tier"] = json!(tier);
+        request["planned"]["target"]["geometry"] =
+            json!({ "width": 1280, "height": 704, "batch": 1, "frames": frames });
+        request["planned"]["fixture"] = json!(format!(
+            "ltx-2-3-mlx-{tier}-1280x704-f{frames}-fps30-seed{LTX_SEED}"
+        ));
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_decode",
+            "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+            "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 },
+        });
+        let predicted_decode_bytes =
+            3_300_000_000_u64 + 40 * 1280 * 704 * u64::from(frames) + 300 * 384 * 384 * 96;
+        let safety = &mut request["planned"]["_measurementSafety"];
+        safety["disposition"] = json!(disposition);
+        safety["tierInventoryBytes"] = json!(inventory);
+        safety["predictedDecodeBytes"] = json!(predicted_decode_bytes);
+        safety["incidentCalibratedProjectionBytes"] = json!(
+            i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+                + (i128::from(inventory) - i128::from(LTX_Q4_INVENTORY_BYTES))
+                + (i128::from(predicted_decode_bytes)
+                    - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES))
+        );
     }
 
     /// The port of the shipped LTX frame ladder must reproduce these 18 transcribed values, one per
@@ -7833,6 +8004,87 @@ mod ltx_tests {
             .validate_selection(&selection)
             .expect_err("staged residency has no decode parameter domain");
         assert!(error.to_string().contains("decode"), "{error}");
+    }
+
+    #[test]
+    fn sc_19642_refuses_every_tier_before_environment_registry_or_weights() {
+        for (tier, inventory) in [
+            ("q4", LTX_Q4_INVENTORY_BYTES),
+            ("q8", LTX_Q8_INVENTORY_BYTES),
+            ("bf16", LTX_BF16_INVENTORY_BYTES),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            set_ltx_request_tier(&mut request, tier, inventory);
+            let error =
+                run_ltx(&request).expect_err("every current SC-18946 tier must fail closed");
+            assert!(
+                error.contains("SC-19642 pre-load safety refusal"),
+                "{error}"
+            );
+            assert!(error.contains(&format!("inventory={inventory}")), "{error}");
+            assert!(error.contains(LTX_SAFETY_REFUSED_OPEN), "{error}");
+            assert!(
+                !error.contains("SCENEWORKS_LTX_ROOT") && !error.contains("build LTX registry"),
+                "refusal happened after environment or registry work: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sc_19642_preserves_incident_monotonic_and_open_refusal_terminals() {
+        for (tier, inventory, frames, disposition) in [
+            ("q4", LTX_Q4_INVENTORY_BYTES, 305, LTX_INCIDENT_FORBIDDEN),
+            (
+                "q4",
+                LTX_Q4_INVENTORY_BYTES,
+                449,
+                LTX_ARITHMETIC_UNMEASURABLE,
+            ),
+            ("q8", LTX_Q8_INVENTORY_BYTES, 305, LTX_SAFETY_REFUSED_OPEN),
+            (
+                "bf16",
+                LTX_BF16_INVENTORY_BYTES,
+                449,
+                LTX_SAFETY_REFUSED_OPEN,
+            ),
+        ] {
+            let mut request = ltx_request_json(1280, 704, frames);
+            set_ltx_bounded_case(&mut request, tier, inventory, frames, disposition);
+            let error = run_ltx(&request).expect_err("SC-18946 case must refuse before load");
+            assert!(
+                error.contains("SC-19642 pre-load safety refusal"),
+                "{error}"
+            );
+            assert!(error.contains(disposition), "{error}");
+            assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{error}");
+        }
+    }
+
+    #[test]
+    fn sc_19642_safety_metadata_mutations_fail_closed_before_weight_work() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/_measurementSafety/disposition",
+                json!("capturable"),
+                "safety disposition",
+            ),
+            (
+                "/planned/_measurementSafety/tierInventoryBytes",
+                json!(LTX_Q8_INVENTORY_BYTES - 1),
+                "tierInventoryBytes",
+            ),
+            (
+                "/planned/_measurementSafety/incidentCrashFootprintBytes",
+                json!(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - 1),
+                "incidentCrashFootprintBytes",
+            ),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            *request.pointer_mut(pointer).unwrap() = value;
+            let error = run_ltx(&request).expect_err("mutated safety metadata must fail closed");
+            assert!(error.contains(expected), "{pointer}: {error}");
+            assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{pointer}: {error}");
+        }
     }
 
     /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would
