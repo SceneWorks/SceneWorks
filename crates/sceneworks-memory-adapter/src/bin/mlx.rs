@@ -2,9 +2,10 @@
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
-    MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
-    MemorySelection, MemoryStrategy, MemoryStrategyParameters, TransformerComponent,
+    GenerationMemory, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry,
+    MemoryMode, MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome,
+    MemorySafetyDecision, MemorySelection, MemoryStrategy, MemoryStrategyParameters,
+    TransformerComponent,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
@@ -13,7 +14,7 @@ use mlx_gen::{
 };
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
-    reset_peak_memory,
+    reset_peak_memory, set_memory_limit, set_wired_limit,
 };
 use mlx_rs::Array;
 use runtime_macos::providers::qwen_image::{load_vae, QwenVae};
@@ -22,9 +23,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
@@ -124,6 +127,31 @@ const LTX_Q4_INVENTORY_BYTES: u64 = 20_467_690_460;
 const LTX_Q8_INVENTORY_BYTES: u64 = 29_728_720_716;
 const LTX_BF16_INVENTORY_BYTES: u64 = 47_092_811_992;
 const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = 96_970_084_480;
+/// The exact q8 text-encoder + transformer co-staged safetensor arithmetic captured by SC-18808 at
+/// 768x512x97. This is not a historical `phys_footprint` measurement or a complete-load bound: the
+/// canary deliberately reuses the smaller value as a conservative external stop, with separate
+/// host-pressure gates. It must never be reused to admit a campaign row.
+const LTX_CANARY_MAX_FOOTPRINT_BYTES: u64 = 53_347_146_863;
+const LTX_CANARY_MAX_RUNTIME_SECONDS: f64 = 1_800.0;
+const LTX_CANARY_MIN_SWAP_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+const LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT: u64 = 70;
+const LTX_CANARY_WATCHDOG_PROTOCOL: &str = "sceneworks-memory-watchdog-v1";
+const LTX_CANARY_WIDTH: u32 = 256;
+const LTX_CANARY_HEIGHT: u32 = 256;
+const LTX_CANARY_FRAMES: u32 = 9;
+const LTX_CANARY_FPS: u32 = 24;
+const LTX_CANARY_SEED: u64 = 1234;
+const LTX_CANARY_TILE_EDGE: u32 = 192;
+const LTX_CANARY_OVERLAP: u32 = 64;
+const LTX_CANARY_FIXTURE: &str = "ltx-2-3-mlx-q4-256x256-f9-fps24-seed1234-safety-canary";
+const LTX_CANARY_ARTIFACT_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
+const LTX_CANARY_Q4_INVENTORY_FILES: u64 = 11;
+const LTX_CANARY_Q4_INVENTORY_SHA256: &str =
+    "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a";
+const LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES: u64 = 17;
+const LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES: u64 = 26_427_894_918;
+const LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256: &str =
+    "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7";
 const LTX_INCIDENT_FORBIDDEN: &str = "incident_forbidden";
 const LTX_ARITHMETIC_UNMEASURABLE: &str = "arithmetic_unmeasurable";
 const LTX_SAFETY_REFUSED_OPEN: &str = "safety_refused_open";
@@ -5430,6 +5458,30 @@ fn ltx_request(geometry: LtxGeometry, fps: u32, seed: u64) -> GenerationRequest 
     }
 }
 
+/// The non-promotable safety canary. This is intentionally outside the product calibration
+/// envelope: it reuses the inference provider's historical 256x256x9 q4 residency baseline, then
+/// forces the smallest shipped spatial decode carrier so the permanent-pin per-tile release path
+/// executes without exposing a campaign geometry to real weights.
+fn ltx_canary_generation_request() -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a sunlit pine branch, static camera".to_owned(),
+        width: LTX_CANARY_WIDTH,
+        height: LTX_CANARY_HEIGHT,
+        count: 1,
+        seed: Some(LTX_CANARY_SEED),
+        frames: Some(LTX_CANARY_FRAMES),
+        fps: Some(LTX_CANARY_FPS),
+        video_mode: Some("no_audio".to_owned()),
+        memory: Some(GenerationMemory {
+            tile_vae_decode: true,
+            decode_tile_edge: Some(LTX_CANARY_TILE_EDGE),
+            decode_overlap: Some(LTX_CANARY_OVERLAP),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Resolve and validate the `SCENEWORKS_LTX_*` environment family into a tier-exact load spec.
 ///
 /// Two roots under ONE repository: the numeric tier and the `gemma/` co-requisite. The Gemma-3-12B
@@ -5544,11 +5596,12 @@ mod ltx_decode_cost {
 }
 
 /// The geometry every `run_ltx` test drives (`ltx_request_json(768, 512, 97)`). It is named here
-/// because an injected budget's blast radius reaches it — see `LTX_BUDGET_INJECTION_LOCK`.
+/// because an injected budget's blast radius reaches it — see `LTX_MEMORY_LIMIT_LOCK`.
 #[cfg(test)]
 const LTX_UNLOCKED_SMOKE_GEOMETRY: (u32, u32, u32) = (768, 512, 97);
 
-/// Serialises the MLX-global memory-limit swap that `LtxInjectedBudget` performs.
+/// Serialises every adapter-owned MLX-global memory-limit swap. Production uses it for the one
+/// diagnostic canary; tests use it for injected selector budgets and restoration assertions.
 ///
 /// **What it guarantees:** two *lock takers* never overlap. No injected-budget resolve observes
 /// another's budget, and each restore pairs with its own swap.
@@ -5558,18 +5611,16 @@ const LTX_UNLOCKED_SMOKE_GEOMETRY: (u32, u32, u32) = (768, 512, 97);
 /// take this test-only lock. Cheap malformed-plan tests are deliberately ordered before that
 /// selector and one holds an injected tiling budget while asserting the ordering, but any future
 /// test that reaches physical resolution must either accept the host-dependent result or take this
-/// lock around its own observation.
+/// lock around its own observation. Production `run_ltx` does not mutate the limit and therefore
+/// does not take this lock; the diagnostic canary holds it for its whole process-global swap.
 ///
 /// Those tests are safe only because every injected budget leaves `LTX_UNLOCKED_SMOKE_GEOMETRY`'s
 /// full-output accumulators affordable — 4.49 GiB against a lowest safe budget of 6.8 GiB, a 1.51x
 /// margin that nothing used to assert. `LtxInjectedBudget::install` asserts it on **every**
 /// injection, so a new row below the floor fails loudly at its own injection site instead of
 /// turning an unrelated test into an intermittent failure carrying the wrong message. That covers
-/// future `run_ltx` call sites too, which taking the lock at today's four would not: this lock is
-/// `#[cfg(test)]` and `resolve` is production code, so the read genuinely cannot be routed through
-/// it from the production side.
-#[cfg(test)]
-static LTX_BUDGET_INJECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// future `run_ltx` call sites too, which taking the lock at today's four would not.
+static LTX_MEMORY_LIMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// An injected MLX memory limit, installed for as long as this value lives.
 ///
@@ -5593,12 +5644,12 @@ impl LtxInjectedBudget {
             safe > floor,
             "an injected budget of {budget_gib} GiB leaves {safe:.2} GiB safe, at or below the \
              {floor:.2} GiB accumulator floor of the {width}x{height} x {frames} smoke geometry. \
-             `run_ltx` reads the process-global MLX limit WITHOUT LTX_BUDGET_INJECTION_LOCK, so a \
+             `run_ltx` reads the process-global MLX limit WITHOUT LTX_MEMORY_LIMIT_LOCK, so a \
              concurrently running `run_ltx` refusal test would be refused by the engine and fail \
              carrying the wrong message. Raise the budget, or take this lock around every \
              `run_ltx` call site."
         );
-        let guard = LTX_BUDGET_INJECTION_LOCK
+        let guard = LTX_MEMORY_LIMIT_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous =
@@ -5614,6 +5665,64 @@ impl LtxInjectedBudget {
 impl Drop for LtxInjectedBudget {
     fn drop(&mut self) {
         mlx_rs::memory::set_memory_limit(self.previous);
+    }
+}
+
+/// Process-global MLX limits for the one diagnostic LTX canary.
+///
+/// `set_memory_limit` is soft backpressure, not a sandbox; the external phys-footprint watchdog is
+/// still mandatory. Setting the wired limit as well prevents MLX from pinning more unified memory
+/// than the same evidence-derived ceiling. The device clamp mirrors the worker's production policy:
+/// MLX's untouched memory limit is 1.5x the device wired ceiling, and asking `set_wired_limit` for
+/// more than that ceiling terminates the process.
+struct LtxCanaryLimits {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    previous_memory: usize,
+    previous_wired: usize,
+    wired: usize,
+    restored: bool,
+}
+
+fn ltx_canary_wired_limit(requested: usize, untouched_memory_limit: usize) -> usize {
+    requested.min(untouched_memory_limit / 3 * 2)
+}
+
+impl LtxCanaryLimits {
+    fn install() -> Result<Self, String> {
+        let guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let requested = usize::try_from(LTX_CANARY_MAX_FOOTPRINT_BYTES)
+            .map_err(|_| "LTX canary footprint ceiling does not fit usize".to_owned())?;
+        let untouched_memory_limit = get_memory_limit();
+        let wired = ltx_canary_wired_limit(requested, untouched_memory_limit);
+        if wired == 0 {
+            return Err("LTX canary could not derive a non-zero device wired ceiling".to_owned());
+        }
+        let previous_memory = set_memory_limit(requested);
+        let previous_wired = set_wired_limit(wired);
+        Ok(Self {
+            _guard: guard,
+            previous_memory,
+            previous_wired,
+            wired,
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) {
+        if self.restored {
+            return;
+        }
+        set_wired_limit(self.previous_wired);
+        set_memory_limit(self.previous_memory);
+        self.restored = true;
+    }
+}
+
+impl Drop for LtxCanaryLimits {
+    fn drop(&mut self) {
+        self.restore();
     }
 }
 
@@ -6233,6 +6342,544 @@ fn verify_ltx_lifecycle(
     Ok(metrics)
 }
 
+fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> {
+    let planned = protocol::planned(request)?;
+    if planned.get("_diagnosticOnly").and_then(Value::as_bool) != Some(true) {
+        return Err("LTX safety canary requires planned._diagnosticOnly == true".to_owned());
+    }
+    if planned.get("evidenceScope").and_then(Value::as_str) != Some("fixture") {
+        return Err("LTX safety canary requires non-promotable fixture evidenceScope".to_owned());
+    }
+    if planned.get("backend").and_then(Value::as_str) != Some("mlx") {
+        return Err("LTX safety canary requires planned.backend == mlx".to_owned());
+    }
+    let engaged_rungs = planned
+        .pointer("/strategy/engagedRungs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "LTX safety canary requires strategy.engagedRungs".to_owned())?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "LTX safety canary strategy.engagedRungs must contain strings".to_owned())?;
+    if engaged_rungs != ["resident", "staged_residency", "bounded_decode"] {
+        return Err(
+            "LTX safety canary requires exact resident/staged_residency/bounded_decode rungs"
+                .to_owned(),
+        );
+    }
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    let target = planned
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    for field in ["provider", "modelId"] {
+        if target.get(field).and_then(Value::as_str) != Some(LTX_PROVIDER) {
+            return Err(format!(
+                "LTX safety canary target.{field} must be {LTX_PROVIDER:?}"
+            ));
+        }
+    }
+    if target.get("tier").and_then(Value::as_str) != Some("q4")
+        || target.get("mode").and_then(Value::as_str) != Some("text_to_video")
+        || target.get("overlay").and_then(Value::as_str) != Some("none")
+    {
+        return Err("LTX safety canary requires q4 text_to_video with overlay none".to_owned());
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let exact_geometry = [
+        ("width", u64::from(LTX_CANARY_WIDTH)),
+        ("height", u64::from(LTX_CANARY_HEIGHT)),
+        ("batch", 1),
+        ("frames", u64::from(LTX_CANARY_FRAMES)),
+    ];
+    for (field, expected) in exact_geometry {
+        if geometry.get(field).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!(
+                "LTX safety canary geometry.{field} must be {expected}"
+            ));
+        }
+    }
+    if planned.get("fixture").and_then(Value::as_str) != Some(LTX_CANARY_FIXTURE) {
+        return Err(format!(
+            "LTX safety canary fixture must be {LTX_CANARY_FIXTURE:?}"
+        ));
+    }
+    if planned
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        != Some(LTX_CALIBRATION_FINGERPRINT)
+    {
+        return Err("LTX safety canary fingerprint does not match the pinned provider".to_owned());
+    }
+    if planned_load_shape(request)? != LoadShape::EagerMaterialization {
+        return Err("LTX safety canary requires eager_materialization".to_owned());
+    }
+    if planned
+        .pointer("/_watchdog/maxFootprintBytes")
+        .and_then(Value::as_u64)
+        != Some(LTX_CANARY_MAX_FOOTPRINT_BYTES)
+    {
+        return Err(format!(
+            "LTX safety canary watchdog ceiling must be the SC-18808 co-staged bound {LTX_CANARY_MAX_FOOTPRINT_BYTES}"
+        ));
+    }
+    let canary = planned
+        .get("_canary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "LTX safety canary requires planned._canary".to_owned())?;
+    if canary.get("videoMode").and_then(Value::as_str) != Some("no_audio")
+        || canary.get("fps").and_then(Value::as_u64) != Some(u64::from(LTX_CANARY_FPS))
+        || canary.get("seed").and_then(Value::as_u64) != Some(LTX_CANARY_SEED)
+    {
+        return Err(format!(
+            "LTX safety canary requires no_audio, fps {LTX_CANARY_FPS}, seed {LTX_CANARY_SEED}"
+        ));
+    }
+    let artifact = planned
+        .get("_artifact")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "LTX safety canary requires planned._artifact".to_owned())?;
+    let numeric_inventory = artifact
+        .get("numericTierInventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "LTX safety canary requires the numeric-tier inventory".to_owned())?;
+    if artifact.get("repository").and_then(Value::as_str) != Some(protocol::LTX_REPOSITORY)
+        || artifact.get("revision").and_then(Value::as_str) != Some(LTX_CANARY_ARTIFACT_REVISION)
+        || numeric_inventory.get("files").and_then(Value::as_u64)
+            != Some(LTX_CANARY_Q4_INVENTORY_FILES)
+        || numeric_inventory.get("bytes").and_then(Value::as_u64) != Some(LTX_Q4_INVENTORY_BYTES)
+        || numeric_inventory.get("sha256").and_then(Value::as_str)
+            != Some(LTX_CANARY_Q4_INVENTORY_SHA256)
+    {
+        return Err(
+            "LTX safety canary requires the exact immutable q4 artifact inventory".to_owned(),
+        );
+    }
+    let text_encoder = artifact
+        .get("textEncoderInventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "LTX safety canary requires the immutable bundled Gemma inventory".to_owned()
+        })?;
+    if text_encoder.get("files").and_then(Value::as_u64)
+        != Some(LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES)
+        || text_encoder.get("bytes").and_then(Value::as_u64)
+            != Some(LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES)
+        || text_encoder.get("sha256").and_then(Value::as_str)
+            != Some(LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256)
+    {
+        return Err(
+            "LTX safety canary requires the exact immutable bundled Gemma inventory".to_owned(),
+        );
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary hardware.memoryBytes must be an integer".to_owned())?;
+    if hardware_bytes < LTX_CANARY_MAX_FOOTPRINT_BYTES * 2 {
+        return Err(format!(
+            "LTX safety canary host memory {hardware_bytes} must preserve two {LTX_CANARY_MAX_FOOTPRINT_BYTES}-byte stop boundaries"
+        ));
+    }
+    let selection = planned_selection(request)?;
+    if selection.strategy != MemoryStrategy::BoundedDecode
+        || selection.tier.quant != Some(Quant::Q4)
+        || selection.parameters.decode_tile_edge != Some(LTX_CANARY_TILE_EDGE)
+        || selection.parameters.decode_overlap != Some(LTX_CANARY_OVERLAP)
+        || selection.parameters.attention_chunk_size.is_some()
+        || selection.parameters.transformer_window_size.is_some()
+        || selection.parameters.transformer_window_component.is_some()
+    {
+        return Err(format!(
+            "LTX safety canary requires exact bounded_decode q4 {LTX_CANARY_TILE_EDGE}/{LTX_CANARY_OVERLAP} selection"
+        ));
+    }
+    Ok(selection)
+}
+
+#[derive(Debug)]
+struct LtxCanaryWatchdogAttestation {
+    max_footprint_bytes: u64,
+    max_runtime_seconds: f64,
+    host_memory_bytes: u64,
+    min_initial_memory_free_bytes: u64,
+    min_initial_memory_free_percent: u64,
+    min_memory_free_bytes: u64,
+    min_swap_free_bytes: u64,
+    nonce: String,
+    stream: Option<UnixStream>,
+}
+
+struct LtxCanaryWatchdogLease {
+    writer: UnixStream,
+    completion: std::sync::mpsc::Receiver<Result<(), String>>,
+    nonce: String,
+}
+
+impl LtxCanaryWatchdogAttestation {
+    fn start_lease(&mut self) -> Result<LtxCanaryWatchdogLease, String> {
+        let stream = self
+            .stream
+            .take()
+            .ok_or_else(|| "LTX safety canary watchdog lease was already consumed".to_owned())?;
+        let mut reader = stream
+            .try_clone()
+            .map_err(|error| format!("clone LTX watchdog lease socket: {error}"))?;
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("configure LTX watchdog lease reader: {error}"))?;
+        let expected = self.nonce.clone();
+        let (sender, completion) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let result = loop {
+                match read_watchdog_line(&mut reader) {
+                    Ok(line) if line == format!("PING {expected}") => continue,
+                    Ok(line) if line == format!("BYE {expected}") => break Ok(()),
+                    Ok(_) => {
+                        break Err(
+                            "LTX safety canary watchdog returned an invalid lease message"
+                                .to_owned(),
+                        )
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+            if result.is_err() {
+                // Loss of the monitor after GO must terminate the adapter while weights may be
+                // resident. Returning to the unguarded render would repeat the incident class.
+                std::process::abort();
+            }
+            let _ = sender.send(result);
+        });
+        Ok(LtxCanaryWatchdogLease {
+            writer: stream,
+            completion,
+            nonce: self.nonce.clone(),
+        })
+    }
+}
+
+impl LtxCanaryWatchdogLease {
+    fn complete(mut self) -> Result<(), String> {
+        self.writer
+            .write_all(format!("DONE {}\n", self.nonce).as_bytes())
+            .map_err(|error| format!("complete LTX canary watchdog lease: {error}"))?;
+        self.completion
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| {
+                format!("wait for LTX canary watchdog completion release: {error}")
+            })??;
+        Ok(())
+    }
+}
+
+fn read_watchdog_line(stream: &mut UnixStream) -> Result<String, String> {
+    let mut payload = Vec::new();
+    for _ in 0..4096 {
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| format!("read LTX canary watchdog attestation: {error}"))?;
+        if byte[0] == b'\n' {
+            return String::from_utf8(payload)
+                .map_err(|error| format!("LTX canary watchdog attestation is not UTF-8: {error}"));
+        }
+        payload.push(byte[0]);
+    }
+    Err("LTX canary watchdog attestation exceeded 4096 bytes".to_owned())
+}
+
+fn consume_ltx_canary_watchdog_attestation(
+    request: &Value,
+) -> Result<LtxCanaryWatchdogAttestation, String> {
+    let socket_path = std::env::var("SCENEWORKS_MEMORY_WATCHDOG_SOCKET")
+        .map_err(|_| "LTX safety canary requires the live external watchdog channel".to_owned())?;
+    let stream = UnixStream::connect(&socket_path)
+        .map_err(|error| format!("connect to live LTX canary watchdog: {error}"))?;
+    consume_ltx_canary_watchdog_attestation_stream(request, stream)
+}
+
+fn consume_ltx_canary_watchdog_attestation_stream(
+    request: &Value,
+    mut stream: UnixStream,
+) -> Result<LtxCanaryWatchdogAttestation, String> {
+    // The watchdog creates this one-run socket in a private random directory only after its
+    // launch-owned process group is anchored. Direct stdin invocation has no socket and therefore
+    // refuses before installing MLX limits or reading any model path. The monitor does not release
+    // allocation work until the ACK/GO pair completes around a second full telemetry sample.
+    let timeout = Some(Duration::from_secs(1));
+    stream
+        .set_read_timeout(timeout)
+        .map_err(|error| format!("configure LTX watchdog read timeout: {error}"))?;
+    stream
+        .set_write_timeout(timeout)
+        .map_err(|error| format!("configure LTX watchdog write timeout: {error}"))?;
+    let payload: Value = serde_json::from_str(&read_watchdog_line(&mut stream)?)
+        .map_err(|error| format!("parse LTX canary watchdog attestation: {error}"))?;
+    if payload.get("protocol").and_then(Value::as_str) != Some(LTX_CANARY_WATCHDOG_PROTOCOL) {
+        return Err("LTX safety canary watchdog protocol changed".to_owned());
+    }
+    let nonce = payload
+        .get("nonce")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "LTX safety canary watchdog attestation omitted nonce".to_owned())?;
+    if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("LTX safety canary watchdog nonce is not 32-byte hexadecimal".to_owned());
+    }
+    let max_footprint_bytes = payload
+        .get("maxFootprintBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted maxFootprintBytes".to_owned())?;
+    let max_runtime_seconds = payload
+        .get("maxRuntimeSeconds")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted maxRuntimeSeconds".to_owned())?;
+    let host_memory_bytes = payload
+        .get("hostMemoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted hostMemoryBytes".to_owned())?;
+    let min_memory_free_bytes = payload
+        .get("minMemoryFreeBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted minMemoryFreeBytes".to_owned())?;
+    let min_initial_memory_free_bytes = payload
+        .get("minInitialMemoryFreeBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted minInitialMemoryFreeBytes".to_owned())?;
+    let min_initial_memory_free_percent = payload
+        .get("minInitialMemoryFreePercent")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "LTX safety canary watchdog omitted minInitialMemoryFreePercent".to_owned()
+        })?;
+    let min_swap_free_bytes = payload
+        .get("minSwapFreeBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted minSwapFreeBytes".to_owned())?;
+    let requested_host_memory = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary hardware.memoryBytes must be an integer".to_owned())?;
+    let telemetry_resolution = host_memory_bytes.div_ceil(100);
+    if max_footprint_bytes != LTX_CANARY_MAX_FOOTPRINT_BYTES
+        || max_runtime_seconds != LTX_CANARY_MAX_RUNTIME_SECONDS
+        || host_memory_bytes != requested_host_memory
+        || min_initial_memory_free_bytes
+            != 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + telemetry_resolution
+        || min_initial_memory_free_percent != LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT
+        || min_memory_free_bytes != LTX_CANARY_MAX_FOOTPRINT_BYTES + telemetry_resolution
+        || min_swap_free_bytes != LTX_CANARY_MIN_SWAP_FREE_BYTES
+    {
+        return Err(
+            "LTX safety canary watchdog did not attest the exact reviewed bounds".to_owned(),
+        );
+    }
+    stream
+        .write_all(format!("ACK {nonce}\n").as_bytes())
+        .map_err(|error| format!("acknowledge LTX canary watchdog: {error}"))?;
+    if read_watchdog_line(&mut stream)? != format!("GO {nonce}") {
+        return Err("LTX safety canary watchdog did not release allocation work".to_owned());
+    }
+    Ok(LtxCanaryWatchdogAttestation {
+        max_footprint_bytes,
+        max_runtime_seconds,
+        host_memory_bytes,
+        min_initial_memory_free_bytes,
+        min_initial_memory_free_percent,
+        min_memory_free_bytes,
+        min_swap_free_bytes,
+        nonce: nonce.to_owned(),
+        stream: Some(stream),
+    })
+}
+
+/// One deliberately tiny, non-ingestible real-weight probe for the permanent-pin tiled-release
+/// repair. This is not a campaign arm: it executes one render, never the six-render lifecycle
+/// sweep, and emits a status the calibration harness schema rejects.
+fn run_ltx_canary(request: &Value) -> Result<Value, String> {
+    let selection = validate_ltx_canary_plan(request)?;
+    let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
+    let watchdog_lease = watchdog.start_lease()?;
+    let limits = LtxCanaryLimits::install()?;
+    let geometry = LtxGeometry {
+        width: LTX_CANARY_WIDTH,
+        height: LTX_CANARY_HEIGHT,
+        frames: LTX_CANARY_FRAMES,
+        latent_frames: 1 + (LTX_CANARY_FRAMES - 1) / LTX_TEMPORAL_SCALE,
+    };
+    let (repository, revision, root, text_encoder_root, spec) =
+        ltx_load_spec(request, "q4", &selection)?;
+    if revision != LTX_CANARY_ARTIFACT_REVISION {
+        return Err(format!(
+            "LTX safety canary artifact revision must be {LTX_CANARY_ARTIFACT_REVISION}, got {revision}"
+        ));
+    }
+    let registry =
+        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| "pinned MLX LTX-2.3 provider has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned LTX-2.3 contract rejected canary selection: {error}"))?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
+    decode_plan.validate_selected_strategy(&selection)?;
+    if !decode_plan.tiling_engaged()
+        || decode_plan.spatial_tile_px() != u64::from(LTX_CANARY_TILE_EDGE)
+        || decode_plan.spatial_overlap_px() != u64::from(LTX_CANARY_OVERLAP)
+    {
+        return Err(
+            "LTX safety canary did not resolve the exact multi-tile decode carrier".to_owned(),
+        );
+    }
+    let generator = registry
+        .load(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("load real LTX-2.3 q4 canary provider: {error}"))?;
+    if generator.memory_strategy_contract() != Some(&contract) {
+        return Err("loaded LTX-2.3 canary contract differs from the registry contract".to_owned());
+    }
+    let context = ltx_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        LTX_CANARY_MAX_FOOTPRINT_BYTES,
+        LTX_CANARY_MAX_FOOTPRINT_BYTES,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&context),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("LTX-2.3 provider rejected the exact canary budget".to_owned());
+    }
+    clear_cache();
+    reset_peak_memory();
+    let mut conditioning = PhaseMemory {
+        active: 0,
+        cache: 0,
+    };
+    let mut denoise = PhaseMemory {
+        active: 0,
+        cache: 0,
+    };
+    let (frames, fps, has_audio) = video_frames(scoped_generate(
+        generator.as_ref(),
+        ltx_canary_generation_request(),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning = PhaseMemory::capture();
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise = PhaseMemory::capture();
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    if frames.len() != LTX_CANARY_FRAMES as usize || fps != LTX_CANARY_FPS || has_audio {
+        return Err(format!(
+            "LTX safety canary returned frames={}, fps={fps}, audio={has_audio}",
+            frames.len()
+        ));
+    }
+    let first = frames
+        .first()
+        .ok_or_else(|| "LTX safety canary returned no frames".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("LTX safety canary returned a degenerate first frame".to_owned());
+    }
+    let peak_active = [conditioning.active, denoise.active, decode.active]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    drop(frames);
+    drop(generator);
+    clear_cache();
+    let cleanup = AllocatorState::capture_current();
+    let planned_artifact = protocol::planned(request)?
+        .get("_artifact")
+        .cloned()
+        .ok_or_else(|| "LTX safety canary lost planned._artifact".to_owned())?;
+    watchdog_lease.complete()?;
+    Ok(json!({
+        "status": "diagnostic_canary_complete",
+        "diagnosticOnly": true,
+        "promotable": false,
+        "ingestible": false,
+        "inferenceRevision": protocol::INFERENCE_PIN,
+        "calibrationFingerprint": calibration.fingerprint,
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": "q4",
+            "tierRoot": root,
+            "textEncoderRoot": text_encoder_root,
+            "numericTierInventory": planned_artifact["numericTierInventory"],
+            "textEncoderInventory": planned_artifact["textEncoderInventory"],
+        },
+        "target": {
+            "provider": LTX_PROVIDER,
+            "tier": "q4",
+            "geometry": {
+                "width": LTX_CANARY_WIDTH,
+                "height": LTX_CANARY_HEIGHT,
+                "frames": LTX_CANARY_FRAMES,
+                "fps": LTX_CANARY_FPS,
+            },
+            "audio": false,
+        },
+        "strategy": ltx_attested_strategy(request, &context.selection, &contract)?,
+        "watchdog": {
+            "required": true,
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "maxFootprintBytes": watchdog.max_footprint_bytes,
+            "maxRuntimeSeconds": watchdog.max_runtime_seconds,
+            "hostMemoryBytes": watchdog.host_memory_bytes,
+            "minInitialMemoryFreeBytes": watchdog.min_initial_memory_free_bytes,
+            "minInitialMemoryFreePercent": watchdog.min_initial_memory_free_percent,
+            "minMemoryFreeBytes": watchdog.min_memory_free_bytes,
+            "minSwapFreeBytes": watchdog.min_swap_free_bytes,
+            "source": "conservative-stop-from-sc-18808-q8-costaged-safetensor-arithmetic-not-physical-bound",
+        },
+        "mlxLimits": {
+            "memoryLimitBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "wiredLimitBytes": limits.wired,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "peakActiveBytes": peak_active,
+            "postCleanupActiveBytes": cleanup.active,
+            "postCleanupCacheBytes": cleanup.cache,
+        },
+        "output": {
+            "frames": LTX_CANARY_FRAMES,
+            "fps": LTX_CANARY_FPS,
+            "firstFrameNondegenerate": true,
+        },
+        "capturedAt": protocol::captured_at(),
+    }))
+}
+
 /// The `mlx:ltx_2_3` SC-18946 arm. SC-19109 moved strategy ownership into the provider: this path
 /// reads the exact registry contract, proves the loaded generator exposes the same contract, drives
 /// the selected request scope, and executes every runtime-complete admission/lifecycle scenario.
@@ -6611,6 +7258,7 @@ fn main() {
     let response = match protocol::action(&request).unwrap_or_else(|error| protocol::fail(error)) {
         "probe" => probe(),
         "run" => run(&request),
+        "canary" => run_ltx_canary(&request),
         "assess_batch" => assess_z_image_batch(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
@@ -7722,6 +8370,257 @@ mod ltx_tests {
         })
     }
 
+    fn ltx_canary_request_json() -> Value {
+        json!({
+            "action": "canary",
+            "hardware": { "memoryBytes": 128_u64 * 1024 * 1024 * 1024 },
+            "planned": {
+                "_diagnosticOnly": true,
+                "evidenceScope": "fixture",
+                "target": {
+                    "provider": LTX_PROVIDER,
+                    "modelId": LTX_PROVIDER,
+                    "tier": "q4",
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "geometry": {
+                        "width": LTX_CANARY_WIDTH,
+                        "height": LTX_CANARY_HEIGHT,
+                        "batch": 1,
+                        "frames": LTX_CANARY_FRAMES,
+                    },
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": {
+                    "rung": "bounded_decode",
+                    "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+                    "parameters": {
+                        "decodeTileEdge": LTX_CANARY_TILE_EDGE,
+                        "decodeOverlap": LTX_CANARY_OVERLAP,
+                    },
+                },
+                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "fixture": LTX_CANARY_FIXTURE,
+                "_watchdog": {
+                    "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+                },
+                "_canary": {
+                    "videoMode": "no_audio",
+                    "fps": LTX_CANARY_FPS,
+                    "seed": LTX_CANARY_SEED,
+                },
+                "_artifact": {
+                    "repository": protocol::LTX_REPOSITORY,
+                    "revision": LTX_CANARY_ARTIFACT_REVISION,
+                    "numericTierInventory": {
+                        "files": LTX_CANARY_Q4_INVENTORY_FILES,
+                        "bytes": LTX_Q4_INVENTORY_BYTES,
+                        "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                    },
+                    "textEncoderInventory": {
+                        "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                        "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                        "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                    },
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_is_an_exact_non_promotable_multi_tile_tuple() {
+        let request = ltx_canary_request_json();
+        let selection = validate_ltx_canary_plan(&request).expect("exact canary tuple");
+        assert_eq!(selection.strategy, MemoryStrategy::BoundedDecode);
+        assert_eq!(selection.tier.quant, Some(Quant::Q4));
+        assert_eq!(
+            selection.parameters.decode_tile_edge,
+            Some(LTX_CANARY_TILE_EDGE)
+        );
+        assert_eq!(
+            selection.parameters.decode_overlap,
+            Some(LTX_CANARY_OVERLAP)
+        );
+        let generated = ltx_canary_generation_request();
+        assert_eq!(
+            (generated.width, generated.height, generated.frames),
+            (LTX_CANARY_WIDTH, LTX_CANARY_HEIGHT, Some(LTX_CANARY_FRAMES))
+        );
+        assert_eq!(generated.video_mode.as_deref(), Some("no_audio"));
+        let memory = generated.memory.expect("bounded decode carrier");
+        assert!(memory.tile_vae_decode);
+        assert_eq!(memory.decode_tile_edge, Some(LTX_CANARY_TILE_EDGE));
+        assert_eq!(memory.decode_overlap, Some(LTX_CANARY_OVERLAP));
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_requires_the_live_watchdog_ack_go_channel_before_limits() {
+        let request = ltx_canary_request_json();
+        let host_memory = request["hardware"]["memoryBytes"]
+            .as_u64()
+            .expect("canary host memory");
+        let nonce = "ab".repeat(32);
+        let payload = json!({
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "nonce": nonce,
+            "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
+            "hostMemoryBytes": host_memory,
+            "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "minInitialMemoryFreePercent": LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT,
+            "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "minSwapFreeBytes": LTX_CANARY_MIN_SWAP_FREE_BYTES,
+        });
+        let (mut watchdog, adapter) = UnixStream::pair().expect("watchdog socket pair");
+        let expected_nonce = nonce.clone();
+        let valid_payload = payload.clone();
+        let watchdog_thread = std::thread::spawn(move || {
+            watchdog
+                .write_all(format!("{valid_payload}\n").as_bytes())
+                .expect("send attestation");
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).expect("adapter ACK"),
+                format!("ACK {expected_nonce}")
+            );
+            watchdog
+                .write_all(format!("GO {expected_nonce}\n").as_bytes())
+                .expect("release canary");
+            watchdog
+                .write_all(format!("PING {expected_nonce}\n").as_bytes())
+                .expect("maintain live watchdog lease");
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).expect("adapter DONE"),
+                format!("DONE {expected_nonce}")
+            );
+            watchdog
+                .write_all(format!("BYE {expected_nonce}\n").as_bytes())
+                .expect("complete canary lease");
+        });
+        let mut attested = consume_ltx_canary_watchdog_attestation_stream(&request, adapter)
+            .expect("exact live watchdog handshake");
+        let lease = attested.start_lease().expect("held watchdog lease");
+        lease.complete().expect("DONE/BYE completion handshake");
+        watchdog_thread.join().expect("watchdog thread");
+        assert_eq!(attested.max_footprint_bytes, LTX_CANARY_MAX_FOOTPRINT_BYTES);
+        assert_eq!(attested.max_runtime_seconds, LTX_CANARY_MAX_RUNTIME_SECONDS);
+        assert_eq!(
+            attested.min_initial_memory_free_percent,
+            LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT
+        );
+
+        assert!(std::env::var_os("SCENEWORKS_MEMORY_WATCHDOG_SOCKET").is_none());
+        let direct = consume_ltx_canary_watchdog_attestation(&request)
+            .expect_err("direct stdin canary has no live watchdog channel");
+        assert!(direct.contains("live external watchdog channel"));
+        let direct_action = run_ltx_canary(&request)
+            .expect_err("public canary action must refuse without the live watchdog");
+        assert!(direct_action.contains("live external watchdog channel"));
+
+        let mut weakened = payload;
+        weakened["minInitialMemoryFreeBytes"] =
+            json!(2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100) - 1);
+        let (mut fake_watchdog, fake_adapter) =
+            UnixStream::pair().expect("weakened watchdog socket pair");
+        let fake_thread = std::thread::spawn(move || {
+            fake_watchdog
+                .write_all(format!("{weakened}\n").as_bytes())
+                .expect("send weakened attestation");
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
+            .expect_err("weakened runtime floor must not attest");
+        fake_thread.join().expect("fake watchdog thread");
+        assert!(error.contains("exact reviewed bounds"));
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_rejects_every_identity_or_safety_mutation_before_load() {
+        type CanaryMutation = (&'static str, fn(&mut Value));
+        let mutations: [CanaryMutation; 15] = [
+            ("promotable scope", |request| {
+                request["planned"]["evidenceScope"] = json!("authoritative")
+            }),
+            ("campaign geometry", |request| {
+                request["planned"]["target"]["geometry"]["width"] = json!(768)
+            }),
+            ("single pass", |request| {
+                request["planned"]["strategy"]["rung"] = json!("staged_residency")
+            }),
+            ("wrong backend", |request| {
+                request["planned"]["backend"] = json!("candle")
+            }),
+            ("missing staged rung", |request| {
+                request["planned"]["strategy"]["engagedRungs"] =
+                    json!(["resident", "bounded_decode"])
+            }),
+            ("wrong tile edge", |request| {
+                request["planned"]["strategy"]["parameters"]["decodeTileEdge"] = json!(256)
+            }),
+            ("wrong overlap", |request| {
+                request["planned"]["strategy"]["parameters"]["decodeOverlap"] = json!(32)
+            }),
+            ("audio enabled", |request| {
+                request["planned"]["_canary"]["videoMode"] = json!("default")
+            }),
+            ("ceiling drift", |request| {
+                request["planned"]["_watchdog"]["maxFootprintBytes"] =
+                    json!(LTX_CANARY_MAX_FOOTPRINT_BYTES + 1)
+            }),
+            ("wrong fixture", |request| {
+                request["planned"]["fixture"] = json!("campaign-row")
+            }),
+            ("wrong artifact revision", |request| {
+                request["planned"]["_artifact"]["revision"] = json!("0".repeat(40))
+            }),
+            ("wrong artifact inventory", |request| {
+                request["planned"]["_artifact"]["numericTierInventory"]["sha256"] =
+                    json!("0".repeat(64))
+            }),
+            ("wrong text encoder bytes", |request| {
+                request["planned"]["_artifact"]["textEncoderInventory"]["bytes"] =
+                    json!(LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES - 1)
+            }),
+            ("wrong text encoder digest", |request| {
+                request["planned"]["_artifact"]["textEncoderInventory"]["sha256"] =
+                    json!("0".repeat(64))
+            }),
+            ("undersized host", |request| {
+                request["hardware"]["memoryBytes"] = json!(LTX_CANARY_MAX_FOOTPRINT_BYTES * 2 - 1)
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut request = ltx_canary_request_json();
+            mutate(&mut request);
+            assert!(
+                validate_ltx_canary_plan(&request).is_err(),
+                "{name} must fail before environment/provider/model access"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ltx_canary_wired_limit_never_exceeds_the_device_ceiling() {
+        let requested = LTX_CANARY_MAX_FOOTPRINT_BYTES as usize;
+        assert_eq!(ltx_canary_wired_limit(requested, 120), 80);
+        assert_eq!(ltx_canary_wired_limit(40, 120), 40);
+        assert_eq!(ltx_canary_wired_limit(requested, 0), 0);
+    }
+
+    #[test]
+    fn the_ltx_canary_process_global_limits_are_serialized_and_restore_memory() {
+        let previous = get_memory_limit();
+        {
+            let mut limits = LtxCanaryLimits::install().expect("install exact canary limits");
+            assert_eq!(get_memory_limit(), LTX_CANARY_MAX_FOOTPRINT_BYTES as usize);
+            limits.restore();
+            assert_eq!(get_memory_limit(), previous);
+            let restored_wired = set_wired_limit(limits.wired);
+            set_wired_limit(restored_wired);
+            assert_eq!(restored_wired, limits.previous_wired);
+        }
+        assert_eq!(get_memory_limit(), previous);
+    }
+
     fn set_ltx_request_tier(request: &mut Value, tier: &str, inventory: u64) {
         request["planned"]["target"]["tier"] = json!(tier);
         request["planned"]["fixture"] = json!(format!(
@@ -8355,7 +9254,7 @@ mod ltx_tests {
 
     /// The margin the fixed-budget injections above ride on, asserted instead of assumed.
     ///
-    /// `run_ltx` reads the process-global MLX limit without `LTX_BUDGET_INJECTION_LOCK`, so an
+    /// `run_ltx` reads the process-global MLX limit without `LTX_MEMORY_LIMIT_LOCK`, so an
     /// injected budget below the `run_ltx` smoke geometry's accumulator floor would make the engine
     /// refuse that geometry and replace the message those refusal tests assert. The lowest budget
     /// injected today (8 GiB, 6.8 GiB safe) clears the 4.49 GiB floor by 1.51x — a margin that used
@@ -8385,7 +9284,7 @@ mod ltx_tests {
 
         // Reacquire before observing the process-global limit. An intervening injection is allowed
         // to run, but must finish and restore `previous` before this assertion reads the value.
-        let _restoration_guard = LTX_BUDGET_INJECTION_LOCK
+        let _restoration_guard = LTX_MEMORY_LIMIT_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(get_memory_limit(), previous);
@@ -8402,7 +9301,7 @@ mod ltx_tests {
             "the budget must actually be installed while the guard lives"
         );
         drop(budget);
-        let restoration_guard = LTX_BUDGET_INJECTION_LOCK
+        let restoration_guard = LTX_MEMORY_LIMIT_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(get_memory_limit(), previous, "restored on the normal path");
@@ -8417,7 +9316,7 @@ mod ltx_tests {
             panic!("the selector blew up mid-plan");
         });
         assert!(outcome.is_err(), "the closure must actually have panicked");
-        let _restoration_guard = LTX_BUDGET_INJECTION_LOCK
+        let _restoration_guard = LTX_MEMORY_LIMIT_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
@@ -8444,7 +9343,7 @@ mod ltx_tests {
         // Read the limit and resolve under the SAME lock `LtxInjectedBudget` swaps under.
         // MLX's memory limit is process-global: without this, the boundary test's injected budget
         // can land between the read and the resolve and this comparison reads two different hosts.
-        let guard = LTX_BUDGET_INJECTION_LOCK
+        let guard = LTX_MEMORY_LIMIT_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let budget_gib =
