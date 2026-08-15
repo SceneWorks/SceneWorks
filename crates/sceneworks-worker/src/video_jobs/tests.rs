@@ -52,6 +52,11 @@ fn video_jobs_remains_split_into_real_engine_modules() {
             "pub(super) async fn generate_mochi(",
         ),
         (
+            "minimax_h3",
+            include_str!("minimax_h3.rs"),
+            "pub(super) async fn generate_minimax_h3(",
+        ),
+        (
             "svd",
             include_str!("svd.rs"),
             "pub(super) async fn generate_svd(",
@@ -76,6 +81,7 @@ fn video_jobs_remains_split_into_real_engine_modules() {
         "krea_realtime",
         "ltx",
         "mochi",
+        "minimax_h3",
         "svd",
         "vace",
     ] {
@@ -2085,6 +2091,12 @@ struct ArmProbe {
     spec: std::sync::Arc<std::sync::Mutex<Option<LoadSpec>>>,
     /// Provider-owned adapter outcomes returned after generation.
     adapter_reports: std::sync::Arc<std::sync::Mutex<Vec<gen_core::AdapterApplyReport>>>,
+    /// The soundtrack the stub engine returns alongside its frames. `None` (the default) is the
+    /// silent-video engines — Wan, Mochi, Krea. `Some` is the joint audio+video families, where the
+    /// question the probe exists to answer is whether the ARM carries the engine's track through to
+    /// `DecodedVideo::audio` or silently drops it (epic 17137 / sc-19508): a video that lost its
+    /// soundtrack still plays, so nothing else in the pipeline notices.
+    audio: Option<gen_core::AudioTrack>,
 }
 
 #[cfg(any(
@@ -2101,6 +2113,7 @@ impl ArmProbe {
         let seen_spec = std::sync::Arc::clone(&self.spec);
         let seen_request = std::sync::Arc::clone(&self.request);
         let adapter_reports = std::sync::Arc::clone(&self.adapter_reports);
+        let audio = self.audio.clone();
         move |engine_id, spec| {
             *seen_spec.lock().unwrap() = Some(spec.clone());
             Ok(Box::new(ProbeGenerator {
@@ -2117,6 +2130,7 @@ impl ArmProbe {
                 },
                 request: seen_request,
                 adapter_reports,
+                audio,
             }))
         }
     }
@@ -2157,6 +2171,8 @@ struct ProbeGenerator {
     descriptor: gen_core::ModelDescriptor,
     request: std::sync::Arc<std::sync::Mutex<Option<GenerationRequest>>>,
     adapter_reports: std::sync::Arc<std::sync::Mutex<Vec<gen_core::AdapterApplyReport>>>,
+    /// The soundtrack this stub emits with its frames — see [`ArmProbe::audio`].
+    audio: Option<gen_core::AudioTrack>,
 }
 
 #[cfg(any(
@@ -2191,7 +2207,7 @@ impl Generator for ProbeGenerator {
                 pixels: vec![0u8; 12],
             }],
             fps: req.fps.unwrap_or(30),
-            audio: None,
+            audio: self.audio.clone(),
         })
     }
 }
@@ -12068,18 +12084,200 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
     assert_no_person_track_strings(&upscaled.with_extension("poster.jpg"), "its poster");
 }
 
-/// sc-17159 (epic 17137) — a MiniMax-H3 job NEVER degrades to a procedural fake clip.
+// ---------------------------------------------------------------------------
+// MiniMax-H3 / Hailuo 3.0 (epic 17137 / sc-19508) — the MLX dispatch arm.
+//
+// Everything below drives the REAL arm (`generate_minimax_h3_using` is what `generate_minimax_h3`
+// delegates to, one line, no logic) or the REAL predicates the arm and the router share. Nothing
+// here re-implements a loader or a route: the recurring failure in this class is a smoke that
+// replicates the engine plumbing and goes green over a broken registration.
+// ---------------------------------------------------------------------------
+
+/// A MiniMax-H3 payload for `model`, with whatever extra keys the test needs.
+#[cfg(target_os = "macos")]
+fn minimax_h3_request(model: &str, extra: Value) -> VideoRequest {
+    let mut payload = json!({
+        "projectId": "p",
+        "model": model,
+        "mode": if model == "minimax_h3_ref" { "reference_to_video" } else { "text_to_video" },
+        "prompt": "a lighthouse keeper hums",
+    });
+    let object = payload.as_object_mut().expect("object payload");
+    for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+        object.insert(key, value);
+    }
+    request(payload)
+}
+
+/// Write ONE MiniMax-H3 DiT partition under tier dir `dir`: the `config.json` the engine parses plus
+/// a shard index naming `shards`, all of which land.
 ///
-/// The family is MLX-routed from sc-17159 (`VIDEO_MODEL_CAPS` + `video_mode_is_mlx_eligible`), so
-/// the mlx worker now claims its jobs — but the mlx engine is not in the pinned inference revision,
-/// so no arm of `resolve_video_route` matches its ids and every job lands on [`VideoRoute::Stub`].
-/// Without the fail-loud arm the Stub path calls `generate_stub_video` and returns a synthesized
-/// clip AT THE REQUESTED GEOMETRY — indistinguishable from a real render until watched. That is the
-/// silent degradation sc-4176 added `ensure_video_engine_weights` to prevent, and the arm Mochi
-/// (sc-11992) and Krea (sc-8443) each needed on arrival.
+/// Deliberately the same shape `sceneworks_core::mlx_tier_completeness` reads — `config.json` plus
+/// every shard the index names — because that predicate is what the resolver under test calls. A
+/// fixture that merely created the directory would satisfy a `<tier>/<partition>/*` glob and prove
+/// nothing about the completeness rule sc-19078 established.
+#[cfg(target_os = "macos")]
+fn seed_minimax_h3_partition(dir: &Path, partition: &str) {
+    let partition = dir.join(partition);
+    std::fs::create_dir_all(&partition).expect("partition dir");
+    let shards = [
+        "diffusion_pytorch_model-00001-of-00002.safetensors",
+        "diffusion_pytorch_model-00002-of-00002.safetensors",
+    ];
+    let weight_map = shards
+        .iter()
+        .enumerate()
+        .map(|(index, shard)| {
+            (
+                format!("blocks.{index}.attn.to_q.weight"),
+                Value::String((*shard).to_owned()),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    std::fs::write(
+        partition.join("diffusion_pytorch_model.safetensors.index.json"),
+        json!({ "weight_map": weight_map }).to_string(),
+    )
+    .expect("shard index");
+    std::fs::write(partition.join("config.json"), "{}").expect("dit config");
+    for shard in shards {
+        std::fs::write(partition.join(shard), b"weights").expect("shard");
+    }
+}
+
+/// A tier root carrying `tiers`, each with the `partitions` named. Returns the guard so the caller
+/// controls the lifetime (a dropped `TempDir` deletes the fixture mid-test).
+#[cfg(target_os = "macos")]
+fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> tempfile::TempDir {
+    let guard = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("temp dir");
+    for tier in tiers {
+        for partition in partitions {
+            seed_minimax_h3_partition(&guard.path().join(tier), partition);
+        }
+    }
+    guard
+}
+
+/// A shared/base snapshot root carrying every component `mlx-gen-minimax-h3::load` probes under
+/// `spec.weights` — the upstream repo's half of the install, which is a DIFFERENT download from the
+/// tiers.
+#[cfg(target_os = "macos")]
+fn minimax_h3_base_root(prefix: &str) -> tempfile::TempDir {
+    let guard = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("temp dir");
+    for component in ["text_encoder", "tokenizer", "vae", "audio_vae"] {
+        std::fs::create_dir_all(guard.path().join(component)).expect("component dir");
+    }
+    std::fs::create_dir_all(guard.path().join("FL2VA").join("audio_vae")).expect("FL2VA dir");
+    guard
+}
+
+/// A `JobSnapshot` for a MiniMax-H3 video job.
+#[cfg(target_os = "macos")]
+fn minimax_h3_job_snapshot() -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job-minimax-h3-1",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": null,
+        "projectName": null,
+        "payload": { "model": "minimax_h3" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0.0,
+        "stage": "queued",
+        "message": "queued",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-08-14T00:00:00Z",
+        "updatedAt": "2026-08-14T00:00:00Z",
+        "startedAt": null,
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": null
+    }))
+    .expect("the minimax-h3 job snapshot deserializes")
+}
+
+/// Drive the REAL `generate_minimax_h3_using` against `probe`, with both roots pointed at fixtures.
 ///
-/// The refusal is asserted by ITS OWN reason, not by `is_err()`: a bare error check here would go
-/// inert the moment the request were rejected for some unrelated cause (sc-19488).
+/// Every network field is unroutable (`offline_settings`) and `HF_HUB_CACHE` is pinned at an empty
+/// dir, so reaching the hub would fail loudly instead of depending on a dev box's real cache — the
+/// sc-12380 trap. The two `*_DIR` overrides are the supported operator seams the resolver reads
+/// first, which is what lets this run with no snapshot layout at all.
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm(
+    tier_root: &Path,
+    base_root: &Path,
+    probe: &ArmProbe,
+    request: &VideoRequest,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    let settings = Settings {
+        data_dir: tier_root.join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let job = minimax_h3_job_snapshot();
+    let loader = probe.loader();
+    let hf_cache = tier_root.join("unused-hf-cache");
+    let project_path = tier_root.join("unused-project");
+    crate::test_env::temp_env_vars(
+        &[
+            ("HF_HUB_CACHE", hf_cache.to_str().expect("utf-8 hub")),
+            (
+                crate::video_jobs::minimax_h3::MINIMAX_H3_TIER_DIR_ENV,
+                tier_root.to_str().expect("utf-8 tier root"),
+            ),
+            (
+                crate::video_jobs::minimax_h3::MINIMAX_H3_BASE_DIR_ENV,
+                base_root.to_str().expect("utf-8 base root"),
+            ),
+        ],
+        || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(crate::video_jobs::minimax_h3::generate_minimax_h3_using(
+                    &ApiClient::new(&settings),
+                    &settings,
+                    &job,
+                    request,
+                    &project_path,
+                    "minimax_h3",
+                    "mlx",
+                    loader,
+                ))
+        },
+    )
+}
+
+/// sc-17159 → sc-19508 (epic 17137) — a MiniMax-H3 job NEVER degrades to a procedural fake clip.
+///
+/// Without a fail-loud gate the Stub path calls `generate_stub_video` and returns a synthesized clip
+/// AT THE REQUESTED GEOMETRY — indistinguishable from a real render until watched. That is the
+/// silent degradation sc-4176 added `ensure_video_engine_weights` to prevent.
+///
+/// **What sc-19508 changed.** sc-17159 filled the slot with an unconditional refusal carrying a
+/// hard-coded "not in the pinned inference revision" string, because there was no dispatch arm to
+/// fall through to. There is one now, so the refusal is DERIVED: the arm asks the registry whether
+/// the engine is linked. At the current pin it is not, so every assertion below still holds — but it
+/// now holds for a reason that re-evaluates itself when the pin moves, instead of a string that can
+/// only go stale.
+///
+/// The refusal is asserted by ITS OWN reason, not by `is_err()`: a bare error check would go inert
+/// the moment the request were rejected for some unrelated cause (sc-19488).
 #[cfg(target_os = "macos")]
 #[test]
 fn minimax_h3_never_degrades_to_a_fake_video() {
@@ -12091,6 +12289,18 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
         data_dir: data_dir_guard.path().to_path_buf(),
         ..Settings::from_env()
     };
+    // The premise this whole test rests on, asserted rather than assumed: at the pinned inference
+    // revision the MiniMax-H3 engine is genuinely absent from the linked bundle. If a future pin
+    // registers it, this assertion fires FIRST and says so, instead of the four below failing with
+    // a confusing "expected a refusal" — the test tells you the world changed, not that you broke
+    // something.
+    assert!(
+        !crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        "the linked inference bundle now REGISTERS minimax_h3 — the pin moved (sc-18650). This \
+         guard's premise is gone: re-point it at the weights-unprovisioned case, which is the \
+         refusal that survives the bump."
+    );
+
     // Every declared mode of BOTH partitions, so no shape slips past on a route the ladder happens
     // to match for another reason.
     for (model, mode) in [
@@ -12100,12 +12310,16 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
         ("minimax_h3_ref", "reference_to_video"),
     ] {
         let req = request(json!({
-            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums"
+            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums",
+            // A real Ref2VA payload, so the reference partition is exercised with the shape it
+            // actually receives rather than an empty one that would be refused for a second reason.
+            "referenceAssetIds": if model == "minimax_h3_ref" { json!(["asset-1"]) } else { json!([]) },
         }));
         assert_eq!(
             resolve_video_route(&req, &settings),
             VideoRoute::Stub,
-            "{model}/{mode}: no native arm matches MiniMax-H3 at the pinned inference revision"
+            "{model}/{mode}: with no engine in the linked bundle the ladder must fall through to \
+             Stub, where the fail-loud gate runs"
         );
         let err = ensure_video_engine_weights(&req, &settings)
             .expect_err("a MiniMax-H3 job MUST fail loudly, never render a fake video");
@@ -12138,5 +12352,722 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
     assert!(
         ensure_video_engine_weights(&unknown, &settings).is_ok(),
         "a non-engine model id keeps the stub as its intended path"
+    );
+}
+
+/// The `VideoRoute::MiniMaxH3` tail arm is REACHED once the engine is ready (sc-19508).
+///
+/// Without this the arm would be untestable dead code until sc-18650 lands: `minimax_h3_available`
+/// requires the engine to be REGISTERED, which is false at the pinned revision, so every MiniMax job
+/// falls to `Stub` and deleting the arm entirely would be green in every other test. Declaration is
+/// not reachability — this drives the real ladder with the readiness the pin bump will supply.
+///
+/// The `false` half is equally load-bearing: it pins today's behavior (Stub, where the fail-loud
+/// gate runs) so the arm cannot be made unconditionally live by mistake.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
+    let data_dir_guard = tempfile::Builder::new()
+        .prefix("minimax_h3_route_arm_")
+        .tempdir()
+        .expect("temp dir");
+    let settings = Settings {
+        data_dir: data_dir_guard.path().to_path_buf(),
+        ..offline_settings()
+    };
+    for (model, mode, extra) in [
+        ("minimax_h3", "text_to_video", json!({})),
+        (
+            "minimax_h3",
+            "image_to_video",
+            json!({ "sourceAssetId": "a" }),
+        ),
+        (
+            "minimax_h3",
+            "first_last_frame",
+            json!({ "sourceAssetId": "a", "lastFrameAssetId": "b" }),
+        ),
+        (
+            "minimax_h3_ref",
+            "reference_to_video",
+            json!({ "referenceAssetIds": ["r1"] }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums",
+        });
+        let object = payload.as_object_mut().expect("object payload");
+        for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+            object.insert(key, value);
+        }
+        let req = request(payload);
+        assert_eq!(
+            resolve_video_route_with(&req, &settings, true),
+            VideoRoute::MiniMaxH3("minimax_h3"),
+            "{model}/{mode}: a ready MiniMax-H3 engine must reach its OWN arm — and carry the one \
+             registry id both partitions load, not a per-partition id the registry has never heard of"
+        );
+        assert_eq!(
+            resolve_video_route_with(&req, &settings, false),
+            VideoRoute::Stub,
+            "{model}/{mode}: with the engine absent the ladder must still fall to Stub, where the \
+             fail-loud gate refuses instead of returning a procedural clip"
+        );
+    }
+
+    // The tail arm must not have widened the ladder: a model served by an earlier arm keeps its
+    // route regardless of MiniMax readiness, so routing for every pre-existing model is unchanged.
+    let mochi = request(json!({
+        "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
+    }));
+    assert_eq!(
+        resolve_video_route_with(&mochi, &settings, true),
+        resolve_video_route_with(&mochi, &settings, false),
+        "MiniMax readiness must not change any other model's route"
+    );
+}
+
+/// The engine-presence check reads the REGISTRY, not a pinned revision string (sc-19508).
+///
+/// This is the substitution sc-17159's guard asked for, and the property that makes the whole arm
+/// writable before sc-18650: the engine is reached through `media().load(id, spec)` — a runtime
+/// lookup keyed on a string — so nothing needs the provider importable at compile time. What it
+/// needs is the id PRESENT in the registry.
+///
+/// Both halves are load-bearing. The `is_none()` half proves the check is asking the real registry
+/// (a hard-coded `false` would pass it, but not the `is_some()` half for a model that IS linked); the
+/// `is_some()` half proves the registry read actually discriminates, so a check stubbed to always
+/// report "absent" — which would make every MiniMax job refuse forever, silently surviving the pin
+/// bump — fails here.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_engine_presence_is_read_from_the_registry() {
+    assert!(
+        crate::inference_runtime::media_descriptor("minimax_h3").is_none(),
+        "minimax_h3 is not registered at the pinned inference revision"
+    );
+    assert!(
+        crate::inference_runtime::media_descriptor("wan2_2_t2v_14b").is_some(),
+        "the probe must discriminate: a registered video engine has to resolve, or `is_none()` \
+         above would pass against a registry that answers None to everything"
+    );
+    assert!(
+        !crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        "the helper must agree with the registry read it claims to perform"
+    );
+}
+
+/// BOTH catalog entries resolve to the SAME engine id, and nothing else does.
+///
+/// The story description asked for `minimax_h3` → "the base transformer provider" and
+/// `minimax_h3_ref` → "the transformer_ref provider". **There is no second provider.**
+/// `mlx-gen-minimax-h3` registers one `MODEL_ID = "minimax_h3"`; the two catalog entries own two DiT
+/// partition DIRECTORIES of it, and the engine picks between them from the conditioning. A second
+/// engine id would have produced an unknown-model load error at run time — green in every
+/// compile-time check.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_engine_id_is_one_id_for_both_partitions() {
+    use crate::video_jobs::minimax_h3::minimax_h3_engine_id;
+    assert_eq!(minimax_h3_engine_id("minimax_h3"), Some("minimax_h3"));
+    assert_eq!(minimax_h3_engine_id("minimax_h3_ref"), Some("minimax_h3"));
+    for outside in ["mochi_1", "wan_2_2", "krea_realtime_14b", "minimax_h4"] {
+        assert_eq!(
+            minimax_h3_engine_id(outside),
+            None,
+            "{outside} is outside the family — a broader match would steal it from its own arm"
+        );
+    }
+}
+
+/// The conditioning SHAPE must agree with the catalog entry's DiT partition (sc-19508).
+///
+/// This is the "would FAIL if the wrong partition were resolved" acceptance criterion, against the
+/// mechanism that exists. `transformer/` and `transformer_ref/` ship the same `config.json` and the
+/// same 638 tensor names — only the values differ — so a request that lands on the wrong one RUNS
+/// and returns plausible video. There is no error to catch downstream; the shape check is the only
+/// thing between a catalog id and a silently-wrong 18.78 GB checkpoint.
+///
+/// Every refusal is asserted on its own wording, never `is_err()`.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
+    use crate::video_jobs::minimax_h3::minimax_h3_validate_partition;
+
+    // The shapes that are CORRECT for their entry — the discriminating half. Without these the
+    // whole test would pass against a validator hard-wired to refuse everything.
+    for (model, extra) in [
+        ("minimax_h3", json!({})),
+        ("minimax_h3", json!({ "sourceAssetId": "a" })),
+        (
+            "minimax_h3",
+            json!({ "sourceAssetId": "a", "lastFrameAssetId": "b" }),
+        ),
+        ("minimax_h3", json!({ "lastFrameAssetId": "b" })),
+        ("minimax_h3_ref", json!({ "referenceAssetIds": ["r1"] })),
+        (
+            "minimax_h3_ref",
+            json!({ "referenceAssetIds": ["r1"], "referenceAudioAssetIds": ["a1"] }),
+        ),
+    ] {
+        let req = minimax_h3_request(model, extra);
+        assert!(
+            minimax_h3_validate_partition(&req).is_ok(),
+            "{model}: this shape belongs to the entry it was submitted against and must be admitted"
+        );
+    }
+
+    // A reference on the BASE entry would resolve ref2va and denoise on `transformer_ref/`.
+    let wrong_partition = minimax_h3_request("minimax_h3", json!({ "referenceAssetIds": ["r1"] }));
+    let message = minimax_h3_validate_partition(&wrong_partition)
+        .expect_err("a reference on the base entry must be refused")
+        .to_string();
+    assert!(
+        message.contains("minimax_h3_ref"),
+        "the refusal must name the entry that DOES serve references: {message}"
+    );
+
+    // A keyframe on the REFERENCE entry would resolve fl2va and denoise on `transformer/`.
+    let wrong_way = minimax_h3_request("minimax_h3_ref", json!({ "sourceAssetId": "a" }));
+    let message = minimax_h3_validate_partition(&wrong_way)
+        .expect_err("a keyframe-only payload on the reference entry must be refused")
+        .to_string();
+    assert!(
+        message.contains("at least one reference"),
+        "the refusal must say what the reference entry actually needs: {message}"
+    );
+
+    // Both at once is a hard error upstream too (`MiniMaxH3Task::resolve`); refused here so the
+    // user gets a SceneWorks-worded reason before a 53 GB text encoder is mapped.
+    let both = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "sourceAssetId": "a", "referenceAssetIds": ["r1"] }),
+    );
+    let message = minimax_h3_validate_partition(&both)
+        .expect_err("keyframes AND references are two different tasks")
+        .to_string();
+    assert!(
+        message.contains("both keyframes and references"),
+        "the refusal must name the collision: {message}"
+    );
+
+    // Audio-only leaves the visual stream unconditioned — the vision tower is the reference
+    // conditioner, so the engine refuses it. Refused here first, before any load.
+    let audio_only = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "referenceAudioAssetIds": ["a1"] }),
+    );
+    let message = minimax_h3_validate_partition(&audio_only)
+        .expect_err("an audio-only reference set must be refused")
+        .to_string();
+    assert!(
+        message.contains("audio-only"),
+        "the refusal must name the shape: {message}"
+    );
+
+    // `Conditioning::ReferenceVideo` — the only variant carrying a reference clip's own frame rate
+    // — arrives with the sc-18650 pin bump. Refused BY NAME rather than downgraded to
+    // `Conditioning::VideoClip`, which the engine deliberately does not advertise.
+    let clips = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "referenceAssetIds": ["r1"], "sourceClipAssetIds": ["c1"] }),
+    );
+    let message = minimax_h3_validate_partition(&clips)
+        .expect_err("video references cannot be built at the pinned gen-core")
+        .to_string();
+    assert!(
+        message.contains("sc-18650") && message.contains("No output was produced"),
+        "the refusal must name the pin bump and say nothing was rendered: {message}"
+    );
+}
+
+/// Keyframes anchor the FIRST and LAST frame, and references keep the caller's order (sc-19508).
+///
+/// Both are invisible in the output when wrong. A keyframe at any index other than `0` or
+/// `-1`/`frames-1` is a hard engine reject; a reference list in the wrong order changes the
+/// `<Picture i>` labels and the shared rotary clock, so the render silently differs.
+///
+/// The last anchor is `-1` and NOT `frames - 1` on purpose: `-1` is independent of the frame count
+/// this arm computed, so a disagreement between our lattice coercion and the engine's can never turn
+/// a last-frame anchor into a rejected mid-clip one.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_conditioning_anchors_and_reference_order() {
+    use crate::video_jobs::minimax_h3::minimax_h3_conditioning;
+    let image = |tag: u8| Image {
+        width: 2,
+        height: 2,
+        pixels: vec![tag; 12],
+    };
+    let anchors = |c: &[Conditioning]| -> Vec<i32> {
+        c.iter()
+            .filter_map(|c| match c {
+                Conditioning::Keyframe { frame_idx, .. } => Some(*frame_idx),
+                _ => None,
+            })
+            .collect()
+    };
+
+    assert!(
+        minimax_h3_conditioning(None, None, Vec::new(), Vec::new()).is_empty(),
+        "t2va conditions on nothing"
+    );
+    assert_eq!(
+        anchors(&minimax_h3_conditioning(
+            Some(image(1)),
+            None,
+            Vec::new(),
+            Vec::new()
+        )),
+        vec![0],
+        "a first frame alone anchors index 0"
+    );
+    assert_eq!(
+        anchors(&minimax_h3_conditioning(
+            None,
+            Some(image(2)),
+            Vec::new(),
+            Vec::new()
+        )),
+        vec![-1],
+        "a last frame alone anchors -1, the count-independent end slot"
+    );
+    let both = minimax_h3_conditioning(Some(image(1)), Some(image(2)), Vec::new(), Vec::new());
+    assert_eq!(
+        anchors(&both),
+        vec![0, -1],
+        "first_last_frame is TWO anchors, one at each end — the same list at the same index would \
+         be refused as two keyframes on one end"
+    );
+    // The images must land on the anchors they were given for, not merely be present.
+    let Conditioning::Keyframe { image: first, .. } = &both[0] else {
+        panic!("the first conditioning entry is a keyframe");
+    };
+    assert_eq!(
+        first.pixels[0], 1,
+        "the FIRST-frame asset must be the one anchored at index 0"
+    );
+
+    // Reference order: images in submission order, then audio. Tagged pixels make a re-ordering
+    // visible — a length check alone would pass against a shuffled list.
+    let audio = |tag: f32| Conditioning::ReferenceAudio {
+        audio: gen_core::AudioTrack {
+            samples: vec![tag],
+            sample_rate: 32_000,
+            channels: 2,
+            stems: Vec::new(),
+        },
+        strength: None,
+    };
+    let refs = minimax_h3_conditioning(
+        None,
+        None,
+        vec![image(7), image(8), image(9)],
+        vec![audio(0.25), audio(0.5)],
+    );
+    let order: Vec<String> = refs
+        .iter()
+        .map(|c| match c {
+            Conditioning::Reference { image, .. } => format!("i{}", image.pixels[0]),
+            Conditioning::ReferenceAudio { audio, .. } => format!("a{}", audio.samples[0]),
+            other => format!("unexpected:{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec!["i7", "i8", "i9", "a0.25", "a0.5"],
+        "reference order is semantic — images in submission order, then audio in submission order"
+    );
+}
+
+/// The recorded task follows the CONDITIONING, which is what the engine derives the partition from.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_task_is_derived_from_the_conditioning() {
+    use crate::video_jobs::minimax_h3::{minimax_h3_conditioning, minimax_h3_task};
+    let image = Image {
+        width: 2,
+        height: 2,
+        pixels: vec![0; 12],
+    };
+    assert_eq!(
+        minimax_h3_task(&minimax_h3_conditioning(None, None, Vec::new(), Vec::new())),
+        "t2va"
+    );
+    assert_eq!(
+        minimax_h3_task(&minimax_h3_conditioning(
+            Some(image.clone()),
+            None,
+            Vec::new(),
+            Vec::new()
+        )),
+        "fl2va"
+    );
+    assert_eq!(
+        minimax_h3_task(&minimax_h3_conditioning(
+            None,
+            None,
+            vec![image],
+            Vec::new()
+        )),
+        "ref2va",
+        "a reference set denoises on transformer_ref/ — the asset record is the only place a \
+         wrong-partition render is visible after the fact"
+    );
+}
+
+/// A tier is loadable only with BOTH DiT partitions, and the error names the missing half.
+///
+/// `mlx_tier_completeness`'s two predicates are independent BY DESIGN so the Model Manager can
+/// report each catalog entry honestly. The ENGINE's `load` probes `transformer/config.json` AND
+/// `transformer_ref/config.json` on every load regardless of task, so a one-partition install
+/// reports "installed" in the UI and cannot render. This resolver is where that gap is closed.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_tier_resolution_requires_both_dit_partitions() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let base = minimax_h3_base_root("minimax_h3_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+
+    let resolve = |tier_root: &Path| {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // Both partitions ⇒ resolves, and points at the BASE partition dir (the provider swings to its
+    // `transformer_ref` sibling for a ref2va render).
+    let complete = minimax_h3_tier_root("mm_both_", &["q4"], &["transformer", "transformer_ref"]);
+    let load = resolve(complete.path()).expect("a complete q4 tier resolves");
+    assert_eq!(load.tier, "q4");
+    assert_eq!(load.quant, Some(Quant::Q4));
+    assert_eq!(load.dit_dir, complete.path().join("q4").join("transformer"));
+    assert_eq!(
+        load.root,
+        base.path(),
+        "spec.weights is the UPSTREAM root — the shared components live there, not in the tier repo"
+    );
+
+    // Base partition only — the `minimax_h3` download without `minimax_h3_ref`.
+    let base_only = minimax_h3_tier_root("mm_base_", &["q4"], &["transformer"]);
+    let message = resolve(base_only.path())
+        .expect_err("one partition is not a loadable tier")
+        .to_string();
+    assert!(
+        message.contains("only one of the two MiniMax-H3 DiT partitions"),
+        "the error must say which half is missing rather than 'not downloaded': {message}"
+    );
+
+    // Reference partition only — the mirror case, so the message is not accidentally one-sided.
+    let ref_only = minimax_h3_tier_root("mm_ref_", &["q4"], &["transformer_ref"]);
+    let message = resolve(ref_only.path())
+        .expect_err("one partition is not a loadable tier")
+        .to_string();
+    assert!(
+        message.contains("only one of the two MiniMax-H3 DiT partitions"),
+        "the reference-only install must get the same actionable error: {message}"
+    );
+
+    // Nothing installed at all is a DIFFERENT message — "download the tier", not "you have half".
+    let empty = tempfile::Builder::new()
+        .prefix("mm_empty_")
+        .tempdir()
+        .expect("temp dir");
+    let message = resolve(empty.path())
+        .expect_err("an empty tier root does not resolve")
+        .to_string();
+    assert!(
+        message.contains("no complete MiniMax-H3 tier found"),
+        "an empty install must not be reported as a torn one: {message}"
+    );
+}
+
+/// The shared components are a SEPARATE download from the tiers, and their absence says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_names_the_missing_shared_components() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let tiers = minimax_h3_tier_root("mm_shared_", &["q4"], &["transformer", "transformer_ref"]);
+    // A base root that exists but is missing `FL2VA/audio_vae/` — the audio VAE's constructor
+    // documents, which live ONLY in the FL2VA sources and which the loader probes explicitly.
+    let base = tempfile::Builder::new()
+        .prefix("mm_torn_base_")
+        .tempdir()
+        .expect("temp dir");
+    for component in ["text_encoder", "tokenizer", "vae", "audio_vae"] {
+        std::fs::create_dir_all(base.path().join(component)).expect("component dir");
+    }
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let message = crate::test_env::temp_env_vars(
+        &[
+            (
+                MINIMAX_H3_TIER_DIR_ENV,
+                tiers.path().to_str().expect("utf-8"),
+            ),
+            (
+                MINIMAX_H3_BASE_DIR_ENV,
+                base.path().to_str().expect("utf-8"),
+            ),
+        ],
+        || resolve_minimax_h3_load(&settings, &req),
+    )
+    .expect_err("a torn shared install must not resolve")
+    .to_string();
+    assert!(
+        message.contains("FL2VA/audio_vae"),
+        "the error must name the component that is actually missing, since the tiers and the \
+         shared components are separate downloads: {message}"
+    );
+}
+
+/// **The caller-side pin.** Drives the REAL arm end to end and asserts on what reached the engine.
+///
+/// Four things are checked here because each is invisible in the output when wrong:
+///
+/// * the `17n + 5` frame count (the Wan `4k + 1` stride would hand the engine an off-lattice count
+///   it hard-rejects — the two lattices are NOT nested);
+/// * the tier's DiT staged as the `"transformer"` COMPONENT while `spec.weights` names the upstream
+///   root (swap them and the loader either cannot find `text_encoder/` or loads the unquantized
+///   upstream DiT — a full-precision render on a machine sized for q4);
+/// * the quant marker, which the provider ASSERTS against the staged tier rather than applying;
+/// * the absence of `guidance` / `negative_prompt`, which this guidance-distilled checkpoint rejects.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_tier() {
+    let tiers = minimax_h3_tier_root("mm_arm_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_arm_base_");
+    let probe = ArmProbe::default();
+    // 6.0 s at MiniMax-H3's one cadence is 144 raw frames, which is OFF the `17n + 5` lattice — so
+    // the coercion has to actually MOVE it (to 158) and this cannot pass against an arm that
+    // forwards the raw count. Stated explicitly rather than leaning on the resolved default: a
+    // payload with no `modelManifestEntry` gets a generic duration, which would make what this
+    // asserts depend on a default it is not testing.
+    // The payload deliberately CARRIES a negative prompt and a guidance scale. Both assertions
+    // below say the arm must not forward them; against an empty payload they would be asserting a
+    // default and would stay green if someone wired either field through.
+    let request = minimax_h3_request(
+        "minimax_h3",
+        json!({
+            "duration": 6.0,
+            "fps": 24,
+            "negativePrompt": "blurry, watermark",
+            "advanced": { "guidanceScale": 7.5 },
+        }),
+    );
+
+    let (_decoded, raw_settings) =
+        drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+            .expect("a t2va job with a complete q4 tier and shared components runs");
+
+    assert_eq!(
+        request.raw_frame_count(),
+        144,
+        "the fixture must hand the arm an OFF-lattice count, or the coercion is a no-op here"
+    );
+    assert_eq!(
+        probe.engine_frames(),
+        158,
+        "the ARM must snap onto the `17n + 5` lattice (17 x 9 + 5 = 158), the first legal count at \
+         or above 144"
+    );
+    assert_eq!(
+        (probe.engine_frames() - 5) % 17,
+        0,
+        "and it must be a genuine lattice point, not a hard-coded number that happens to match"
+    );
+    assert_ne!(
+        probe.engine_frames(),
+        wan_frame_count(request.raw_frame_count()),
+        "the probe must discriminate: routing this arm through the Wan 4k+1 stride is the exact \
+         bug the epic's retracted '4k+1' claim would have produced, and the engine never refits"
+    );
+
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    // `WeightsSource` is not `PartialEq`, so unwrap each to the directory it names.
+    let source_dir = |source: Option<&WeightsSource>| match source {
+        Some(WeightsSource::Dir(dir)) => Some(dir.clone()),
+        _ => None,
+    };
+    assert_eq!(
+        source_dir(Some(&spec.weights)),
+        Some(base.path().to_path_buf()),
+        "spec.weights must be the UPSTREAM root — every shared component is probed under it"
+    );
+    assert_eq!(
+        source_dir(spec.components.get("transformer")),
+        Some(tiers.path().join("q4").join("transformer")),
+        "the tiered DiT must ride the components map: it lives in a different repo from the \
+         shared components, and `weights` can only name one root"
+    );
+    assert_eq!(
+        spec.quantize,
+        Some(Quant::Q4),
+        "the arm must carry the resolved tier's quant onto the LoadSpec — the provider asserts it \
+         against the tier's own marker rather than quantizing at load"
+    );
+
+    let engine_request = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        engine_request.fps,
+        Some(24),
+        "MiniMax-H3 has ONE cadence; the engine errors on anything else"
+    );
+    assert!(
+        !request.negative_prompt.trim().is_empty(),
+        "the fixture must SUPPLY a negative prompt, or the assertion below tests a default"
+    );
+    assert!(
+        engine_request.negative_prompt.is_none(),
+        "guidance-distilled: the checkpoint has no unconditional branch and REJECTS a negative \
+         prompt — the manifest declares the axis false and the worker must not forward it"
+    );
+    assert!(
+        request.advanced.contains_key("guidanceScale"),
+        "same: the fixture must supply a guidance scale for the next assertion to discriminate"
+    );
+    assert!(
+        engine_request.guidance.is_none(),
+        "there is no guidance axis on this checkpoint — a forwarded scale would be rejected by \
+         `validate_request`, and the Video Studio hides the control"
+    );
+    assert!(
+        engine_request.conditioning.is_empty(),
+        "a t2va payload conditions on nothing"
+    );
+
+    assert_eq!(
+        raw_settings["minimaxH3Tier"],
+        json!("q4"),
+        "the asset must record the tier that actually LOADED"
+    );
+    assert_eq!(
+        raw_settings["minimaxH3Task"],
+        json!("t2va"),
+        "and the task that actually DENOISED — the only durable evidence of WHICH of the two \
+         structurally-identical DiT partitions ran"
+    );
+    assert_eq!(raw_settings["realModelInference"], json!(true));
+}
+
+/// The engine's synchronized soundtrack reaches the asset instead of being dropped (sc-19508).
+///
+/// MiniMax-H3 emits video AND stereo audio in ONE pass. A clip that lost its soundtrack still plays,
+/// so nothing downstream notices — which is why this is pinned at the arm rather than assumed from
+/// the funnel's shape. `DecodedVideo::audio` already carries `GenerationOutput::Video { audio }`
+/// generically (LTX-2.3 built it); this asserts the MiniMax arm actually inherits that path rather
+/// than needing bespoke plumbing, and would fail if the arm ever stopped going through the shared
+/// funnel.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_carries_the_engine_soundtrack_to_the_asset() {
+    let tiers = minimax_h3_tier_root("mm_av_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_av_base_");
+    let probe = ArmProbe {
+        // The family's declared output: 32 kHz interleaved stereo.
+        audio: Some(gen_core::AudioTrack {
+            samples: vec![0.25, -0.25, 0.5, -0.5],
+            sample_rate: 32_000,
+            channels: 2,
+            stems: Vec::new(),
+        }),
+        ..ArmProbe::default()
+    };
+    let request = minimax_h3_request("minimax_h3", json!({}));
+
+    let (decoded, _raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("the arm runs against the probe");
+
+    let track = decoded
+        .audio
+        .expect("the joint audio+video family's soundtrack must reach the asset, not be dropped");
+    assert_eq!(track.sample_rate, 32_000);
+    assert_eq!(track.channels, 2);
+    assert_eq!(
+        track.samples,
+        vec![0.25, -0.25, 0.5, -0.5],
+        "the samples must arrive unmodified — a re-synthesized or truncated track would still \
+         play, so only comparing the payload catches it"
+    );
+
+    // The discriminating half: the same arm over a SILENT engine must yield no track, so this test
+    // cannot pass against a `DecodedVideo` that fabricates one.
+    //
+    // It runs against FRESH fixture roots on purpose. The funnel loads through
+    // `generator_cache::with_cached_generator_using`, keyed on the engine id AND the `LoadSpec` — so
+    // a second run over the same roots would be a cache HIT, silently reuse the loud generator
+    // above, and "prove" the opposite of what it claims while still passing. Different roots means a
+    // different spec, which means the silent loader actually runs.
+    let silent_tiers =
+        minimax_h3_tier_root("mm_silent_", &["q4"], &["transformer", "transformer_ref"]);
+    let silent_base = minimax_h3_base_root("mm_silent_base_");
+    let silent = ArmProbe::default();
+    let (decoded, _raw) =
+        drive_minimax_h3_arm(silent_tiers.path(), silent_base.path(), &silent, &request)
+            .expect("the arm runs against a silent probe too");
+    assert!(
+        silent.loaded(),
+        "the silent probe's loader must actually have run — a cache hit here would reuse the \
+         generator above and invert what this half proves"
+    );
+    assert!(
+        decoded.audio.is_none(),
+        "an engine that returned no audio must not gain one in the arm"
+    );
+}
+
+/// The arm refuses a wrong-partition shape BEFORE it loads anything (sc-19508).
+///
+/// `probe.loaded()` is what makes this a pre-load assertion rather than just an error check: it is
+/// only ever set from inside the loader. A validator moved after the load would leave every message
+/// assertion above green while the 53 GB text encoder was already mapped.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_refuses_a_wrong_partition_shape_before_loading() {
+    let tiers = minimax_h3_tier_root("mm_shape_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_shape_base_");
+    let probe = ArmProbe::default();
+    // A reference on the BASE entry: the engine would resolve ref2va and denoise on the reference
+    // partition, returning plausible video from the wrong checkpoint.
+    let request = minimax_h3_request("minimax_h3", json!({ "referenceAssetIds": ["r1"] }));
+
+    let message = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .err()
+        .expect("a reference on the base entry must be refused")
+        .to_string();
+    assert!(
+        message.contains("minimax_h3_ref"),
+        "the refusal must point at the entry that serves references: {message}"
+    );
+    assert!(
+        !probe.loaded(),
+        "the shape check must run BEFORE the load — a wrong-partition job must never pay for a \
+         53 GB text encoder, let alone render from the wrong DiT"
     );
 }

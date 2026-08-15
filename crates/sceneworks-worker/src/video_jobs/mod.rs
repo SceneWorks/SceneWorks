@@ -221,6 +221,12 @@ enum VideoRoute {
     /// Mochi 1 text-to-video (epic 1788 / sc-11992). Carries the resolved engine id. t2v ONLY —
     /// [`mochi_available`] gates the mode, since `conditioning: []` means there is no other shape.
     Mochi(&'static str),
+    /// MiniMax-H3 / Hailuo 3.0 joint audio+video (epic 17137 / sc-19508). Serves t2va, fl2va (0/1/2
+    /// keyframes) and Ref2VA; mac-only. Carries the resolved engine id — ONE id for BOTH catalog
+    /// entries, because the two DiT partitions are directories of a single provider, not two
+    /// providers. [`minimax_h3_available`] folds in the registry check, the partition/shape
+    /// agreement check and weights resolution.
+    MiniMaxH3(&'static str),
     /// No native engine matched (or weights unresolved) → the procedural stub, after
     /// `ensure_video_engine_weights` fails a known-but-unprovisioned engine loudly (sc-4176).
     Stub,
@@ -233,6 +239,33 @@ enum VideoRoute {
 /// ladder for every other mode.
 #[cfg(target_os = "macos")]
 fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
+    // MiniMax-H3 readiness is the ONE ladder input that cannot be reached from a test today: it
+    // requires the engine to be REGISTERED in the linked inference bundle, which is false at the
+    // pinned revision (sc-18650 owns the bump). Left inline, the tail arm below would be dead code
+    // no test can distinguish from a deleted one — declaration without reachability, the exact trap
+    // this epic keeps hitting. Threaded in instead, so `resolve_video_route_with` can be driven
+    // with the readiness the pin bump will supply and the arm is covered NOW.
+    //
+    // Evaluated here rather than in the ladder, but NOT eagerly: `minimax_h3_engine_id` is a pure
+    // string check, so every other model short-circuits before any filesystem touch and routing
+    // stays byte-identical. For a MiniMax-H3 id the probe simply runs earlier than it would have —
+    // no earlier predicate can match those ids, so the outcome is unchanged.
+    let minimax_h3_ready =
+        minimax_h3_engine_id(&request.model).is_some() && minimax_h3_available(request, settings);
+    resolve_video_route_with(request, settings, minimax_h3_ready)
+}
+
+/// [`resolve_video_route`] with the MiniMax-H3 readiness probe supplied by the caller — the seam
+/// that makes the family's tail arm reachable before the inference pin moves (sc-19508).
+///
+/// `resolve_video_route` is the one-line delegation that binds the real probe. Everything the
+/// ladder decides lives here.
+#[cfg(target_os = "macos")]
+fn resolve_video_route_with(
+    request: &VideoRequest,
+    settings: &Settings,
+    minimax_h3_ready: bool,
+) -> VideoRoute {
     if request.mode == "replace_person" {
         if let Some(engine_id) = scail2_engine_id(&request.model) {
             VideoRoute::ReplacePersonScail2(engine_id)
@@ -281,6 +314,20 @@ fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRout
         // matches only `mochi_1`, and no earlier predicate can match that id, so routing for every
         // pre-existing model stays byte-identical. `mochi_available` folds in the t2v-only mode gate.
         VideoRoute::Mochi(engine_id)
+    } else if let Some(engine_id) =
+        minimax_h3_engine_id(&request.model).filter(|_| minimax_h3_ready)
+    {
+        // MiniMax-H3 (epic 17137 / sc-19508). Appended at the NEW tail: `minimax_h3_engine_id`
+        // matches only `minimax_h3` / `minimax_h3_ref`, and no earlier predicate can match either
+        // id, so routing for every pre-existing model stays byte-identical.
+        //
+        // `minimax_h3_available` folds in three gates that all have to hold before an arm may run:
+        // the engine is actually REGISTERED in the linked inference bundle (false at the current
+        // pin, and the reason this arm is dormant rather than broken), the conditioning shape
+        // agrees with the entry's DiT partition, and both the tier and its shared components
+        // resolve. Any of them failing drops to `Stub`, where `ensure_video_engine_weights` re-runs
+        // the same checks and surfaces the precise reason instead of a procedural fake clip.
+        VideoRoute::MiniMaxH3(engine_id)
     } else {
         VideoRoute::Stub
     }
@@ -817,6 +864,31 @@ pub(crate) async fn run_video_generate_job(
                 let (decoded, raw_settings) =
                     generate_mochi(api, settings, job, &request, engine_id, backend).await?;
                 (decoded, MOCHI_ADAPTER, raw_settings, None)
+            }
+            VideoRoute::MiniMaxH3(engine_id) => {
+                // MiniMax-H3 (epic 17137 / sc-19508): joint audio+video in ONE denoise pass.
+                // `generate_minimax_h3` maps the supplied media to the engine conditioning — 0/1/2
+                // keyframes for t2va/fl2va, ordered image + audio references for Ref2VA — resolves
+                // the tier's DiT partition and the upstream shared components (two different
+                // repos), and drives the shared `generate_video` funnel. The synchronized stereo
+                // soundtrack rides `DecodedVideo::audio` out of the funnel exactly as LTX's does;
+                // no bespoke audio plumbing.
+                //
+                // It returns its own `rawSettings` because the tier that actually LOADED and the
+                // task that actually DENOISED — i.e. which of the two structurally-identical
+                // 18.78 GB DiT partitions ran — are only knowable inside the arm, and a
+                // wrong-partition render is invisible in the output.
+                let (decoded, raw_settings) = generate_minimax_h3(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (decoded, MINIMAX_H3_ADAPTER, raw_settings, None)
             }
             VideoRoute::Stub => {
                 // An MLX-routed video model whose snapshot didn't resolve must fail
@@ -1909,6 +1981,11 @@ pub use ltx::{text_encoder_options_for_adapter, TextEncoderOption};
 mod mochi;
 #[cfg(target_os = "macos")]
 use mochi::{generate_mochi, mochi_available, mochi_engine_id, MOCHI_ADAPTER};
+pub(crate) mod minimax_h3;
+#[cfg(target_os = "macos")]
+use minimax_h3::{
+    generate_minimax_h3, minimax_h3_available, minimax_h3_engine_id, MINIMAX_H3_ADAPTER,
+};
 mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};

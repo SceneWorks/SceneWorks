@@ -483,6 +483,32 @@ describe("declared video capabilities are all offerable", () => {
     }
   });
 
+  // sc-19504. The withdrawal, asserted where it is actually LOAD-BEARING.
+  //
+  // On a Mac the First/Last tab was already hidden for this model — `macSupport.features.videoModes`
+  // is built by mapping the real `video_mode_is_mlx_eligible`, which says false. OFF-Mac
+  // `macGatingActive` is false, `macVideoModeBlock` is inert, and `videoModelServesMode` collapses
+  // to `capabilities.includes(mode)` alone. So `capabilities` was the ONLY thing between a
+  // Windows/Linux user and a tab whose every submission queued forever — which is why the fix is
+  // the manifest array and not a gating flag.
+  it("the 14B I2V no longer offers First/Last Frame — on any platform", () => {
+    const entry = shipped.find((model) => model.id === "wan_2_2_i2v_14b");
+    expect(entry, "wan_2_2_i2v_14b is a shipped video model").toBeTruthy();
+    expect(entry.capabilities).not.toContain("first_last_frame");
+    expect(entry.ui?.recommendedFor ?? []).not.toContain("first_last_frame");
+
+    // Off-Mac: gating inactive, so this is `capabilities` speaking for itself.
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: false, platform: "win32" };
+    expect(videoModelServesMode(entry, "first_last_frame", offMac)).toBe(false);
+    // …and the modes a lane really does serve are untouched, so the withdrawal narrowed one
+    // capability rather than the model. Without this the assertion above would pass on an entry
+    // that had lost every capability.
+    for (const mode of ["image_to_video", "extend_clip", "video_bridge"]) {
+      expect(videoModelServesMode(entry, mode, offMac), `still serves ${mode}`).toBe(true);
+    }
+    expect(videoModelUsable({ ...entry, macSupport: undefined }, offMac)).toBe(true);
+  });
+
   it("both MiniMax-H3 partitions are usable in the Video Studio, each on its own modes", () => {
     // The regression this pins: the family installs on macOS ONLY, so if the server ever answers
     // `macSupport.supported: false` for it again (it did until sc-17159 added the VIDEO_MODEL_CAPS

@@ -39,7 +39,8 @@ pub use routing::catalog::{
     model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
-    candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
+    candle_supported, mac_rust_supported, video_request_is_claimable_by_any_lane,
+    UnsupportedReason, NATIVE_CONVERTERS,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &[
