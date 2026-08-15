@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7db67f02b8e237d22723522d8ed9417d8719982cb4edcbfc50aeb5e8a34c3638",
-    "inferenceRevision": "e58fb08dc6ef622e701ea3a9cb699e5be947593a",
+    "sceneWorksRevision": "source-tree:24f65319fffd79b0572846e2c5feff7949626b3c28d318d09ddd0b793588fd5a",
+    "inferenceRevision": "8e6497f2f8f915ffe24b104c1b4f1b4dfe9a6b8d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "f36100b01fc85ea42e4a1f64afe20afaacf2b7678f34bed5fca9591d5be06f8f"
+        "sha256": "08ae91488e23f7c6857e3cd3234bfb17e7356ce35f67704d575668a90d8195ba"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -26,11 +26,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "fff0319baa93a4932a37a9f304886a839d293104a583389af428ef412d50ae62"
+        "sha256": "5b4075f57c41ce479284c38717aa1d203b587ae22667a2f4c120176f2f5e5199"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "88a5051cf1f2f9f858e03bd1c9fa1655703431e8a07acba1b4006cd1c5d8d255"
+        "sha256": "eeb25339c7984c4fc99d9c8e0c311fd6df70dbd41792711e75e20f68e65fd7cf"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -50,19 +50,31 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "7c6a6db8a8879b88f3b8b6cbef8abcf613667b328b99823392aaa8096ceaa318"
+        "sha256": "922b476a80ba244c5434d13747c2b43133ebe6c1f7fc72c7934756a3a08e56b1"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "67ba8789ceac080e791bcd8fc62836f2f8931d00f49bd5f10729c79ae68a09dc"
+        "sha256": "af8151db18a097d42ef3df32e344e9c595ffc52ca4b97c333fc6f22d7e25fce4"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
         "sha256": "7b89df90e64268ce95738e11e4b118d1f6ed0db8a62009a757f50edd9b264c81"
       },
+      "engineCapabilitiesMlx": {
+        "path": "config/engine-capabilities/capabilities.mlx.json",
+        "sha256": "d035dc39cda8e4c31bfd0e8f30312fdb531c9667d4334b40f4de0f15204fe0d4"
+      },
+      "engineCapabilitiesCandle": {
+        "path": "config/engine-capabilities/capabilities.candle.json",
+        "sha256": "cc41ed7cc75d82be33f880b2cf5b73e4506c477e4898360edbf8f1b9cc21b948"
+      },
+      "memoryContractWaivers": {
+        "path": "config/memory-contract-reconciliation-waivers.json",
+        "sha256": "a0d052f9b5246c93ce19ee592920688d03e4991901ac4c566533500d2ab80cea"
+      },
       "cargo": {
         "path": "Cargo.toml",
-        "sha256": "7cd8b76a2ecaf18e3b510b411d725b8de766b396a1f1afe36d89f1c4d5495623"
+        "sha256": "8f5409c4e38b9678750a0292a0768e75fe583f3c3650b2b56c4e2df6d3707a61"
       }
     }
   },
@@ -132,8 +144,8 @@
     "publishedCells": 208,
     "elidedCells": 8932,
     "elidedByState": {
-      "Implemented/unverified": 3084,
-      "Missing": 5848
+      "Implemented/unverified": 3112,
+      "Missing": 5820
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -145,6 +157,15 @@
       "runtimeComplete": 19
     },
     "currentCalibrationRuns": 0,
+    "memoryContractReconciliation": {
+      "providers": 69,
+      "mismatches": 625,
+      "byLeg": {
+        "engine_manifest": 483,
+        "manifest_route": 44,
+        "survey_engine": 98
+      }
+    },
     "rung4Survey": {
       "story": 15969,
       "surveyedFamilyBackends": 40,
@@ -8130,9 +8151,25 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 12
+        "Implemented/unverified": 6,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
+        },
+        "mode": {
+          "edit_image": 0,
+          "text_to_image": 6
+        },
+        "overlay": {
+          "lora": 3,
+          "none": 3
+        }
       }
     },
     {
@@ -8142,9 +8179,25 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 12
+        "Implemented/unverified": 6,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
+        },
+        "mode": {
+          "edit_image": 0,
+          "text_to_image": 6
+        },
+        "overlay": {
+          "lora": 3,
+          "none": 3
+        }
       }
     },
     {
@@ -8447,24 +8500,24 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 4,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 10
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
+          "style_variations": 0,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8475,24 +8528,24 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 4,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 4,
-        "Missing": 8
+        "Implemented/unverified": 2,
+        "Missing": 10
       },
       "implementedBy": {
         "tier": {
           "bf16": 0,
-          "q4": 2,
-          "q8": 2
+          "q4": 1,
+          "q8": 1
         },
         "mode": {
-          "style_variations": 2,
+          "style_variations": 0,
           "text_to_image": 2
         },
         "overlay": {
           "lora": 0,
-          "none": 4
+          "none": 2
         }
       }
     },
@@ -8631,9 +8684,25 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 0,
+      "implemented": 2,
       "states": {
-        "Missing": 12
+        "Implemented/unverified": 2,
+        "Missing": 10
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 0,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "style_variations": 0,
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
       }
     },
     {
@@ -8643,9 +8712,25 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 0,
+      "implemented": 2,
       "states": {
-        "Missing": 12
+        "Implemented/unverified": 2,
+        "Missing": 10
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 0,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "style_variations": 0,
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
       }
     },
     {
@@ -8655,9 +8740,25 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 0,
+      "implemented": 2,
       "states": {
-        "Missing": 12
+        "Implemented/unverified": 2,
+        "Missing": 10
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 0,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "style_variations": 0,
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
       }
     },
     {
@@ -8667,9 +8768,9 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 0,
+      "implemented": 12,
       "states": {
-        "Missing": 12
+        "Implemented/unverified": 12
       }
     },
     {
@@ -8679,9 +8780,25 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 0,
+      "implemented": 2,
       "states": {
-        "Missing": 12
+        "Implemented/unverified": 2,
+        "Missing": 10
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 0,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "style_variations": 0,
+          "text_to_image": 2
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 2
+        }
       }
     },
     {
@@ -12336,26 +12453,9 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 12,
+      "implemented": 18,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
-        },
-        "mode": {
-          "style_variations": 6,
-          "text_to_image": 6
-        },
-        "overlay": {
-          "control": 0,
-          "lora": 6,
-          "none": 6
-        }
+        "Implemented/unverified": 18
       }
     },
     {
@@ -12365,26 +12465,9 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 12,
+      "implemented": 18,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
-        },
-        "mode": {
-          "style_variations": 6,
-          "text_to_image": 6
-        },
-        "overlay": {
-          "control": 0,
-          "lora": 6,
-          "none": 6
-        }
+        "Implemented/unverified": 18
       }
     },
     {
@@ -12567,9 +12650,26 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 18,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 12,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 4,
+          "q4": 4,
+          "q8": 4
+        },
+        "mode": {
+          "style_variations": 6,
+          "text_to_image": 6
+        },
+        "overlay": {
+          "control": 0,
+          "lora": 6,
+          "none": 6
+        }
       }
     },
     {
@@ -12579,9 +12679,26 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 18,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 12,
+        "Missing": 6
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 4,
+          "q4": 4,
+          "q8": 4
+        },
+        "mode": {
+          "style_variations": 6,
+          "text_to_image": 6
+        },
+        "overlay": {
+          "control": 0,
+          "lora": 6,
+          "none": 6
+        }
       }
     },
     {
@@ -15609,7 +15726,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "df8676318d9c58e0b2de5a306b7220e11cdc006ae321f49006fc9031f1891756",
+      "calibrationFingerprint": "8465051281c0e720390dabfedb0732b2199ffb8afc5b25b2395d6bb53d8268b6",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -15681,7 +15798,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "bd74e00428252a5e2740e9004dc605edfb480e5613cb4707f65a06d23ad24d8d",
+      "calibrationFingerprint": "eedd1dda885c7f3d92abe477b1ce5bff5aa520470e08f33a844046e013088a6e",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -16389,7 +16506,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9c8bf4555dabd7de7cf1c405b40ef60414507708d90f5b7ec72bb69f3dc6a2fd",
+      "calibrationFingerprint": "f9e69d29718162513b258c45040c76d7ea5ffd706e81a406eef074aeb73c387e",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -16461,7 +16578,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d846d7d801ca3f409fb8e439a0878e616ba64f5427f7e527841590a77e8741be",
+      "calibrationFingerprint": "d649c612b32fa85ac3a39267564e7a5ec1aee21cf92e4e29ef05cd4c9e7d9d91",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -17204,7 +17321,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7c9d28a4f5e53d956bf9160d582d13706752dd9bff9a633318f4e608fb2974dd",
+      "calibrationFingerprint": "33d36c55c7e859071f5bf1e73483b4e552fa96dceb3d35a64ad8874e2109a1da",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -17276,7 +17393,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0f26f3180ffcfaf6e07c01226bbfa5f7cf5931f76523f9113b87ffc8685d9548",
+      "calibrationFingerprint": "48c21e45089d6a2d03e4269303a3e5e46d0ac584466d59a9b325fcc40c779a0b",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -18223,7 +18340,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "87e6e8f7e0382ea42be11235d9dc7853108cc872ff18fa450f954cf92b65af4d",
+      "calibrationFingerprint": "1ca30cb300ad35b4ef167718ffb46b104b58465a4cad0a9dc593ee216ef3557b",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18288,7 +18405,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "93dc30711de5343cb5924fcc36f1f437c940f65a8cdd58a8d4edf28cfc6da3c1",
+      "calibrationFingerprint": "8ef8ed68db781dfb00d9e85e15dd3ddc497dc19a2f05456d3f34fb481d561d47",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18583,7 +18700,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "787207c48df7f843c872d0a01f25cd5e33a2cae4f149c59009a12bcda8008d14",
+      "calibrationFingerprint": "240f1ad2a3c4e29eee6446e0de898f10c014c3407ed8df3e11bd38c4f78ceeb8",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18648,7 +18765,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "98f2bd8fa4cc747ccb120e1efd5f5271b96e925de58d86fff6b534f5b8105f1c",
+      "calibrationFingerprint": "f99cb37884088098c3a239507213f29561298c0687b071468371387c45af1ba8",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -18943,7 +19060,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "14b342205397e64c7cb65252048e12de0939341e38fb3ddacf2cd0fc8d099158",
+      "calibrationFingerprint": "81821ceb97b51a89c43dbc3e4ef6760f275ed563295560e02c4442f06f2945ee",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -19008,7 +19125,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2ef3e9a81a10de77fb6c07e03812c426a0ec6cec60c783e064f516e94e4873c8",
+      "calibrationFingerprint": "0dbb96c82e01ff53a297af11cc225600ee7b9b9ed8208c74512893309f845452",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -19060,7 +19177,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0a1d307201b0b8dbc0486b5f73cfb87cc719e0e9a9583e9731224e6cb0603093",
+      "calibrationFingerprint": "18eced4a882ede23ee4f1deb8f3d2b0ba2bbb8b5b9c9587ca878e92006936059",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19121,7 +19238,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4d6e0439ca205140c517c325ee4196505e6f058a0d70dd0369faa3e52bd58905",
+      "calibrationFingerprint": "5bfe5032e8eeff0b5c170f32bee91d4e772ef1186405e0fe9c3e305f6af7540f",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19182,7 +19299,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1afbe05bdecb989f5cb7f069939e6cb56420ce7eca1e6a0ab439977fa7227247",
+      "calibrationFingerprint": "caae5804cd81a985dee54dadd75e9fd3912ec6839f1a63e1d417941cfb3d6e6f",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19243,7 +19360,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7a591fbc11dc334beecd215d03ab4397ed6b26555877c92246e99d4beaba8f42",
+      "calibrationFingerprint": "3892b59ace36507de29ec3a5c95937ca8a919a89ded75c8bb14bd95ab8e82c77",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19304,7 +19421,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "30f30a4339ba988f92beb0048b3826866f93db6042b2d415f4af49e3e2b34287",
+      "calibrationFingerprint": "f5cc09012412e9a941308cd498a56a67c9db1d3e4bcf1c876ad4826955b015e3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19365,7 +19482,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ffcdcfd2b1c775fa0467457bc1eff854a23e8cef7f5715fcd40baf4640097630",
+      "calibrationFingerprint": "5c9e1671b7a2872b0bf62cbab85965b0889f60cf8fd475021d48931ed96e101b",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -19426,7 +19543,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1a979edb2cd005af6db61d26c2af0c1da26aeb4b24c2a7168840270c5e92e577",
+      "calibrationFingerprint": "e3f1af60bbc7beb5032e22df64f9b96e2e9645d41dcd4a4fd9fa47b59ae61313",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -19487,7 +19604,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "28003603fec07b060fe15951708c00995eda4c561782ac0db7520760d7acaf33",
+      "calibrationFingerprint": "93c83047a1b0eac7a791cf50c6e81a6f183501ddc73493e9c17a1f5db7b98223",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -19548,7 +19665,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "aea42cb227fc5c8ef7667b525dc3e5a55f5ff81b18014d5f62d466c70174a1f9",
+      "calibrationFingerprint": "2d5f2b8c9ba65ceda66b6b0b3e6df494b73955ccfbcd0e53a31d692d6dd45f16",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -19609,7 +19726,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1288b195ab8c5155227c6fe95dd4c3e481b494503e333344895aad7916187fbd",
+      "calibrationFingerprint": "56c8ea087009b03f550eda1624659fb2964835a3c595221373a5891bfe4a0c50",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -19670,7 +19787,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c0e9caa9612479c40d89bef31d8ae208b01092f6127c9dece9ef8d9e77d09ede",
+      "calibrationFingerprint": "906490ee7698bf3498b93e9b8cf5b83ae0b65d2612cbd05d5371b1e0323ce1b3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -19731,7 +19848,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "672a66c916482045d4ea46e33f0f92043a2ede15bb325e7c93f0580b2319c10b",
+      "calibrationFingerprint": "f22bcfe48169f06a4da4ec45a6e2946eec6fff4929ca27410f0c08c1a98f677f",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -19792,7 +19909,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e67a3dd50694142d14c05638c5a8bd90aaebb552e6448261779b4c911b5572f3",
+      "calibrationFingerprint": "10e9e615125d5164d089d108eccea8cfb66c14ef1b318aae28de001a29b389a4",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -19853,7 +19970,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5562d03d000c691b09b1dfe2153614b890180fe2b75749ba50be2df9503b7fef",
+      "calibrationFingerprint": "82d554e5b1d15de093ff26effc44e4c8640d2642fd7e5f6ded09001327929da3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -19914,7 +20031,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7df4396fa72a7e63e3a2ca38db35774d3e7956fafd07caba29833a5e34dd2a37",
+      "calibrationFingerprint": "2d7342c053dffe2489658f394543f651964ac12e69eb74358a23488a59c7b094",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -19975,7 +20092,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "a1066629cbfdfa23664c679fcd2ecbf8b09c7abbc6fc701949f6871ca69e2759",
+      "calibrationFingerprint": "d068edfb023524b38df0711e490aa57c4d97aa24a1d7e4f8088f982e10d27f6b",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20036,7 +20153,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "eeb21ad12ac6011a28cb6ff559333a570c884272bc68d56b3a60c1f711e0001b",
+      "calibrationFingerprint": "a55d9fbf0c999e91da167e93979cfc5e0c5d2fb1044f358df64665576154698a",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20097,7 +20214,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "171fdc49d5b4c017fa8cda56a74ac6197401c58fa2985ca14d256da0a6fb9bda",
+      "calibrationFingerprint": "d664cba987e5ce4d3258cd2a086047e38df5b03e2d389216f7666cfac8551e2e",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20158,7 +20275,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "de2f253a2d0be2af72b85a074569d45bbe4e440d49cea82fbc98fd11810a331d",
+      "calibrationFingerprint": "8ee55ea18351e607462dc55bb702900d2472d35c401303a3f2f3274bcf88fa1a",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20219,7 +20336,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8486950b1eb07fdf8d0a4136890713f8e2f8106be61a88eee25598b4dbb91642",
+      "calibrationFingerprint": "caa5da0eec9acd6ca0be136c49535900682442dc4de68a2b1a03f85d512eb903",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20280,7 +20397,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0f9c874202d53167a48b6434a6783201970f6f36844b59ca156c585f9239fb73",
+      "calibrationFingerprint": "c4954198d405478a77a8167b6fb59e85ba99542b55b33f97ca563d87475762f7",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -20341,7 +20458,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f5faf8232210f48bbffd6b6f421a907e5159ea972d9b6777abaa5373ad0a9c8e",
+      "calibrationFingerprint": "0d3af767d86037181a55c258e7814aacb7e463e10ac4a382c5ad68f1dafa8ab7",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20402,7 +20519,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6f6214a781a4c3bf5f8fa511e9f80888a58bff343f96626a797e432433728203",
+      "calibrationFingerprint": "c2697634a36a35b4347260aee3e91b9ea7f98f77d704f05e236ef94921e82bfc",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20463,7 +20580,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3d25a69d45a40f9c76a818ee6bdc0343ce11752d90e43cd6eb0ff3f0acfe87f4",
+      "calibrationFingerprint": "399f637bad20c745224ba3c7790c15711d83ce41991b544ee9a2460ff25c619f",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20524,7 +20641,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b8383d3c990d537b75601cb78424e5106454ba1568efd475fcbabdb7436c47f9",
+      "calibrationFingerprint": "6e705a39204d4e26ec10f02b6564f702c933c1ed20e373e67381c543ce988a55",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20585,7 +20702,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6cfbed3d3c1952db6cbfc5d1d8d5e534fb27d8a59415a583a42fc0a442d2c350",
+      "calibrationFingerprint": "3f8b4417873774718a66edd9053fd485d3dad9d150841264752f22e00395548c",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20646,7 +20763,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "807844d11e7141dd94ee0dd568ab67eca1c9645c946614ecb055f26f2bb9cc1f",
+      "calibrationFingerprint": "a394162678a67214fcb2aa39f07e5a07efc2c3bc73a55b7874e81da5e3bc294f",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -20705,7 +20822,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b47d199d34ce8e35ef561a72f60f4900b387d2e5f29159d44e7a655ae97cff2a",
+      "calibrationFingerprint": "a67f269a152814b30f1a6b3f961d65f86493fae8060b52291db33271e578d6c5",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20755,7 +20872,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9e591b67c895649b83c281e6867682c1d6339f085760b61f677e0da966096b7a",
+      "calibrationFingerprint": "55c0fc278d741a8cd8d52435d8a28307ed93c1f032f5934e288aff15fd4d7002",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20800,7 +20917,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7dc33cda768f2d0994b7a250fd197184bfda08dc6d97021a8a73213bf9b0e791",
+      "calibrationFingerprint": "02b0ffbc59c587f7c3cf6cdbad888b31ab2d5bb95d6265b609ec8c56e1711612",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20852,7 +20969,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d811928d8aa2adb0ca044f53b4e46ac050f94a257306bda96b8a76ceea7fa462",
+      "calibrationFingerprint": "ce8ed8bd0ad4e6c899a05ea1dc2801de7666b7e3983b03ff3f776cc3b2576d52",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -20902,7 +21019,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8bc12fa5a37de401662b1b3cba90620de90b13db670112ba7bcc213ea7296c71",
+      "calibrationFingerprint": "4e3d166d1df61489eb5ff34644b7984d5d1a447f2351053fb6c519e3a06e90f8",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -20952,7 +21069,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9e05272146de05fbcc0f530c2ee19bb8f2ca701cbc53668ac65654a50507f2ab",
+      "calibrationFingerprint": "f85e918b67cfc953c2a3fcafc0cf4c57a16aa648339f2c25470c15451e8f2376",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -21004,7 +21121,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9f2bc17218f82497daf35f3cc07b37fc100ff040163f7a3a1ad5a1d819e7a5f7",
+      "calibrationFingerprint": "257314b27f22d8078ca8b834cbacf9096575c01cdb18d6d3499bce884a68028b",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "rung4Survey": {
@@ -21056,7 +21173,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "888f48b794a49976c7b3a72c644653715aa2dddb1ffb646200b3bfea6dd2f4f6",
+      "calibrationFingerprint": "6ac8fdb818c0eafa02a42303dafa637e44aecbd2ae82cf9639921c9ac84acdfc",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -21108,7 +21225,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8d04240817043c951afcdd77c3e8b9b9792de8348e9e03fd29b53b1bc760da06",
+      "calibrationFingerprint": "27efa7edbfc89495130ea0b31f6ac54716f976bfe6221de1024f984cad365250",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -21158,7 +21275,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "77f0750d0464ee12de1fca57363bda98f32d54f11e582c7a8efee6f6dd88c22d",
+      "calibrationFingerprint": "2bf6cc52a4eaf7fecb9dca27d35e55a60f8d56983a4c686a9060249b122d25e8",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -21208,7 +21325,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6a7448c9ac6ff0d6c1ad546188c3b03d47933d4c151bb6fe7a6a8565e41ca955",
+      "calibrationFingerprint": "0b7fe40a1049ad2b9834d5c64a6333f6d03f0712da2eb4cc23257cf2a32cfb90",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -21260,7 +21377,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "77137facc1bf2332f61426a3bbf5c73dcdce0a0b09fef18566a53956930e64ef",
+      "calibrationFingerprint": "e6ec03e79ea65866099b799b2b1f1db517c3bf085aeb5112b9e6231d81ac6dce",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "rung4Survey": {
@@ -21312,7 +21429,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "807688ea4daf3e0fdb8afda4471f1684920327fc14d2394ddcc26d106f86661c",
+      "calibrationFingerprint": "25bc933f0be4bd763b3943e89a064671916dbee6d2020b55beff73e34086e2a8",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -21364,7 +21481,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "27c3938e9716a678cff56d657b25ac580ba22be4516578b8a3c0f53d5a4fcce1",
+      "calibrationFingerprint": "be1741b0f02b215af1732d75368a2040e2b4af51fd1075b232882e04edc6fc89",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -22637,7 +22754,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "38829e29dcd5958015f221f074fd2bc719f51b9e445c65c5301aa5f21ee1c20a",
+      "calibrationFingerprint": "65697dacdf42cb12269e2fbd7372128861ed8c5be744e7a77ad8786b131961a5",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22692,7 +22809,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "407930d4ed6411b1916422cce44598e9d8c7ce4247d054233aaa331429c240e1",
+      "calibrationFingerprint": "18060db64b17aa859aada90df0868a23ab8860764a9d0ec090b491af61cc6795",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22793,7 +22910,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b0956d163b7b9655a3468c39db4725d17872a4d26491e50335141dfa030e658c",
+      "calibrationFingerprint": "2d565fec3fa8b9cd92eb8aeba649f6f872f4548d87472ab98b50c26e6bdd2ac8",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22848,7 +22965,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "66ea913c38772f7471c1a2544ebef421305b9b5cbc01288ca9b54d6330c1641c",
+      "calibrationFingerprint": "24012422d33c3466170a86da922a2d889e9fa9a50b85c45aec2b19b741e22d38",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -22949,7 +23066,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "17d62dbe16a655e82f93eea2d7083756ef85486536acf8a3df3bc0ca289c5ae0",
+      "calibrationFingerprint": "db8e5e4b40ba60c0c399107a4a75f6e7f89b01eb090236c6aad863ded981f3a7",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -23004,7 +23121,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e19ed62c25c94f295f647d8e13996f04bffd53c5fae8fd7ec272b4008b60376b",
+      "calibrationFingerprint": "4d5b5ec21eeef99171f75976d8a43f2bf6ede3006783bea204fc3cdd3ea0749a",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -23450,10 +23567,10 @@
       }
     },
     {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:bounded_attention",
+      "id": "z_image:z_image_control:candle:bf16:style_variations:control:bounded_attention",
       "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
       "backend": "candle",
       "tier": "bf16",
       "mode": "style_variations",
@@ -23513,10 +23630,10 @@
       }
     },
     {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:bounded_decode",
+      "id": "z_image:z_image_control:candle:bf16:style_variations:control:bounded_decode",
       "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
       "backend": "candle",
       "tier": "bf16",
       "mode": "style_variations",
@@ -23571,10 +23688,10 @@
       }
     },
     {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:bounded_transformer_residency",
+      "id": "z_image:z_image_control:candle:bf16:style_variations:control:bounded_transformer_residency",
       "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
       "backend": "candle",
       "tier": "bf16",
       "mode": "style_variations",
@@ -23650,10 +23767,10 @@
       }
     },
     {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:resident",
+      "id": "z_image:z_image_control:candle:bf16:style_variations:control:resident",
       "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
       "backend": "candle",
       "tier": "bf16",
       "mode": "style_variations",
@@ -23678,7 +23795,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4c076cd5d8b20ec7e06ecb5efd1e5fa18d251449027ec5be045856b5c0edbc68",
+      "calibrationFingerprint": "39864eab2c24dd409d1548bc7ef676de2bb147cc497d56e442c634bc5e423181",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23695,10 +23812,10 @@
       }
     },
     {
-      "id": "z_image:z_image:candle:bf16:style_variations:control:staged_residency",
+      "id": "z_image:z_image_control:candle:bf16:style_variations:control:staged_residency",
       "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
       "backend": "candle",
       "tier": "bf16",
       "mode": "style_variations",
@@ -23730,7 +23847,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0cb065aefaac57c73ea6ee2f9eaa35eff5ee9846b976c4e71e6a2c956323319e",
+      "calibrationFingerprint": "403883404bdef8aee9217750ec97f222f77dcba6cd0d26d0c93a0013bbcf8946",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23744,6 +23861,1491 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "z_image:candle:bf16"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:bf16:text_to_image:control:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:bf16"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:bf16:text_to_image:control:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:bf16"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:bf16:text_to_image:control:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:bf16"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:bf16:text_to_image:control:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "57062c2d06431493ebe871981d7b6c102a2a84062c6fcbac0c2b5f923e3fb74b",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:bf16"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:bf16:text_to_image:control:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "a253cd5b0267e1a12cc1cd5438bd131c6c4f0d58021d5e0a5a73364956d4dbf9",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:bf16"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:style_variations:control:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:style_variations:control:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:style_variations:control:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:style_variations:control:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "b7bb182d4bdc78fdb68bfbc4477fe1a5cf0a9e95dd0cd4bedcd475f68fe7c566",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:style_variations:control:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "dd200bd03a70006e2545caf9331e224912732204efb57c5175a0cd8fcd058c96",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:text_to_image:control:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:text_to_image:control:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:text_to_image:control:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:text_to_image:control:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "d214a7f0ddcb79339db9c23c5338c64ce0945b7ff804f1dfb19d23a304ced974",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q4:text_to_image:control:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "483a21f36eedf2860a00bc4db13f09ac4e751f327d6c49902a837a48201bf22a",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q4"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:style_variations:control:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:style_variations:control:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:style_variations:control:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:style_variations:control:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "c3e4c6b0a747aff9e154d3bc66b8877bef4ee5c9b98b513ee4a945b934392092",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:style_variations:control:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "70a8feb01ea9e695c952f2a3501ac26c728d26f3434d06ca04cfac91fc375d3a",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "603b6f956f16ed144d710b60734b0eb89ea667f228d246652ee9787a0c61fbdb",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "c9fde7b6cad61290643f3760bd1d77bf1b3d2821d406f55beb89bac545efad31",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "z_image:candle:q8"
       }
     },
     {
@@ -23975,7 +25577,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2608f117134903a8097eab292cdfd0d45b9bed40565ace27b3f327ccfd60bc37",
+      "calibrationFingerprint": "654b4871203a7801727797ed667721edf9bb3f00a8d510f52009d43c33644f45",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24027,7 +25629,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0b383b39335708ee515f86d078e06250a30940b2ca6736a532554672e1db2308",
+      "calibrationFingerprint": "e44783c9cd5a1bbaacfaf3d70b4f8d1b58015874dedb3fc55d401a718f3c142f",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24272,7 +25874,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "98f49160f630b5f06e5cbc49dab066eb9da0346bfcc66ca73976cbc8f6f180e9",
+      "calibrationFingerprint": "3a56d6ce77e761a153fa90ddafaf12f58b508c1de92e6f8ceab44c81debaf79f",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24324,304 +25926,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0ae85709bd2606d3f8c1426a24e77b53d9d7f4a2fd7ca3b967b0169c83abfa0d",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:text_to_image:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:text_to_image:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:text_to_image:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:text_to_image:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "1eb684f173d90b15ac758699700a70e3b065f6fe084e10dcecd2301f93cc76ee",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:bf16:text_to_image:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "e7f7fb559c06de0fc8be591d2dd369df3b736c4ee6c29fb806d25fde5dc2a3db",
+      "calibrationFingerprint": "1922ef6274a0a8bbd9f0a8635d31e65a93321aeca2ac4fb5d78604a73267e746",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24866,7 +26171,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1c184adb8e0d3774809f13819ea1717bd4de2536a7865bc680da5bd26c4dbbf1",
+      "calibrationFingerprint": "e70cd1fbae4a9276c0693f623877d0641660acd286cc9c548c0b6583ada497af",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24918,7 +26223,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "08db0300e2926a403c3418173914731106812aa1d61c4f424a6c444fe85a1ea9",
+      "calibrationFingerprint": "a29b77b9762abb1f505ef0b8fb4177cc353b4e30186316051c7e44a078bf214a",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25163,7 +26468,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "88ef9480af65512a01a5d765c4192cca5c1f0312601c6098ff066e3dae50afdb",
+      "calibrationFingerprint": "4293faae79d650551ed62a637a8b0ded6ca572ee126a2729a80eed143eb75ef2",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25215,7 +26520,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "442976e26424fa495c29019166d23c902d3f36faa06d5a86792352695a443562",
+      "calibrationFingerprint": "be2466b279b4f1a76dcbc13734081eb8eabb224562342ac72d857ddf3eb7caa0",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25229,303 +26534,6 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "z_image:candle:bf16"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "7fe6bd496d727c900a588b65a792e6518ce92df89bcd7f5dab51ed8ec0768cc6",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:style_variations:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "29c4b14c052634995d1023609f152e33c5280fc99b3eac2d976263b62cad3984",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
       }
     },
     {
@@ -25757,7 +26765,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d986bbb26d99b0d98043c5808e2f82bd0ceafd24312bc60e778efa80fb259479",
+      "calibrationFingerprint": "c96964d8e47ec00db915ffed46d5068daee86c0794b17d5571d33510e05d294c",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25809,7 +26817,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "eff6b691aed7867f5d6f59efefa96fb25fd0d56f1aa359bbd8cf1d5e7347609f",
+      "calibrationFingerprint": "e0deebdbd9fc62dfe43a2999fa0a15e237c623777774a61919c0827f717af1bf",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26054,7 +27062,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8c7e1cbd14c3d71edc031f3b77589d2a84cdbe7c29d2570f5f619ebae3cdf1a4",
+      "calibrationFingerprint": "be2fa62b23ced785a63ca93a8b788ab2d48ec1822c753f4934677260cf3b9e93",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26106,304 +27114,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f02f73c7d9a165c9c708b654cfc7824ac6ef8c7702d72b18ac6320f1f05c7d09",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:text_to_image:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:text_to_image:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:text_to_image:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:text_to_image:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "cc2f4535c151ec7fcd3fb2ded490978c66ea8a1ef7667eaaafb17c4a8cecc5ad",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q4:text_to_image:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "481bd900f4e50783ff3d2fad8feb71f3247af0daadc686f01da69c37434c6099",
+      "calibrationFingerprint": "61a80afa5981de4cf907743b9413f2d512b665b5ac90eea672da17f5c532bceb",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26648,7 +27359,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c86e3d8a13af85bfd0438a2d6f4f855581dbdefb16de7b9cf1ee2ce26398ee9d",
+      "calibrationFingerprint": "1ee3ef9b17830c723afc0e4f1cfd775766a5e4d9d99ecc65d2b197e9da09bf61",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26700,7 +27411,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f35fedec3316f2197f34ca38176df73eefa7dae11a7317f963560faf56dee44b",
+      "calibrationFingerprint": "c5297e524cde8744f1e2a70181e1c4f88b4d955612d346b18b8ee356e23b22fe",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26945,7 +27656,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "cc4f858ed99ab060c27bb87534f37872cd4255f1cc5811c58cd29c1a1a05ef46",
+      "calibrationFingerprint": "c61c868efd6968dfc90cbd569a82c60593df34b6bfdabacd08d6f87794147917",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26997,7 +27708,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6a1967266dc8aac6271a775bee20b56222c3dc703ea403e434ab902fafcd6f5a",
+      "calibrationFingerprint": "69b55bc76ee563851a183b4327ec2461cca74db078954b8c768ce5a22048b8e0",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27011,303 +27722,6 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "z_image:candle:q4"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "167a82bb33b71100b6e4ebb076b58bd8e8e0ea7b5102ea5834f11ae0de24cf48",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:style_variations:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "ade64a5bda3451397be16c226abe199cac1f80ecd19e9edbdf0a6d19758aab68",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
       }
     },
     {
@@ -27539,7 +27953,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "15a3e13188cb9fd31a7d99b7e4c0f757fe6501cf87ab137b6580f25344144533",
+      "calibrationFingerprint": "dd9dcbf0a21b6068b7aff8f183f500180a3fd46e0f752ab034267c1b4a7e1ede",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27591,7 +28005,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "cba4fd8f156bc15ea64b8dcc8a2daf87ec4d058aa8918b8eb61da1688cb8946f",
+      "calibrationFingerprint": "b47f6a3ed05b2e84e7462209cb3c3e1a5dd9ad1d46d6524efd9ec041c211f316",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27836,7 +28250,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "757c3a0686c79205ea218c11fc4e441de988b3304d0ede5f4e0a97378634b26c",
+      "calibrationFingerprint": "ccc8207d6039f4a4f19f4883ceec1ae12ad452c4af4389784cfde200de939342",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27888,304 +28302,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0a584fb3cab2599131e90845dddd8c9eebfdba8619bfa4db7984ecc858d3cfe2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:text_to_image:control:bounded_attention",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_attention",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:text_to_image:control:bounded_decode",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_decode",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:text_to_image:control:bounded_transformer_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "bounded_transformer_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "decodeTileEdge": 512,
-        "decodeOverlap": 128,
-        "attentionChunkSize": 67108864,
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit",
-        "publishedRanges": {
-          "decodeTileEdges": [
-            512
-          ],
-          "decodeOverlaps": [
-            128
-          ],
-          "attentionChunkSizes": [
-            67108864
-          ],
-          "transformerWindowSizes": [
-            1
-          ],
-          "transformerWindowComponents": [
-            "Dit"
-          ]
-        }
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "rung4Survey": {
-        "story": 15969,
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-        "overlayIncompatible": false
-      },
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:text_to_image:control:resident",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "resident",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {},
-      "engagedRungs": [
-        "resident"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "db8616b35467abaad494050452cb77b7c2c5240bcbe7df90094f95b8d839a17c",
-      "owningFamilyStory": 15815,
-      "owningModelStory": 16170,
-      "evidence": {
-        "staticImplementation": [
-          {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
-          }
-        ],
-        "historicalVerification": [],
-        "currentEnvironmentVerification": [],
-        "strategyParameterVerification": [],
-        "structural": [],
-        "manifestScope": "z_image:candle:q8"
-      }
-    },
-    {
-      "id": "z_image:z_image:candle:q8:text_to_image:control:staged_residency",
-      "modelId": "z_image",
-      "resolvedRoute": "z_image",
-      "provider": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "rung": "staged_residency",
-      "geometryEnvelope": {
-        "defaultResolution": "1024x1024",
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ]
-      },
-      "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
-      },
-      "engagedRungs": [
-        "resident",
-        "staged_residency"
-      ],
-      "state": "Implemented/unverified",
-      "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
-      },
-      "calibrationFingerprint": "62bb555f6ad2f653af586daf98fbe08527f139e8cce58d5052206062bc77972d",
+      "calibrationFingerprint": "9c4871a01ca4a2377ca20ed708cf1069772955a5cddcecf8b3481aa2ef991bae",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28430,7 +28547,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e05d16198c0bb53cfd798796bba244307868ebf75bc0f442e64544b012292598",
+      "calibrationFingerprint": "4c6c8834568a94395841c1a16520645689a95cf282a14fc246b07f75441cd24f",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28482,7 +28599,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6450ad878f8046c860cf185b1059213e7c5cb886ef7bcb9dfe26d9c1684571f1",
+      "calibrationFingerprint": "e482d066bbe8276d8efca56a90750690f0a59e661515c2724bf0dcb27e8b9343",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28727,7 +28844,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5a26ac1662049a04e88d1878cb1911b56413776600c47de2d7e03e9fb43ee948",
+      "calibrationFingerprint": "b699cea67ddd667a6243bf32cab309187887e96e34842130071419e62ac3f58f",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28779,7 +28896,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7909beb8133cafc78f046fc8da4fa7fe698badd159fdfc94e664929783d533d2",
+      "calibrationFingerprint": "a17eb4d070d7938e827ad7bdfe3af139d33f35e7b40c74e723a19b54b6934d91",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -33226,11 +33343,36 @@
     "sensenova_u1_8b_infographic_v3": [],
     "sensenova_u1_8b_infographic_v3_fast": [],
     "z_image": [
-      "z_image:z_image:candle:bf16:style_variations:control:bounded_attention",
-      "z_image:z_image:candle:bf16:style_variations:control:bounded_decode",
-      "z_image:z_image:candle:bf16:style_variations:control:bounded_transformer_residency",
-      "z_image:z_image:candle:bf16:style_variations:control:resident",
-      "z_image:z_image:candle:bf16:style_variations:control:staged_residency",
+      "z_image:z_image_control:candle:bf16:style_variations:control:bounded_attention",
+      "z_image:z_image_control:candle:bf16:style_variations:control:bounded_decode",
+      "z_image:z_image_control:candle:bf16:style_variations:control:bounded_transformer_residency",
+      "z_image:z_image_control:candle:bf16:style_variations:control:resident",
+      "z_image:z_image_control:candle:bf16:style_variations:control:staged_residency",
+      "z_image:z_image_control:candle:bf16:text_to_image:control:bounded_attention",
+      "z_image:z_image_control:candle:bf16:text_to_image:control:bounded_decode",
+      "z_image:z_image_control:candle:bf16:text_to_image:control:bounded_transformer_residency",
+      "z_image:z_image_control:candle:bf16:text_to_image:control:resident",
+      "z_image:z_image_control:candle:bf16:text_to_image:control:staged_residency",
+      "z_image:z_image_control:candle:q4:style_variations:control:bounded_attention",
+      "z_image:z_image_control:candle:q4:style_variations:control:bounded_decode",
+      "z_image:z_image_control:candle:q4:style_variations:control:bounded_transformer_residency",
+      "z_image:z_image_control:candle:q4:style_variations:control:resident",
+      "z_image:z_image_control:candle:q4:style_variations:control:staged_residency",
+      "z_image:z_image_control:candle:q4:text_to_image:control:bounded_attention",
+      "z_image:z_image_control:candle:q4:text_to_image:control:bounded_decode",
+      "z_image:z_image_control:candle:q4:text_to_image:control:bounded_transformer_residency",
+      "z_image:z_image_control:candle:q4:text_to_image:control:resident",
+      "z_image:z_image_control:candle:q4:text_to_image:control:staged_residency",
+      "z_image:z_image_control:candle:q8:style_variations:control:bounded_attention",
+      "z_image:z_image_control:candle:q8:style_variations:control:bounded_decode",
+      "z_image:z_image_control:candle:q8:style_variations:control:bounded_transformer_residency",
+      "z_image:z_image_control:candle:q8:style_variations:control:resident",
+      "z_image:z_image_control:candle:q8:style_variations:control:staged_residency",
+      "z_image:z_image_control:candle:q8:text_to_image:control:bounded_attention",
+      "z_image:z_image_control:candle:q8:text_to_image:control:bounded_decode",
+      "z_image:z_image_control:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "z_image:z_image_control:candle:q8:text_to_image:control:resident",
+      "z_image:z_image_control:candle:q8:text_to_image:control:staged_residency",
       "z_image:z_image:candle:bf16:style_variations:lora:bounded_attention",
       "z_image:z_image:candle:bf16:style_variations:lora:bounded_decode",
       "z_image:z_image:candle:bf16:style_variations:lora:bounded_transformer_residency",
@@ -33241,11 +33383,6 @@
       "z_image:z_image:candle:bf16:style_variations:none:bounded_transformer_residency",
       "z_image:z_image:candle:bf16:style_variations:none:resident",
       "z_image:z_image:candle:bf16:style_variations:none:staged_residency",
-      "z_image:z_image:candle:bf16:text_to_image:control:bounded_attention",
-      "z_image:z_image:candle:bf16:text_to_image:control:bounded_decode",
-      "z_image:z_image:candle:bf16:text_to_image:control:bounded_transformer_residency",
-      "z_image:z_image:candle:bf16:text_to_image:control:resident",
-      "z_image:z_image:candle:bf16:text_to_image:control:staged_residency",
       "z_image:z_image:candle:bf16:text_to_image:lora:bounded_attention",
       "z_image:z_image:candle:bf16:text_to_image:lora:bounded_decode",
       "z_image:z_image:candle:bf16:text_to_image:lora:bounded_transformer_residency",
@@ -33256,11 +33393,6 @@
       "z_image:z_image:candle:bf16:text_to_image:none:bounded_transformer_residency",
       "z_image:z_image:candle:bf16:text_to_image:none:resident",
       "z_image:z_image:candle:bf16:text_to_image:none:staged_residency",
-      "z_image:z_image:candle:q4:style_variations:control:bounded_attention",
-      "z_image:z_image:candle:q4:style_variations:control:bounded_decode",
-      "z_image:z_image:candle:q4:style_variations:control:bounded_transformer_residency",
-      "z_image:z_image:candle:q4:style_variations:control:resident",
-      "z_image:z_image:candle:q4:style_variations:control:staged_residency",
       "z_image:z_image:candle:q4:style_variations:lora:bounded_attention",
       "z_image:z_image:candle:q4:style_variations:lora:bounded_decode",
       "z_image:z_image:candle:q4:style_variations:lora:bounded_transformer_residency",
@@ -33271,11 +33403,6 @@
       "z_image:z_image:candle:q4:style_variations:none:bounded_transformer_residency",
       "z_image:z_image:candle:q4:style_variations:none:resident",
       "z_image:z_image:candle:q4:style_variations:none:staged_residency",
-      "z_image:z_image:candle:q4:text_to_image:control:bounded_attention",
-      "z_image:z_image:candle:q4:text_to_image:control:bounded_decode",
-      "z_image:z_image:candle:q4:text_to_image:control:bounded_transformer_residency",
-      "z_image:z_image:candle:q4:text_to_image:control:resident",
-      "z_image:z_image:candle:q4:text_to_image:control:staged_residency",
       "z_image:z_image:candle:q4:text_to_image:lora:bounded_attention",
       "z_image:z_image:candle:q4:text_to_image:lora:bounded_decode",
       "z_image:z_image:candle:q4:text_to_image:lora:bounded_transformer_residency",
@@ -33286,11 +33413,6 @@
       "z_image:z_image:candle:q4:text_to_image:none:bounded_transformer_residency",
       "z_image:z_image:candle:q4:text_to_image:none:resident",
       "z_image:z_image:candle:q4:text_to_image:none:staged_residency",
-      "z_image:z_image:candle:q8:style_variations:control:bounded_attention",
-      "z_image:z_image:candle:q8:style_variations:control:bounded_decode",
-      "z_image:z_image:candle:q8:style_variations:control:bounded_transformer_residency",
-      "z_image:z_image:candle:q8:style_variations:control:resident",
-      "z_image:z_image:candle:q8:style_variations:control:staged_residency",
       "z_image:z_image:candle:q8:style_variations:lora:bounded_attention",
       "z_image:z_image:candle:q8:style_variations:lora:bounded_decode",
       "z_image:z_image:candle:q8:style_variations:lora:bounded_transformer_residency",
@@ -33301,11 +33423,6 @@
       "z_image:z_image:candle:q8:style_variations:none:bounded_transformer_residency",
       "z_image:z_image:candle:q8:style_variations:none:resident",
       "z_image:z_image:candle:q8:style_variations:none:staged_residency",
-      "z_image:z_image:candle:q8:text_to_image:control:bounded_attention",
-      "z_image:z_image:candle:q8:text_to_image:control:bounded_decode",
-      "z_image:z_image:candle:q8:text_to_image:control:bounded_transformer_residency",
-      "z_image:z_image:candle:q8:text_to_image:control:resident",
-      "z_image:z_image:candle:q8:text_to_image:control:staged_residency",
       "z_image:z_image:candle:q8:text_to_image:lora:bounded_attention",
       "z_image:z_image:candle:q8:text_to_image:lora:bounded_decode",
       "z_image:z_image:candle:q8:text_to_image:lora:bounded_transformer_residency",

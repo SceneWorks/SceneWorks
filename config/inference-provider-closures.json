@@ -93,6 +93,20 @@
       "sourceFileCount": 184,
       "lockedPackageCount": 240
     },
+    "candle:z_image_control": {
+      "crate": "crates/media/candle-gen/candle-gen-z-image",
+      "digest": "6f274c46f1a213b0030409a79314bc7333d7948574304ed32a5e88bd44874825",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-z-image",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "sourceFileCount": 184,
+      "lockedPackageCount": 240
+    },
     "mlx:flux2_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
       "digest": "1ce69915bc7cde1d8b3f82a2c3ca48d6d4627e6edd343a2063a23ef76252c991",

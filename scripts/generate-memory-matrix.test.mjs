@@ -956,15 +956,24 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   assert.ok(bounded.length > 0);
   assert.deepEqual([...new Set(bounded.map((cell) => cell.modelId))].sort(), zImageIds);
   assert.ok(
-    bounded.every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
-    "a shipped Z-Image MLX rung may not remain Missing once its provider contract is exported",
+    bounded.every((cell) =>
+      cell.resolvedRoute === "z_image_control" && cell.rung !== "bounded_transformer_residency"
+        ? cell.state === "Missing"
+        : ["Implemented/unverified", "Verified"].includes(cell.state),
+    ),
+    "plain/edit routes expose every bounded rung while strict control exposes only its declared transformer window",
   );
   assert.ok(
-    bounded.every((cell) =>
-      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
-      cell.evidence.staticImplementation.some((entry) =>
-        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
-      ),
+    bounded.filter((cell) => cell.state !== "Missing").every((cell) =>
+      cell.resolvedRoute === "z_image_control"
+        ? /^[0-9a-f]{64}$/.test(cell.calibrationFingerprint) &&
+          cell.evidence.staticImplementation.some((entry) =>
+            entry.source.includes("mlx-gen-z-image/src/transformer.rs"),
+          )
+        : cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
+          cell.evidence.staticImplementation.some((entry) =>
+            entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+          ),
     ),
     "historical bindings must not mask the pinned MLX provider contract",
   );
@@ -979,7 +988,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     "the edit catalog entry must inherit the Turbo provider contract, not invent a provider",
   );
 
-  for (const cell of bounded) {
+  for (const cell of bounded.filter((entry) => entry.resolvedRoute !== "z_image_control")) {
     const ranges = cell.strategyParameters.publishedRanges;
     assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512]);
     assert.deepEqual(ranges.decodeOverlaps, [256, 64]);
@@ -1002,7 +1011,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   // lift them out of Implemented/unverified.
   assert.ok(
     bounded
-      .filter((cell) => cell.modelId !== "z_image_turbo")
+      .filter((cell) => cell.modelId !== "z_image_turbo" && cell.resolvedRoute !== "z_image_control")
       .every((cell) => cell.state === "Implemented/unverified"),
   );
 
@@ -1019,10 +1028,13 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     allZImageMlx
       .filter((cell) => cell.state !== "Verified")
       .every((cell) =>
-        cell.state === "Implemented/unverified" &&
+        (cell.state === "Implemented/unverified" ||
+          (cell.resolvedRoute === "z_image_control" &&
+            ["bounded_decode", "bounded_attention"].includes(cell.rung) &&
+            cell.state === "Missing")) &&
         cell.evidence.currentEnvironmentVerification.length === 0
       ),
-    "unmeasured Z-Image sibling tuples must remain implemented but unverified",
+    "unmeasured Z-Image tuples remain implemented while unsupported strict-control lower rungs stay Missing",
   );
 });
 
@@ -1446,7 +1458,7 @@ test("a shipping control lane is declared, not inferred from having been measure
 
   for (const [modelId, provider] of [
     ["z_image", "z_image_control"],
-    ["z_image_turbo", "z_image_turbo_control"],
+    ["z_image_turbo", "z_image_turbo"],
   ]) {
     const cells = control.filter((cell) => cell.modelId === modelId && cell.backend === "mlx");
     assert.ok(cells.length > 0, `${modelId}/mlx must expose its shipping control lane`);
@@ -1732,14 +1744,8 @@ test("an implemented family is Implemented/unverified only where the provider ac
     );
     assert.ok(cells.length > 0);
     assert.ok(
-      cells.every((cell) =>
-        cell.modelId === "z_image"
-          ? ["Implemented/unverified", "Verified"].includes(cell.state)
-          : cell.overlay === "control"
-            ? cell.state === "Missing"
-            : cell.state === "Implemented/unverified",
-      ),
-      `${rung} must reach base control without leaking to the Turbo control route`,
+      cells.every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
+      `${rung} must reach both exact strict-control providers without leaking across their routes`,
     );
   }
 
@@ -1849,7 +1855,8 @@ test("an implemented family is Implemented/unverified only where the provider ac
         cell.owningFamilyStory === 15819 &&
         cell.state === "Implemented/unverified" &&
         cell.rung4Survey.implementation === "shared-primitive" &&
-        cell.strategyParameters.transformerWindowSize === 1 &&
+        (cell.strategyParameters.transformerWindowSize === 1 ||
+          cell.strategyParameters.transformerWindowSizes?.includes(1)) &&
         cell.strategyParameters.transformerWindowComponent === "Dit",
       ),
     "SC-15819 exposes the exact packed q4/q8 plain Candle Lens-Turbo ladder",
@@ -1949,7 +1956,7 @@ test("PuLID's closed overlay contract does not redefine legacy Candle resident c
   const expectedResident = [
     "flux_dev:flux1_dev:candle:q4:text_to_image:lora:resident",
     "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
-    "z_image_turbo:z_image_turbo:candle:q4:text_to_image:control:resident",
+    "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:resident",
   ];
   for (const id of expectedResident) {
     assert.equal(

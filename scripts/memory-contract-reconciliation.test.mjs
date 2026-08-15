@@ -195,6 +195,20 @@ test("manifest to route is mutation-proven green-red-green", () => {
   );
 });
 
+test("combined low-rank and PiD route facts remain owned by the LoRA manifest coordinate", () => {
+  const input = fixture();
+  input.engineFacts[0].memoryRouteWitnesses[0].overlay = "lora";
+  input.engineFacts[0].memoryRouteWitnesses[0].loadProfile = "lora_pid";
+  input.manifest.models[0].mlx.memoryStrategyContract.implementations[0].overlays = ["lora"];
+  input.cells[0].overlay = "lora";
+  input.survey.families[100].backends.mlx.implementedOverlays = ["lora"];
+  assert.equal(reconcileMemoryContracts(input).mismatches, 0);
+
+  const mutated = structuredClone(input);
+  mutated.engineFacts[0].memoryRouteWitnesses[0].loadProfile = "unknown_combined_profile";
+  assert.throws(() => reconcileMemoryContracts(mutated), /unknown load profile/);
+});
+
 test("runtimeProvider is the exact composed provider identity", () => {
   const input = fixture();
   const candleFacts = input.engineFacts[1];

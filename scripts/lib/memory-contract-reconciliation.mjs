@@ -195,6 +195,7 @@ const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
 const ROUTE_LOAD_PROFILES = new Map([
   ["plain", "none"],
   ["lora", "lora"],
+  ["lora_pid", "lora"],
   ["single_control", "control"],
   ["multi_control", "control"],
   ["ip_adapter", "identity"],
@@ -205,7 +206,7 @@ const ROUTE_LOAD_PROFILES = new Map([
 // are distinct load profiles, not aliases for the single-control or plain matrix coordinates.
 const MANIFEST_ROUTE_PROFILES = new Map([
   ["none", new Set(["plain"])],
-  ["lora", new Set(["lora"])],
+  ["lora", new Set(["lora", "lora_pid"])],
   ["control", new Set(["single_control"])],
   ["identity", new Set(["ip_adapter", "identity"])],
 ]);

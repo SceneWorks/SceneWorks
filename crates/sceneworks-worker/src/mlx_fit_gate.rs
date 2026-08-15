@@ -11369,9 +11369,19 @@ mod tests {
         );
         assert_eq!(
             cells.len(),
-            35,
+            32,
             "the source-derived Resident-only inventory changed; update the recorded audit result"
         );
+        for route in [
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ] {
+            assert!(
+                cells.iter().all(|cell| cell.manifest_id != route),
+                "{route}'s pinned provider contract must remove it from the Resident-only audit"
+            );
+        }
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
         let hosts = [48_u64, 64, 96, 128];
         let mut flips = Vec::new();
