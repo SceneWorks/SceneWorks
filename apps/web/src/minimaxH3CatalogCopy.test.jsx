@@ -173,9 +173,49 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
       expect(guide.includes(marker), `guide must name ${marker}`).toBe(true);
     }
     expect(/none of them do anything/i.test(guide), "guide must say the markers are inert").toBe(true);
-    // The engine's recorded decision is PASS THROUGH UNCHANGED — no strip, no rewrite, no submit-time
-    // warning — so the guide must say that rather than implying SceneWorks cleans the prompt up.
-    expect(/passes your prompt through \*\*unchanged\*\*/.test(guide), "guide must say the prompt is passed through unchanged").toBe(true);
+  });
+
+  // The engine's recorded decision is PASS THROUGH UNCHANGED — no strip, no repair, no submit-time
+  // warning — and the guide has to say so without overclaiming, because the WEB layer has three
+  // prompt-altering paths the engine knows nothing about. The guide has now carried two wrong
+  // versions of this paragraph and each was pinned by a test that agreed with it:
+  //
+  //   v1 "SceneWorks passes your prompt through **unchanged**" — false. `RefinePromptControl`
+  //      (`VideoStudio.jsx:1578`, gated only on `promptless`, which `minimax_h3` never sets) rewrites
+  //      it, and `composeStyledPrompt` / the general-preset stack rewrap it at submit
+  //      (`VideoStudio.jsx:1274-1279`, `:1357`).
+  //   v2 "SceneWorks never alters your prompt on its own … the one exception is Refine" — still
+  //      false twice over. Refine does NOT replace what you wrote: it renders the rewrite behind
+  //      **Apply** / **Keep original** (`RefinePromptControl.jsx:193-212`), so an unapplied
+  //      suggestion changes nothing. And Refine is not "the one exception" — the style fold and the
+  //      stack fold both alter the outgoing prompt with no review step at all.
+  //
+  // So this pins the SHAPE of the correct claim rather than one sentence: the two absolutes are
+  // asserted ABSENT, and each surviving path is asserted named. A future rewrite that reintroduces
+  // either absolute reds on the absolute's own assertion.
+  it("states the prompt-alteration story without the two absolutes that were false", () => {
+    for (const overclaim of [
+      { name: "the v1 unqualified pass-through", re: /passes your prompt through \*\*unchanged\*\*/ },
+      { name: "the v2 'never alters your prompt' absolute", re: /never alters your prompt/i },
+      { name: "the v2 'the one exception' framing", re: /the one exception/i },
+      // Refine is a SUGGESTION until Apply. Copy that says it replaces the prompt outright is the
+      // same class of error in the opposite direction.
+      { name: "the claim that Refine replaces the prompt outright", re: /replaces what you wrote/i },
+    ]) {
+      expect(overclaim.re.test(guide), `guide must not carry ${overclaim.name}`).toBe(false);
+    }
+    for (const claim of [
+      { name: "the markers are not stripped or repaired", re: /not removed, not rewritten and not warned about/ },
+      { name: "the Refine button as a prompt-altering path", re: /\*\*Refine\*\* button/ },
+      { name: "that Refine needs Apply before it changes anything", re: /until you press \*\*Apply\*\*/ },
+      { name: "the Style Catalog fold as a second path", re: /\*\*Style Catalog\*\* entry/ },
+      { name: "the preset stack fold as a third path", re: /\*\*preset stack\*\*/ },
+      { name: "that the folds have no confirmation step", re: /no confirmation step/ },
+      // The pass-through claim survives, but CONDITIONED on all three paths being idle.
+      { name: "the conditioned pass-through claim", re: /With no style, no stack and no applied refinement/ },
+    ]) {
+      expect(claim.re.test(guide), `guide must state ${claim.name}`).toBe(true);
+    }
   });
 
   it("names all four withheld surfaces, not three", () => {

@@ -172,13 +172,22 @@ open text encoder has no trained representation for them — the embedding rows 
 indistinguishable from the model's unused padding. They almost certainly belong to the withheld
 H3-Context-IR front end, which is not in this loop.
 
-**SceneWorks never alters your prompt on its own** — the markers are not stripped, not rewritten and
-not warned about at submit time, so whatever is in the box is exactly what the text encoder sees.
-The one exception is the **Refine** button: it hands your prompt *and this guide* to a language model
-and replaces what you wrote with the rewrite, and because it has just read this page it may well drop
-the markers. Either way they cost you prompt space and contribute nothing. **Write dialogue as plain
-text instead** — name the speaker, give the line, give the delivery, exactly as in the *Prompt the
-audio explicitly* section above. That works; the markup does not.
+**Nothing strips or repairs the markers.** They are not removed, not rewritten and not warned about
+at submit time. Two features can still change what the text encoder sees, and both are things you
+switched on yourself:
+
+- The **Refine** button hands your prompt *and this guide* to a language model and shows you the
+  rewrite as a suggestion. The box does not change until you press **Apply** — *Keep original*
+  leaves it exactly as you typed it. But because the model has just read this page, a rewrite you
+  do apply may well drop the markers.
+- A **Style Catalog** entry or a **preset stack** is folded into the outgoing prompt at submit time.
+  There is no confirmation step: the Studio previews the composed string above the Generate button,
+  and then sends it.
+
+With no style, no stack and no applied refinement, whatever is in the box is exactly what the text
+encoder sees. Either way the markers cost you prompt space and contribute nothing. **Write dialogue
+as plain text instead** — name the speaker, give the line, give the delivery, exactly as in the
+*Prompt the audio explicitly* section above. That works; the markup does not.
 
 ### Keep the action inside the clip
 
