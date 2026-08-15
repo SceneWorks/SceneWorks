@@ -12296,6 +12296,15 @@ fn minimax_h3_job_snapshot() -> JobSnapshot {
     .expect("the minimax-h3 job snapshot deserializes")
 }
 
+/// The `data_dir` [`drive_minimax_h3_arm`] runs under. Named rather than inlined because the LoRA
+/// confinement (`normalize_app_managed_lora_path`) admits only paths UNDER the data dir, so a test
+/// that stages an adapter for the arm has to stage it here — anywhere else and the arm rejects the
+/// file for the confinement reason rather than exercising the recipe (sc-18726).
+#[cfg(target_os = "macos")]
+fn minimax_h3_data_dir(tier_root: &Path) -> PathBuf {
+    tier_root.join("arm-data-dir")
+}
+
 /// Drive the REAL `generate_minimax_h3_using` against `probe`, with both roots pointed at fixtures.
 ///
 /// Every network field is unroutable (`offline_settings`) and `HF_HUB_CACHE` is pinned at an empty
@@ -12309,14 +12318,34 @@ fn drive_minimax_h3_arm(
     probe: &ArmProbe,
     request: &VideoRequest,
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    // The t2va/fl2va arms resolve no media, so the project root is never read and a placeholder is
+    // honest. The Ref2VA arms DO read it — they take `drive_minimax_h3_arm_in_project`.
+    let project_path = tier_root.join("unused-project");
+    drive_minimax_h3_arm_in_project(tier_root, base_root, probe, request, &project_path)
+}
+
+/// [`drive_minimax_h3_arm`] with the project root supplied — the Ref2VA form.
+///
+/// A reference asset id resolves through `ProjectStore::get_asset` to a PROJECT-RELATIVE
+/// `file.path`, which `safe_project_path` joins under this root. So an arm carrying references only
+/// reaches the engine when the root is the staged project's own
+/// ([`stage_minimax_h3_reference_project`]).
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm_in_project(
+    tier_root: &Path,
+    base_root: &Path,
+    probe: &ArmProbe,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<(DecodedVideo, Value)> {
     let settings = Settings {
-        data_dir: tier_root.join("unused-data-dir"),
+        data_dir: minimax_h3_data_dir(tier_root),
         ..offline_settings()
     };
     let job = minimax_h3_job_snapshot();
     let loader = probe.loader();
     let hf_cache = tier_root.join("unused-hf-cache");
-    let project_path = tier_root.join("unused-project");
+    let project_path = project_path.to_path_buf();
     crate::test_env::temp_env_vars(
         &[
             ("HF_HUB_CACHE", hf_cache.to_str().expect("utf-8 hub")),
@@ -13155,4 +13184,356 @@ fn generate_minimax_h3_using_refuses_a_wrong_partition_shape_before_loading() {
         "the shape check must run BEFORE the load — a wrong-partition job must never pay for a \
          53 GB text encoder, let alone render from the wrong DiT"
     );
+}
+
+// ---------------------------------------------------------------------------
+// MiniMax-H3 turbo recipe — the DRIVABLE CHAIN (epic 17137, sc-18726 / sc-18727).
+//
+// The failure these guard against is not "the control does not render". It is the one this epic has
+// shipped three times: a control that exists, a payload field that carries its value, and a worker
+// that never reads it. So every test below drives the REAL arm and asserts on what reached the
+// ENGINE — the step count, the video shift, and the adapter file itself — rather than on any
+// intermediate state.
+//
+// Every asserted value is NON-DEFAULT on purpose. The model's `defaults.steps` is 50 and the
+// engine's own `VIDEO_SIGMA_SHIFT` is 12.0, so an arm that forwarded nothing could not pass.
+// ---------------------------------------------------------------------------
+
+/// Stage a turbo adapter file under the arm's data dir and return the payload `loras` entry naming
+/// it — the shape `serialize_job_lora` produces for a catalog-backed selection (`id` + `path` +
+/// `weight`).
+///
+/// The `id` is what the recipe resolves from, and it is a REAL catalog id: the resolver reads the
+/// embedded builtin manifest, so a made-up id resolves to no recipe and every assertion below would
+/// silently be asserting the base regime.
+#[cfg(target_os = "macos")]
+fn minimax_h3_turbo_lora(tier_root: &Path, lora_id: &str) -> Value {
+    let dir = minimax_h3_data_dir(tier_root).join("loras");
+    std::fs::create_dir_all(&dir).expect("lora dir");
+    let file = dir.join(format!("{lora_id}.safetensors"));
+    write_lora_fixture(&file, None);
+    json!({ "id": lora_id, "path": file.to_string_lossy(), "weight": 1.0 })
+}
+
+/// Stage a real image reference for the Ref2VA arms: a project in the arm's own `ProjectStore`, a
+/// decodable PNG under it, and the indexed asset record `load_reference_image` resolves.
+///
+/// Returns `(project_id, project_path, asset_id)`. Both are needed by the caller: the id goes in the
+/// request (`minimax_h3_request`'s default `projectId` is a placeholder no store has heard of) and
+/// the path goes to [`drive_minimax_h3_arm_in_project`].
+///
+/// Registered through `persist_generated_asset` — the same door the image lane writes its own
+/// outputs with — rather than by hand-writing a sidecar, so this proves the resolution against the
+/// asset shape references actually have.
+#[cfg(target_os = "macos")]
+fn stage_minimax_h3_reference_project(data_dir: &Path) -> (String, PathBuf, String) {
+    let store = ProjectStore::new(data_dir.to_path_buf(), "worker");
+    let project = store
+        .create_project("sc18726_ref")
+        .expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+    let asset_id = "mm_h3_ref_1";
+    let media_rel = "assets/images/reference.png";
+    let media_path = project_path.join(media_rel);
+    std::fs::create_dir_all(media_path.parent().expect("image dir")).expect("image dir creates");
+    // A real decodable PNG, not a touched file: `load_reference_image` runs `decode_image_any` and
+    // an empty file would fail there — which would leave this arm stopping one frame later than the
+    // fallback it replaces rather than reaching the engine.
+    image::RgbImage::from_pixel(64, 64, image::Rgb([32u8, 96, 200]))
+        .save(&media_path)
+        .expect("reference png writes");
+    store
+        .persist_generated_asset(
+            &project.id,
+            "job-sc18726",
+            "genset-sc18726",
+            &json!({
+                "type": "image",
+                "assetId": asset_id,
+                "mediaPath": media_rel,
+                "mimeType": "image/png",
+                "width": 64,
+                "height": 64,
+                "displayName": "reference.png",
+                "createdAt": "2026-08-15T00:00:00Z",
+            }),
+        )
+        .expect("reference asset persists");
+    (project.id, project_path, asset_id.to_owned())
+}
+
+/// 🔴 **THE CHAIN.** A selected turbo variant reaches the engine as its own `(steps, video shift)`
+/// AND as a loaded adapter, and the base regime is byte-identical to what shipped before.
+///
+/// Both halves are required and neither is sufficient:
+///
+/// * **the recipe without the adapter** renders the BASE checkpoint on a 4-step schedule, which
+///   sc-18729 measured as visibly undercooked (motion 1.117 against the LoRA's 5.612) — a fast
+///   render of the wrong thing;
+/// * **the adapter without the recipe** is what sc-18725 actually shipped: a 692M-parameter residual
+///   stacked onto a 50-step render, slower than the base and off-distribution.
+///
+/// The `off` arm is the control. Without it, an arm that unconditionally forced `(4, 6.0)` would
+/// pass the `on` arm and destroy every non-turbo MiniMax-H3 render.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_selected_turbo_variant_changes_the_job_that_reaches_the_engine() {
+    let tiers = minimax_h3_tier_root("mm_turbo_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_turbo_base_");
+
+    // --- turbo OFF: the base regime, unchanged ------------------------------------------------
+    let off_probe = ArmProbe::default();
+    let off = minimax_h3_request("minimax_h3", json!({}));
+    let (_decoded, off_raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &off_probe, &off)
+        .expect("a plain t2va job runs");
+    let off_request = off_probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        (off_request.steps, off_request.scheduler_shift),
+        (None, None),
+        "with no accelerator the arm must pass NOTHING, so the engine's own 50 steps / shift 12.0 \
+         stand exactly as they did before sc-18726"
+    );
+    let off_spec = off_probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert!(
+        off_spec.adapters.is_empty(),
+        "a job with no LoRAs must load none"
+    );
+    assert_eq!(off_raw["minimaxH3Turbo"], json!("off"));
+    assert_eq!(off_raw["effectiveSteps"], Value::Null);
+    assert_eq!(off_raw["effectiveSchedulerShift"], Value::Null);
+
+    // --- turbo ON: the 768p variant's OWN recipe ----------------------------------------------
+    let on_probe = ArmProbe::default();
+    let lora = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_4step_768p");
+    let lora_path = lora["path"].as_str().expect("a staged path").to_owned();
+    let on = minimax_h3_request("minimax_h3", json!({ "loras": [lora] }));
+    let (_decoded, on_raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &on_probe, &on)
+        .expect("a t2va job carrying the turbo adapter runs");
+    let on_request = on_probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        on_request.steps,
+        Some(4),
+        "the variant's own NFE must reach the engine — 4, not the model's default 50, and not the \
+         5 a SceneWorks-side +1 would produce (the engine appends the terminal sigma itself)"
+    );
+    assert_eq!(
+        on_request.scheduler_shift,
+        Some(6.0),
+        "the variant's own VIDEO shift must reach the engine — 6.0, the one published variant that \
+         differs from the base 12.0, so this cannot pass against a hardcoded default"
+    );
+    let on_spec = on_probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        on_spec
+            .adapters
+            .iter()
+            .map(|adapter| adapter.path.clone())
+            .collect::<Vec<_>>(),
+        vec![std::fs::canonicalize(&lora_path).expect("the staged adapter canonicalizes")],
+        "the adapter itself must reach the LOAD — before sc-18726 the arm passed `Vec::new()` and \
+         every selected MiniMax-H3 LoRA was silently dropped here"
+    );
+    assert_eq!(
+        on_raw["minimaxH3Turbo"],
+        json!("minimax_h3_turbo_4step_768p")
+    );
+    assert_eq!(on_raw["effectiveSteps"], json!(4));
+    assert_eq!(on_raw["effectiveSchedulerShift"], json!(6.0));
+    assert_eq!(
+        on_raw["effectiveAudioSchedulerShift"],
+        json!(3.0),
+        "the asset records the WHOLE schedule — the audio shift the engine is fixed at, not just \
+         the video half the request can move"
+    );
+}
+
+/// Each published variant carries its OWN recipe to the engine — the property a single constant, a
+/// format sniff, or a `role: accelerator` boolean could not have.
+///
+/// The four files disagree pairwise: the two 4-step fl2v ones share an NFE and differ on shift, the
+/// 8-step one shares the shift with `4step_v01` and differs on NFE. Any implementation that
+/// collapses the set to one recipe fails at least one arm.
+#[cfg(target_os = "macos")]
+#[test]
+fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
+    let tiers = minimax_h3_tier_root("mm_variants_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_variants_base_");
+    // The ref2v arm is driven at the ENGINE SEAM like the other three, not through the pure sampling
+    // function: the ref2v adapter is the one variant paired with the OTHER DiT partition, so the
+    // partition it is unique to is exactly the one a function-level assertion would leave unproved.
+    // That takes a real reference on disk, because `resolve_minimax_h3_conditioning` decodes one
+    // before the arm ever builds a `GenerationRequest`.
+    let (project_id, project_path, reference_id) =
+        stage_minimax_h3_reference_project(&minimax_h3_data_dir(tiers.path()));
+    for (model, lora_id, steps, shift) in [
+        ("minimax_h3", "minimax_h3_turbo_4step_768p", 4u32, 6.0f32),
+        ("minimax_h3", "minimax_h3_turbo_8step", 8, 12.0),
+        ("minimax_h3", "minimax_h3_turbo_4step_v01", 4, 12.0),
+        ("minimax_h3_ref", "minimax_h3_ref2v_turbo_4step", 4, 12.0),
+    ] {
+        let lora = minimax_h3_turbo_lora(tiers.path(), lora_id);
+        // The reference partition needs a reference, or the SHAPE validator refuses before the
+        // recipe is ever consulted.
+        let extra = if model == "minimax_h3_ref" {
+            json!({
+                "loras": [lora],
+                "projectId": project_id,
+                "referenceAssetIds": [reference_id],
+            })
+        } else {
+            json!({ "loras": [lora] })
+        };
+        let request = minimax_h3_request(model, extra);
+        let probe = ArmProbe::default();
+        drive_minimax_h3_arm_in_project(tiers.path(), base.path(), &probe, &request, &project_path)
+            .unwrap_or_else(|error| panic!("{lora_id} renders: {error}"));
+        let engine = probe
+            .request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the arm reached the engine");
+        assert_eq!(
+            (engine.steps, engine.scheduler_shift),
+            (Some(steps), Some(shift)),
+            "{lora_id} must drive its OWN (steps, video shift) to the engine"
+        );
+        // The ref2v arm additionally has to have gone through the REFERENCE path to get here, or
+        // the partition this variant is distilled for is still unproved at the seam. The
+        // conditioning the arm built is what discriminates.
+        if model == "minimax_h3_ref" {
+            assert!(
+                engine
+                    .conditioning
+                    .iter()
+                    .any(|item| matches!(item, gen_core::Conditioning::Reference { .. })),
+                "the ref2v arm must reach the engine carrying its reference, not as a bare t2va \
+                 request that happened to resolve the same recipe: {:?}",
+                engine.conditioning
+            );
+        }
+    }
+}
+
+/// An explicit `advanced.steps` beats the variant's own count; the trained SHIFT does not yield.
+///
+/// Upstream lists the 8-step adapter as "8 / 4", so a caller who knows the checkpoint may run it
+/// shorter — honouring the knob rather than seizing it, exactly as `scail2_sampling` does. The shift
+/// is the opposite call and is asserted here so the asymmetry is a decision rather than an accident:
+/// a distilled checkpoint sampled at a shift it was not distilled for is the off-distribution render
+/// the recipe exists to prevent, so `advanced.schedulerShift` loses to the variant.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_explicit_step_override_wins_over_the_variants_count_but_the_shift_does_not() {
+    let tiers = minimax_h3_tier_root("mm_override_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_override_base_");
+    let probe = ArmProbe::default();
+    let lora = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_8step");
+    // 6 is neither the variant's 8, nor the model default 50, nor the other variants' 4 — so no
+    // value elsewhere in the system can produce this number by accident. 9.0 is likewise not the
+    // variant's/engine's 12.0 nor the 768p variant's 6.0.
+    let request = minimax_h3_request(
+        "minimax_h3",
+        json!({ "loras": [lora], "advanced": { "steps": 6, "schedulerShift": 9.0 } }),
+    );
+
+    drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).expect("the job runs");
+    let engine = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        engine.steps,
+        Some(6),
+        "an explicit step count must win over the variant's own"
+    );
+    assert_eq!(
+        engine.scheduler_shift,
+        Some(12.0),
+        "the variant's TRAINED shift must win over an explicit one — 9.0 must not reach the engine"
+    );
+}
+
+/// Two accelerators asking for different schedules are refused BEFORE anything loads.
+///
+/// A render has one schedule; silently picking the first would run a job at numbers the user can see
+/// they did not choose. `probe.loaded()` makes this a pre-load assertion — the refusal must not cost
+/// a 53 GB text-encoder load.
+#[cfg(target_os = "macos")]
+#[test]
+fn two_conflicting_turbo_variants_are_refused_before_the_load() {
+    let tiers = minimax_h3_tier_root("mm_conflict_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_conflict_base_");
+    let probe = ArmProbe::default();
+    let request = minimax_h3_request(
+        "minimax_h3",
+        json!({
+            "loras": [
+                minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_4step_768p"),
+                minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_8step"),
+            ]
+        }),
+    );
+
+    let message = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .err()
+        .expect("two different schedules cannot both govern one render")
+        .to_string();
+    assert!(
+        message.contains("MiniMax-H3 Turbo (4-step, 768p)")
+            && message.contains("MiniMax-H3 Turbo (8-step)"),
+        "the refusal names both adapters: {message}"
+    );
+    assert!(
+        !probe.loaded(),
+        "a contradictory selection must be refused before the load"
+    );
+}
+
+/// A plain (non-accelerator) MiniMax-H3 LoRA loads its weights and leaves the schedule alone.
+///
+/// The complement of the chain test: it proves the adapter plumbing is genuinely general rather than
+/// a turbo-only special case, and that the recipe keys on the catalog id rather than on "any LoRA is
+/// present".
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plain_minimax_h3_lora_loads_without_changing_the_schedule() {
+    let tiers = minimax_h3_tier_root("mm_plain_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_plain_base_");
+    let probe = ArmProbe::default();
+    let lora = minimax_h3_turbo_lora(tiers.path(), "some_user_style_lora");
+    let request = minimax_h3_request("minimax_h3", json!({ "loras": [lora] }));
+
+    let (_decoded, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("a job carrying a plain LoRA runs");
+    let engine = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        (engine.steps, engine.scheduler_shift),
+        (None, None),
+        "a LoRA with no declared recipe must not move the schedule"
+    );
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        spec.adapters.len(),
+        1,
+        "…and must still be LOADED — the plumbing is general, not turbo-only"
+    );
+    assert_eq!(raw["minimaxH3Turbo"], json!("off"));
 }

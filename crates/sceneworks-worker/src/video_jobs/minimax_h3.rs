@@ -420,6 +420,90 @@ pub(super) fn ensure_minimax_h3_renderable(
     Ok(())
 }
 
+/// Build the adapter specs for a MiniMax-H3 generation (sc-18726).
+///
+/// MiniMax-H3 is a single **dense** DiT — no MoE experts, no Lightning distill pair to prepend — so
+/// this is the shared [`super::resolve_dense_adapters`] the Wan-VACE and SCAIL-2 arms use, with the
+/// same `MAX_JOB_LORAS` cap and the same confinement of the resolved path.
+///
+/// 🔴 Until this existed the arm passed `adapters: Vec::new()` unconditionally, so a selected
+/// MiniMax-H3 LoRA — turbo or otherwise — was accepted by the API's family gate, round-tripped
+/// through the payload, shown as selected in the picker, and then **silently dropped** on the way to
+/// the engine. That is the whole reason the recipe below is not enough on its own: switching the
+/// schedule to 4 steps without the distilled residual actually loading renders the base checkpoint
+/// at 4 steps, which sc-18729 measured as visibly undercooked (motion 1.117 against 5.612).
+///
+/// The engine (`mlx-gen-minimax-h3`, `supports_lora: true`) resolves each file's rank from the factor
+/// shapes and its alpha from the file — per-target `.alpha`, then PEFT metadata, then the bare
+/// top-level `__metadata__["alpha"]` string, then `DEFAULT_LORA_ALPHA = 8`, never the rank. Nothing
+/// about that fold belongs on this side: `defaultWeight` is the runtime `lora_scale` MULTIPLIER and
+/// the catalog leaves it at 1.0 so the file's own alpha/rank fold lands unmodified.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_minimax_h3_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    super::resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
+}
+
+/// The MiniMax-H3 sampling recipe `(steps, video scheduler shift)` for this request, plus the turbo
+/// variant that produced it (`None` ⇒ the base regime).
+///
+/// The twin of [`super::wan::scail2_sampling`], and it diverges from it in exactly the three ways
+/// sc-18726 identified:
+///
+/// 1. **The recipe is per VARIANT, read from the catalog.** SCAIL-2 has one lightning recipe and can
+///    sniff it from the file format; MiniMax-H3's four published adapters carry three different
+///    `(NFE, video shift)` pairs in a byte-identical format, so the discriminator is the catalog id
+///    and the values live in `builtin.loras.jsonc` (`sampling`). Resolution goes through
+///    [`sceneworks_core::minimax_h3_turbo::resolve_turbo_recipe`] — the ONE resolver both entry
+///    points (the studio's turbo control and the generic LoRA picker) reach, because both do the
+///    same thing: put a catalog id in `request.loras`.
+///
+/// 2. **Guidance is not part of the recipe.** SCAIL-2's lightning invariants include CFG-off, because
+///    SCAIL-2 has CFG to turn off. This checkpoint is guidance-distilled — there is no unconditional
+///    branch in it, the manifest declares `video.supportsGuidance: false`, and the engine REJECTS a
+///    guidance scale — so the turbo LoRA changes the schedule and nothing else.
+///
+/// 3. **The audio shift is recorded, not forwarded.** See
+///    [`sceneworks_core::minimax_h3_turbo`]: the engine holds audio at its own `AUDIO_SIGMA_SHIFT`,
+///    every published variant trains at 3.0, and the core guard goes red if a catalog variant ever
+///    declares otherwise.
+///
+/// An explicit `advanced.steps` wins over the variant's own count, exactly as `scail2_sampling`
+/// lets it — upstream's spec table lists the 8-step file as "8 / 4", so a caller who knows the
+/// checkpoint can run it shorter. The shift is NOT overridable the same way: `advanced.schedulerShift`
+/// still reaches the base regime (it is the pre-existing knob this arm already read), but under a
+/// turbo variant the trained shift wins, because a distilled checkpoint sampled at a shift it was
+/// not distilled for is the off-distribution render the recipe exists to prevent.
+#[cfg(target_os = "macos")]
+pub(super) fn minimax_h3_sampling(
+    request: &VideoRequest,
+) -> WorkerResult<(
+    Option<u32>,
+    Option<f32>,
+    Option<&'static sceneworks_core::minimax_h3_turbo::TurboRecipe>,
+)> {
+    let recipe =
+        sceneworks_core::minimax_h3_turbo::resolve_turbo_recipe(&request.model, &request.loras)
+            .map_err(WorkerError::InvalidPayload)?;
+    let Some(recipe) = recipe else {
+        // Base regime — byte-identical to what this arm did before sc-18726: `None` ⇒ the engine's
+        // own DEFAULT_STEPS (50) and VIDEO_SIGMA_SHIFT (12.0), with the pre-existing `advanced`
+        // overrides still honored.
+        return Ok((
+            advanced_opt_u32(request, "steps"),
+            advanced_opt_f32(request, "schedulerShift"),
+            None,
+        ));
+    };
+    Ok((
+        advanced_opt_u32(request, "steps").or(Some(recipe.steps)),
+        Some(recipe.video_shift),
+        Some(recipe),
+    ))
+}
+
 /// The `rawSettings` recorded on a real MiniMax-H3 asset.
 ///
 /// `minimaxH3Tier` names the tier that actually LOADED, not the one the request asked for — the
@@ -430,14 +514,56 @@ pub(super) fn ensure_minimax_h3_renderable(
 /// partitions — actually denoised. It is the one field that makes a wrong-checkpoint render
 /// visible after the fact: the output of a t2va job on `transformer_ref/` is plausible video, so
 /// the asset record is the only place the truth can live.
+///
+/// The `effective*` block is the sc-18726 half — the `wan_raw_settings` / `scail2_raw_settings`
+/// convention, and the only place the schedule a render ACTUALLY ran is inspectable. `minimaxH3Turbo`
+/// names the variant (or `"off"`), `effectiveSteps` is the model-evaluation count that reached the
+/// engine, `effectiveSchedulerShift` the video shift, and `effectiveAudioSchedulerShift` the audio
+/// one.
+///
+/// `effectiveAudioSchedulerShift` is recorded from the DECLARED recipe (or, in the base regime, from
+/// the engine constant it is pinned to) rather than from a request field, because there is no request
+/// field: the engine holds audio at `AUDIO_SIGMA_SHIFT` on every path. Writing the number anyway is
+/// how the asset states the WHOLE schedule instead of the video half of it, and
+/// `sceneworks_core::minimax_h3_turbo` carries the guard that the declared and rendered values cannot
+/// silently diverge.
+///
+/// `effectiveSteps` / `effectiveSchedulerShift` record `null` when the arm passed `None` — "the
+/// engine picked its own default" is a fact about the render, and mirroring the engine's 50 / 12.0
+/// here would create a second place for those constants to drift. `scail2_raw_settings` omits its
+/// `effective*` keys off-recipe for the same reason it never has to answer that question; this arm
+/// answers it explicitly so `minimaxH3Turbo: "off"` and a null step count read as one statement.
 #[cfg(target_os = "macos")]
-pub(super) fn minimax_h3_raw_settings(request: &VideoRequest, tier: &str, task: &str) -> Value {
+pub(super) fn minimax_h3_raw_settings(
+    request: &VideoRequest,
+    tier: &str,
+    task: &str,
+    steps: Option<u32>,
+    scheduler_shift: Option<f32>,
+    turbo: Option<&sceneworks_core::minimax_h3_turbo::TurboRecipe>,
+) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert("minimaxH3Tier".to_owned(), Value::String(tier.to_owned()));
     raw.insert("minimaxH3Task".to_owned(), Value::String(task.to_owned()));
+    raw.insert(
+        "minimaxH3Turbo".to_owned(),
+        Value::String(
+            turbo
+                .map(|recipe| recipe.lora_id.clone())
+                .unwrap_or_else(|| "off".to_owned()),
+        ),
+    );
+    raw.insert("effectiveSteps".to_owned(), json!(steps));
+    raw.insert("effectiveSchedulerShift".to_owned(), json!(scheduler_shift));
+    raw.insert(
+        "effectiveAudioSchedulerShift".to_owned(),
+        json!(turbo
+            .map(|recipe| recipe.audio_shift)
+            .unwrap_or(sceneworks_core::minimax_h3_turbo::ENGINE_AUDIO_SIGMA_SHIFT)),
+    );
     Value::Object(raw)
 }
 
@@ -621,7 +747,12 @@ pub(super) async fn generate_minimax_h3_using(
     let conditioning = resolve_minimax_h3_conditioning(settings, request, project_path)?;
     let load = resolve_minimax_h3_load(settings, request)?;
     let task = minimax_h3_task(&conditioning);
-    let raw_settings = minimax_h3_raw_settings(request, load.tier, task);
+    // The turbo recipe (sc-18726) is resolved BEFORE the adapters so a contradictory pair of
+    // accelerators is refused by name rather than after a LoRA file has been opened and classified.
+    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
+    let adapters = resolve_minimax_h3_adapters(settings, request)?;
+    let raw_settings =
+        minimax_h3_raw_settings(request, load.tier, task, steps, scheduler_shift, turbo);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -631,7 +762,10 @@ pub(super) async fn generate_minimax_h3_using(
         model_dir: load.root,
         dit_component_dir: Some(load.dit_dir),
         quant: load.quant,
-        adapters: Vec::new(),
+        // sc-18726. Was an unconditional `Vec::new()`: every selected MiniMax-H3 LoRA was dropped
+        // between the payload and the engine, so the turbo adapters sc-18725 catalogued could be
+        // picked and never loaded. See [`resolve_minimax_h3_adapters`].
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         // Guidance-distilled: the checkpoint has no unconditional branch and the engine REJECTS
@@ -646,11 +780,14 @@ pub(super) async fn generate_minimax_h3_using(
         // engine an off-lattice count it hard-rejects (the engine never refits).
         frames: video_frame_count(&request.model, request.raw_frame_count()),
         fps: request.fps,
-        // `None` ⇒ the engine's own DEFAULT_STEPS (50).
-        steps: advanced_opt_u32(request, "steps"),
+        // MODEL EVALUATIONS, not sigma grid points — the engine appends the terminal σ = 0 itself
+        // (`JointSchedule::with_shifts(evaluations + 1, ..)`), so this number is passed through with
+        // no ±1 anywhere on this side. `None` ⇒ the engine's own DEFAULT_STEPS (50); a selected turbo
+        // variant supplies its own 4 or 8 ([`minimax_h3_sampling`]).
+        steps,
         // The video sigma shift (sc-18729). `None` ⇒ the engine's own VIDEO_SIGMA_SHIFT; the turbo
         // 4-step recipe wants a lower one, so it is a real per-request axis rather than a constant.
-        scheduler_shift: advanced_opt_f32(request, "schedulerShift"),
+        scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         ..VideoGenInput::default()
     };

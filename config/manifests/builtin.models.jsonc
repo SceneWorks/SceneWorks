@@ -13240,12 +13240,22 @@
         // the default canvas is already two hours. Recommending a shorter scalar would falsely
         // imply long clips are infeasible everywhere (sc-17152).
         "recommendedMaxDuration": 14.375,
-        // The scheduler's sigma grid is `linspace(1, 0, num_inference_steps)` and the terminal 0 is
-        // a GRID POINT, not a sentinel appended afterwards — so N steps drive N-1 model evaluations
-        // and a single point is a schedule with nothing between its ends. `set_timesteps` raises
-        // "`num_inference_steps` >= 2, got 1" (diffusers `MiniMaxH3Scheduler`), so 1 step is not a
-        // fast draft here, it is unrenderable, and it is REFUSED rather than quietly raised to 2 —
-        // the same reject-never-clamp posture the duration bounds take (sc-19426).
+        // 🔴 THE UNIT IS MODEL EVALUATIONS (NFE), and it is the same unit everywhere: `defaults.steps`
+        // above, `advanced.steps`, this floor, and the `sampling.steps` each turbo adapter declares
+        // in builtin.loras.jsonc. The engine builds the sigma grid as `linspace(1, 0, steps + 1)` —
+        // it appends the terminal 0 ITSELF (`JointSchedule::with_shifts(evaluations + 1, ..)`) — so
+        // `defaults.steps: 50` really is 50 evaluations and nothing in SceneWorks adds or subtracts
+        // one. sc-18726 asked for that call to be made once and tested; it is pinned by
+        // `minimax_h3_turbo_steps_are_model_evaluations_not_grid_points` (sceneworks-core) and by
+        // the arm-level `a_selected_turbo_variant_changes_the_job_that_reaches_the_engine`.
+        //
+        // ⚠️ This comment previously read "N steps drive N-1 model evaluations" and concluded that
+        // `steps: 1` is unrenderable. That describes diffusers' `num_inference_steps`, which is NOT
+        // what this key carries: at 1 NFE the engine builds a legal 2-point grid and renders. So the
+        // floor is a PRODUCT judgement, not an engine limit — a 1-evaluation schedule is a single
+        // Euler jump from pure noise, which is not a fast draft, it is noise. 2 is the smallest
+        // schedule with an intermediate sigma. REFUSED rather than quietly raised, the same
+        // reject-never-clamp posture the duration bounds take (sc-19426, corrected sc-18726).
         "hardMinSteps": 2,
         // One cadence. The lattice, the duration window and every measured render are 24 fps.
         "fps": [24],
@@ -13557,7 +13567,9 @@
         "hardMinDuration": 5.1667,
         "hardMaxDuration": 14.375,
         "recommendedMaxDuration": 14.375,
-        // Same scheduler, same two-grid-point floor as `minimax_h3` — see that entry (sc-19426).
+        // Same scheduler, same two-EVALUATION floor as `minimax_h3` — see that entry for the unit
+        // (NFE, not sigma grid points) and for why 2 is a product judgement rather than an engine
+        // limit (sc-19426, corrected sc-18726).
         "hardMinSteps": 2,
         "fps": [24],
         "maxPixels": 1032192,

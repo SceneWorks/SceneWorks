@@ -189,11 +189,49 @@ it a guess.
 Unlike a first/last frame, **references do not set the canvas shape** — they are encoded at their own
 resolution and the output falls back to 16:9 unless you choose a size.
 
+## Turbo — The Control That Changes The Cost Table
+
+The **Turbo** control in the Advanced panel swaps in a step-distilled adapter and switches the render
+to the schedule that adapter was trained on. It is **on by default**, and the reason is the table
+above: at 1344x768 a measured base render took **2 h 25 m**, and the same shot with the 4-step 768p
+adapter took **12.6 minutes**. On a matched 576x320 pair the measured floor was 7x.
+
+Turbo is not "the same picture, faster". It is a **different sample** of the same prompt and seed —
+on the validated shot it carried *more* detail and *more* motion than the 50-step base, but the
+adapters are distilled at 544p/768p and MiniMax's own roadmap lists improving Turbo's fine detail as
+open work. Turn it off for the reference schedule; leave it on for everything else.
+
+Each published adapter carries its own schedule, which is why the control is a menu rather than a
+switch:
+
+| Variant | Steps | Trained for |
+|---|---|---|
+| **Turbo (4-step, 768p)** | 4 | The default 1344x768 canvas. The validated one, and the default pick. |
+| **Turbo (8-step)** | 8 | 544p, mixed aspect ratios. Two more steps of headroom. |
+| **Turbo (4-step, v0.1)** | 4 | 544p, the earlier release. |
+| **Ref2VA Turbo (4-step)** | 4 | The **References** entry — it distils the reference-conditioned path. |
+
+Two notes worth knowing:
+
+- The menu only lists adapters you have **installed**. If it says none are installed, fetch one from
+  the LoRA library — nothing else about the model changes.
+- Selecting a Turbo adapter from the ordinary **LoRA picker** does exactly the same thing. They are
+  one selection shown in two places, not two settings that can disagree.
+
 ## Steps
 
 Fifty steps is the reference default and what the timings above assume. Fewer steps scale the cost
 almost linearly, so 25 steps roughly halves the render — a reasonable trade while you are drafting.
-Below about 20 the motion starts to smear and the audio loses definition.
+Below about 20 the motion starts to smear and the audio loses definition — **unless** a Turbo adapter
+is on, which is the whole point of it: those weights are distilled to land in 4 or 8.
+
+Leaving the Steps box blank runs the model's own 50, or the selected Turbo adapter's own count. You
+can still type a number over either. The 8-step adapter is documented to work at 4 as well, so that
+override is a real option rather than a way to break it; the *sigma shift* is not overridable while
+Turbo is on, because sampling a distilled checkpoint on a schedule it was not distilled for is
+precisely what makes it look wrong.
+
+The count is **model evaluations**. "4 steps" means the transformer runs four times.
 
 ## Quant Tiers
 
