@@ -197,11 +197,22 @@ where
         job_id: &job.id,
         cancel_message: ffmpeg_cancel_message,
     };
+    // sc-19549: seek to a frame that actually EXISTS. `timestamp` is a playhead, which can sit past
+    // the end of the source (a still has one frame at t=0; a timeline item can outlive its clip),
+    // and `-ss` past the end encodes nothing while ffmpeg still exits 0 — so this used to produce no
+    // file at all, silently, for every image asset extracted at a playhead > 0.
+    let seek = resolve_frame_seek(
+        "ffmpeg",
+        &source.source_asset,
+        &source.source_media_path,
+        timestamp,
+    )
+    .await?;
     render_frame_png(
         "ffmpeg",
         &source.source_media_path,
         &temp_path,
-        timestamp,
+        seek,
         width,
         height,
         Some(ffmpeg_context),
@@ -686,24 +697,178 @@ async fn run_yolo11_person_detect(
 /// no frame at `duration` (the last decodable frame sits ~`1/fps` before it), and an
 /// `ffmpeg -ss duration` accurate seek then yields no output and fails the whole track.
 /// 0.2 s clears one frame for any clip ≥ 5 fps without meaningfully moving the sample.
-/// Available on Mac AND the off-Mac candle lane, like its sole caller
-/// `assemble_real_person_track`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// UNGATED (sc-19549): this was `cfg(macos | backend-candle)` while its second caller,
+/// `render_frame_asset`, is compiled on EVERY target. Leaving the guard gated while the caller
+/// is not is precisely the "one half of a pair moved" break — the plain-Linux worker that the
+/// `parity-rust` lane builds would not have had the constant at all.
 const FRAME_SEEK_GUARD_SECONDS: f64 = 0.2;
 
 /// Clamp a sample timestamp to a frame-extraction seek that always lands on a real frame:
 /// never past `duration - FRAME_SEEK_GUARD_SECONDS`. Only the final inclusive-end sample is
 /// affected; every interior sample passes through unchanged. The tracker still records the
 /// logical sample time — only the seek used to pull pixels is clamped.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// This is the ONE clamping rule for every `-ss` frame seek in this module — the person-track
+/// sampler, the single-pass `select` threshold, and (since sc-19549) the single-frame
+/// `render_frame_asset` path all route through it rather than spelling their own bound.
 pub(crate) fn frame_seek_timestamp(timestamp: f64, duration: f64) -> f64 {
     timestamp.min((duration - FRAME_SEEK_GUARD_SECONDS).max(0.0))
+}
+
+/// Is this asset a still picture rather than a timed clip? The ONE spelling of that question in
+/// this module — `render_item_segment` (which loops a still with `-loop 1`) and the frame-extract
+/// seek resolver below both call it, so the two can never disagree about what a still is.
+pub(crate) fn asset_is_image_source(asset: &Value) -> bool {
+    let media_type = asset.get("type").and_then(Value::as_str);
+    let mime_type = asset
+        .get("file")
+        .and_then(|file| file.get("mimeType"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    media_type != Some("video") && (media_type == Some("image") || mime_type.starts_with("image/"))
+}
+
+/// Resolve the ffmpeg binary a probe should spawn, honouring `SCENEWORKS_FFMPEG` exactly the way
+/// the render paths do. Shared by both probes so a lane that points at a bundled ffmpeg cannot end
+/// up probing one binary and rendering with another.
+fn resolve_probe_program(ffmpeg: &str) -> String {
+    let configured = match std::env::var("SCENEWORKS_FFMPEG") {
+        Ok(path) if ffmpeg == "ffmpeg" && !path.trim().is_empty() => path,
+        _ => ffmpeg.to_owned(),
+    };
+    sceneworks_core::media_convert::resolve_ffmpeg_program(&configured).into_owned()
+}
+
+/// Parse an ffmpeg `HH:MM:SS.ms` clock into seconds.
+fn parse_ffmpeg_clock(clock: &str) -> Option<f64> {
+    let mut parts = clock.trim().split(':');
+    let hours: f64 = parts.next()?.trim().parse().ok()?;
+    let minutes: f64 = parts.next()?.trim().parse().ok()?;
+    let seconds: f64 = parts.next()?.trim().parse().ok()?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
+}
+
+/// The container-header duration ffmpeg prints as `Duration: 00:00:02.00, start: ...`. `None` when
+/// the header says `Duration: N/A` (image pipes and raw elementary streams both do).
+fn parse_ffmpeg_header_duration(stderr: &str) -> Option<f64> {
+    let idx = stderr.find("Duration:")?;
+    let rest = &stderr[idx + "Duration:".len()..];
+    let clock = rest.split(',').next()?;
+    parse_ffmpeg_clock(clock)
+}
+
+/// The last `time=HH:MM:SS.ms` progress token of a completed ffmpeg pass — the MEASURED end of the
+/// decoded stream, which is what a source with no usable container header has instead.
+fn parse_ffmpeg_measured_time(stderr: &str) -> Option<f64> {
+    stderr.rmatch_indices("time=").find_map(|(idx, _)| {
+        let rest = &stderr[idx + "time=".len()..];
+        let clock = rest.split_whitespace().next()?;
+        parse_ffmpeg_clock(clock)
+    })
+}
+
+/// Measure the seekable duration of `source_path` so [`frame_seek_timestamp`] has a real bound to
+/// clamp against (sc-19549).
+///
+/// **Failure is an `Err`, never a quiet `None`.** That is deliberate and is the lesson of
+/// [`probe_source_frame_count`] directly above, whose `Option` return made "ffmpeg 6 printed no
+/// `frame=` token" indistinguishable from "this source legitimately has no frame count", so every
+/// caller on every ffmpeg-6 host silently took the fallback and nobody could see it. Every timed
+/// source HAS a duration, so there is no legitimate absence here to be confused with: if we cannot
+/// measure one, the job fails with ffmpeg's own stderr tail in the message.
+///
+/// Two tiers, cheapest first:
+/// 1. the container header (`ffmpeg -i` alone, which exits non-zero after printing it — no decode);
+/// 2. when the header says `N/A`, a real decode pass (`-f null -`) and its final `time=` token.
+///
+/// Tier 2 decodes rather than `-c copy`-walks on purpose: `-c copy` is exactly the form that
+/// emitted no progress token on ffmpeg 6.1.1. `time=` on a decoding pass is emitted by every
+/// ffmpeg we support.
+async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult<f64> {
+    let program = resolve_probe_program(ffmpeg);
+    let path = source_path.display().to_string();
+
+    let header = Command::new(&program)
+        .args(["-hide_banner", "-i", &path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Could not run ffmpeg to measure the duration of {path}: {error}"
+            ))
+        })?;
+    let header_stderr = String::from_utf8_lossy(&header.stderr).into_owned();
+    if let Some(duration) = parse_ffmpeg_header_duration(&header_stderr) {
+        return Ok(duration);
+    }
+
+    // No usable header (`Duration: N/A`) — measure it by decoding.
+    let measured = Command::new(&program)
+        .args([
+            "-hide_banner",
+            "-i",
+            &path,
+            "-map",
+            "0:v:0",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Could not run ffmpeg to measure the duration of {path}: {error}"
+            ))
+        })?;
+    let measured_stderr = String::from_utf8_lossy(&measured.stderr).into_owned();
+    parse_ffmpeg_measured_time(&measured_stderr).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Could not determine the duration of {path}: ffmpeg reported neither a container \
+             duration nor a measured time. ffmpeg said: {}",
+            ffmpeg_stderr_tail(&measured_stderr)
+        ))
+    })
+}
+
+/// The last few ffmpeg stderr lines, for an error message that a human can act on.
+fn ffmpeg_stderr_tail(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(4)..].join(" | ")
+}
+
+/// The `-ss` seek a single-frame extraction must use so it always lands on a real frame (sc-19549).
+///
+/// `ffmpeg -ss T -i src -frames:v 1` past the end of a source encodes NOTHING and still **exits 0**,
+/// so before this existed any extraction at a playhead beyond the source silently produced no file.
+///
+/// - **Still pictures clamp to 0.** A still is one frame at t=0 and has no timeline of its own, so
+///   every playhead over it denotes that same single frame — returning it is the right answer, not
+///   a consolation prize. (This is *not* the "just retry at 0" shortcut, which is wrong for video
+///   precisely because a video's frames differ; see the next bullet.)
+/// - **Timed sources clamp to the last real frame** via [`frame_seek_timestamp`] against a measured
+///   duration, so a playhead past the end yields the END of the clip, never the beginning.
+async fn resolve_frame_seek(
+    ffmpeg: &str,
+    source_asset: &Value,
+    source_path: &Path,
+    timestamp: f64,
+) -> WorkerResult<f64> {
+    if asset_is_image_source(source_asset) {
+        return Ok(0.0);
+    }
+    let duration = probe_source_duration(ffmpeg, source_path).await?;
+    Ok(frame_seek_timestamp(timestamp, duration))
 }
 
 /// The native-MLX person segmenter used by the macOS person-track masking pass.
@@ -2275,12 +2440,8 @@ fn frame_scale_pad_filter(width: u32, height: u32) -> String {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> Option<usize> {
-    let configured = match std::env::var("SCENEWORKS_FFMPEG") {
-        Ok(path) if ffmpeg == "ffmpeg" && !path.trim().is_empty() => path,
-        _ => ffmpeg.to_owned(),
-    };
-    let program = sceneworks_core::media_convert::resolve_ffmpeg_program(&configured);
-    let output = Command::new(program.as_ref())
+    let program = resolve_probe_program(ffmpeg);
+    let output = Command::new(&program)
         .args([
             "-hide_banner",
             "-i",
@@ -2855,13 +3016,7 @@ pub(crate) async fn render_item_segment(
         ));
     }
 
-    let media_type = asset.get("type").and_then(Value::as_str);
-    let mime_type = file
-        .get("mimeType")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let is_image_source = media_type != Some("video")
-        && (media_type == Some("image") || mime_type.starts_with("image/"));
+    let is_image_source = asset_is_image_source(asset);
     if is_image_source {
         run_ffmpeg(
             vec![
@@ -4603,5 +4758,345 @@ mod export_metadata_tests {
                  deliberate, it needs a `WORKFLOW_WRITE_SEAMS` entry naming the builders behind it."
             );
         }
+    }
+}
+
+/// sc-19549: the single-frame extraction seek. `ffmpeg -ss T -i src -frames:v 1` past the end of a
+/// source encodes NOTHING and **exits 0**, so an exit-code assertion proves nothing here — every
+/// test below asserts on the FILE ffmpeg was supposed to produce, and the video case asserts on its
+/// CONTENT (a container header can lie about duration; the pixels cannot).
+///
+/// Deliberately ungated `#[cfg(test)]` — not `cfg(macos | backend-candle)` — because the code under
+/// test is compiled on every target and the lane that caught this defect (`parity-rust`) is plain
+/// Linux. These run there, under `SCENEWORKS_REQUIRE_FFMPEG`, rather than soft-skipping.
+#[cfg(test)]
+mod frame_extract_seek_tests {
+    use super::*;
+    use crate::video_jobs::tests::ffmpeg_reachable;
+
+    fn image_asset() -> Value {
+        json!({"type": "image", "file": {"path": "still.png", "mimeType": "image/png"}})
+    }
+
+    fn video_asset() -> Value {
+        json!({"type": "video", "file": {"path": "clip.mp4", "mimeType": "video/mp4"}})
+    }
+
+    fn scratch(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("temp dir")
+    }
+
+    /// Build a deterministic fixture with lavfi. Returns false when ffmpeg cannot build it.
+    async fn build_fixture(args: Vec<String>) -> bool {
+        run_ffmpeg(args, None).await.is_ok()
+    }
+
+    fn still_fixture_args(out: &Path) -> Vec<String> {
+        vec![
+            "ffmpeg".to_owned(),
+            "-y".to_owned(),
+            "-f".to_owned(),
+            "lavfi".to_owned(),
+            "-i".to_owned(),
+            "testsrc2=size=320x240:rate=1".to_owned(),
+            "-frames:v".to_owned(),
+            "1".to_owned(),
+            out.display().to_string(),
+        ]
+    }
+
+    fn video_fixture_args(out: &Path, duration: f64) -> Vec<String> {
+        vec![
+            "ffmpeg".to_owned(),
+            "-y".to_owned(),
+            "-f".to_owned(),
+            "lavfi".to_owned(),
+            "-i".to_owned(),
+            format!("testsrc2=size=320x240:rate=10:duration={duration}"),
+            "-pix_fmt".to_owned(),
+            "yuv420p".to_owned(),
+            out.display().to_string(),
+        ]
+    }
+
+    /// A still is one frame at t=0, so EVERY playhead over it denotes that frame → seek 0.
+    /// A timed source clamps to the last real frame, which is NOT 0 — the distinction the naive
+    /// "just retry at 0" fix erases.
+    #[test]
+    fn still_clamps_to_zero_while_a_timed_source_clamps_to_its_last_frame() {
+        assert_eq!(
+            frame_seek_timestamp(10.0, 2.0),
+            2.0 - FRAME_SEEK_GUARD_SECONDS
+        );
+        assert!(
+            frame_seek_timestamp(10.0, 2.0) > 0.0,
+            "a video past its end must land at the END of the clip, never at the first frame"
+        );
+        // Interior playheads are untouched.
+        assert_eq!(frame_seek_timestamp(0.5, 2.0), 0.5);
+        // A source shorter than the guard collapses to 0 rather than a negative seek.
+        assert_eq!(frame_seek_timestamp(0.5, 0.04), 0.0);
+    }
+
+    #[test]
+    fn image_source_predicate_matches_the_timeline_renderers_own_spelling() {
+        assert!(asset_is_image_source(&image_asset()));
+        assert!(!asset_is_image_source(&video_asset()));
+        // mimeType alone is enough (the `type` key is absent on older sidecars).
+        assert!(asset_is_image_source(
+            &json!({"file": {"mimeType": "image/jpeg"}})
+        ));
+        // An explicit video type wins over an image-ish mime.
+        assert!(!asset_is_image_source(
+            &json!({"type": "video", "file": {"mimeType": "image/png"}})
+        ));
+    }
+
+    #[test]
+    fn duration_parsers_read_ffmpegs_two_shapes() {
+        let header = "  Duration: 00:00:02.00, start: 0.000000, bitrate: 42 kb/s";
+        assert_eq!(parse_ffmpeg_header_duration(header), Some(2.0));
+        assert_eq!(
+            parse_ffmpeg_header_duration("  Duration: N/A, bitrate: N/A"),
+            None
+        );
+        assert_eq!(
+            parse_ffmpeg_header_duration("  Duration: 00:01:30.50,"),
+            Some(90.5)
+        );
+
+        let progress = "frame=   20 fps=0.0 q=-0.0 Lsize=N/A time=00:00:02.00 bitrate=N/A";
+        assert_eq!(parse_ffmpeg_measured_time(progress), Some(2.0));
+        // The LAST token wins (ffmpeg reprints progress as it goes).
+        let two = "time=00:00:01.00 x\ntime=00:00:02.50 y";
+        assert_eq!(parse_ffmpeg_measured_time(two), Some(2.5));
+        assert_eq!(parse_ffmpeg_measured_time("no progress here"), None);
+    }
+
+    /// THE DEFECT. A still image extracted at a playhead > 0 must produce a file.
+    ///
+    /// The first half is the CONTROL that pins the mechanism: the raw playhead ffmpeg used to be
+    /// handed produces NO file while ffmpeg exits 0. The second half is the fix.
+    #[test]
+    fn still_image_at_a_nonzero_playhead_produces_a_frame() {
+        if !ffmpeg_reachable() {
+            eprintln!("skipping: no ffmpeg on this lane");
+            return;
+        }
+        let guard = scratch("sw-still-seek-");
+        let dir = guard.path();
+        let src = dir.join("still.png");
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            assert!(
+                build_fixture(still_fixture_args(&src)).await,
+                "fixture built"
+            );
+
+            // CONTROL: the pre-fix behaviour — seek at the raw playhead. ffmpeg exits 0 and writes
+            // nothing, which is exactly why this was silent. `try_render_frame_png` reports that as
+            // `false` without erroring, so this asserts the MECHANISM, not an exit code.
+            let unclamped = dir.join("unclamped.png");
+            let produced = try_render_frame_png("ffmpeg", &src, &unclamped, 0.5, 320, 240, None)
+                .await
+                .expect("ffmpeg ran");
+            assert!(
+                !produced && !unclamped.exists(),
+                "CONTROL: seeking a still at 0.5s must produce nothing — if this fires, the \
+                 defect's mechanism changed and the test below no longer proves anything"
+            );
+
+            // THE FIX: the resolved seek lands on the still's only frame.
+            let seek = resolve_frame_seek("ffmpeg", &image_asset(), &src, 0.5)
+                .await
+                .expect("seek resolves for a still");
+            assert_eq!(seek, 0.0, "a still clamps to its single frame at t=0");
+
+            let out = dir.join("out.png");
+            render_frame_png("ffmpeg", &src, &out, seek, 320, 240, None)
+                .await
+                .expect("still extraction at a non-zero playhead must succeed");
+            let bytes = std::fs::metadata(&out).expect("frame file exists").len();
+            assert!(bytes > 0, "the extracted still frame must not be empty");
+        });
+    }
+
+    /// THE CASE THE NAIVE FIX GETS WRONG. A video asked for past its end must yield the LAST frame.
+    /// Asserted on PIXELS: byte-identical to a render at the clamped end, and DIFFERENT from t=0.
+    #[test]
+    fn video_past_its_end_yields_the_last_frame_not_the_first() {
+        if !ffmpeg_reachable() {
+            eprintln!("skipping: no ffmpeg on this lane");
+            return;
+        }
+        let guard = scratch("sw-video-seek-");
+        let dir = guard.path();
+        let src = dir.join("clip.mp4");
+        let duration = 2.0;
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            assert!(
+                build_fixture(video_fixture_args(&src, duration)).await,
+                "fixture built"
+            );
+
+            // The probe must MEASURE the clip, not guess.
+            let probed = probe_source_duration("ffmpeg", &src)
+                .await
+                .expect("duration probe succeeds on a real clip");
+            assert!(
+                (probed - duration).abs() < 0.25,
+                "probed duration {probed} must match the {duration}s fixture"
+            );
+
+            // A playhead far past the end.
+            let seek = resolve_frame_seek("ffmpeg", &video_asset(), &src, 10.0)
+                .await
+                .expect("seek resolves for a video");
+            assert_eq!(seek, frame_seek_timestamp(10.0, probed));
+            assert!(seek > 0.0, "must not collapse to the first frame");
+
+            let actual = dir.join("actual.png");
+            let first = dir.join("first.png");
+            let last = dir.join("last.png");
+            render_frame_png("ffmpeg", &src, &actual, seek, 320, 240, None)
+                .await
+                .expect("clamped extraction produces a frame");
+            render_frame_png("ffmpeg", &src, &first, 0.0, 320, 240, None)
+                .await
+                .expect("reference first frame");
+            render_frame_png(
+                "ffmpeg",
+                &src,
+                &last,
+                probed - FRAME_SEEK_GUARD_SECONDS,
+                320,
+                240,
+                None,
+            )
+            .await
+            .expect("reference last frame");
+
+            let actual_bytes = std::fs::read(&actual).expect("actual frame");
+            let first_bytes = std::fs::read(&first).expect("first frame");
+            let last_bytes = std::fs::read(&last).expect("last frame");
+
+            assert!(
+                !actual_bytes.is_empty(),
+                "extraction produced an empty file"
+            );
+            assert_ne!(
+                actual_bytes, first_bytes,
+                "a playhead past the end must NOT hand back the first frame — that is the silent \
+                 lie the `retry at 0` fix would introduce"
+            );
+            assert_eq!(
+                actual_bytes, last_bytes,
+                "a playhead past the end must hand back the clip's LAST real frame"
+            );
+        });
+    }
+
+    /// The probe's failure must be OBSERVABLE — an `Err` carrying ffmpeg's own words, never a
+    /// quiet `None` that a caller cannot tell apart from a legitimate absence (the shape that let
+    /// `probe_source_frame_count` return `None` on every ffmpeg-6 host unnoticed).
+    #[test]
+    fn duration_probe_fails_loudly_rather_than_returning_a_quiet_absence() {
+        if !ffmpeg_reachable() {
+            eprintln!("skipping: no ffmpeg on this lane");
+            return;
+        }
+        let guard = scratch("sw-probe-loud-");
+        let dir = guard.path();
+        let junk = dir.join("not-media.mp4");
+        std::fs::write(&junk, b"this is not a media file").expect("write junk");
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let error = probe_source_duration("ffmpeg", &junk)
+                .await
+                .expect_err("an unreadable source must be an error, not a silent default");
+            let message = error.to_string();
+            assert!(
+                message.contains("Could not determine the duration"),
+                "probe failure must name itself: {message}"
+            );
+            assert!(
+                message.contains("ffmpeg said:"),
+                "probe failure must carry ffmpeg's own stderr so it is diagnosable: {message}"
+            );
+
+            // And that failure PROPAGATES — it does not degrade into a seek of 0.
+            resolve_frame_seek("ffmpeg", &video_asset(), &junk, 5.0)
+                .await
+                .expect_err("an unprobeable video must fail the extraction, not guess a seek");
+        });
+    }
+
+    /// The still short-circuit's OWN value, distinct from the measured fallback that happens to
+    /// agree with it: a declared still resolves to its single frame WITHOUT probing the source at
+    /// all. Pinned against a path that cannot be probed, so only the short-circuit can answer.
+    /// (Without this the short-circuit is a mutation survivor — the fallback quietly covers for it.)
+    #[test]
+    fn a_declared_still_resolves_without_probing_the_source() {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let missing = Path::new("/nonexistent/sw-19549/not-here.png");
+            let seek = resolve_frame_seek("ffmpeg", &image_asset(), missing, 0.5)
+                .await
+                .expect("a declared still needs no probe to know its only frame is at t=0");
+            assert_eq!(seek, 0.0);
+
+            // Same unprobeable path, declared a video → this MUST fail, proving the success above
+            // came from the still short-circuit and not from a probe that quietly tolerates junk.
+            resolve_frame_seek("ffmpeg", &video_asset(), missing, 0.5)
+                .await
+                .expect_err("an unprobeable video must not resolve a seek");
+        });
+    }
+
+    /// A still whose sidecar does not declare it an image still converges on 0 — the measured
+    /// fallback reports a sub-guard duration, which `frame_seek_timestamp` clamps to 0. Belt and
+    /// braces: the fix does not depend on the asset metadata being right.
+    #[test]
+    fn a_still_with_no_image_metadata_still_converges_on_the_only_frame() {
+        if !ffmpeg_reachable() {
+            eprintln!("skipping: no ffmpeg on this lane");
+            return;
+        }
+        let guard = scratch("sw-still-nometa-");
+        let dir = guard.path();
+        let src = dir.join("still.png");
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            assert!(
+                build_fixture(still_fixture_args(&src)).await,
+                "fixture built"
+            );
+
+            // No `type`, no image mime → the image short-circuit does NOT fire.
+            let bare = json!({"file": {"path": "still.png"}});
+            assert!(!asset_is_image_source(&bare));
+
+            let seek = resolve_frame_seek("ffmpeg", &bare, &src, 0.5)
+                .await
+                .expect("the measured fallback resolves a still with no metadata");
+            assert_eq!(
+                seek, 0.0,
+                "measured sub-guard duration clamps to the only frame"
+            );
+
+            let out = dir.join("out.png");
+            render_frame_png("ffmpeg", &src, &out, seek, 320, 240, None)
+                .await
+                .expect("extraction succeeds");
+            assert!(std::fs::metadata(&out).expect("frame file").len() > 0);
+        });
     }
 }

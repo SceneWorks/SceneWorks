@@ -2287,5 +2287,8 @@ where
     ])
 }
 
+// `pub(crate)` so `media_jobs`' own ffmpeg-backed tests can reuse `tests::ffmpeg_reachable` —
+// the ONE place that turns "no ffmpeg on this lane" into an assert when the lane declared one
+// (sc-19549). A second copy of that predicate is a second way for a lane to silently skip.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

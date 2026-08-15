@@ -11279,7 +11279,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
 /// set, "no ffmpeg" is a FAILURE rather than a skip, so the install step being dropped, the binary
 /// being renamed, or the variable going missing turns the lane red instead of quiet. Hosts that
 /// never set it — a developer's laptop with no ffmpeg — skip exactly as before.
-fn ffmpeg_reachable() -> bool {
+pub(crate) fn ffmpeg_reachable() -> bool {
     let reachable = if std::env::var("SCENEWORKS_FFMPEG")
         .ok()
         .is_some_and(|path| !path.trim().is_empty() && Path::new(&path).exists())
@@ -11306,7 +11306,7 @@ fn ffmpeg_reachable() -> bool {
 
 /// Does this lane promise a real ffmpeg? Set (to anything but empty or `0`) by the CI lanes that
 /// install one, which is what turns [`ffmpeg_reachable`]'s skip into a failure.
-fn ffmpeg_is_required() -> bool {
+pub(crate) fn ffmpeg_is_required() -> bool {
     std::env::var("SCENEWORKS_REQUIRE_FFMPEG")
         .ok()
         .is_some_and(|flag| !matches!(flag.trim(), "" | "0"))
