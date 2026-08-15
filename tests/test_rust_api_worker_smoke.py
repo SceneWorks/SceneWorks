@@ -552,10 +552,12 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
 
 def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_binary(rust_api, tmp_path):
-    # ffmpeg is intentionally NOT provisioned in the `check.yml` CI (only in the
-    # desktop/release packaging workflows), so this stays a plain skip: it must not
-    # red the e2e gate. The all-skipped guard in conftest still fires if cargo (and
-    # thus every other e2e test) also went missing (sc-8935 / F-133).
+    # `check.yml`'s `checks` job DOES provision ffmpeg as of sc-19549, so this test now runs there
+    # rather than skipping — and the first time it ran it failed, on an export resolution the route
+    # has never accepted (see below). The skip is kept for hosts that genuinely have no ffmpeg (a
+    # developer laptop, the packaging-only lanes); it is no longer the normal outcome in CI. The
+    # all-skipped guard in conftest still fires if cargo (and thus every other e2e test) also went
+    # missing (sc-8935 / F-133).
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required for the FFmpeg worker smoke test")
 
@@ -638,7 +640,12 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         frame_job.raise_for_status()
         export_job = httpx.post(
             f"{rust_api}/api/v1/projects/{project_id}/timelines/{timeline_id}/exports",
-            json={"resolution": 240, "fps": 24, "requestedGpu": "auto"},
+            # 640, not 240: `validate_timeline_export` admits only 640/720/1024/1280, so 240 is a
+            # flat 400 and this request never created a job. It had been that way since the route
+            # and this test landed on the same day (7aef05c4f / 3168dd187, 2026-05-17) — invisible
+            # because the ffmpeg skip below meant this test had never once executed in CI.
+            # Matches `test_rust_api_contract_snapshots.py`, which exports at 640.
+            json={"resolution": 640, "fps": 24, "requestedGpu": "auto"},
             timeout=5,
         )
         export_job.raise_for_status()

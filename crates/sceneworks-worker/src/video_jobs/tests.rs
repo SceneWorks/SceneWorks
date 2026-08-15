@@ -10910,8 +10910,20 @@ fn probe_frame_count(path: &Path) -> Option<usize> {
         .and_then(|n| n.parse().ok())
 }
 
-/// One `-c copy -f null -` pass over `path`, returning ffmpeg's stderr. Shared by the two probes
+/// One decoding `-f null -` pass over `path`, returning ffmpeg's stderr. Shared by the two probes
 /// above so they read the same run's report rather than two.
+///
+/// The pass DECODES rather than stream-copying, and that is load-bearing rather than incidental.
+/// MEASURED on ffmpeg 6.1.1-3ubuntu5 (what `apt-get install ffmpeg` puts on `ubuntu-latest`, the
+/// runner this lane's `checks` job uses): under `-c copy` that build emits no `frame=` token at
+/// all — its stats line is `size=N/A time=00:00:01.87 bitrate=N/A speed=1.28e+03x` — so
+/// [`probe_frame_count`] parsed `None` and both measured mux tests died on their `expect`. Decoding
+/// restores the counter (`frame=   48`) there. ffmpeg 9.0.1 prints `frame=` either way, which is
+/// why this went unnoticed against the bundled 7.1 the sibling doc comments were measured on; the
+/// decoding form is the one that agrees across both.
+///
+/// Decoding also makes the count VFR-honest rather than a container claim — MEASURED on 6.1.1, the
+/// variable-rate fixture below reports `frame=   32` real frames.
 fn probe_stderr(path: &Path) -> Option<String> {
     let program = std::env::var("SCENEWORKS_FFMPEG")
         .ok()
@@ -10925,8 +10937,6 @@ fn probe_stderr(path: &Path) -> Option<String> {
             &path.display().to_string(),
             "-map",
             "0:v:0",
-            "-c",
-            "copy",
             "-f",
             "null",
             "-",
