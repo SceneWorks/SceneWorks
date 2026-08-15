@@ -26,6 +26,7 @@ import { audioAssetMetaLine, audioAssetRunGroups, formatClock } from "../audioTa
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
+import { AudioTrackBadge, assetHasAudioTrack } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
 import { Modal } from "./Modal.jsx";
 import { assetImportedWorkflow } from "../workflowShare.js";
@@ -625,6 +626,7 @@ export function AssetDetail({
       ) : (
         <button className="preview-button" onClick={() => onPreview(asset)} type="button">
           <AssetMedia asset={asset} />
+          <AudioTrackBadge asset={asset} />
         </button>
       )}
       <h3>{asset.displayName}</h3>
@@ -672,6 +674,17 @@ export function AssetDetail({
           <dt>Duration</dt>
           <dd>{asset.file?.duration ? `${asset.file.duration}s` : "Still"}</dd>
         </div>
+        {/* sc-19577. The detail panel is the one surface with room to spell out the difference
+            between "measured, and silent" and "never measured", so it renders the row only when the
+            worker recorded a verdict — and shows "No" for a genuinely silent render rather than
+            hiding it. The compact badge above answers the positive case at a glance; this row is
+            what makes a t2va job that produced no soundtrack legible instead of ambiguous. */}
+        {assetHasAudioTrack(asset) !== null ? (
+          <div>
+            <dt>Audio</dt>
+            <dd>{assetHasAudioTrack(asset) ? "Yes" : "No"}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Generation set</dt>
           <dd>{asset.generationSetId ?? "None"}</dd>
@@ -693,6 +706,7 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
       <button className="preview-button" onClick={() => onPreview(asset)} onContextMenu={suppressThumbnailContextMenu} type="button">
         <AssetMedia asset={asset} />
         <LikenessBadge asset={asset} />
+        <AudioTrackBadge asset={asset} />
       </button>
       <div className="review-actions">
         <AssetStatusActions
@@ -1252,6 +1266,7 @@ function FullscreenPreviewComponent({
             </div>
           )}
           <LikenessBadge asset={asset} />
+          <AudioTrackBadge asset={asset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"
