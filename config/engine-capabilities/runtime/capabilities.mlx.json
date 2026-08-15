@@ -1,0 +1,3142 @@
+{
+  "schemaVersion": 2,
+  "generatedFrom": {
+    "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
+    "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
+  },
+  "modelMappings": {
+    "anima_aesthetic": "anima_aesthetic",
+    "anima_base": "anima_base",
+    "anima_turbo": "anima_turbo",
+    "bernini_image": "bernini",
+    "boogu_image": "boogu_image",
+    "boogu_image_edit": "boogu_image_edit",
+    "boogu_image_turbo": "boogu_image_turbo",
+    "chroma1_base": "chroma1_base",
+    "chroma1_flash": "chroma1_flash",
+    "chroma1_hd": "chroma1_hd",
+    "flux2_dev": "flux2_dev",
+    "flux2_klein_9b": "flux2_klein_9b",
+    "flux2_klein_9b_kv": "flux2_klein_9b",
+    "flux2_klein_9b_true_v2": "flux2_klein_9b",
+    "flux_dev": "flux1_dev",
+    "flux_schnell": "flux1_schnell",
+    "ideogram_4": "ideogram_4",
+    "ideogram_4_turbo": "ideogram_4_turbo",
+    "illustrious_xl_v1": "sdxl",
+    "illustrious_xl_v2": "sdxl",
+    "kolors": "kolors",
+    "krea_2_raw": "krea_2_raw",
+    "krea_2_turbo": "krea_2_turbo",
+    "lens": "lens",
+    "lens_turbo": "lens_turbo",
+    "mage_flow": "mage_flow",
+    "mage_flow_base": "mage_flow_base",
+    "mage_flow_edit": "mage_flow_edit",
+    "mage_flow_edit_base": "mage_flow_edit_base",
+    "mage_flow_edit_turbo": "mage_flow_edit_turbo",
+    "mage_flow_turbo": "mage_flow_turbo",
+    "qwen_image": "qwen_image",
+    "qwen_image_edit": "qwen_image_edit",
+    "qwen_image_edit_2509": "qwen_image_edit",
+    "qwen_image_edit_2511": "qwen_image_edit",
+    "qwen_image_edit_2511_lightning": "qwen_image_edit",
+    "realvisxl": "sdxl",
+    "realvisxl_lightning": "sdxl",
+    "sana_1600m": "sana_1600m",
+    "sana_sprint_1600m": "sana_sprint_1600m",
+    "sd3_5_large": "sd3_5_large",
+    "sd3_5_large_turbo": "sd3_5_large_turbo",
+    "sd3_5_medium": "sd3_5_medium",
+    "sdxl": "sdxl",
+    "sensenova_u1_8b": "sensenova_u1_8b",
+    "sensenova_u1_8b_fast": "sensenova_u1_8b_fast",
+    "sensenova_u1_8b_infographic_v2": "sensenova_u1_8b",
+    "sensenova_u1_8b_infographic_v2_fast": "sensenova_u1_8b_fast",
+    "sensenova_u1_8b_infographic_v3": "sensenova_u1_8b",
+    "sensenova_u1_8b_infographic_v3_fast": "sensenova_u1_8b_fast",
+    "z_image": "z_image",
+    "z_image_edit": "z_image_turbo",
+    "z_image_turbo": "z_image_turbo"
+  },
+  "videoModelMappings": [
+    {
+      "modelId": "bernini",
+      "mode": "ads2v",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "multi_video_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "reference_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "reference_video_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "text_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "video_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "krea_realtime_14b",
+      "mode": "image_to_video",
+      "engineIds": [
+        "krea_realtime_14b"
+      ]
+    },
+    {
+      "modelId": "krea_realtime_14b",
+      "mode": "text_to_video",
+      "engineIds": [
+        "krea_realtime_14b"
+      ]
+    },
+    {
+      "modelId": "krea_realtime_14b",
+      "mode": "video_to_video",
+      "engineIds": [
+        "krea_realtime_14b"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "image_to_video",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "video_bridge",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "image_to_video",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "video_bridge",
+      "engineIds": [
+        "ltx_2_3"
+      ]
+    },
+    {
+      "modelId": "scail2_14b",
+      "mode": "animate_character",
+      "engineIds": [
+        "scail2_14b"
+      ]
+    },
+    {
+      "modelId": "scail2_14b",
+      "mode": "replace_person",
+      "engineIds": [
+        "scail2_14b"
+      ]
+    },
+    {
+      "modelId": "svd",
+      "mode": "image_to_video",
+      "engineIds": [
+        "svd_xt"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "extend_clip",
+      "engineIds": [
+        "wan2_2_ti2v_5b",
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "wan2_2_ti2v_5b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "image_to_video",
+      "engineIds": [
+        "wan2_2_ti2v_5b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "replace_person",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "text_to_video",
+      "engineIds": [
+        "wan2_2_ti2v_5b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "video_bridge",
+      "engineIds": [
+        "wan2_2_ti2v_5b",
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "mode": "image_to_video",
+      "engineIds": [
+        "wan2_2_i2v_14b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "mode": "text_to_video",
+      "engineIds": [
+        "wan2_2_t2v_14b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_vace_fun_14b",
+      "mode": "replace_person",
+      "engineIds": [
+        "wan2_2_vace_fun_14b"
+      ]
+    }
+  ],
+  "trainerMappings": {
+    "anima_base_lora": "anima_base",
+    "illustrious_xl_v1_lora": "sdxl",
+    "illustrious_xl_v2_lora": "sdxl",
+    "kolors_lora": "kolors",
+    "krea_2_control": "krea_2_control",
+    "krea_2_raw_lora": "krea_2_raw",
+    "lens_turbo_lora": "lens",
+    "ltx_video_lora": "ltx_2_3",
+    "mage_flow_base_lora": "mage_flow_base",
+    "sd3_5_large_lora": "sd3_5_large",
+    "sd3_5_medium_lora": "sd3_5_medium",
+    "sdxl_lora": "sdxl",
+    "wan_i2v_14b_lora": "wan2_2_i2v_14b",
+    "wan_lora": "wan2_2_ti2v_5b",
+    "wan_t2v_14b_lora": "wan2_2_t2v_14b",
+    "z_image_turbo_lora": "z_image_turbo"
+  },
+  "workerCapabilities": [
+    "audio_generate",
+    "catalog_analysis",
+    "dataset_analysis",
+    "dataset_face_analysis",
+    "dataset_upscale",
+    "face_likeness_compare",
+    "gpu",
+    "image_detail",
+    "image_edit",
+    "image_generate",
+    "image_interleave",
+    "image_segment",
+    "image_upscale",
+    "image_vqa",
+    "kps_extract",
+    "lora_train",
+    "lora_train_execute",
+    "person_detect",
+    "person_replace",
+    "person_track",
+    "pose_detect",
+    "prompt_refine",
+    "training_caption",
+    "video_bridge",
+    "video_extend",
+    "video_generate",
+    "video_upscale"
+  ],
+  "snapshot": {
+    "platform": "macos",
+    "backend": "mlx",
+    "generator_ids": [
+      "anima_base",
+      "anima_aesthetic",
+      "anima_turbo",
+      "bernini_renderer",
+      "bernini",
+      "boogu_image",
+      "boogu_image_turbo",
+      "boogu_image_edit",
+      "chroma1_hd",
+      "chroma1_base",
+      "chroma1_flash",
+      "flux1_schnell",
+      "flux1_dev",
+      "flux1_dev_control",
+      "flux2_klein_9b",
+      "flux2_klein_9b_edit",
+      "flux2_klein_9b_kv_edit",
+      "flux2_dev",
+      "flux2_dev_edit",
+      "flux2_dev_control",
+      "ideogram_4",
+      "ideogram_4_turbo",
+      "kolors",
+      "krea_2_turbo",
+      "krea_2_raw",
+      "krea_2_edit",
+      "krea_2_turbo_edit",
+      "krea_2_turbo_control",
+      "krea_realtime_14b",
+      "lens_turbo",
+      "lens",
+      "ltx_2_3",
+      "mage_flow",
+      "mage_flow_base",
+      "mage_flow_turbo",
+      "mage_flow_edit",
+      "mage_flow_edit_base",
+      "mage_flow_edit_turbo",
+      "mochi_1",
+      "pulid_flux",
+      "qwen_image",
+      "qwen_image_control",
+      "qwen_image_edit",
+      "sana_1600m",
+      "sana_sprint_1600m",
+      "scail2_14b",
+      "sd3_5_large",
+      "sd3_5_large_turbo",
+      "sd3_5_medium",
+      "sdxl",
+      "seedvr2",
+      "seedvr2_3b",
+      "seedvr2_7b",
+      "sensenova_u1_8b",
+      "sensenova_u1_8b_fast",
+      "svd_xt",
+      "wan2_2_ti2v_5b",
+      "wan2_2_t2v_14b",
+      "wan2_2_i2v_14b",
+      "wan_vace",
+      "wan2_2_vace_fun_14b",
+      "z_image_turbo",
+      "z_image",
+      "z_image_control",
+      "z_image_turbo_control"
+    ],
+    "generator_capabilities": [
+      {
+        "id": "anima_base",
+        "family": "anima",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "anima_aesthetic",
+        "family": "anima",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "anima_turbo",
+        "family": "anima",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "bernini_renderer",
+        "family": "bernini",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference",
+          "multiReference",
+          "videoClip"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "unipc"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "bernini",
+        "family": "bernini",
+        "backend": "mlx",
+        "modality": "both",
+        "conditioning": [
+          "reference",
+          "multiReference",
+          "videoClip"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "unipc"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "boogu_image",
+        "family": "boogu",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "boogu_image_turbo",
+        "family": "boogu",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "lcm",
+          "euler_ancestral",
+          "dpmpp_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "boogu_image_edit",
+        "family": "boogu",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "chroma1_hd",
+        "family": "chroma",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "chroma1_base",
+        "family": "chroma",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "chroma1_flash",
+        "family": "chroma",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux1_schnell",
+        "family": "flux",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux1_dev",
+        "family": "flux",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match",
+          "hyper"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux1_dev_control",
+        "family": "flux",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "control"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match",
+          "hyper"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux2_klein_9b",
+        "family": "flux2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux2_klein_9b_edit",
+        "family": "flux2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux2_klein_9b_kv_edit",
+        "family": "flux2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux2_dev",
+        "family": "flux2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": true,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux2_dev_edit",
+        "family": "flux2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": true,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux2_dev_control",
+        "family": "flux2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "control",
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "ideogram_4",
+        "family": "ideogram",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "mask"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "ideogram_4_turbo",
+        "family": "ideogram",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "mask"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "kolors",
+        "family": "kolors",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "control"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler_discrete",
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim"
+        ],
+        "schedulers": [
+          "discrete",
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "krea_2_turbo",
+        "family": "krea_2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "krea_2_raw",
+        "family": "krea_2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "krea_2_edit",
+        "family": "krea_2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "krea_2_turbo_edit",
+        "family": "krea_2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "krea_2_turbo_control",
+        "family": "krea_2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "control"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "krea_realtime_14b",
+        "family": "krea_realtime",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference",
+          "videoClip"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "self_forcing"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "lens_turbo",
+        "family": "lens",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match_euler"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "lens",
+        "family": "lens",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match_euler"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "flow_match"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "ltx_2_3",
+        "family": "ltx",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference",
+          "keyframe",
+          "videoClip",
+          "controlClip"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mage_flow",
+        "family": "mage_flow",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mage_flow_base",
+        "family": "mage_flow",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mage_flow_turbo",
+        "family": "mage_flow",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mage_flow_edit",
+        "family": "mage_flow",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mage_flow_edit_base",
+        "family": "mage_flow",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mage_flow_edit_turbo",
+        "family": "mage_flow",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mochi_1",
+        "family": "mochi",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "pulid_flux",
+        "family": "pulid",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "qwen_image",
+        "family": "qwen-image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "lightning"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "qwen_image_control",
+        "family": "qwen-image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "control"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "lightning"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "qwen_image_edit",
+        "family": "qwen-image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "lightning"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sana_1600m",
+        "family": "sana",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "default"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "default"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sana_sprint_1600m",
+        "family": "sana",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "default"
+        ],
+        "schedulers": [
+          "default"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "scail2_14b",
+        "family": "scail2",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference",
+          "mask",
+          "multiReference",
+          "controlClip"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "unipc",
+          "dpm++"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sd3_5_large",
+        "family": "sd3",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sd3_5_large_turbo",
+        "family": "sd3",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sd3_5_medium",
+        "family": "sd3",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sdxl",
+        "family": "sdxl",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "mask",
+          "control"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler_ancestral",
+          "lcm",
+          "lightning",
+          "hyper",
+          "euler",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "ddim"
+        ],
+        "schedulers": [
+          "discrete",
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": [
+          "cfg",
+          "cfg_pp"
+        ]
+      },
+      {
+        "id": "seedvr2",
+        "family": "seedvr2",
+        "backend": "mlx",
+        "modality": "both",
+        "conditioning": [
+          "reference",
+          "videoClip"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "seedvr2_euler"
+        ],
+        "schedulers": [
+          "seedvr2_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "seedvr2_3b",
+        "family": "seedvr2",
+        "backend": "mlx",
+        "modality": "both",
+        "conditioning": [
+          "reference",
+          "videoClip"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "seedvr2_euler"
+        ],
+        "schedulers": [
+          "seedvr2_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "seedvr2_7b",
+        "family": "seedvr2",
+        "backend": "mlx",
+        "modality": "both",
+        "conditioning": [
+          "reference",
+          "videoClip"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "seedvr2_euler"
+        ],
+        "schedulers": [
+          "seedvr2_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sensenova_u1_8b",
+        "family": "sensenova-u1",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "sensenova_u1_8b_fast",
+        "family": "sensenova-u1",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "svd_xt",
+        "family": "svd",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "wan2_2_ti2v_5b",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference",
+          "keyframe"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "uni_pc",
+          "euler",
+          "dpmpp_2m",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_sde",
+          "ddim",
+          "unipc",
+          "dpmpp2m"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "wan2_2_t2v_14b",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "uni_pc",
+          "euler",
+          "dpmpp_2m",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_sde",
+          "ddim",
+          "unipc",
+          "dpmpp2m"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "wan2_2_i2v_14b",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "uni_pc",
+          "euler",
+          "dpmpp_2m",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_sde",
+          "ddim",
+          "unipc",
+          "dpmpp2m"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "wan_vace",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "controlClip",
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "uni_pc",
+          "euler",
+          "dpmpp_2m",
+          "unipc",
+          "dpmpp2m"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "wan2_2_vace_fun_14b",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "controlClip",
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "uni_pc",
+          "euler",
+          "dpmpp_2m",
+          "unipc",
+          "dpmpp2m"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "z_image_turbo",
+        "family": "z-image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "z_image",
+        "family": "z-image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "z_image_control",
+        "family": "z-image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "control",
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "z_image_turbo_control",
+        "family": "z-image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "control",
+          "reference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      }
+    ],
+    "transform_ids": [],
+    "trainer_ids": [
+      "anima_base",
+      "anima_aesthetic",
+      "anima_turbo",
+      "kolors",
+      "krea_2_raw",
+      "lens",
+      "ltx_2_3",
+      "mage_flow_base",
+      "sd3_5_large",
+      "sd3_5_medium",
+      "sdxl",
+      "wan2_2_t2v_14b",
+      "wan2_2_i2v_14b",
+      "wan2_2_ti2v_5b",
+      "z_image_turbo"
+    ],
+    "trainer_capabilities": [
+      {
+        "id": "anima_base",
+        "family": "anima",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "anima_aesthetic",
+        "family": "anima",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "anima_turbo",
+        "family": "anima",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "kolors",
+        "family": "kolors",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "krea_2_raw",
+        "family": "krea_2",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "lens",
+        "family": "lens",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "ltx_2_3",
+        "family": "ltx",
+        "backend": "mlx",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "mage_flow_base",
+        "family": "mage_flow",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": true
+      },
+      {
+        "id": "sd3_5_large",
+        "family": "sd3",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "sd3_5_medium",
+        "family": "sd3",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "sdxl",
+        "family": "sdxl",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "wan2_2_t2v_14b",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "wan2_2_i2v_14b",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "wan2_2_ti2v_5b",
+        "family": "wan",
+        "backend": "mlx",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "z_image_turbo",
+        "family": "z_image",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false
+      }
+    ],
+    "captioner_ids": [
+      "fancyfeast/llama-joycaption-beta-one-hf-llava"
+    ],
+    "image_embedder_ids": [
+      "clip_vit_l14"
+    ],
+    "text_embedder_ids": [
+      "clip_vit_l14_text"
+    ],
+    "text_llm_ids": [
+      "mlx-llama",
+      "mlx-joycaption"
+    ],
+    "snapshot_preparer_backends": [
+      "mlx"
+    ],
+    "audio_backend": "candle",
+    "audio_generator_ids": [
+      "kokoro_82m",
+      "moss_sfx_v2",
+      "acestep_v15_turbo",
+      "stable_audio_3_small_music",
+      "stable_audio_3_small_sfx",
+      "stable_audio_3_medium",
+      "stable_audio_3_small_music_base",
+      "stable_audio_3_small_sfx_base",
+      "stable_audio_3_medium_base",
+      "moss_tts_realtime",
+      "chatterbox_tts",
+      "mmaudio_small_16k",
+      "mmaudio_large_44k",
+      "moss_ttsd_v05"
+    ],
+    "audio_generator_capabilities": [
+      {
+        "id": "kokoro_82m",
+        "family": "kokoro",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "moss_sfx_v2",
+        "family": "moss_soundeffect",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "acestep_v15_turbo",
+        "family": "acestep",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "audioEdit"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "stable_audio_3_small_music",
+        "family": "stable_audio_3",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio",
+          "audioEdit",
+          "audioEditRegions"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "pingpong",
+          "euler",
+          "rk4",
+          "dpmpp"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": [
+          "cfg",
+          "apg",
+          "cfg_rescale"
+        ]
+      },
+      {
+        "id": "stable_audio_3_small_sfx",
+        "family": "stable_audio_3",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio",
+          "audioEdit",
+          "audioEditRegions"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "pingpong",
+          "euler",
+          "rk4",
+          "dpmpp"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": [
+          "cfg",
+          "apg",
+          "cfg_rescale"
+        ]
+      },
+      {
+        "id": "stable_audio_3_medium",
+        "family": "stable_audio_3",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio",
+          "audioEdit",
+          "audioEditRegions"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "pingpong",
+          "euler",
+          "rk4",
+          "dpmpp"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": [
+          "cfg",
+          "apg",
+          "cfg_rescale"
+        ]
+      },
+      {
+        "id": "stable_audio_3_small_music_base",
+        "family": "stable_audio_3",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio",
+          "audioEdit",
+          "audioEditRegions"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "pingpong",
+          "euler",
+          "rk4",
+          "dpmpp"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": [
+          "cfg",
+          "apg",
+          "cfg_rescale"
+        ]
+      },
+      {
+        "id": "stable_audio_3_small_sfx_base",
+        "family": "stable_audio_3",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio",
+          "audioEdit",
+          "audioEditRegions"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "pingpong",
+          "euler",
+          "rk4",
+          "dpmpp"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": [
+          "cfg",
+          "apg",
+          "cfg_rescale"
+        ]
+      },
+      {
+        "id": "stable_audio_3_medium_base",
+        "family": "stable_audio_3",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio",
+          "audioEdit",
+          "audioEditRegions"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "pingpong",
+          "euler",
+          "rk4",
+          "dpmpp"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": [
+          "cfg",
+          "apg",
+          "cfg_rescale"
+        ]
+      },
+      {
+        "id": "moss_tts_realtime",
+        "family": "moss_tts_realtime",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio",
+          "conversationHistory"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "chatterbox_tts",
+        "family": "chatterbox",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "voiceEmbedding",
+          "referenceAudio"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mmaudio_small_16k",
+        "family": "mmaudio",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "videoSync"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "mmaudio_large_44k",
+        "family": "mmaudio",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "videoSync"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "moss_ttsd_v05",
+        "family": "moss_ttsd",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      }
+    ],
+    "audio_voice_embedder_ids": [
+      "chatterbox_ve"
+    ],
+    "audio_transform_ids": [
+      "openvoice_v2"
+    ],
+    "audio_transcriber_ids": [
+      "whisper_base"
+    ],
+    "audio_embedder_ids": [
+      "clap_htsat_unfused"
+    ],
+    "audio_snapshot_preparer_backends": [
+      "candle"
+    ]
+  }
+}

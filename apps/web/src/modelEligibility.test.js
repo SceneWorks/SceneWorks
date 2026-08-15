@@ -28,6 +28,7 @@ describe("modelEligibility predicates", () => {
     expect(imageModelUsable({ type: "image", capabilities: ["edit_image"] }, caps)).toBe(true);
     expect(imageModelUsable({ type: "image", capabilities: [] }, caps)).toBe(false);
     expect(imageModelUsable({ type: "video", capabilities: ["text_to_image"] }, caps)).toBe(false);
+    expect(imageModelUsable({ type: "image", capabilities: ["style_variations"] }, caps)).toBe(false);
   });
 
   // sc-13634 (#1780) made ImageStudio's picker treat an ABSENT capability array as a legacy
@@ -161,7 +162,7 @@ describe("modelEligibility predicates", () => {
       const supported = {
         id,
         type: "image",
-        capabilities: ["text_to_image", "style_variations"],
+        capabilities: ["text_to_image"],
         macSupport: { supported: true, features: {} },
       };
       // Mac-supported native MLX variant → usable on Image Studio under active gating.

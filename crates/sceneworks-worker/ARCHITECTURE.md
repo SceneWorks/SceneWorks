@@ -89,8 +89,8 @@ conditional/partial.
 | `pose_detect` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_pose_detect_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `kps_extract` | ✅ MLX SCRFD on Mac / candle SCRFD off-Mac | `run_utility_job` → `run_kps_extract_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `image_upscale` | ⚠️ MLX / candle Real-ESRGAN or SeedVR2; AuraSR dropped | `run_utility_job` → `run_image_upscale_job`; `upscale_job_is_mlx_eligible`; `upscale_job_is_candle_eligible` |
-| `image_detail` | ⚠️ MLX, SDXL/RealVisXL detail models only | `run_utility_job` → `run_image_detail_job`; `job_is_mlx_eligible`; `mlx_gpu` |
-| `image_segment` | ⚠️ Mac-only MLX SAM3 | `run_utility_job` → `run_image_segment_job`; `mlx_gpu`; `mac_rust_supported` |
+| `image_detail` | ✅ MLX + Candle, SDXL/RealVisXL detail models only | `run_utility_job` → `run_image_detail_job`; native route predicates; GPU capabilities |
+| `image_segment` | ✅ MLX + Candle SAM3 box segmentation | `run_utility_job` → `run_image_segment_job`; native route predicates; GPU capabilities |
 | `video_upscale` | ⚠️ MLX on Mac / candle off-Mac, SeedVR2 only | `run_utility_job` → `run_video_upscale_job`; `video_upscale_job_is_mlx_eligible`; `video_upscale_job_is_candle_eligible` |
 | `frame_extract` | ✅ CPU utility (FFmpeg) | `run_utility_job` → `run_frame_extract_job`; `cpu_gpu` |
 | `timeline_export` | ✅ CPU utility (FFmpeg MP4) | `run_utility_job` → `run_timeline_export_job`; `cpu_gpu` |
@@ -103,7 +103,7 @@ conditional/partial.
 | `control_training` | ⚠️ candle ControlNet trainer only | `run_utility_job` → `run_control_training_job`; `required_capability`; `is_real_training_job`; `training_job_is_candle_eligible` |
 | `training_caption` | ⚠️ MLX / candle JoyCaption only | `run_utility_job` → `run_training_caption_job`; `caption_job_is_mlx_eligible` |
 | `dataset_parquet_import` | ✅ CPU utility (Parquet scan + public image fetch) | `run_utility_job` → `run_dataset_parquet_import_job`; `NON_GPU_JOB_TYPES`; `mac_rust_supported`; `candle_supported` |
-| `dataset_analysis` | ⚠️ MLX CLIP lane when linked; no candle CLIP lane yet | `run_utility_job` → `run_dataset_analysis_job`; `mlx_gpu`; `mac_rust_supported` |
+| `dataset_analysis` | ✅ MLX + Candle CLIP lanes | `run_utility_job` → `run_dataset_analysis_job`; native route predicates; GPU capabilities |
 | `catalog_analysis` | ⚠️ MLX / candle when constrained vision and CLIP image lanes are linked | `run_utility_job` → `run_catalog_analysis_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
 | `dataset_upscale` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_dataset_upscale_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `dataset_face_analysis` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_dataset_face_analysis_job`; `mlx_gpu`; `with_candle_capabilities` |
@@ -122,7 +122,7 @@ conditional/partial.
 - **Utility family (CPU, any platform):** `placeholder`, `model_download`,
   `model_import`, `model_convert`, `lora_import`, `lora_download`,
   `frame_extract`, `timeline_export` — served by the Rust CPU utility worker.
-- **Platform-specific:** `image_segment` is Mac-only MLX. `video_upscale` is
+- **Platform-specific:** `image_segment` uses MLX SAM3 on Mac and Candle SAM3 off-Mac. `video_upscale` is
   SeedVR2 on both native GPU lanes: MLX on Mac and candle/CUDA off-Mac.
 - **Generation kinds:** each ⚠️ row serves the MLX/candle-eligible subset of its
   model/payload shapes; a shape outside the native lane is refused (no torch

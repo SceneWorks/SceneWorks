@@ -1,17 +1,21 @@
-#[cfg(target_os = "macos")]
-use super::ltx::resolve_clip_media_path;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use super::ltx::resolve_keyframe_conditioning;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::{
     bernini::{bernini_engine_id, resolve_bernini_model_dir},
     krea_realtime::{krea_realtime_engine_id, resolve_krea_realtime_tier_dir_and_quant},
-    ltx::{ltx_engine_id, resolve_keyframe_conditioning, resolve_ltx_model_dir},
+    ltx::{ltx_engine_id, resolve_ltx_model_dir},
     mochi::{mochi_engine_id, resolve_mochi_model_dir},
     scail2::{resolve_scail2_model_dir, scail2_engine_id},
     svd::{resolve_svd_model_dir, svd_engine_id},
-    vace::FRAME_PAD_COLOR,
 };
+#[cfg(target_os = "macos")]
+use super::{ltx::resolve_clip_media_path, vace::FRAME_PAD_COLOR};
 
 // ---------------------------------------------------------------------------
 // Real MLX Wan2.2 generation (macOS, via mlx-gen-wan, sc-3034): T2V/TI2V (5B
@@ -621,7 +625,8 @@ pub(super) fn resolve_wan_adapters(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
         )));
     }
-    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    let is_wan_a14b = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    let is_moe = is_wan_a14b || matches!(engine_id, "bernini" | "wan2_2_vace_fun_14b");
     let mut specs: Vec<AdapterSpec> = Vec::new();
 
     // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied per-expert at
@@ -630,7 +635,7 @@ pub(super) fn resolve_wan_adapters(
     // it on the quantized tiers, so the pair is added only when the toggle is on. When off, the
     // native multi-step CFG recipe runs ([`wan_sampling`]) with no Lightning adapter. User LoRAs
     // below are honored in both states. The subdir is resolved per architecture (not cross-compatible).
-    if is_moe && wan_lightning_on(engine_id, request) {
+    if is_wan_a14b && wan_lightning_on(engine_id, request) {
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
         specs.push(moe_adapter(
             high,
@@ -737,7 +742,10 @@ pub(super) fn resolve_scail2_adapters(
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
 /// the TI2V-5B (present → image-conditioned mask-blend, absent → pure T2V), and ignored
 /// by the T2V-14B (text-only). Loads `source_asset_id` to an in-memory RGB8 image.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_wan_conditioning(
     settings: &Settings,
     request: &VideoRequest,
@@ -755,7 +763,27 @@ pub(super) fn resolve_wan_conditioning(
         }
         return resolve_keyframe_conditioning(settings, request, project_path);
     }
-    let required = engine_id == "wan2_2_i2v_14b";
+    if engine_id == "wan2_2_ti2v_5b" {
+        match request.mode.as_str() {
+            "text_to_video"
+                if request.source_asset_id.is_some() || request.last_frame_asset_id.is_some() =>
+            {
+                return Err(WorkerError::InvalidPayload(
+                    "wan_2_2 text-to-video must not carry sourceAssetId or lastFrameAssetId; select image_to_video or first_last_frame explicitly."
+                        .to_owned(),
+                ));
+            }
+            "image_to_video" if request.last_frame_asset_id.is_some() => {
+                return Err(WorkerError::InvalidPayload(
+                    "wan_2_2 image-to-video must not carry lastFrameAssetId; select first_last_frame explicitly."
+                        .to_owned(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let required = engine_id == "wan2_2_i2v_14b"
+        || (engine_id == "wan2_2_ti2v_5b" && request.mode == "image_to_video");
     let accepts = required || engine_id == "wan2_2_ti2v_5b";
     if !accepts {
         return Ok(Vec::new());
@@ -782,9 +810,10 @@ pub(super) fn resolve_wan_conditioning(
                 strength: None,
             }])
         }
-        None if required => Err(WorkerError::InvalidPayload(
-            "wan_2_2_i2v_14b: image-to-video requires a source image (sourceAssetId).".to_owned(),
-        )),
+        None if required => Err(WorkerError::InvalidPayload(format!(
+            "{}: image-to-video requires a source image (sourceAssetId).",
+            request.model
+        ))),
         None => Ok(Vec::new()),
     }
 }
@@ -1298,6 +1327,13 @@ pub(super) struct VideoGenInput {
     /// separate from `memory`: a Resident selection still carries context while preserving the
     /// provider's request defaults with `memory == None`.
     pub(super) memory_context: Option<gen_core::MemoryRunContext>,
+    /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
+    /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
+    /// it `None`. It is deliberately outside
+    /// `LoadSpec`/the cache key: request-time free VRAM must be re-evaluated for a miss, while an exact
+    /// resident key (including precision/adapters/layout) bypasses the cold-load gate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    pub(super) cold_load_admission: Option<crate::generator_cache::GeneratorColdLoadAdmission>,
 }
 
 #[cfg(any(
@@ -1341,6 +1377,8 @@ impl Default for VideoGenInput {
             uncensored_enhancer_dir: None,
             comfyui: None,
             offload_policy: OffloadPolicy::Resident,
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            cold_load_admission: None,
         }
     }
 }
@@ -1891,6 +1929,8 @@ pub(super) async fn generate_video_using(
         let cancel = cancel.clone();
         let spec = video_load_spec(&input);
         let engine_id = input.engine_id;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let cold_load_admission = input.cold_load_admission.take();
         // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
         // (`load_from_comfyui_experts` — two experts read in place + remapped + dequant'd), which frees
         // any resident cached generator first; every other job takes the registry cached path. On the
@@ -1919,6 +1959,8 @@ pub(super) async fn generate_video_using(
             input.decode_chunk_size,
         );
         tokio::spawn(async move {
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let cold_load_cancel = cancel.clone();
             let run = move |generator: &dyn Generator,
                             cache_state: gen_core::MemoryCacheState,
                             load_policy: gen_core::OffloadPolicy,
@@ -2006,6 +2048,7 @@ pub(super) async fn generate_video_using(
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let result = match comfyui_load {
                 Some((high, low, te, vae, snapshot, i2v)) => {
+                    debug_assert!(cold_load_admission.is_none());
                     crate::generator_cache::with_uncached_generator(
                         move || {
                             runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts_with_offload(
@@ -2025,16 +2068,30 @@ pub(super) async fn generate_video_using(
                     )
                     .await
                 }
-                None => {
-                    crate::generator_cache::with_cached_generator_for_request_using(
-                        engine_id,
-                        spec,
-                        "video load failed",
-                        load_generator,
-                        run,
-                    )
-                    .await
-                }
+                None => match cold_load_admission {
+                    Some(admission) => {
+                        crate::generator_cache::with_cached_generator_for_request_using_cold_admission(
+                            engine_id,
+                            spec,
+                            "video load failed",
+                            cold_load_cancel,
+                            admission,
+                            load_generator,
+                            run,
+                        )
+                        .await
+                    }
+                    None => {
+                        crate::generator_cache::with_cached_generator_for_request_using(
+                            engine_id,
+                            spec,
+                            "video load failed",
+                            load_generator,
+                            run,
+                        )
+                        .await
+                    }
+                },
             };
             #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
             let result = {

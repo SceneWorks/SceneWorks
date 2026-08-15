@@ -11,11 +11,12 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const STORY = "sc-18946";
 export const FINGERPRINT = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
+export const INFERENCE_REVISION = "0e4adc6f05884e6891e29dfecd32ee695efe8b18";
 export const SEED = 18946;
-// Capture q8 first to establish the permanent-pin reference before asking whether its held-out
-// coefficients transfer to q4/bf16. The harness sorts logical identities internally, so the
-// runbook still selects one provider by name at a time instead of relying on implicit file order.
-export const TIERS = Object.freeze(["q8", "q4", "bf16"]);
+// Frozen serialized order: establish the smallest tier first at each rung-2 boundary, then advance
+// q4 -> q8 -> bf16 before moving from f305 to f449. The runbook still selects one provider by name
+// at a time, but the checked-in plan must preserve that reviewed operator order too.
+export const TIERS = Object.freeze(["q4", "q8", "bf16"]);
 export const RUNG2_PARAMETERS = Object.freeze({ decodeTileEdge: 384, decodeOverlap: 64 });
 const PROVIDER = "ltx_2_3";
 
@@ -100,16 +101,18 @@ function providerRow(tier, [width, height, frames, fps, role, campaignPhase], ru
   return row;
 }
 
-function plan(comment, rows, rung) {
+function plan(comment, rows, rung, { rowMajor = false } = {}) {
   return {
     _comment: comment,
     story: STORY,
     campaignIdentity: {
-      inferenceRevision: "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
+      inferenceRevision: INFERENCE_REVISION,
       calibrationFingerprint: FINGERPRINT,
       seed: SEED,
     },
-    providers: TIERS.flatMap((tier) => rows.map((row) => providerRow(tier, row, rung))),
+    providers: rowMajor
+      ? rows.flatMap((row) => TIERS.map((tier) => providerRow(tier, row, rung)))
+      : TIERS.flatMap((tier) => rows.map((row) => providerRow(tier, row, rung))),
   };
 }
 
@@ -124,6 +127,7 @@ export function buildPlans() {
       "SC-18946 rung-2-first matrix. Every q4/q8/bf16 row explicitly selects decodeTileEdge=384 and decodeOverlap=64 at 1280x704 f305/f449. These records are ingested as canonical evidence but never pooled into the single-pass temporal fit.",
       rung2Rows,
       "bounded_decode",
+      { rowMajor: true },
     ),
     "ltx-mlx-host-risk-probes.json": {
       ...plan(

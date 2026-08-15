@@ -244,10 +244,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["record"]["status"] == "runtime_complete"
     ]
-    # sc-16915 measured seventeen Full-complete runs at the then-live closure. SC-18237 and
-    # SC-18353 later added the production-deferred Qwen q8 and physical bf16/q4 rows, but the
-    # epic's frozen b4 provider-contract closure moves every retained capture to historical until
-    # SC-18946 performs the final-pin recapture. No old record may stay current by pin equality.
+    # sc-16915 measured seventeen Full-complete runs at the then-live closure; those records are now
+    # historical. SC-18237 and SC-18353 added physical Qwen captures at later live closures, but the
+    # rich descriptor change in sc-18473 moved the shared provider closure again. No physical record
+    # is re-dated by that source change.
     #
     # Pinned as an exact set AND an exact count, the same way it was when runs were current: a bare
     # `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
@@ -384,9 +384,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert len(runtime_complete_runs) == len(flux2_runtime) + len(
         historical_flux1_runtime
     )
-    # The frozen b4 provider-contract closure moves the MLX FLUX.2 records as well as the older
-    # FLUX.1 records to historical. The Candle FLUX.2 window independently becomes current only at
-    # its audited pin; b4 is outside that window.
+    # The MLX FLUX.2 and older FLUX.1 records are historical after the shared provider closure moved.
+    # The Candle FLUX.2 window independently becomes current only at its audited pin.
     assert {run["semantics"] for run in runtime_complete_runs} == {"historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
@@ -394,10 +393,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    # Three independent sources can make a record current, kept separate so one lane cannot mask
-    # another. At frozen b4 each derived set is empty:
+    # Three independent sources of "current", kept separate so one lane cannot mask another. All
+    # are empty at this pin because no capture was made after the rich descriptor closure change:
     #
-    #   - records whose capture revision is still the live pin;
+    #   - SC-18353 records measured at the live pin;
     #   - records whose captured provider closure still matches the live provider closure
     #     (SC-18237's two Qwen q8 rows);
     #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
@@ -409,12 +408,22 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of the
     # provider's compile closure. The two coincided while nothing had moved; they no longer do.
     #
-    # SC-18353 ran thirteen exact physical Qwen bf16/q4 records at 014134e3. Pin those immutable ids
-    # to their historical capture revision without excluding future records captured at whatever
-    # revision becomes live. SC-18237's q8 pair remains current by provider closure even though it
-    # was measured at an earlier pin.
+    # No calibration was captured at the capability-snapshot-only pin introduced by sc-18473.
+    # Pin bumps must not re-date physical evidence; provider closure, checked below, determines
+    # whether the older captures remain current.
+    assert measured_at_live_pin == set()
+
+    # SC-18353 ran thirteen exact physical Qwen bf16/q4 records at 014134e3. Pin the immutable ids and
+    # their capture revision so unrelated evidence cannot silently enter this closed capture set;
+    # SC-18237's q8 pair remains current by provider closure despite an older capture revision.
     sc_18353_capture_revision = "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
     sc_18353_capture_ids = {
+        record["id"]
+        for record in calibration["records"]
+        if record["repositories"]["inference"]["revision"]
+        == sc_18353_capture_revision
+    }
+    assert sc_18353_capture_ids == {
         "imc-08e925c50d9c290ed53d",
         "imc-0e00924d96eeaf12be17",
         "imc-277c04656961710d29e0",
@@ -429,12 +438,6 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "imc-b072c9b116a6a40d00e1",
         "imc-ea87169a3ea1fd340791",
     }
-    assert {
-        record["id"]
-        for record in calibration["records"]
-        if record["repositories"]["inference"]["revision"]
-        == sc_18353_capture_revision
-    } == sc_18353_capture_ids
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
     # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
     # with nothing measured at the live pin there is nothing to classify, and the moment a record
@@ -451,13 +454,16 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     unbound_decode_edges = {
         record["id"]
         for record in calibration["records"]
-        if record["id"] in sc_18353_capture_ids
+        if live_closures.get(
+            f"{record['backend']}:{record['target']['provider']}", {}
+        ).get("digest")
+        == record["repositories"]["inference"]["closureDigest"]
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
-    # Six additional physical bf16 tile edges characterize the sweep but do not bind the single
-    # production 512/64 coordinate.
-    assert len(unbound_decode_edges) == 6
+    # The physical bf16 tile edges still characterize the historical sweep, but none matches the
+    # current provider closure and therefore none is a current-but-unbound coordinate.
+    assert unbound_decode_edges == set()
     # Currency is the provider's COMPILE CLOSURE, not the pin (sc-17774). While nothing had moved the
     # two coincided and this assertion could be written off `measured_at_live_pin`; a pin bump that
     # leaves a provider's closure untouched separates them, which is exactly what the 014134e3 bump
@@ -474,6 +480,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         ).get("digest")
         == record["repositories"]["inference"]["closureDigest"]
     }
+    assert current_by_closure == set()
     assert {run["record"]["id"] for run in current_eligible} == (
         current_by_closure - unbound_decode_edges
     ) | (
@@ -520,14 +527,13 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and run["record"]["target"]["tier"] == "bf16"
         and run["record"]["strategy"]["rung"] in {"resident", "staged_residency"}
     ]
-    # Eight, not four: four shared-fingerprint bf16 rows that were current at earlier closures join
-    # the four retired eager-fingerprint rows at frozen b4. The population grows because currency
-    # moved, not because anything about these records changed.
+    # Eight, not six: SC-18353's resident/staged pair joined the six already-historical rows when the
+    # shared provider closure moved. The population grew because currency moved, not because any
+    # captured record was re-dated.
     assert len(historical_qwen) == 8
-    # The eight are two distinct populations, and flattening them would lose the distinction that
-    # matters. Four carry the retired `-eager` fingerprint and still cannot bind. Four carry the shared
-    # fingerprint and bind the bf16 cells prior campaigns restored, but remain historical and therefore
-    # cannot authorize current verification.
+    # The eight are two distinct populations. Four carry the retired `-eager` fingerprint and still
+    # cannot bind. Four carry the shared fingerprint and bind the bf16 cells, but remain historical
+    # and therefore cannot authorize current verification.
     rejected = [
         run for run in historical_qwen if run["binding"]["reasons"] == ["fingerprint-mismatch"]
     ]
@@ -551,9 +557,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         )
         for run in historical_qwen
     } == {("mlx", "bf16", "text_to_image", "none")}
-    # Four apiece: each rung has two retired eager rows plus two closure-superseded shared rows.
-    # The symmetry is the property this pins — an asymmetry would mean one rung lost a record rather
-    # than changing currency.
+    # Four apiece: each rung carries two shared-fingerprint bindings and two rejected `-eager` rows.
+    # The two rungs remain symmetric, which is the property
+    # this pins — an asymmetry would mean one rung lost a record rather than changing currency.
     assert Counter(
         run["record"]["strategy"]["rung"] for run in historical_qwen
     ) == {
@@ -718,22 +724,21 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
 def test_historical_records_remain_unverified_after_the_provider_contract_advance():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
-    # sc-16915 recaptured the Qwen and Krea MLX evidence at the current pin, which is what
-    # "until the records are recaptured" was waiting for, so those cells now promote.
-    # Z-Image was NOT recaptured and is the subject of this test: its history must still fail
-    # closed, which the per-model assertions below pin directly.
-    #
-    # Stated as the exact verified SET rather than as `== []`. A bare emptiness check stopped
-    # being meaningful the moment anything was verified, and a count would let one model's
-    # promotion silently cover another's regression.
+    # sc-16915, SC-18237, and SC-18353 captured Qwen/Krea evidence at then-live provider closures.
+    # The rich descriptor change moved those closures again, so every physical record is historical.
+    # Positive promotion remains covered by synthetic current-closure fixtures in the Node suite;
+    # this checked-in artifact must not claim verification by silently re-stamping captures.
     verified = {
         (cell["modelId"], cell["backend"], cell["tier"], cell["rung"])
         for cell in matrix["cells"]
         if cell["state"] == "Verified"
     }
-    # The frozen b4 provider-contract closure intentionally makes every retained capture
-    # historical. Qwen's rows remain useful characterization, but none can authorize Verified
-    # until SC-18946 recaptures at the final permanent pin.
+    # SC-18237/SC-18353's Qwen captures, Krea, and Z-Image are all stale after their
+    # closures moved; this test's actual subject — Z-Image's history failing closed — is pinned
+    # directly below and is unaffected.
+    #
+    # This assertion is incidental context for this test either way. Its actual subject — Z-Image's
+    # history failing closed — is pinned directly below and is unaffected.
     assert verified == set()
     assert not [
         cell

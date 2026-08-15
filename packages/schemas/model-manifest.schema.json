@@ -1043,7 +1043,7 @@
             "allOf": [
               {
                 "if": { "required": ["vramGbByTier"] },
-                "then": { "required": ["vramMeasuredPixels"] }
+                "then": { "required": ["vramMeasuredPixels", "measured"] }
               }
             ],
             "properties": {
@@ -1056,7 +1056,7 @@
               },
               "vramGbByTier": {
                 "type": "object",
-                "description": "Measured (or explicitly-estimated) candle/CUDA overall-peak VRAM (GB), keyed by quant tier (q4 / q8 / bf16). Its output geometry is declared by vramMeasuredPixels. The peak is the max across the whole generate (load + denoise + VAE decode); candle loads weights lazily on first forward, so load-peak is negligible and the denoise peak dominates (sc-9094). This is the RESIDENT peak (all components co-resident) that the fit-gate compares against free VRAM to pick sequential offload vs reject.",
+                "description": "Calibrated, explicitly estimated, or conservative uncalibrated candle/CUDA overall-peak VRAM (GB), keyed by quant tier (q4 / q8 / bf16); the sibling measured flag distinguishes those evidence classes. Its output geometry is declared by vramMeasuredPixels. The peak is the max across the whole generate (load + denoise + VAE decode); candle loads weights lazily on first forward, so load-peak is negligible and the denoise peak dominates (sc-9094). This is the RESIDENT peak (all components co-resident) that the fit-gate compares against free VRAM to pick sequential offload vs reject.",
                 "additionalProperties": { "type": "number" }
               },
               "vramMeasuredPixels": {
@@ -1066,7 +1066,7 @@
               },
               "sequentialPeakGb": {
                 "type": "object",
-                "description": "Measured candle/CUDA SEQUENTIAL-residency peak VRAM (GB) at 1024², keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this measured sequential peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
+                "description": "Candle/CUDA SEQUENTIAL-residency peak or conservative high-water VRAM (GB) at the vramMeasuredPixels geometry, keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). The sibling measured flag says whether it is calibrated evidence. Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
                 "additionalProperties": { "type": "number" }
               },
               "supportsSequentialOffload": {
@@ -1116,7 +1116,7 @@
               },
               "measured": {
                 "type": "boolean",
-                "description": "true when minMemoryGb / vramGbByTier were MEASURED on a real GPU (sc-9094); false when ESTIMATED (scaled from weight size + a measured sibling) pending a real measurement. An estimated entry is tracked for a follow-up measurement."
+                "description": "true only when minMemoryGb / vramGbByTier are calibrated measurements at the declared workload geometry and may be consumed as measured evidence; false when ESTIMATED (scaled from weight size + a measured sibling) or when a conservative real-GPU high-water was captured at a functional-minimum geometry rather than the catalog calibration workload. An unmeasured entry remains a fail-closed tier gate and is tracked for a full calibration."
               },
               "control": {
                 "type": "object",

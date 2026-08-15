@@ -221,4 +221,61 @@ describe("CharacterAdvancedOptions PiD toggle (sc-8372)", () => {
     expect(advanced()).not.toHaveProperty("guidanceScale");
     expect(container.querySelector('[data-testid="raw-negative"]').textContent).toBe("visible baseline");
   });
+
+  it("emits manifest variationStrength as trueCfgScale and suppresses the inert IP scale", async () => {
+    const qwenEdit = {
+      id: "qwen_image_edit_2511",
+      ui: {
+        hideReferenceStrength: true,
+        variationStrength: {
+          label: "Prompt strength",
+          default: 4,
+          min: 1,
+          max: 10,
+          step: 0.5,
+        },
+      },
+    };
+    await act(async () => root.render(<Harness model={qwenEdit} catalog={[]} />));
+
+    expect(container.textContent).not.toContain("Reference strength");
+    expect(container.textContent).toContain("Prompt strength");
+    expect(advanced()).toMatchObject({ trueCfgScale: 4 });
+    expect(advanced()).not.toHaveProperty("ipAdapterScale");
+
+    const slider = container.querySelector(".variation-strength input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(slider, "6");
+      slider.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+    expect(advanced().trueCfgScale).toBe(6);
+  });
+
+  it("resets trueCfgScale to the next model's declared default", async () => {
+    const qwenEdit = {
+      id: "qwen_image_edit_2511",
+      ui: {
+        hideReferenceStrength: true,
+        variationStrength: { label: "Prompt strength", default: 4, min: 1, max: 10, step: 0.5 },
+      },
+    };
+    const senseNova = {
+      id: "sensenova_u1_8b",
+      ui: {
+        hideReferenceStrength: true,
+        variationStrength: { label: "Reference strength", default: 1.5, min: 1, max: 4, step: 0.1 },
+      },
+    };
+    await act(async () => root.render(<Harness model={qwenEdit} catalog={[]} />));
+    const slider = container.querySelector(".variation-strength input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(slider, "7");
+      slider.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+    expect(advanced().trueCfgScale).toBe(7);
+
+    await act(async () => root.render(<Harness model={senseNova} catalog={[]} />));
+    expect(advanced()).toMatchObject({ trueCfgScale: 1.5 });
+    expect(advanced()).not.toHaveProperty("ipAdapterScale");
+  });
 });

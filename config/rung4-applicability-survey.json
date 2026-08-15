@@ -278,7 +278,7 @@
             },
             {
               "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/sequential_vram_probe.rs",
-              "reason": "The fresh-process CUDA harness selects every rung, installed q4/q8/bf16 tier, optional deterministic LoRA overlay, and text-to-image or reference-driven style-variation mode while recording phase peaks and warm-repeat determinism."
+              "reason": "The fresh-process CUDA harness selects every rung, installed q4/q8/bf16 tier, optional deterministic LoRA overlay, and active text-to-image mode while recording phase peaks and warm-repeat determinism."
             },
             {
               "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/control_vram_probe.rs",
@@ -806,8 +806,7 @@
           ],
           "implementedModes": [
             "text_to_image",
-            "character_image",
-            "style_variations"
+            "character_image"
           ],
           "implementedOverlays": [
             "none",
@@ -1234,8 +1233,7 @@
           "implementedModes": [
             "text_to_image",
             "edit_image",
-            "character_image",
-            "style_variations"
+            "character_image"
           ],
           "implementedOverlays": [
             "none"
@@ -1488,7 +1486,7 @@
                 "finding": "moves"
               }
             ],
-            "reason": "Measured on Chroma1-Base q4 at 1024², 4 steps, true CFG 4.0 (Apple/Metal), fresh generator per row with a discarded warm-up row and `reset_peak_memory` after the load: rung 4 takes the staged request peak 19.2065 → 14.6932 GiB (−23.50%), byte-identical output at every cadence in [1, 2, 5, 10]. The saving is attributed, not assumed — the 4.5133 GiB drop matches the 4.5125 GiB windowable block weight set read from the snapshot's own safetensors `data_offsets`, the whole set to within 0.8 MiB. The scope axis is measured on the same control: `TextEncoder` −0.00% (rung 1 already shed the dense 10.15 GiB T5-XXL before the heavy phase), `Dit` −23.50%, `Both` identical to `Dit` at +22% wall clock (dominated, not wrong). The four cadences are equal-peak alternatives whose ms/step ordering is unresolvable on this instrument (sc-17679). The sibling entries, q8/bf16 tiers, style_variations mode and every overlay carry the capability claim, not a measured peak.",
+            "reason": "Measured on Chroma1-Base q4 at 1024², 4 steps, true CFG 4.0 (Apple/Metal), fresh generator per row with a discarded warm-up row and `reset_peak_memory` after the load: rung 4 takes the staged request peak 19.2065 → 14.6932 GiB (−23.50%), byte-identical output at every cadence in [1, 2, 5, 10]. The saving is attributed, not assumed — the 4.5133 GiB drop matches the 4.5125 GiB windowable block weight set read from the snapshot's own safetensors `data_offsets`, the whole set to within 0.8 MiB. The scope axis is measured on the same control: `TextEncoder` −0.00% (rung 1 already shed the dense 10.15 GiB T5-XXL before the heavy phase), `Dit` −23.50%, `Both` identical to `Dit` at +22% wall clock (dominated, not wrong). The four cadences are equal-peak alternatives whose ms/step ordering is unresolvable on this instrument (sc-17679). The sibling entries, q8/bf16 tiers and every overlay carry the capability claim, not a measured peak.",
             "evidence": [
               {
                 "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/tests/memory_ladder_real_weights.rs",

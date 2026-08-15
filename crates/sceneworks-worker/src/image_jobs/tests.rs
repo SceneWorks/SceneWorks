@@ -4,7 +4,7 @@ use super::{
     flux1_control_candle::*, flux2_comfyui_candle::*, flux2_control_candle::*,
     flux2_edit_candle::*, flux_ipadapter::*, kolors_control::*, kolors_ipadapter::*,
     krea_control_candle::*, pulid_candle::*, qwen_control::*, qwen_edit_candle::*,
-    sdxl_ipadapter::*, zimage_control::*, zimage_identity_candle::*,
+    sdxl_ipadapter::*, zimage_control::*,
 };
 use serde_json::json;
 
@@ -16,6 +16,119 @@ use crate::test_env::EnvVars;
 
 fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
+}
+
+/// sc-18480: the worker half of the raw Batch Detail contract. The API starts from the web's
+/// no-manifest/no-quant payload and persists authoritative metadata plus `mlxQuantize: 0`; prove
+/// those persisted fields make the worker select the installed dense tier and resolve every SDXL
+/// descriptor component before dispatching to the provider.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_components() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir creates");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin models manifest present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin models manifest parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == json!("realvisxl"))
+        .cloned()
+        .expect("realvisxl manifest entry");
+
+    let stage = |repo: &str, revision: &str, file: &str| {
+        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), repo)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(revision);
+        let path = snapshot.join(file);
+        std::fs::create_dir_all(path.parent().expect("staged file parent"))
+            .expect("staged parent creates");
+        std::fs::write(&path, b"weights").expect("staged file writes");
+        path
+    };
+    let base_revision = "e40202d63baef826c7df95a639a811698c1178d2";
+    stage(
+        "SceneWorks/realvisxl-mlx",
+        base_revision,
+        "q4/unet/diffusion_pytorch_model.safetensors",
+    );
+    stage(
+        "SceneWorks/realvisxl-mlx",
+        base_revision,
+        "bf16/unet/diffusion_pytorch_model.safetensors",
+    );
+    for (repo, revision, file) in [
+        (
+            "openai/clip-vit-large-patch14",
+            "32bd64288804d66eefd0ccbe215aa642df71cc41",
+            "tokenizer.json",
+        ),
+        (
+            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+            "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+            "tokenizer.json",
+        ),
+        (
+            "madebyollin/sdxl-vae-fp16-fix",
+            "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+            "diffusion_pytorch_model.safetensors",
+        ),
+    ] {
+        stage(repo, revision, file);
+    }
+
+    let request = request(json!({
+        "projectId": "project-1",
+        "sourceAssetId": "asset-1",
+        "model": "realvisxl",
+        "displayName": "portrait.png",
+        "advanced": { "strength": 0.55, "cnScale": 0.7, "mlxQuantize": 0 },
+        "modelManifestEntry": entry
+    }));
+    let weights_dir = resolve_weights_dir(&request, &settings)
+        .expect("detail tier resolves")
+        .expect("detail base is installed");
+    assert_eq!(
+        tier_key_from_resolved_dir(&weights_dir),
+        Some("bf16"),
+        "the route-owned dense selector must beat the shipped q4 default"
+    );
+
+    let (clip_l, clip_bigg, vae) =
+        resolve_candle_detail_components(&request, &settings, &weights_dir, false)
+            .expect("dense base and all authoritative co-requisites resolve");
+    assert!(matches!(clip_l, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(matches!(clip_bigg, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(
+        matches!(vae, WeightsSource::File(path) if path.ends_with("diffusion_pytorch_model.safetensors"))
+    );
+
+    std::fs::remove_dir_all(&weights_dir).expect("remove staged bf16 tier");
+    let packed_fallback = resolve_weights_dir(&request, &settings)
+        .expect("fallback tier resolves")
+        .expect("q4 sibling remains installed");
+    assert_eq!(tier_key_from_resolved_dir(&packed_fallback), Some("q4"));
+    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback, false)
+        .expect_err("a packed sibling must not masquerade as the requested dense detail base");
+    assert!(
+        error
+            .to_string()
+            .contains("installed dense bf16 model tier"),
+        "the fallback refusal must tell the user which tier detail requires: {error}"
+    );
 }
 
 #[test]
@@ -132,6 +245,13 @@ impl Generator for HiresProbeGenerator {
                 current,
                 total: req.steps.unwrap_or(1),
             });
+        }
+        if req.prompt_enhancement.is_active() {
+            req.prompt_enhancement
+                .emit(gen_core::PromptEnhancementReport::enhanced(
+                    req.prompt.clone(),
+                    format!("{} enhanced", req.prompt),
+                ));
         }
         on_progress(Progress::Decoding);
         Ok(GenerationOutput::Images(vec![Image {
@@ -290,6 +410,7 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             provider_reference_strength: 0.3,
         }),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |event| progress.push(event),
     )
@@ -327,6 +448,69 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             .count(),
         1
     );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reports.clone();
+    let sink = gen_core::PromptEnhancementSink::new(move |report| {
+        captured.lock().unwrap().push(report);
+    });
+    generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        &PromptEnhance {
+            enabled: true,
+            temperature: Some(0.2),
+            max_tokens: Some(64),
+        },
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        sink,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("two-pass enhanced generation");
+
+    let requests = generator.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].enhance_prompt);
+    assert!(!requests[0].prompt_enhancement.is_active());
+    assert!(requests[1].enhance_prompt);
+    assert!(requests[1].prompt_enhancement.is_active());
+    assert_eq!(reports.lock().unwrap().len(), 1);
 }
 
 #[cfg(any(
@@ -405,6 +589,7 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         &PromptEnhance::default(),
         Some(hires_fix),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -491,6 +676,7 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
             provider_reference_strength: 0.3,
         }),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -2035,6 +2221,25 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
             .contains("route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request))"),
         "the resolved candle route must supply the adapter label"
     );
+    let pose_reject = between(
+        run_job,
+        "CandleImageRoute::PoseReject => {",
+        "CandleImageRoute::PoseControlBaseMissing => {",
+    );
+    assert!(
+        pose_reject.contains("return Err(WorkerError::InvalidPayload"),
+        "PoseReject must terminate dispatch with a typed payload error"
+    );
+    let pose_reject_dispatch = run_job
+        .find("CandleImageRoute::PoseReject => {")
+        .expect("PoseReject dispatch arm");
+    let stub_fallback = run_job
+        .find("if !handled {\n        if request.hires_fix.enabled")
+        .expect("procedural-stub fallback");
+    assert!(
+        pose_reject_dispatch < stub_fallback,
+        "PoseReject dispatch must execute before the procedural-stub fallback"
+    );
 
     let base = include_str!("base.rs");
     let mlx_stream = between(
@@ -2653,6 +2858,13 @@ fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
             json!({ "projectId": "p", "mode": "character_image" })
         )),
         1.5
+    );
+    assert_eq!(
+        resolve_sensenova_img_cfg(&request(json!({
+            "projectId": "p", "mode": "character_image",
+            "advanced": { "trueCfgScale": 3.0, "imageGuidanceScale": 2.5 }
+        }))),
+        3.0
     );
     assert_eq!(
         resolve_sensenova_img_cfg(&request(json!({
@@ -3873,6 +4085,7 @@ fn smoke_generate_one(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -4058,6 +4271,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_p| {},
@@ -4348,6 +4562,7 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4421,6 +4636,7 @@ fn boogu_q4_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4490,6 +4706,7 @@ fn klein_tier_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4551,6 +4768,7 @@ fn ideogram_4_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4710,6 +4928,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -4768,6 +4987,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -5142,6 +5362,7 @@ fn smoke_generate_one_true_cfg(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -5502,6 +5723,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -6080,7 +6302,10 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
@@ -6089,7 +6314,8 @@ fn prompt_enhance_reads_advanced_settings() {
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
         .advanced,
-    );
+    )
+    .expect("absent enhancement settings validate");
     assert!(!off.enabled);
     assert_eq!(off.temperature, None);
     assert_eq!(off.max_tokens, None);
@@ -6100,10 +6326,389 @@ fn prompt_enhance_reads_advanced_settings() {
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
-    .advanced);
+    .advanced)
+    .expect("bounded enhancement settings validate");
     assert!(on.enabled);
     assert_eq!(on.temperature, Some(0.2));
     assert_eq!(on.max_tokens, Some(256));
+}
+
+#[test]
+fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
+    #[allow(unused_mut)]
+    let mut settings = Settings::from_env();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        settings.backend_candle_enabled = true;
+    }
+    for (advanced, expected) in [
+        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": true, "enhanceTemperature": 2.1 }),
+            "must be between 0 and 2",
+        ),
+        (
+            json!({ "enhancePrompt": true, "enhanceMaxTokens": 2049 }),
+            "must be between 1 and 2048",
+        ),
+        (
+            json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
+            "tuning requires",
+        ),
+        (
+            json!({ "promptEnhancement": { "outcome": "enhanced" } }),
+            "worker-owned",
+        ),
+    ] {
+        let error =
+            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
+                .expect_err("invalid settings reject")
+                .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let klein = request(json!({
+        "model": "flux2_klein_9b",
+        "advanced": { "enhancePrompt": true }
+    }));
+    assert!(validate_prompt_enhancement_request(&klein, &settings)
+        .unwrap_err()
+        .to_string()
+        .contains("FLUX.2-Klein"));
+    for strict_control in [
+        json!({ "poses": [{ "id": "pose-1" }] }),
+        json!({ "controlWeights": { "overlayId": "flux2-depth" } }),
+        json!({ "controlImage": "asset-1" }),
+        json!({ "controlMode": "depth" }),
+    ] {
+        let mut advanced = strict_control.as_object().unwrap().clone();
+        advanced.insert("enhancePrompt".to_owned(), json!(true));
+        let strict = request(json!({
+            "model": "flux2_dev",
+            "advanced": advanced,
+        }));
+        assert!(validate_prompt_enhancement_request(&strict, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("strict control"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "character_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "style_variations", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("MLX supports its native base/edit/character/style routes");
+        }
+        for mode in ["reference", "image_to_image"] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            assert!(validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support"));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "edit_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "edit_image", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("Candle supports only its native base and edit routes");
+        }
+
+        for mode in [
+            "character_image",
+            "style_variations",
+            "reference",
+            "image_to_image",
+        ] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            let error = validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Candle supports only"),
+                "mode={mode}: {error}"
+            );
+        }
+
+        for carrier in [
+            json!({ "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = carrier.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("mode".to_owned(), json!("text_to_image"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            let error =
+                validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains("cannot include source or reference"),
+                "{error}"
+            );
+        }
+
+        let missing_edit_input = request(json!({
+            "model": "flux2_dev",
+            "mode": "edit_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(
+            validate_prompt_enhancement_request(&missing_edit_input, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a source or reference")
+        );
+
+        settings.backend_candle_enabled = false;
+        let disabled = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&disabled, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let backendless = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&backendless, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly() {
+    let enhanced = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "a fox".to_owned(),
+            "a red fox in winter light".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("matching enhanced report validates");
+    assert_eq!(enhanced["outcome"], "enhanced");
+    assert_eq!(enhanced["originalPrompt"], "a fox");
+    assert_eq!(enhanced["effectivePrompt"], "a red fox in winter light");
+    assert!(enhanced["fallbackReason"].is_null());
+
+    let fallback = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "enhancer unavailable".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("safe fallback validates");
+    assert_eq!(fallback["outcome"], "fallback");
+    assert_eq!(fallback["effectivePrompt"], "a fox");
+    assert_eq!(fallback["fallbackReason"], "enhancer unavailable");
+
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "another prompt".to_owned(),
+            "a fox".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not match"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not rewrite"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "   ".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("must contain"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "unsafe\nreason".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("safe bounded reason"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::absent("a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("absent outcome"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
+    fn enhanced(original: &str, effective: &str) -> gen_core::PromptEnhancementReport {
+        gen_core::PromptEnhancementReport::enhanced(original.to_owned(), effective.to_owned())
+    }
+
+    let mut reports = PromptEnhancementReports::new();
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        false,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("disabled request"));
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        1,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("unknown image"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .expect("first report is accepted");
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "another red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("duplicate"));
+    let fact = take_prompt_enhancement_fact(&mut reports, 0)
+        .expect("the report remains available for its image");
+    assert_eq!(fact["effectivePrompt"], "a red fox");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("no prompt-enhancement report"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("another prompt", "a red fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not match"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not rewrite"));
+
+    // Reports may arrive out of order for a batch, but each image must consume only the report
+    // bound to its own index and requested prompt.
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        1,
+        "an owl".to_owned(),
+        enhanced("an owl", "a moonlit owl"),
+    )
+    .expect("second image report is accepted first");
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox in snowfall"),
+    )
+    .expect("first image report is accepted second");
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 0).unwrap()["effectivePrompt"],
+        "a fox in snowfall"
+    );
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 1).unwrap()["effectivePrompt"],
+        "a moonlit owl"
+    );
 }
 
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
@@ -6731,6 +7336,32 @@ fn flux2_edit_image_guidance_lever() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
+    let model = mlx_model("flux2_dev").unwrap();
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "character_image",
+                "advanced": { "trueCfgScale": 7.0, "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(7.0)
+    );
+    assert_eq!(
+        flux2_edit_text_guidance(
+            &request(serde_json::json!({
+                "model": "flux2_dev", "mode": "edit_image",
+                "advanced": { "guidanceScale": 2.0 }
+            })),
+            &model
+        ),
+        Some(2.0)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn build_edit_conditioning_single_vs_multi() {
     let img = |seed| gen_core::Image {
         width: 8,
@@ -6900,6 +7531,7 @@ fn flux2_edit_real_weights_generates_one_image() {
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -7407,6 +8039,29 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&zimage_base_t2i, &settings).unwrap();
     assert_eq!(route, ImageRoute::Mlx);
     assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() {
+    let req = request(json!({
+        "projectId": "p", "model": "sensenova_u1_8b", "mode": "character_image",
+        "prompt": "portrait", "referenceAssetIds": ["first", "second"], "count": 1,
+        "seed": 123, "advanced": { "angleSet": true, "trueCfgScale": 1.5 }
+    }));
+    let work = candle_conditioned_edit_work(&req);
+    assert_eq!(work.len(), 11);
+    assert!(work.iter().all(|(seed, _)| *seed == work[0].0));
+    assert_eq!(work[0].0, 123);
+    assert_eq!(
+        CandleImageRoute::SenseNovaEdit.image_count(&req, &Settings::from_env()),
+        11
+    );
+    assert_eq!(
+        sensenova_edit_candle_reference_ids(&req),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+    assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
@@ -8837,15 +9492,169 @@ fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_cl
         "character_image",
         "style_variations",
     ] {
-        let dev_unsupported = request(json!({
+        let dev_conditioned = request(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
             "mode": mode, "referenceAssetId": "asset_1", "count": 1
         }));
         assert!(
-            !flux2_edit_candle_mode(&dev_unsupported),
-            "flux2_dev must remain edit_image-only; mode={mode}"
+            flux2_edit_candle_mode(&dev_conditioned),
+            "flux2_dev conditioned mode must reach the edit provider; mode={mode}"
         );
     }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_edit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let model_path = root.path().to_string_lossy().to_string();
+
+    let flux_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+        "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert!(flux2_control_candle_available(&flux_pose, &settings));
+    assert!(!flux2_edit_candle_available(&flux_pose, &settings));
+    assert_eq!(
+        resolve_candle_image_route(&flux_pose, &settings),
+        Some(CandleImageRoute::Flux2Control),
+        "the real Character Studio pose payload must keep its skeleton control"
+    );
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        let supported_control = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "pose the subject",
+            "mode": mode, "referenceAssetId": "identity", "count": 1,
+            "advanced": {
+                "modelPath": model_path.clone(),
+                "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+            }
+        }));
+        assert_eq!(
+            resolve_candle_image_route(&supported_control, &settings),
+            Some(CandleImageRoute::Flux2Control),
+            "FLUX.2 non-edit pose mode {mode} remains a control request"
+        );
+    }
+
+    let flux_edit_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "edit with pose",
+        "mode": "edit_image", "sourceAssetId": "source", "count": 1,
+        "advanced": {
+            "modelPath": model_path.clone(),
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&flux_edit_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "valid pose + edit_image must reject explicitly, never return None to the stub"
+    );
+
+    for poses in [Value::Null, json!([])] {
+        let plain_character = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": poses }
+        }));
+        assert!(flux2_edit_candle_available(&plain_character, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&plain_character, &settings),
+            Some(CandleImageRoute::Flux2Edit)
+        );
+    }
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        let malformed_pose = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+            "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": malformed }
+        }));
+        assert!(!flux2_edit_candle_available(&malformed_pose, &settings));
+        assert_eq!(
+            resolve_candle_image_route(&malformed_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "direct worker routing must reject a malformed carrier after typed parsing"
+        );
+    }
+
+    let qwen_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "prompt": "keep the person", "mode": "character_image",
+        "referenceAssetId": "identity", "count": 1,
+        "advanced": {
+            "modelPath": model_path,
+            "poses": [
+                { "keypoints": [[0.5, 0.2, 1.0]] },
+                { "keypoints": [[0.2, 0.5, 1.0]] }
+            ]
+        }
+    }));
+    assert!(qwen_edit_candle_available(&qwen_pose, &settings));
+    let route = resolve_candle_image_route(&qwen_pose, &settings);
+    assert_eq!(route, Some(CandleImageRoute::QwenEdit));
+    assert_eq!(
+        route
+            .expect("Qwen pose route")
+            .image_count(&qwen_pose, &settings),
+        2,
+        "Qwen pose plans must reserve one streamed result per pose"
+    );
+
+    let malformed_qwen = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetId": "identity",
+        "advanced": { "poses": false }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&malformed_qwen, &settings),
+        Some(CandleImageRoute::PoseReject)
+    );
+
+    for (mode, references) in [
+        ("edit_image", json!({ "sourceAssetId": "source" })),
+        ("text_to_image", json!({})),
+        ("reference", json!({ "referenceAssetId": "identity" })),
+        (
+            "style_variations",
+            json!({ "referenceAssetId": "identity" }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": "qwen_image_edit_2511_lightning", "mode": mode,
+            "advanced": { "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }] }
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(references.as_object().expect("reference object").clone());
+        let unsupported_pose = request(payload);
+        assert_eq!(
+            resolve_candle_image_route(&unsupported_pose, &settings),
+            Some(CandleImageRoute::PoseReject),
+            "Qwen pose mode {mode} must reject explicitly, never return None to the stub"
+        );
+    }
+    let ambiguous_identity_pose = request(json!({
+        "projectId": "p", "model": "qwen_image_edit_2511_lightning",
+        "mode": "character_image", "referenceAssetIds": ["one", "two"],
+        "advanced": { "poses": [{}] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&ambiguous_identity_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "the exact Qwen pose recipe accepts one identity, not a silently truncated array"
+    );
 }
 
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
@@ -8931,6 +9740,7 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
         CandleImageRoute::Flux2Control,
         CandleImageRoute::Flux1Control,
         CandleImageRoute::KreaControl,
+        CandleImageRoute::KreaImportedControl,
     ] {
         assert_eq!(route.image_count(&zimage_pose, &settings), 3);
     }
@@ -8939,6 +9749,39 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
         CandleImageRoute::CandleTxt2Img.image_count(&zimage_pose, &settings),
         zimage_pose.count,
     );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn sc18477_every_named_bespoke_lane_declares_real_adapter_application() {
+    let request = request(json!({ "projectId": "p", "model": "z_image_turbo", "count": 1 }));
+    for route in [
+        CandleImageRoute::SdxlEdit,
+        CandleImageRoute::SdxlIpAdapter,
+        CandleImageRoute::Flux2Edit,
+        CandleImageRoute::FluxIpAdapter,
+        CandleImageRoute::Pulid,
+        CandleImageRoute::QwenEdit,
+        CandleImageRoute::QwenImageComfyui,
+        CandleImageRoute::QwenControl,
+        CandleImageRoute::KolorsIpAdapter,
+        CandleImageRoute::KolorsControl,
+        CandleImageRoute::ZimageEdit,
+        CandleImageRoute::ZimageComfyui,
+        CandleImageRoute::ZimageControl,
+        CandleImageRoute::Flux1Control,
+        CandleImageRoute::Flux2Control,
+        CandleImageRoute::Flux2Comfyui,
+        CandleImageRoute::Bernini,
+        CandleImageRoute::KreaImported,
+        CandleImageRoute::KreaImportedControl,
+        CandleImageRoute::SdxlImported,
+    ] {
+        assert!(
+            route.applies_request_loras(&request),
+            "{route:?} must never claim adapter provenance without applying the selected stack"
+        );
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -8975,14 +9818,19 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
             "candle_krea_imported",
         ),
         (
+            CandleImageRoute::KreaImportedControl,
+            "external_krea",
+            "candle_krea_imported",
+        ),
+        (
+            CandleImageRoute::MageFinetuned,
+            "finetune_mage",
+            "candle_mage_finetuned",
+        ),
+        (
             CandleImageRoute::SdxlImported,
             "external_sdxl",
             "candle_sdxl_imported",
-        ),
-        (
-            CandleImageRoute::ZimageIdentity,
-            "z_image_turbo",
-            "candle_zimage_identity",
         ),
         (
             CandleImageRoute::SdxlIpAdapter,
@@ -9439,11 +10287,18 @@ fn qwen_edit_engine_id_maps_variants() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn qwen_edit_reference_ids_prefers_reference_then_source() {
-    // referenceAssetId (character flow) wins over a source.
+fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
+    // Ordered plural references are the character/reference-array contract.
     assert_eq!(
         qwen_edit_reference_ids(&request(json!({
-            "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
+            "projectId": "p", "mode": "character_image",
+            "referenceAssetIds": ["ref_1", "ref_2"]
+        }))),
+        vec!["ref_1".to_owned(), "ref_2".to_owned()]
+    );
+    assert_eq!(
+        qwen_edit_reference_ids(&request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref_1"
         }))),
         vec!["ref_1".to_owned()]
     );
@@ -9496,6 +10351,17 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             &model
         ),
         6.0
+    );
+    assert_eq!(
+        resolve_qwen_edit_guidance(
+            &request(json!({
+                "projectId": "p", "mode": "character_image",
+                "advanced": { "imageGuidanceScale": 2.5 }
+            })),
+            &model
+        ),
+        2.5,
+        "legacy imageGuidanceScale remains a deliberate fallback"
     );
     // The character reference path clamps to [1, 10].
     assert_eq!(
@@ -9730,6 +10596,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         None,
         conditioning,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -9865,6 +10732,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
                 None,
                 conditioning,
                 &PromptEnhance::default(),
+                gen_core::PromptEnhancementSink::default(),
                 gen_core::PreviewSink::default(),
                 &cancel,
                 &mut |p| {
@@ -9935,7 +10803,10 @@ fn sdxl_sub_mode_classifies_advanced_shapes() {
     assert!(sdxl_sub_mode(&request(json!({ "model": "sdxl", "mode": "edit_image" }))).is_none());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(1024), 1024); // already valid
@@ -9945,7 +10816,10 @@ fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(3000), 2048); // clamps to the engine maximum
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn detail_feather_ramps_over_overlap() {
     // No overlap → a flat field of ones (every pixel contributes fully).
@@ -9964,7 +10838,10 @@ fn detail_feather_ramps_over_overlap() {
     assert!((at(8, 0) - at(8, 15)).abs() < 1e-6);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn compose_feathered_no_boundary_vignette() {
     // sc-8229: a single edge tile covers the whole frame; its raised-cosine feather ramps
@@ -10000,6 +10877,85 @@ fn compose_feathered_no_boundary_vignette() {
             "pixel ({x},{y}) = {px:?} darkened toward the border (expected ~{SRC})"
         );
     }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
+    use std::sync::Mutex;
+
+    struct RecordingRefiner {
+        calls: Mutex<Vec<(u32, u32, i64)>>,
+    }
+
+    impl DetailTileRefiner for RecordingRefiner {
+        fn refine_tile(
+            &self,
+            tile: Image,
+            eng_w: u32,
+            eng_h: u32,
+            _params: &DetailParams,
+            seed: i64,
+            _preview: &gen_core::PreviewSink,
+            _cancel: &CancelFlag,
+        ) -> WorkerResult<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("recording lock")
+                .push((eng_w, eng_h, seed));
+            Ok(tile.pixels)
+        }
+    }
+
+    let source = image::RgbImage::from_pixel(700, 540, image::Rgb([73, 101, 149]));
+    let params = DetailParams {
+        strength: 0.55,
+        cn_scale: 0.7,
+        steps: 24,
+        guidance: 5.0,
+        tile: 512,
+        overlap: 64,
+        prompt: "detail".to_owned(),
+        negative: "blur".to_owned(),
+        seed: 11,
+    };
+    let refiner = RecordingRefiner {
+        calls: Mutex::new(Vec::new()),
+    };
+    let mut progress = Vec::new();
+    let preview = gen_core::PreviewSink::default();
+    let (output, total) = refine_tiled_detail(
+        &refiner,
+        &source,
+        &params,
+        &preview,
+        &CancelFlag::new(),
+        &mut |done, total| progress.push((done, total)),
+    )
+    .expect("provider-neutral detail refinement");
+
+    assert_eq!(total, 4);
+    assert_eq!(progress, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+    assert_eq!(
+        *refiner.calls.lock().expect("recording lock"),
+        vec![
+            (512, 512, 11),
+            (512, 512, 12),
+            (512, 512, 13),
+            (512, 512, 14)
+        ]
+    );
+    assert_eq!(output.dimensions(), source.dimensions());
+    assert!(output.pixels().all(|pixel| {
+        pixel
+            .0
+            .into_iter()
+            .zip([73, 101, 149])
+            .all(|(actual, expected)| actual.abs_diff(expected) <= 1)
+    }));
 }
 
 /// sc-3625 real-Mac E2E (epic 3621): drive the WORKER's FLUX.1 XLabs IP-Adapter reference path
@@ -10535,6 +11491,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -10729,6 +11686,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
@@ -10855,6 +11813,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -11057,6 +12016,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -12973,6 +13933,142 @@ fn candle_strict_control_trait_routes_each_provider() {
     assert_eq!(kolors.stream_tag(), "kolors_control");
 }
 
+/// sc-18477 review regression: every adapter-capable bespoke Candle route must price the exact
+/// resolved adapter stack before handing it to the provider. Exercise both admission mechanisms:
+/// shared-selector routes receive nonzero resident bytes, and floor routes include the adapter path
+/// in the footprint whose decision can flip at the resulting boundary.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
+    let root = tempfile::tempdir().expect("adapter admission fixture");
+    let adapter_path = root.path().join("style.safetensors");
+    std::fs::write(&adapter_path, vec![0_u8; 4096]).expect("adapter bytes");
+    let adapters = vec![AdapterSpec::new(
+        adapter_path.clone(),
+        0.75,
+        AdapterKind::Lora,
+    )];
+
+    for (route, bytes) in [
+        (
+            "FLUX.2 edit",
+            flux2_edit_adapter_source_bytes(&adapters).expect("sized FLUX.2 edit adapter"),
+        ),
+        (
+            "FLUX.1 control",
+            flux1_control_adapter_source_bytes(&adapters).expect("sized FLUX.1 control adapter"),
+        ),
+        (
+            "FLUX.2 control",
+            flux2_control_adapter_source_bytes(&adapters).expect("sized FLUX.2 control adapter"),
+        ),
+    ] {
+        assert_eq!(bytes, 4096, "{route} must pass real, nonzero adapter bytes");
+        let manifest = json!({ "candle": { "vramGbByTier": { "q4": 10.0 } } })
+            .as_object()
+            .unwrap()
+            .clone();
+        let plain = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(&manifest, "q4", 0)
+            .expect("plain peak");
+        let adapted =
+            crate::vram_gate::predicted_peak_gb_with_adapter_bytes(&manifest, "q4", bytes)
+                .expect("adapted peak");
+        assert!(
+            adapted > plain,
+            "{route} adapter bytes must raise admission"
+        );
+    }
+    assert_eq!(
+        bernini_adapter_resident_bytes(&adapters, None).expect("dense Bernini folds adapters"),
+        0
+    );
+    assert_eq!(
+        bernini_adapter_resident_bytes(&adapters, Some(Quant::Q4))
+            .expect("packed Bernini sizes both resident experts"),
+        8192,
+        "an untargeted packed Bernini adapter is resident on both co-resident experts"
+    );
+    let missing = vec![AdapterSpec::new(
+        root.path().join("missing.safetensors"),
+        1.0,
+        AdapterKind::Lora,
+    )];
+    for (route, result) in [
+        ("FLUX.2 edit", flux2_edit_adapter_source_bytes(&missing)),
+        (
+            "FLUX.1 control",
+            flux1_control_adapter_source_bytes(&missing),
+        ),
+        (
+            "FLUX.2 control",
+            flux2_control_adapter_source_bytes(&missing),
+        ),
+        (
+            "packed Bernini still",
+            bernini_adapter_resident_bytes(&missing, Some(Quant::Q4)),
+        ),
+    ] {
+        assert!(
+            result.is_err(),
+            "{route} must fail closed when adapter bytes cannot be sized"
+        );
+    }
+
+    let base = root.path().join("base");
+    std::fs::create_dir_all(&base).expect("base dir");
+    std::fs::write(base.join("model.safetensors"), vec![0_u8; 8192]).expect("base bytes");
+    let control = root.path().join("control.safetensors");
+    std::fs::write(&control, vec![0_u8; 2048]).expect("control bytes");
+    let plain = crate::conditioning_fit::ConditioningFootprint::from_paths(
+        "test",
+        "control",
+        &base,
+        &[control.as_path()],
+    );
+    let adapted = crate::conditioning_fit::ConditioningFootprint::from_paths(
+        "test",
+        "control + adapter",
+        &base,
+        &[control.as_path(), adapter_path.as_path()],
+    );
+    assert_eq!(adapted.overlay_bytes - plain.overlay_bytes, 4096);
+    let plain_floor = crate::conditioning_fit::conditioning_floor_gb(&plain).unwrap();
+    let adapted_floor = crate::conditioning_fit::conditioning_floor_gb(&adapted).unwrap();
+    let budget = crate::vram_gate::VramBudget {
+        free_gb: (plain_floor + adapted_floor) / 2.0,
+        total_gb: adapted_floor,
+    };
+    assert!(matches!(
+        crate::conditioning_fit::decide(&plain, Some(budget)),
+        crate::conditioning_fit::ConditioningFit::Fits { .. }
+    ));
+    assert!(matches!(
+        crate::conditioning_fit::decide(&adapted, Some(budget)),
+        crate::conditioning_fit::ConditioningFit::TooBig { .. }
+    ));
+
+    for (route, source, marker) in [
+        ("FLUX.2 edit selector", include_str!("flux2_edit_candle.rs"), "predicted_peak_gb_with_adapter_bytes(\n        &request.model_manifest_entry,\n        tier,\n        adapter_source_bytes,"),
+        ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("Bernini admission", include_str!("bernini.rs"), "admit_candle_base_floor_with_resident_overlay(\n        &request.model,\n        \"Bernini still image\",\n        settings,\n        &[weights_dir.as_path()],\n        adapter_resident_bytes,"),
+        ("Qwen control", include_str!("qwen_control.rs"), "self.adapters.iter()"),
+        ("Kolors control", include_str!("kolors_control.rs"), "self.adapters.iter()"),
+        ("Z-Image control", include_str!("zimage_control.rs"), "self.adapters.iter()"),
+        ("Kolors IP-Adapter", include_str!("kolors_ipadapter.rs"), "admission_overlays.extend(adapters.iter()"),
+        ("PuLID fallback", include_str!("pulid_candle.rs"), "overlays.extend(adapters.iter()"),
+        ("Z-Image ComfyUI", include_str!("zimage_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
+        ("FLUX.2 ComfyUI", include_str!("flux2_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
+        ("Krea imported", include_str!("krea_imported.rs"), "admission_paths.extend(adapters.iter()"),
+        ("SDXL detail", include_str!("detail.rs"), "admission_paths.extend(adapters.iter()"),
+    ] {
+        assert!(
+            source.contains(marker),
+            "{route} must add the same resolved adapter paths to preflight admission"
+        );
+    }
+}
+
 /// epic 16948 / sc-16962: the two preview-wired bespoke strict-control lanes put the job's **live**
 /// sink on their request, not the inert default.
 ///
@@ -14270,16 +15366,44 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     );
     assert!(krea_imported_available(&imported, &settings));
     assert_eq!(KREA_IMPORTED_ENGINE, "candle_krea_imported");
+
+    let with_lora = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "loras": [{ "id": "style", "path": file.to_str().unwrap() }],
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&with_lora, &settings),
+        Some(CandleImageRoute::KreaImported),
+        "an imported Krea adapter request must reach the adapter-capable native-file lane"
+    );
+
+    let strict_pose = request(json!({
+        "projectId": "p",
+        "model": "kreamania_variant4",
+        "advanced": { "poses": [{ "id": "pose-1" }] },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": file.to_str().unwrap()
+        }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&strict_pose, &settings),
+        Some(CandleImageRoute::KreaImportedControl),
+        "strict pose must dispatch to the imported Krea control provider"
+    );
 }
 
 /// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
 /// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
-/// t2i + img2img are accepted on EVERY backend; LoRAs (sc-14111) and the Kontext edit surface
-/// (sc-14119) are accepted only on an adapter-capable backend ([`KREA_IMPORTED_SUPPORTS_ADAPTERS`]:
-/// MLX yes / candle not yet, sc-14135); the bare-transformer guards (pose, mask, character, multi-phase,
-/// a non-edit two-reference SET, a bare non-edit `sourceAssetId`) stay rejected on every backend. Runs on
-/// the cross-platform path so both the MLX and candle imported lanes are covered, asserting the
-/// per-backend split via the compile-time capability const.
+/// t2i + img2img are accepted on EVERY backend; LoRAs, Kontext edit, and strict pose follow the
+/// backend's explicit provider capabilities. The current MLX and Candle pins advertise all three.
+/// Base-tier-only shapes (mask, character, multi-phase, a non-edit reference set, bare source) stay
+/// rejected on every backend.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -14311,8 +15435,22 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         krea_imported_available(&img2img, &settings),
         "an img2img referenceAssetId (mode t2i) is accepted"
     );
+    assert!(
+        krea_imported_img2img_requested(&img2img),
+        "the admitted reference shape must engage img2img even without optional ui.img2img metadata"
+    );
 
-    // A LoRA stack (sc-14111) and the edit surface (sc-14119) are backend-gated: MLX yes, candle no.
+    let plain_hires = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "hiresFix": { "enabled": true },
+        "modelManifestEntry": base.clone()
+    }));
+    assert!(
+        krea_imported_available(&plain_hires, &settings),
+        "plain imported Krea t2i keeps its supported hires pass"
+    );
+
+    // A LoRA stack and the edit surface are admitted wherever the native loader accepts adapters.
     let t2i_lora = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "loras": [{ "id": "adapter" }],
@@ -14366,8 +15504,8 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     );
 
     // A strict-pose set follows the backend's pose-control capability, the same shape the LoRA/edit
-    // surfaces follow above: MLX assembles the trained pose branch around the file-loaded imported
-    // DiT (`load_control_from_native_dit_file`), candle's single-file path has no control parameter.
+    // surfaces follow above: each capable provider assembles the trained pose branch around the
+    // file-loaded imported DiT (`load_control_from_native_dit_file`).
     let pose = request(json!({
         "projectId": "p", "model": "kreamania_variant4",
         "advanced": { "poses": [{ "id": "a" }] },
@@ -14378,10 +15516,6 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
             krea_imported_available(&pose, &settings),
             "a pose set is served on the pose-control-capable backend"
         );
-        // `krea_imported_control_available` (the route-claim predicate) exists only on the
-        // pose-control-capable build, so probe it under its own cfg rather than the const — the
-        // candle lane compiles this same test file and would not resolve the name.
-        #[cfg(target_os = "macos")]
         assert!(
             krea_imported_control_available(&pose, &settings),
             "...and it is claimed by the pose-control route, not the plain per-image one"
@@ -14390,6 +15524,40 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         assert!(
             !krea_imported_available(&pose, &settings),
             "a pose set is rejected on a backend without pose-control support"
+        );
+    }
+
+    for (label, extra) in [
+        (
+            "img2img + hires",
+            json!({ "referenceAssetId": "r", "hiresFix": { "enabled": true } }),
+        ),
+        (
+            "edit + hires",
+            json!({
+                "mode": "edit_image", "sourceAssetId": "s",
+                "hiresFix": { "enabled": true }
+            }),
+        ),
+        (
+            "pose + hires",
+            json!({
+                "advanced": { "poses": [{ "id": "a" }] },
+                "hiresFix": { "enabled": true }
+            }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": "kreamania_variant5",
+            "modelManifestEntry": base.clone()
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(
+            !krea_imported_available(&request(payload), &settings),
+            "{label} must fail closed instead of dropping conditioning"
         );
     }
 
@@ -14447,13 +15615,16 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     }
 }
 
-/// On the MLX imported lane, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
+/// On both native imported lanes, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
 /// (sc-14111) and, for an `edit_image` job, enforces the R5 identity-edit-LoRA requirement (sc-14119,
 /// epic 10871) BEFORE any reference I/O — the bare transformer cannot edit without the
 /// `krea2_identity_edit` LoRA (the source conditioning is inert without it), mirroring the builtin
 /// `generate_krea_edit_stream`. A plain t2i job (no loras) resolves to an empty adapter stack + no edit
-/// conditioning. macOS-only (the adapter/edit path is MLX-only, sc-14135).
-#[cfg(target_os = "macos")]
+/// conditioning.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn imported_edit_requires_the_identity_edit_lora() {
     let dir = tempfile::tempdir().unwrap();
@@ -14486,9 +15657,9 @@ fn imported_edit_requires_the_identity_edit_lora() {
 
 /// The imported Krea lane threads a resolved img2img reference into a single `Conditioning::Reference`
 /// (strength carried) on the Turbo t2i descriptor, and a plain txt2img job into the empty conditioning
-/// (sc-14071). Also pins the manifest→worker seam: the `ui.img2img` flag the core stamps on an imported
-/// krea_2 entry (sc-14071 Part B) is exactly what `model_supports_img2img` reads to engage the img2img
-/// resolve. Pure — no reference-asset I/O or generator load. Runs on the cross-platform path so the
+/// (sc-14071). Also pins the API→worker seam: the admitted `referenceAssetId` shape engages img2img
+/// without relying on optional UI presentation metadata. Pure — no reference-asset I/O or generator
+/// load. Runs on the cross-platform path so the
 /// candle imported lane's img2img threading is covered too.
 #[cfg(any(
     target_os = "macos",
@@ -14514,23 +15685,23 @@ fn krea_imported_conditioning_threads_the_img2img_reference() {
         "plain txt2img carries no conditioning"
     );
 
-    // Manifest→worker seam: the `ui.img2img` flag `apply_family_studio_surface_defaults` stamps on an
-    // imported krea_2 entry (Part B) is what `model_supports_img2img` reads to engage the img2img arm.
-    let img2img_entry = request(json!({
+    // API→worker seam: a LAN client need not echo the UI hint for the shape the route advertises.
+    let img2img_entry_without_ui_hint = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
-        "modelManifestEntry": { "family": "krea_2", "ui": { "img2img": true } }
+        "referenceAssetId": "asset-1",
+        "modelManifestEntry": { "family": "krea_2" }
     }));
     assert!(
-        model_supports_img2img(&img2img_entry),
-        "the stamped ui.img2img flag engages the img2img resolve"
+        krea_imported_img2img_requested(&img2img_entry_without_ui_hint),
+        "referenceAssetId engages imported Krea img2img without ui.img2img"
     );
-    let no_flag = request(json!({
+    let plain = request(json!({
         "projectId": "p", "model": "kreamania_variant5",
         "modelManifestEntry": { "family": "krea_2" }
     }));
     assert!(
-        !model_supports_img2img(&no_flag),
-        "without ui.img2img the lane stays plain txt2img"
+        !krea_imported_img2img_requested(&plain),
+        "without a reference the lane stays plain txt2img"
     );
 }
 
@@ -15136,7 +16307,10 @@ fn krea_imported_control_mlx_gpu_smoke() {
 /// Settings + a complete fine-tuned Mage transformer component dir under the app data root
 /// (sc-15036): the `config.json` + `diffusion_pytorch_model.safetensors` pair the trainer's
 /// `save_full_checkpoint` writes into `<data>/models/finetunes/<id>`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::PathBuf) {
     let checkpoint = dir
         .join("models")
@@ -15164,7 +16338,10 @@ fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::
 /// Discriminating on each of the four conditions independently: a builtin Mage id must keep its
 /// tiered-snapshot path, a wrong family is not this lane's job, and a TORN checkpoint (either
 /// component file missing) is refused here rather than failing deep inside the load.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
@@ -15185,7 +16362,7 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
     // A BUILTIN Mage id keeps loading from its own per-tier snapshot through the generic lane.
     assert!(
         mlx_model("mage_flow_base").is_some(),
-        "precondition: mage_flow_base is a builtin engine on macOS"
+        "precondition: mage_flow_base is a builtin native engine"
     );
     let builtin = request(json!({
         "projectId": "p", "model": "mage_flow_base",
@@ -15233,11 +16410,20 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
 /// else claims it).
 ///
 /// Discriminating: one entry, one flip of one field per case.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
     let dir = tempfile::tempdir().unwrap();
     let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let mut settings = settings;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        settings.backend_candle_enabled = true;
+    }
     let path_str = checkpoint.to_str().unwrap().to_owned();
     let job = |extra: serde_json::Value| {
         let mut value = json!({
@@ -15256,11 +16442,17 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
         mage_finetuned_available(&t2i, &settings),
         "plain txt2img is the shape this lane serves"
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(
         resolve_image_route(&t2i, &settings),
         Some(ImageRoute::MageFinetuned),
-        "the router must reach the fine-tuned lane — the id is in no MODEL_TABLE, so otherwise the \
-         job stubs"
+        "the MLX router must reach the fine-tuned lane"
+    );
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert_eq!(
+        resolve_candle_image_route(&t2i, &settings),
+        Some(CandleImageRoute::MageFinetuned),
+        "the Candle router must reach the fine-tuned lane"
     );
 
     for (label, extra) in [
@@ -15288,12 +16480,48 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
             !mage_finetuned_available(&shaped, &settings),
             "{label} must not be claimed by the fine-tuned lane — it would be silently dropped"
         );
+        #[cfg(target_os = "macos")]
         assert_ne!(
             resolve_image_route(&shaped, &settings),
             Some(ImageRoute::MageFinetuned),
             "{label} must not route to the fine-tuned lane"
         );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert_ne!(
+            resolve_candle_image_route(&shaped, &settings),
+            Some(CandleImageRoute::MageFinetuned),
+            "{label} must not route to the Candle fine-tuned lane"
+        );
     }
+}
+
+/// The generated Mage base inherits the undistilled Base descriptor's true-CFG negative-prompt
+/// surface. Pin the actual per-image request builder so accepted LAN/API input cannot be recorded in
+/// asset provenance while disappearing before provider dispatch.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn mage_finetuned_generation_request_threads_negative_prompt() {
+    let cancel = CancelFlag::new();
+    let request = mage_finetuned_generation_request(
+        "portrait".to_owned(),
+        Some("blurry, watermark".to_owned()),
+        1024,
+        1024,
+        42,
+        28,
+        4.5,
+        gen_core::PreviewSink::default(),
+        &cancel,
+    );
+    assert_eq!(
+        request.negative_prompt.as_deref(),
+        Some("blurry, watermark")
+    );
+    assert_eq!(request.guidance, Some(4.5));
+    assert_eq!(request.seed, Some(42));
 }
 
 /// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint
@@ -15541,6 +16769,7 @@ fn sc_8253_8278_identity_angle_ab() {
                         strength: None,
                     }],
                     &PromptEnhance::default(),
+                    gen_core::PromptEnhancementSink::default(),
                     gen_core::PreviewSink::default(),
                     &cancel,
                     &mut |_| {},
@@ -15706,12 +16935,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "admit_conditioning_paths(",
         ),
         (
-            "ZimageIdentity",
-            "zimage_identity_candle.rs",
-            include_str!("zimage_identity_candle.rs"),
-            "admit_conditioning_paths(",
-        ),
-        (
             "SdxlIpAdapter",
             "sdxl_ipadapter.rs",
             include_str!("sdxl_ipadapter.rs"),
@@ -15773,6 +16996,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             include_str!("krea_control_candle.rs"),
             "admit_conditioning_paths(",
         ),
+        (
+            "KreaImportedControl",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+            "admit_conditioning_paths(",
+        ),
     ];
 
     // Routes that overlay NO second network, so the conditioning gate does not apply to them. Each is
@@ -15793,11 +17022,20 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "ZimageEdit",
         "MageEdit",
         "KreaEdit",
+        // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
+        // separately loaded conditioning network is overlaid. The route then uses the generic
+        // `generate_candle_stream` base-model admission gate.
+        "SenseNovaEdit",
+        // Kolors source edit lazily VAE-encodes the img2img init inside the registered base pipeline;
+        // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
+        // and reaches the generic `generate_candle_stream` base-model admission gate.
+        "KolorsEdit",
         // Krea sampling-regime lanes: the same base, a different schedule / phase list.
         "KreaTurboOnRaw",
         "KreaMultiPhase",
         // Imported / in-place external bases: a single user-supplied checkpoint.
         "KreaImported",
+        "MageFinetuned",
         "SdxlImported",
         "ZimageComfyui",
         "QwenImageComfyui",
@@ -15864,6 +17102,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "admit_candle_load_spec_floor(",
         ),
         (
+            "MageFinetuned",
+            "mage_finetuned.rs",
+            include_str!("mage_finetuned.rs"),
+            "admit_candle_load_spec_floor(",
+        ),
+        (
             "ZimageComfyui",
             "zimage_comfyui_candle.rs",
             include_str!("zimage_comfyui_candle.rs"),
@@ -15885,7 +17129,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "Bernini",
             "bernini.rs",
             include_str!("bernini.rs"),
-            "admit_candle_base(",
+            "admit_candle_base_floor_with_resident_overlay(",
         ),
     ];
     for (route, file, source, marker) in BASE_ADMITTED {
@@ -16150,12 +17394,80 @@ mod preview_stream_tests {
         );
     }
 
+    #[test]
+    fn scored_reported_driver_keeps_prompt_and_likeness_facts_isolated_per_image() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
+        let items = [
+            ("a fox", "a red fox in snow", 11_i64, 0.91_f64),
+            ("an owl", "a moonlit owl in flight", 12_i64, 0.73_f64),
+        ];
+        drive_gen_items_scored_reported(
+            tx,
+            items,
+            |_index, (original, effective, seed, likeness), _preview, reports, _progress| {
+                reports
+                    .for_prompt(original)
+                    .emit(gen_core::PromptEnhancementReport::enhanced(
+                        original.to_owned(),
+                        effective.to_owned(),
+                    ));
+                let face_likeness = json!({ "score": likeness })
+                    .as_object()
+                    .expect("likeness fact object")
+                    .clone();
+                Ok(Some((seed, 1, 1, vec![0_u8; 3], Some(face_likeness))))
+            },
+        )
+        .expect("weights-free scored edit carrier completes");
+
+        for (expected_index, (original, effective, seed, likeness)) in items.into_iter().enumerate()
+        {
+            match rx.try_recv().expect("prompt report precedes its image") {
+                GenEvent::PromptEnhancement {
+                    index,
+                    expected_prompt,
+                    report,
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(expected_prompt, original);
+                    assert_eq!(
+                        prompt_enhancement_fact(report, &expected_prompt).unwrap()
+                            ["effectivePrompt"],
+                        effective
+                    );
+                }
+                other => panic!(
+                    "expected a prompt-enhancement event, got {}",
+                    gen_event_name(&other)
+                ),
+            }
+            match rx
+                .try_recv()
+                .expect("scored image follows its prompt report")
+            {
+                GenEvent::Image {
+                    index,
+                    seed: actual_seed,
+                    face_likeness,
+                    ..
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(actual_seed, seed);
+                    assert_eq!(face_likeness.unwrap()["score"], likeness);
+                }
+                other => panic!("expected a scored image, got {}", gen_event_name(&other)),
+            }
+        }
+        assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
+    }
+
     fn gen_event_name(event: &GenEvent) -> &'static str {
         match event {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
             GenEvent::Preview { .. } => "Preview",
+            GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::Image { .. } => "Image",
         }
     }

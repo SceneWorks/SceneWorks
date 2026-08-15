@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -565,7 +566,6 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
         "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
         "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
         "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/zimage_identity_candle.rs": "default_repo_for(&request.model)",
         "sensenova_jobs.rs": "default_repo_for(&request.model)",
         "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
     }
@@ -701,6 +701,29 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_sensenova_models_do_not_advertise_lora_compatibility():
+    """sc-18476: SenseNova has no diffusion-LoRA merge path, so advertise none."""
+    manifest = _load_builtin_models_manifest()
+    sensenova = {
+        model["id"]: model
+        for model in manifest["models"]
+        if model.get("family") == "sensenova-u1"
+    }
+    assert set(sensenova) == {
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
+    }
+    for model_id, model in sensenova.items():
+        assert "loraCompatibility" not in model, (
+            f"{model_id} must omit the LoRA advertisement; the SenseNova worker accepts no "
+            "user adapters"
+        )
+
+
 def test_schema_accepts_mlx_sequential_offload_capability():
     """SC-18377: MLX staged-residency declarations are part of the authoring contract."""
     schema = _load_schema(SCHEMA_PATH)
@@ -809,12 +832,13 @@ def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
     assert set(static_overlays) == set(contract_overlays) == expected
 
 
-def test_measured_memory_rows_declare_their_1024_square_geometry():
+def test_measured_memory_rows_declare_their_workload_geometry():
     """sc-16020: geometry is data, not a prose assumption.
 
     The counts were derived from the live catalog when the field landed. Update them when
-    adding/removing measured rows; the universal assertions are what prevent a new row from
-    silently escaping the normalization contract.
+    adding/removing rows; the universal assertions are what prevent a new row from silently
+    escaping the normalization contract or an unmeasured tier gate from presenting itself as a
+    calibrated measurement.
     """
     manifest = _load_builtin_models_manifest()
     mlx_rows = []
@@ -829,9 +853,70 @@ def test_measured_memory_rows_declare_their_1024_square_geometry():
             candle_rows.append((model["id"], candle))
 
     assert len(mlx_rows) == 16
-    assert len(candle_rows) == 35
+    assert len(candle_rows) == 36
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
-    assert all(row[1].get("vramMeasuredPixels") == 1024 * 1024 for row in candle_rows), candle_rows
+    assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
+
+    measured_rows = [row for row in candle_rows if row[1]["measured"]]
+    unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
+    assert len(measured_rows) == 24
+    assert len(unmeasured_rows) == 12
+
+    measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
+    assert all(
+        row[1].get("vramMeasuredPixels") == 1024 * 1024
+        for row in measured_image_rows
+    ), measured_image_rows
+    scail = [row for row in measured_rows if row[0] == "scail2_14b"]
+    assert len(scail) == 1
+    assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
+
+    # Unmeasured rows still declare the geometry of their estimate or conservative gate, but they
+    # do not enter the calibrated 1024² set. FLUX.2-dev is deliberately the sole 256² gate: its
+    # durable runs establish a safe high-water, not a 1024² calibration.
+    non_calibration_geometry = [
+        (model_id, candle["vramMeasuredPixels"])
+        for model_id, candle in unmeasured_rows
+        if candle["vramMeasuredPixels"] != 1024 * 1024
+    ]
+    assert non_calibration_geometry == [("flux2_dev", 256 * 256)]
+    flux2_dev = next(
+        candle for model_id, candle in unmeasured_rows if model_id == "flux2_dev"
+    )
+    assert flux2_dev["measured"] is False
+    assert flux2_dev["vramGbByTier"] == {"q4": 42.7, "q8": 70.8}
+
+
+def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
+    """sc-18473: the installable shared package and its fail-closed gate share one exact row."""
+    manifest = _load_builtin_models_manifest()
+    scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
+    candle = scail["candle"]
+    assert candle == {
+        "minMemoryGb": 105,
+        "vramGbByTier": {"bf16": 102.115},
+        "vramMeasuredPixels": 832 * 480,
+        "measured": True,
+    }
+    assert candle["minMemoryGb"] == math.ceil(
+        candle["vramGbByTier"]["bf16"] + 2
+    )
+    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+
+    raw = MANIFEST_PATH.read_text(encoding="utf-8")
+    scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(
+        "// Krea Realtime 14B", 1
+    )[0]
+    for exact_evidence in [
+        "3174984b20334bb029170e367be234de0b3f8753",
+        "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+        "31455292141",
+        "93667700921",
+        "9089420126",
+        "de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9",
+        "overallPeakGb=102.115",
+    ]:
+        assert exact_evidence in scail_section
 
 
 def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
@@ -870,6 +955,12 @@ def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
     assert any(
         error.validator == "required"
         and "vramMeasuredPixels" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["candle"]
+        for error in candle_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]
+    assert any(
+        error.validator == "required"
+        and "measured" in error.validator_value
         and list(error.absolute_path)[-1:] == ["candle"]
         for error in candle_errors
     ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]

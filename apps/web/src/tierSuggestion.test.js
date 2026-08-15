@@ -16,7 +16,7 @@ import {
   hostGbForPeakGb,
   installedFloorHostGb,
   installedTierPeakGb,
-  laneEvidenceEstimated,
+  laneEvidenceUncalibrated,
   suggestTier,
   tierFits,
   variantFootprintBytes,
@@ -625,9 +625,9 @@ describe("per-tier memory floor: the blanket is a FLOOR, not a ceiling", () => {
   });
 });
 
-describe("per-tier memory floor: an ESTIMATED candle lane is floored at its blanket", () => {
-  // MAJOR 4. `candle.measured === false` means the per-tier rows AND the blanket are both estimates
-  // (the flag covers them together), so neither may lower the other.
+describe("per-tier memory floor: an UNCALIBRATED candle lane is floored at its blanket", () => {
+  // MAJOR 4. `candle.measured === false` marks the per-tier rows and blanket uncalibrated. They may be
+  // estimates or conservative functional-minimum high-waters, so neither may lower the other.
   function lensTurbo(measured) {
     return {
       candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42, bf16: 52 }, measured },
@@ -636,15 +636,15 @@ describe("per-tier memory floor: an ESTIMATED candle lane is floored at its blan
     };
   }
 
-  it("takes the max when the lane says ESTIMATED", () => {
-    expect(laneEvidenceEstimated(lensTurbo(false), "candle")).toBe(true);
+  it("takes the max when the lane says UNCALIBRATED", () => {
+    expect(laneEvidenceUncalibrated(lensTurbo(false), "candle")).toBe(true);
     // ceil(37.3 + 2) = 40, floored at the curated 44.
     expect(installedFloorHostGb(lensTurbo(false), { backend: "candle" })).toBe(44);
     expect(declaredFloorHostGb(lensTurbo(false), { backend: "candle" })).toBe(44);
   });
 
   it("takes the per-tier figure alone when the lane says MEASURED", () => {
-    expect(laneEvidenceEstimated(lensTurbo(true), "candle")).toBe(false);
+    expect(laneEvidenceUncalibrated(lensTurbo(true), "candle")).toBe(false);
     expect(installedFloorHostGb(lensTurbo(true), { backend: "candle" })).toBe(40);
   });
 
@@ -659,7 +659,7 @@ describe("per-tier memory floor: an ESTIMATED candle lane is floored at its blan
         { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 32749818036 } },
       ],
     };
-    expect(laneEvidenceEstimated(model, "mlx")).toBe(false);
+    expect(laneEvidenceUncalibrated(model, "mlx")).toBe(false);
     // ceil(30.50 / 0.9) = 34, NOT floored at the MLX blanket 60.
     expect(installedFloorHostGb(model, { backend: "mlx" })).toBe(34);
   });
