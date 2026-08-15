@@ -13360,9 +13360,20 @@
         // as the model card body; it is `ui.description`'s ONLY reader). Four claims here are
         // load-bearing rather than descriptive, and each is checkable:
         //   1. NOT the hosted product — `H3-Context-IR` and `H3-Regenerate-2K` are unreleased, so
-        //      prompt adherence differs from the Hailuo API and 2K is unreachable. The engine
-        //      enforces `max_size: 1344` per edge and `CANVAS_MAX_PIXELS`, so there is no 2K path
-        //      to be coy about; see inference `docs/reference/minimax-h3-withheld-upstream-components.md`.
+        //      prompt adherence differs from the Hailuo API and 2K is unreachable. The load-bearing
+        //      enforcement for THAT claim is `CANVAS_MAX_PIXELS` (1,032,192), the AREA budget: a 2K
+        //      frame is >2x it on area alone, so no per-edge value can make 2K reachable and there
+        //      is no 2K path to be coy about. See inference
+        //      `docs/reference/minimax-h3-withheld-upstream-components.md`.
+        //
+        //      ⚠️ DO NOT cite `max_size: 1344` as the 2K argument, which this comment previously
+        //      did — it contradicted this entry's own `limits.resolutions`. The per-edge cap is a
+        //      SEPARATE, independently-applied bound (see the `resolutions` note above), and it is
+        //      1344 today while the advertised 21:9 pair is 1536 px on the long edge. So
+        //      `1536x672` / `672x1536` are ADVERTISED BUT NOT YET RENDERABLE: the area passes and
+        //      the edge check refuses. sc-17152 raises the cap to 1536 and is the story that makes
+        //      those two buckets true; the prompt guide's *Sizes* section carries the same caveat
+        //      for the user. Every other advertised bucket is reachable now.
         //   2. Dense attention, because the sparse-attention inference path is unreleased — which
         //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
         //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`
@@ -13375,7 +13386,7 @@
         //      not render at all.
         // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
         // in the prompt guide, which is the only place a user would copy that syntax from.
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. macOS native MLX only, and it needs a large-memory Mac.",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It RENDERS on macOS only, through the native MLX lane, and needs a large-memory Mac; the weights themselves may be downloadable on other platforms.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
         "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
         "promptGuide": {

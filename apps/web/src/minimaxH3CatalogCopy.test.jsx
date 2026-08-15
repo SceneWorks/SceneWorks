@@ -24,9 +24,16 @@
 //
 // SET-DERIVED, not id-listed: every assertion below is driven off `family === "minimax-h3"` in the
 // shipped manifest, and the prompt-guide path is read off `ui.promptGuide.path` rather than typed.
-// A third partition added to the family is covered the day it lands. A hard-coded pair would let it
-// ship with no disclosure while this file stayed green — which is precisely the failure it exists
-// to catch.
+// A hard-coded pair would let a new partition ship with no disclosure while this file stayed green —
+// which is precisely the failure it exists to catch.
+//
+// What that does NOT mean, and what this comment used to claim: a third partition is *not* "covered
+// the day it lands". `covers both shipped partitions of the family` asserts the id set EXACTLY
+// (`toEqual(["minimax_h3", "minimax_h3_ref"])`), so a third partition REDS that test on arrival even
+// if its copy is perfect. That is deliberate — it is the anti-vacuity guard, and a family rename
+// would otherwise empty every loop below and turn the whole file green while disclosing nothing —
+// but it means a third partition is BLOCKED until someone widens that list by hand. The set-derived
+// loops are what make widening it a one-line change instead of an audit.
 
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -89,14 +96,36 @@ const DURATION_HINT_CLAIMS = [
 // The drift this actually guards: `limits.hardMinDuration` / `hardMaxDuration` move (a lattice
 // correction, a new clamp) and the prose keeps quoting the old window. Derived from the entry, so
 // changing a bound without changing the copy is red.
+//
+// ⚠️ THE TWO `includes` CHECKS ARE NOT SUFFICIENT ON THEIR OWN and were once claimed to be. They are
+// independent substring tests with no adjacency, and every hint quotes BOTH figures a second time in
+// its cost sentence ("5.17s at 576x320 is ~14 minutes", "the whole 14.38s range"). Delete the range
+// clause outright and both substrings survive on the leftovers, so the assertion passes over copy
+// that no longer states a range at all — an assertion that cannot fail its own mutation.
+//
+// `RANGE` is the anchor that closes that: it requires the two bounds ADJACENT, separated only by a
+// range connector, which the cost sentence's leftovers can never satisfy. Still derived from
+// `limits` rather than typed, so moving a bound without moving the copy is red for the same reason
+// the substring checks were meant to be. The connector set is deliberately small but covers both
+// shipped spellings — the manifest writes "5.17s to 14.38s", the `fallbackModels` mirror condenses
+// it to "5.17s-14.38s".
 function hintQuotesTheDeclaredBounds(hint, entry, label) {
+  const quoted = {};
   for (const [name, seconds] of [
     ["hardMinDuration", entry.limits?.hardMinDuration],
     ["hardMaxDuration", entry.limits?.hardMaxDuration],
   ]) {
     expect(Number.isFinite(seconds), `${label} ${name} must be declared`).toBe(true);
-    expect(hint.includes(`${seconds.toFixed(2)}s`), `${label} must quote ${name} (${seconds.toFixed(2)}s)`).toBe(true);
+    quoted[name] = seconds.toFixed(2);
+    expect(hint.includes(`${quoted[name]}s`), `${label} must quote ${name} (${quoted[name]}s)`).toBe(true);
   }
+  const escape = (value) => value.replace(/\./g, "\\.");
+  const CONNECTOR = "\\s*(?:to|-|\u2013|\u2014)\\s*"; // "to", hyphen, en dash, em dash
+  const range = new RegExp(`${escape(quoted.hardMinDuration)}s${CONNECTOR}${escape(quoted.hardMaxDuration)}s`);
+  expect(
+    range.test(hint),
+    `${label} must state the two bounds as an adjacent RANGE (${quoted.hardMinDuration}s to ${quoted.hardMaxDuration}s), not merely mention both figures somewhere`,
+  ).toBe(true);
 }
 
 function assertClaims(text, claims, label) {
@@ -235,10 +264,21 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     // a user off to do it: `H3-Regenerate-2K` was an IN-CONTEXT upsample the DiT performed, and a
     // post-hoc upscale of a 1344px render is a different artifact, so telling someone to "run an
     // upscaler afterwards" quietly re-advertises the capability the paragraph just withdrew.
-    expect(
-      /\bupscal\w*\b[^.]{0,40}\b(afterwards|later|after the render)\b/i.test(guide),
-      "guide must not route the withheld 2K through a post-hoc upscale",
-    ).toBe(false);
+    //
+    // Scoped to a SENTENCE and order-insensitive, because the previous `[^.]{0,40}` form was three
+    // separate one-character evasions away from useless: "afterward" (no trailing s) missed the
+    // alternation, any phrasing longer than 40 characters ran past the window, and "then upscale
+    // it" put the time word FIRST so the upscale verb never led. None of those are hypothetical
+    // rewrites — they are the three most natural ways to write the sentence this must catch.
+    const UPSCALE = /\bupscal(?:e|es|ed|ing|er|ers)?\b/i;
+    const POST_HOC =
+      /\b(?:afterwards?|later|then|subsequently|post[- ]?hoc|second pass|after the render|after the fact|once (?:it|the clip) is (?:done|rendered))\b/i;
+    for (const sentence of guide.split(/(?<=[.!?])[\s\n]+/)) {
+      expect(
+        UPSCALE.test(sentence) && POST_HOC.test(sentence),
+        `guide must not route the withheld 2K through a post-hoc upscale — found both in: ${sentence.trim().slice(0, 160)}`,
+      ).toBe(false);
+    }
     // What it must say instead: the ceiling is enforced, so 1344 is the number to plan against.
     expect(/refused rather than refitted/.test(guide), "guide must say an over-size request is refused").toBe(true);
   });
