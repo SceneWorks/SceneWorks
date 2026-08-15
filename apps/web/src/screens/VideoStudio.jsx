@@ -95,6 +95,7 @@ import {
   schedulerDefaultFromModel,
   schedulerOptionsFromModel,
   stepsDefaultFromModel,
+  stepsMenuFromModel,
 } from "../samplerOptions.js";
 import {
   formatDurationOption,
@@ -103,6 +104,15 @@ import {
   referenceLimitError,
 } from "../videoModelLimits.js";
 import { ModelAttribution } from "../components/ModelAttribution.jsx";
+
+// "8" / "4 or 8" / "4, 8, or 12" — the same phrasing `humanized_number_menu` gives the enqueue
+// gate's own rejection (crates/sceneworks-core/src/video_request.rs, sc-19502), so the Steps
+// picker's tooltip states the legal set the way a 400 from that gate would.
+function humanizedNumberMenu(menu) {
+  if (menu.length <= 1) return String(menu[0] ?? "");
+  if (menu.length === 2) return `${menu[0]} or ${menu[1]}`;
+  return `${menu.slice(0, -1).join(", ")}, or ${menu[menu.length - 1]}`;
+}
 
 const ltxVideoModelId = "ltx_2_3";
 const legacyDefaultTextEncoderId = "default";
@@ -425,6 +435,38 @@ export function VideoStudio() {
   // for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
+  // `limits.steps` — the exact set of step counts the model can render (sc-19502). Distilled models
+  // bake their sigma waypoints into training: LTX-2.3 runs 8 and nothing else, and BOTH backends now
+  // refuse anything off the menu, so an unpinned Steps box here would let the user type a number the
+  // enqueue gate 400s on.
+  //
+  // PINNED (disabled + the value shown), not hidden. The lightning precedent above disables because
+  // the inertness is transient, and `supportsGuidance` hides because the axis is missing entirely.
+  // This is a third case: the axis is real and the value is worth seeing — the user should know the
+  // render is 8 steps — but it is not theirs to move. Hiding it would answer "why is there no Steps
+  // control?" with nothing, and leaving it editable would be the silently-ignored knob this story
+  // exists to remove.
+  const stepsMenu = stepsMenuFromModel(selectedModel);
+  const stepsPinnedValue = stepsMenu?.length === 1 ? stepsMenu[0] : null;
+  const stepsPinned = stepsPinnedValue !== null;
+  // A menu with MORE than one entry is a CHOICE, not a pin — but the gate refuses off-menu counts
+  // exactly as hard there, so a free-text box would be the same "UI looser than the gate" desync in
+  // a different shape. Render the declared set as a picker, the way `fpsOptions` renders `limits.fps`
+  // below. No shipped model declares a multi-entry menu today, so this path is latent; it exists
+  // because every OTHER reader on this seam is already set-shaped (`allowed_steps` and
+  // `humanized_number_menu` in crates/sceneworks-core/src/video_request.rs, `stepsMenuFromModel`,
+  // `checkInMenu` in PresetManagerScreen, gen-core's `supported_steps`) and leaving this one
+  // singleton-only would make the studio the single seam that silently reopens the defect.
+  const stepsChoice = stepsMenu !== null && stepsMenu.length > 1 ? stepsMenu : null;
+  // Whether the override currently held is something the selected model can actually render. A
+  // number typed against a PREVIOUS model survives the switch (the same staleness `stepsPinned`
+  // suppresses), and a `<select>` whose `value` matches no `<option>` displays its first one — which
+  // would quietly assert `limits.steps[0]` is the default. It is not; `defaults.steps` is, and the
+  // manifest fixed-point invariant (`shipped_manifest_step_limits_are_what_core_reads`) guarantees
+  // that default is itself on the menu. So an off-menu override falls back to the empty
+  // "model default" option and, below, is kept out of the payload rather than 400ing.
+  const stepsOffMenu =
+    stepsChoice !== null && stepsOverride !== "" && !stepsChoice.includes(Number(stepsOverride));
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -1415,7 +1457,20 @@ export function VideoStudio() {
           // the 4-step/CFG-off recipe, so we suppress the manual steps/guidance overrides below to
           // keep the payload consistent with the recipe the UI is reflecting.
           ...(showLightning ? { lightning } : {}),
-          ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+          // `stepsPinned` suppresses the override for the same reason `lightningActive` does: the
+          // count is not the caller's to set (sc-19502). Omitting `steps` entirely — rather than
+          // sending the pinned value — is what "use the baked schedule" means to the engine, and it
+          // also means a stale number left in the box by a previously-selected model can never leak
+          // into the payload and 400.
+          //
+          // `stepsOffMenu` is the multi-entry half of the same suppression: the picker below shows
+          // such a stale value as "model default", so emitting it anyway would send a count the UI
+          // is not displaying AND that the enqueue gate refuses.
+          ...(!lightningActive &&
+          !stepsPinned &&
+          !stepsOffMenu &&
+          stepsOverride !== "" &&
+          Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
             : {}),
           ...(supportsGuidance &&
@@ -2218,27 +2273,68 @@ export function VideoStudio() {
               ) : null}
               <label>
                 Steps
-                {/* The floor is the MODEL's, not a blanket 1 (sc-19426 / sc-17161).
-                    MiniMax-H3's scheduler grid is `linspace(1, 0, steps)` with the terminal 0 as a
-                    grid point, so a 1-step request has nothing between its ends and is REFUSED
-                    rather than raised — the form has to say so instead of letting it be typed and
-                    then 400'd at enqueue. */}
-                <input
-                  min={String(minSteps)}
-                  max="80"
-                  disabled={lightningActive}
-                  onChange={(event) => setStepsOverride(event.target.value)}
-                  placeholder={lightningActive ? "4 (Lightning)" : String(stepsDefaultFromModel(selectedModel) ?? "")}
-                  title={
-                    lightningActive
-                      ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
-                      : minSteps > 1
-                        ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
-                        : undefined
-                  }
-                  type="number"
-                  value={lightningActive ? "" : stepsOverride}
-                />
+                {stepsChoice ? (
+                  <select
+                    disabled={lightningActive}
+                    onChange={(event) => setStepsOverride(event.target.value)}
+                    title={
+                      lightningActive
+                        ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                        : `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it renders at ${humanizedNumberMenu(stepsChoice)} steps only.`
+                    }
+                    value={lightningActive || stepsOffMenu ? "" : stepsOverride}
+                  >
+                    {/* The cleared state, exactly as for the free-text box above and as the panel's
+                        own "cleared values → model default" hint promises: no `advanced.steps` is
+                        sent and the engine runs `defaults.steps`. It is deliberately NOT
+                        `stepsChoice[0]` — `limits.steps[0]` is not a default — and it is safe
+                        because the manifest invariant pins `defaults.steps` onto the menu. */}
+                    <option value="">
+                      {stepsDefaultFromModel(selectedModel) == null
+                        ? "Model default"
+                        : `${stepsDefaultFromModel(selectedModel)} (model default)`}
+                    </option>
+                    {stepsChoice.map((value) => (
+                      <option key={value} value={String(value)}>
+                        {value}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  /* The `min` floor is the MODEL's, not a blanket 1 (sc-19426 / sc-17161).
+                     MiniMax-H3's scheduler grid is `linspace(1, 0, steps)` with the terminal 0 as a
+                     grid point, so a 1-step request has nothing between its ends and is REFUSED
+                     rather than raised — the form has to say so instead of letting it be typed and
+                     then 400'd at enqueue. `hardMinSteps` and `limits.steps` are INDEPENDENT axes
+                     (sc-19502): the floor bounds an open range, the menu enumerates a closed set,
+                     and this branch is the one a model reaches when it declares no menu — so the
+                     floor still has to be honoured here even though the pinned/menu cases above
+                     express their own, tighter constraint. */
+                  <input
+                    min={String(minSteps)}
+                    max="80"
+                    disabled={lightningActive || stepsPinned}
+                    onChange={(event) => setStepsOverride(event.target.value)}
+                    placeholder={
+                      lightningActive
+                        ? "4 (Lightning)"
+                        : stepsPinned
+                          ? `${stepsPinnedValue} (fixed schedule)`
+                          : String(stepsDefaultFromModel(selectedModel) ?? "")
+                    }
+                    title={
+                      lightningActive
+                        ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                        : stepsPinned
+                          ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
+                          : minSteps > 1
+                            ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
+                            : undefined
+                    }
+                    type="number"
+                    value={lightningActive || stepsPinned ? "" : stepsOverride}
+                  />
+                )}
               </label>
               {supportsGuidance ? (
                 <label>
