@@ -5376,6 +5376,112 @@ async fn license_acknowledgment_model_download_proceeds_once_asserted() {
     assert_eq!(job["payload"]["repo"], "owner/plain");
 }
 
+/// What the `licenseAcknowledged` STAMP on a queued payload means (sc-17227 review MINOR 3).
+///
+/// The stamp is keyed on `model_requires_license_acknowledgment(model) || license_acknowledged` —
+/// the caller's own assertion is enough on its own, so it is written even when NO gate fired. That
+/// is deliberate and load-bearing: the repo gate catches an entry with no flag whose download names
+/// a repo a flagged entry declares, and a flag-keyed stamp would write nothing for exactly that
+/// shape, so the RETRY of an authorized download would then be refused by the repo gate reading its
+/// own stored `repo`.
+///
+/// The cost of that choice is that the stamp records "the caller asserted this", not "a gate fired
+/// and was satisfied". Pinned here on the case that isolates the difference — an entry the gate has
+/// no interest in at all, downloaded with the assertion volunteered — so the stamp's meaning cannot
+/// drift into being read as evidence of a gate.
+#[tokio::test]
+async fn license_acknowledgment_stamp_records_the_assertion_even_when_no_gate_fired() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Non-vacuity, derived from the gate's OWN input — the manifest the route reads — rather than
+    // asserted about the fixture: the entry under test must neither declare the flag (the id gate)
+    // nor name a repo any FLAGGED entry declares (the repo gate). If either became true the "no
+    // gate fired" premise would silently evaporate and the assertion below would prove nothing.
+    // Read from the manifest and not `GET /api/v1/models`, because the catalog DTO does not expose
+    // `downloads` at all and the repo gate is keyed on exactly those repos.
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(config_dir.join("builtin.models.jsonc")).expect("manifest reads"),
+    )
+    .expect("manifest parses");
+    let models = manifest["models"].as_array().expect("models is an array");
+    let repos = |entry: &Value| -> Vec<String> {
+        entry["downloads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|download| download["repo"].as_str())
+            .map(str::to_owned)
+            .collect()
+    };
+    let plain = models
+        .iter()
+        .find(|item| item["id"] == "plain_model")
+        .expect("the unrestricted fixture entry is in the manifest");
+    assert!(
+        plain.get("requiresLicenseAcknowledgment").is_none(),
+        "the unrestricted entry must NOT declare the flag, or the id gate fires and this test no \
+         longer isolates the assertion-only path: {plain:?}",
+    );
+    let plain_repos = repos(plain);
+    assert!(
+        !plain_repos.is_empty(),
+        "the fixture must actually fetch something: {plain:?}",
+    );
+    for other in models {
+        if other["id"] == plain["id"]
+            || other.get("requiresLicenseAcknowledgment") != Some(&Value::Bool(true))
+        {
+            continue;
+        }
+        for repo in repos(other) {
+            assert!(
+                !plain_repos.contains(&repo),
+                "the unrestricted entry must not share a repo with a flagged entry, or the REPO \
+                 gate fires and this is no longer the no-gate case: {repo}",
+            );
+        }
+    }
+
+    // Volunteered by the caller on a download nothing gates.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(
+        job["payload"][crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY],
+        Value::Bool(true),
+        "the stamp carries the caller's assertion verbatim, gate or no gate: {job:?}",
+    );
+
+    // And the control that makes the assertion above non-trivial: the SAME entry, the SAME route,
+    // without the assertion, must carry no stamp at all. A stamp that appeared unconditionally
+    // would satisfy the assertion above while meaning nothing.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert!(
+        job["payload"]
+            .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .is_none(),
+        "an unrestricted download with no assertion must not be stamped: {job:?}",
+    );
+}
+
 /// The typed route's gate was MODEL-ID-keyed while every other door is REPO-keyed (sc-17227), so
 /// the two doors disagreed about the same weights: `POST /api/v1/models/shared_repo_model/download`
 /// fetched `MiniMaxAI/MiniMax-H3` with no acknowledgment, while `POST /api/v1/jobs` naming that

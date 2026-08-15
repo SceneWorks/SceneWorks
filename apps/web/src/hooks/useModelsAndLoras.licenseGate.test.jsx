@@ -205,8 +205,14 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
 // gates on the repo the catalog row resolves to, so a catalog LoRA whose `source.repo` is a
 // restricted repo is refused server-side exactly as a model download is. This hook is the only path
 // every LoRA-download surface takes (the Models screen, the Simple UI's model manager, the studio
-// LoRA pickers' Update buttons, the editor's on-demand fetch), so it is where the gate binds — and
-// without it the refusal is a bare 403 with no checkbox anywhere in the product to clear it.
+// LoRA pickers' Update buttons, the editor's on-demand fetch, and the dropped-workflow panel's
+// missing-requirement install), so it is where the gate binds — and without it the refusal is a bare
+// 403 with no checkbox anywhere in the product to clear it.
+//
+// Binding here is necessary but not sufficient: the gate reads the row it is HANDED, so a caller
+// that hands it an `{ id }` stub disables it just as surely as no gate at all. The dropped-workflow
+// panel did exactly that until sc-17227 review MAJOR 1; `useWorkflowDrop.test.jsx` pins that caller
+// resolving both kinds of row to their real catalog entry first.
 //
 // A LoRA row cannot declare the requirement itself: the server stamps `licenseAcknowledgmentModelId`
 // / `…ModelName` onto the row from the UNFILTERED model manifest, naming the model whose card carries

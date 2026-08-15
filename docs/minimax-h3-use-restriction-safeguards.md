@@ -151,6 +151,33 @@ over a set of ids **derived** from the flag rather than listed, and
 `::test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself` keeps the shipped catalog
 free of the entry-without-the-flag shape.
 
+Two further audits close the shapes the derived-from-the-flag test cannot see, because it starts
+from the entries that already carry the flag:
+
+* `::test_every_license_acknowledgment_entry_declares_the_credential_free_shape` pins the
+  *distinction* `requiresLicenseAcknowledgment` was introduced for — an entry carrying it without
+  `gated` must declare no credential host, because there is no token to add and no access to
+  request. Coupling the two flags again would quietly restore the pre-sc-17227 behaviour in which
+  a licence gate implied a credential gate.
+* `::test_every_builtin_lora_naming_a_license_gated_repo_has_a_reachable_remedy` audits the LoRA
+  side of the catalog: a LoRA whose `source.repo` is a repo some `requiresLicenseAcknowledgment`
+  model declares is refused by `/loras/:id/download`, and a LoRA row carries no licence UI of its
+  own, so the refusal is only clearable if the gating model is itself present and acceptable in the
+  catalog. Without this the gate would be satisfiable in principle and unclearable in practice.
+
+The client side of the LoRA gate is `createLoraDownloadJob`
+(`apps/web/src/hooks/useModelsAndLoras.js`), which every LoRA-download surface funnels through. It
+cannot re-derive repo → gating model itself: the model catalog the client holds is filtered to the
+running OS, so a re-derivation would come up empty on a host where the gating model's rows were
+stripped and would drop the gate on exactly the hosts where it still binds. Instead the server
+stamps the answer onto each row from the **unfiltered** manifest —
+`annotate_license_acknowledgment_sources` (`apps/rust-api/src/models.rs`), which writes
+`licenseAcknowledgmentModelId` / `…ModelName` — and the client reads the stamp
+(`licenseAcknowledgmentSource`, `apps/web/src/licenseAcknowledgment.js`). Because the gate reads the
+row it is handed, a caller that hands it an `{ id }` stub disables it; both kinds of row are
+therefore resolved to their real catalog entry before the install starts, pinned by
+`apps/web/src/hooks/useWorkflowDrop.test.jsx`.
+
 ### S2 — The user is told which restrictions apply, in the gate itself (§V.2 notification)
 
 §V.2 requires notifying each user *that the restrictions apply*, which a bare "accept the license"
