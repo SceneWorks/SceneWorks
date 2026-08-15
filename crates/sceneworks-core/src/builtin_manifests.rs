@@ -1229,6 +1229,63 @@ mod tests {
         }
     }
 
+    /// sc-19563 — **every MiniMax-H3 turbo entry declares the ONE partition it is distilled for**,
+    /// and the ref2v one is the odd one out.
+    ///
+    /// This reads the embedded manifest, so it is the guard on the declaration itself; the gate that
+    /// reads it lives in `apps/rust-api/src/loras.rs::validate_lora_specs_for_model` and is proved
+    /// reachable from a real submission by
+    /// `jobs::cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job_route`.
+    ///
+    /// The `assert_ne!` at the end is the half that matters. Family membership cannot express this
+    /// pairing — both partitions are one architecture and both declare `family: minimax-h3` — so a
+    /// table that gave all four the same `modelIds` would be exactly as wrong as declaring none, and
+    /// would sail past a test that only checked the key was present.
+    #[test]
+    fn every_minimax_h3_turbo_lora_declares_its_partition() {
+        // The expected pairing, spelled out rather than derived from the filename, so a manifest
+        // edit that pointed the ref2v adapter at the fl2v partition reds here.
+        const EXPECTED: [(&str, &str); 4] = [
+            ("minimax_h3_turbo_4step_768p", "minimax_h3"),
+            ("minimax_h3_turbo_8step", "minimax_h3"),
+            ("minimax_h3_turbo_4step_v01", "minimax_h3"),
+            ("minimax_h3_ref2v_turbo_4step", "minimax_h3_ref"),
+        ];
+        let mut seen = 0;
+        for lora in builtin_loras() {
+            if lora["family"] != serde_json::json!("minimax-h3") {
+                continue;
+            }
+            let id = lora["id"].as_str().expect("a LoRA entry has an id");
+            let want = EXPECTED
+                .iter()
+                .find(|(known, _)| *known == id)
+                .unwrap_or_else(|| panic!("unlisted minimax-h3 LoRA {id}; add it to EXPECTED"))
+                .1;
+            let declared: Vec<&str> = lora["modelIds"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id} declares no `modelIds`. Both H3 partitions share \
+                         `family: minimax-h3`, so without this the adapter attaches to either and \
+                         folds CLEANLY at the wrong quality — a mismatch, not a failure (sc-19563)."
+                    )
+                })
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            assert_eq!(declared, vec![want], "{id} names the wrong partition");
+            seen += 1;
+        }
+        assert_eq!(seen, EXPECTED.len(), "every listed entry must be present");
+        // The two partitions really are addressed differently — a uniform table would be as wrong
+        // as no table at all, and would pass a mere presence check.
+        assert_ne!(
+            EXPECTED[0].1, EXPECTED[3].1,
+            "the fl2v and ref2v adapters must name DIFFERENT partitions"
+        );
+    }
+
     #[test]
     fn no_minimax_h3_lora_declares_an_alpha() {
         // 🔴 sc-18724 / sc-18725. Alpha differs PER FILE inside this one repo — 128, 8, 8, and absent

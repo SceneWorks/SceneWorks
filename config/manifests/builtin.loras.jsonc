@@ -208,6 +208,7 @@
       "id": "minimax_h3_turbo_4step_768p",
       "name": "MiniMax-H3 Turbo (4-step, 768p)",
       "family": "minimax-h3",
+      "modelIds": ["minimax_h3"],
       "triggerWords": [],
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",
@@ -230,6 +231,7 @@
       "id": "minimax_h3_turbo_8step",
       "name": "MiniMax-H3 Turbo (8-step)",
       "family": "minimax-h3",
+      "modelIds": ["minimax_h3"],
       "triggerWords": [],
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",
@@ -254,6 +256,7 @@
       "id": "minimax_h3_turbo_4step_v01",
       "name": "MiniMax-H3 Turbo (4-step, v0.1)",
       "family": "minimax-h3",
+      "modelIds": ["minimax_h3"],
       "triggerWords": [],
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",
@@ -271,16 +274,19 @@
     },
     {
       // The Ref2VA variant — it distils the REFERENCE-conditioned path, so it pairs with the
-      // `minimax_h3_ref` catalog entry rather than the `minimax_h3` (t2va/fl2va) one. That pairing is
-      // NOT enforced today and this entry does not pretend otherwise: both partitions share
-      // `family: minimax-h3` (they are one DiT architecture, one geometry), the LoRA schema has no
-      // per-model-id field, and the API's base-model gate is hardcoded to `wan-video`. Cross-selecting
-      // an fl2v file onto Ref2VA (or this onto t2va) is shape-valid and folds cleanly — it is a
-      // quality mismatch, not a failure. Enforcing the pairing needs a new per-model-id gate on both
-      // the LoRA schema and `validate_lora_specs_for_model`; tracked on sc-19563 (epic 17137).
+      // `minimax_h3_ref` catalog entry rather than the `minimax_h3` (t2va/fl2va) one. sc-19563
+      // ENFORCES that pairing: the `modelIds` below is read by `validate_lora_specs_for_model`,
+      // which refuses this adapter on `minimax_h3` and the three fl2v ones on `minimax_h3_ref`.
+      //
+      // The enforcement lives on a declared key rather than in family detection because it CANNOT
+      // live there: both partitions are one DiT architecture with one geometry, so both declare
+      // `family: minimax-h3` and `detect_unique_key_family` correctly cannot separate them.
+      // Cross-selecting used to be shape-valid and fold cleanly — a quality mismatch, not a
+      // failure, which is exactly why nothing caught it.
       "id": "minimax_h3_ref2v_turbo_4step",
       "name": "MiniMax-H3 Ref2VA Turbo (4-step)",
       "family": "minimax-h3",
+      "modelIds": ["minimax_h3_ref"],
       "triggerWords": [],
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",

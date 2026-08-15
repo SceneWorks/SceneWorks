@@ -1485,12 +1485,42 @@ pub(crate) fn validate_lora_specs_for_model(
                 "LoRA {lora_id} is not compatible with model {model_id}"
             )));
         }
+        // ── Declared-partition gating (sc-19563), the FAMILY-AGNOSTIC arm ──────────────────────
+        //
+        // The gate below this one is hardcoded to `wan-video`. This one deliberately is not, and
+        // that is the whole point of the story: it fires on the LoRA's own `modelIds` declaration,
+        // whatever family it belongs to, so closing the next family's version of this gap is a
+        // manifest edit rather than a third hardcoded arm here.
+        //
+        // What it closes: `family` cannot express a partition. MiniMax-H3 publishes `minimax_h3`
+        // (t2va/fl2va) and `minimax_h3_ref` (ref2va) as ONE DiT architecture with ONE geometry, so
+        // both declare `family: minimax-h3` and family detection cannot separate them — correctly,
+        // because they really are the same architecture. But lightx2v distils the fl2v and ref2v
+        // turbo adapters for one partition each, and cross-selecting one folds CLEANLY: no shape
+        // error, no refusal, just a quality mismatch. That is what makes it easy to ship and hard
+        // to notice.
+        //
+        // Absent `modelIds` means family gating alone, so no existing entry is tightened.
+        let declared_model_ids = lora_model_ids(lora);
+        if !declared_model_ids.is_empty() && !declared_model_ids.iter().any(|id| id == model_id) {
+            return Err(ApiError::bad_request(format!(
+                "LoRA {lora_id} is declared for model {}, not {model_id}. These are separate \
+                 partitions of the same model family, so the adapter would attach and fold \
+                 cleanly at the wrong quality rather than fail — which is why the pairing is \
+                 enforced here rather than left to the family check.",
+                declared_model_ids.join(" or ")
+            )));
+        }
         // Base-model gating: for families where a matching family is insufficient
         // (Wan 5B vs 14B both declare `wan-video` but have incompatible
         // architectures — 48 vs 16 latent channels), a LoRA that records its
         // trained base model only loads on that exact model. LoRAs without a
         // recorded base model fall back to family gating (legacy/imported), so this
         // never tightens behavior for existing LoRAs.
+        //
+        // Kept alongside the declared-partition gate above rather than merged into it: this one
+        // reads what an adapter RECORDS about its own training, that one reads what a catalog
+        // author DECLARES. An imported Wan LoRA has the former and no catalog entry at all.
         if families.iter().any(|family| family == "wan-video") {
             if let Some(base_model) = lora_base_model(lora) {
                 // Shared with the worker's own gate (sc-15017): exact-id equality, plus the
@@ -1963,6 +1993,40 @@ pub(crate) fn lora_families(lora: &Value) -> Vec<String> {
         &["families", "compatibleFamilies", "modelFamilies"],
         Some("compatibility"),
     )
+}
+
+/// The exact model ids a catalog entry **declares** this adapter is for (sc-19563), or empty when
+/// it declares none.
+///
+/// The generalisation of the base-model gate below. Two things distinguish it from
+/// [`lora_base_model`], and both are why it is a separate reader rather than another spelling of
+/// the same one:
+///
+/// * **Direction.** `baseModel` is a value a trained or imported adapter *records about itself*;
+///   `modelIds` is a catalog author *declaring* which partitions an adapter may attach to.
+/// * **Arity.** A recorded base model is one id. A declaration can legitimately name several, so
+///   this is a list.
+///
+/// Absent means family gating alone, exactly as before — so adding the key tightens nothing for any
+/// entry that does not declare it. Not normalized: model ids are exact strings, like
+/// [`lora_base_model`]'s. `model_ids` is accepted alongside `modelIds` for the same reason
+/// `lora_base_model` accepts `base_model` — an inline spec may arrive in either casing.
+pub(crate) fn lora_model_ids(lora: &Value) -> Vec<String> {
+    for key in ["modelIds", "model_ids"] {
+        if let Some(items) = lora.get(key).and_then(Value::as_array) {
+            let ids: Vec<String> = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if !ids.is_empty() {
+                return ids;
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// The specific base model a LoRA records it was trained for (e.g. `wan_2_2`,
@@ -2583,6 +2647,180 @@ mod base_model_gating_tests {
                 panic!("the turbo accelerator must be accepted on {model_id}: {error:?}")
             });
         }
+    }
+
+    /// sc-19563 — **the declared-partition gate**, both directions, with the control that makes it
+    /// attributable.
+    ///
+    /// The family check cannot see this: `minimax_h3` and `minimax_h3_ref` are one architecture and
+    /// one family, so before this gate the ref2v adapter attached to `minimax_h3` and **folded
+    /// cleanly** — no shape error, no refusal, just a quality mismatch, which is what made it easy
+    /// to ship and hard to notice.
+    ///
+    /// Four arms, and the two `Ok` ones are load-bearing: without them a gate that refused
+    /// *everything* would pass the two `Err` arms.
+    #[test]
+    fn a_declared_partition_gates_the_lora_to_that_model_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_turbo_lora(
+            tmp.path(),
+            "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+        );
+        let models = vec![
+            json!({
+                "id": "minimax_h3",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+            json!({
+                "id": "minimax_h3_ref",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+        ];
+        let ref2v = json!({
+            "id": "minimax_h3_ref2v_turbo_4step",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+            "modelIds": ["minimax_h3_ref"],
+        });
+        let fl2v = json!({
+            "id": "minimax_h3_turbo_8step",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+            "modelIds": ["minimax_h3"],
+        });
+
+        // ── the two refusals, each naming BOTH the LoRA and the partition.
+        for (lora, model_id, declared) in [
+            (&ref2v, "minimax_h3", "minimax_h3_ref"),
+            (&fl2v, "minimax_h3_ref", "minimax_h3"),
+        ] {
+            let error = validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+            )
+            .expect_err("a cross-selected partition adapter must be refused");
+            let message = format!("{error:?}");
+            let lora_id = lora["id"].as_str().unwrap();
+            assert!(
+                message.contains(lora_id),
+                "the refusal must name the LoRA; got {message}"
+            );
+            assert!(
+                message.contains(model_id),
+                "the refusal must name the model it was refused ON; got {message}"
+            );
+            // **The exact phrase, not a substring search.** `minimax_h3_ref2v_turbo_4step`
+            // CONTAINS `minimax_h3_ref`, so a bare `message.contains(declared)` is satisfied by
+            // the LoRA id already in the message and asserts nothing — mutation testing caught
+            // exactly that: blanking the declared-partition interpolation left this green.
+            assert!(
+                message.contains(&format!("is declared for model {declared}")),
+                "the refusal must name the partition it IS for; got {message}"
+            );
+        }
+
+        // ── the controls: each adapter is accepted on its OWN partition. Without these the test
+        //    would pass against a gate that refused every H3 LoRA outright.
+        for (lora, model_id) in [(&ref2v, "minimax_h3_ref"), (&fl2v, "minimax_h3")] {
+            validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+            )
+            .unwrap_or_else(|error| panic!("must be accepted on its own partition: {error:?}"));
+        }
+    }
+
+    /// The gate is **not** hardcoded to a family — that was the whole point of sc-19563, whose
+    /// predecessor gate reads `families.iter().any(|f| f == "wan-video")`.
+    ///
+    /// A `modelIds` declaration on an invented family with no in-tree special-casing must gate just
+    /// as hard. If someone later re-hardcodes this to `minimax-h3`, this arm reds and the H3 arms
+    /// above do not.
+    #[test]
+    fn the_declared_partition_gate_is_family_agnostic() {
+        let models = vec![
+            json!({
+                "id": "acme_alpha",
+                "family": "acme",
+                "loraCompatibility": { "families": ["acme"] }
+            }),
+            json!({
+                "id": "acme_beta",
+                "family": "acme",
+                "loraCompatibility": { "families": ["acme"] }
+            }),
+        ];
+        // No `installedPath`, so no header is read and no family detection runs — this isolates the
+        // declared-partition gate from the detected-family one.
+        let lora = json!({
+            "id": "acme_style",
+            "installState": "installed",
+            "families": ["acme"],
+            "modelIds": ["acme_beta"],
+        });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "acme_beta",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .expect("accepted on the partition it declares");
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "acme_alpha",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .expect_err("a family with no in-tree special-casing must still be gated");
+        assert!(format!("{error:?}").contains("acme_beta"), "{error:?}");
+    }
+
+    /// **A LoRA that declares NO `modelIds` is untouched.** The key is optional, so the gate must
+    /// not tighten a single existing catalog entry — every LoRA in the tree today declares none.
+    #[test]
+    fn a_lora_without_declared_model_ids_is_not_gated() {
+        let models = vec![json!({
+            "id": "minimax_h3_ref",
+            "family": "minimax-h3",
+            "loraCompatibility": { "families": ["minimax-h3"] }
+        })];
+        let lora = json!({
+            "id": "legacy_h3_style",
+            "installState": "installed",
+            "families": ["minimax-h3"],
+        });
+        validate_lora_specs_for_model(&models, &[], "minimax_h3_ref", &[lora], true, "LoRA")
+            .expect("an undeclared LoRA keeps family gating alone");
+        // ...and the reader itself agrees there is nothing to gate on.
+        assert!(lora_model_ids(&json!({ "id": "x" })).is_empty());
+        assert!(lora_model_ids(&json!({ "modelIds": [] })).is_empty());
+        assert!(lora_model_ids(&json!({ "modelIds": ["  ", ""] })).is_empty());
+        assert_eq!(
+            lora_model_ids(&json!({ "modelIds": [" minimax_h3_ref "] })),
+            vec!["minimax_h3_ref".to_string()],
+            "ids are trimmed, matching lora_base_model"
+        );
+        assert_eq!(
+            lora_model_ids(&json!({ "model_ids": ["minimax_h3"] })),
+            vec!["minimax_h3".to_string()],
+            "the snake_case alias is read too, like base_model"
+        );
     }
 
     /// The detected-family gate is a REAL gate for this family, not a formality: a LoRA from another

@@ -60,6 +60,12 @@
             "minLength": 1,
             "description": "Human-facing display name shown in the LoRA picker."
           },
+          "modelIds": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "The exact model ids this adapter may attach to (sc-19563). OPTIONAL, and absent means family gating alone \u2014 so this never tightens an existing entry. When present, validate_lora_specs_for_model refuses the LoRA on any model id outside this list, EVEN WITHIN THE SAME FAMILY. That is the case `family` cannot express: MiniMax-H3 publishes `minimax_h3` (t2va/fl2va) and `minimax_h3_ref` (ref2va) as one DiT architecture with one geometry, so both declare `family: minimax-h3` and both accept `minimax-h3` LoRAs \u2014 yet lightx2v distils the fl2v and ref2v turbo adapters for one partition each. Cross-selecting is shape-valid and folds cleanly, which is what made it a quality mismatch rather than a failure. Deliberately a LIST, not the singular `baseModel` the Wan gate reads: `baseModel` is a value a trained or imported adapter RECORDS about itself, while this is a catalog author DECLARING which partitions an adapter is for, and one adapter can legitimately serve several."
+          },
           "family": {
             "type": "string",
             "description": "Model family this adapter is compatible with (the compatibility gate reads this and `compatibility.families`)."
