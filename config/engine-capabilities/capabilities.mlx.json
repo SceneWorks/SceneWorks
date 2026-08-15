@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "7c45f22aa671e16de72929e1781ac66994c21f7f",
+    "inferenceRevision": "8e6497f2f8f915ffe24b104c1b4f1b4dfe9a6b8d",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -2587,7 +2587,7 @@
     {
       "id": "chroma1_base",
       "composed": false,
-      "selectorDigest": "sha256:492ae3bd886c835ed7f18c94dff70f3761c59e421ea89268b5a82c355bedd571",
+      "selectorDigest": "sha256:c5b07b38e8dd5e55e7c92a772c7d8e86a9892dab322ec3249bddd304c16b714e",
       "surfaces": [
         {
           "selector": {
@@ -2596,10 +2596,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2608,7 +2612,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2649,10 +2654,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2661,7 +2670,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2673,11 +2683,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2699,10 +2712,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2711,7 +2728,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2723,11 +2741,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2747,7 +2768,7 @@
     {
       "id": "chroma1_flash",
       "composed": false,
-      "selectorDigest": "sha256:492ae3bd886c835ed7f18c94dff70f3761c59e421ea89268b5a82c355bedd571",
+      "selectorDigest": "sha256:c5b07b38e8dd5e55e7c92a772c7d8e86a9892dab322ec3249bddd304c16b714e",
       "surfaces": [
         {
           "selector": {
@@ -2756,10 +2777,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2768,7 +2793,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2809,10 +2835,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2821,7 +2851,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2833,11 +2864,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2859,10 +2893,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2871,7 +2909,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2883,11 +2922,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2907,7 +2949,7 @@
     {
       "id": "chroma1_hd",
       "composed": false,
-      "selectorDigest": "sha256:492ae3bd886c835ed7f18c94dff70f3761c59e421ea89268b5a82c355bedd571",
+      "selectorDigest": "sha256:c5b07b38e8dd5e55e7c92a772c7d8e86a9892dab322ec3249bddd304c16b714e",
       "surfaces": [
         {
           "selector": {
@@ -2916,10 +2958,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2928,7 +2974,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2969,10 +3016,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -2981,7 +3032,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2993,11 +3045,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -3019,10 +3074,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -3031,7 +3090,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -3043,11 +3103,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -3906,7 +3969,7 @@
     {
       "id": "flux2_klein_9b",
       "composed": false,
-      "selectorDigest": "sha256:94fcb2364ce9dd4483a42c2b86944d9667172d5b9c31dca611f02a3af4254471",
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
       "surfaces": [
         {
           "selector": {
@@ -4006,11 +4069,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4064,11 +4130,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4090,7 +4159,7 @@
     {
       "id": "flux2_klein_9b_edit",
       "composed": false,
-      "selectorDigest": "sha256:94fcb2364ce9dd4483a42c2b86944d9667172d5b9c31dca611f02a3af4254471",
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
       "surfaces": [
         {
           "selector": {
@@ -4190,11 +4259,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4248,11 +4320,204 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "flux2_klein_9b_kv_edit",
+      "composed": false,
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4274,7 +4539,7 @@
     {
       "id": "kolors",
       "composed": false,
-      "selectorDigest": "sha256:5d3498170272cb0f4948cdde57331874915021eedd5b054bf4afbb57c89ba5eb",
+      "selectorDigest": "sha256:c5b07b38e8dd5e55e7c92a772c7d8e86a9892dab322ec3249bddd304c16b714e",
       "surfaces": [
         {
           "selector": {
@@ -4341,11 +4606,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4367,11 +4635,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4393,11 +4664,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4419,11 +4693,14 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4443,7 +4720,7 @@
     {
       "id": "krea_2_edit",
       "composed": false,
-      "selectorDigest": "sha256:94fcb2364ce9dd4483a42c2b86944d9667172d5b9c31dca611f02a3af4254471",
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
       "surfaces": [
         {
           "selector": {
@@ -4543,11 +4820,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4601,11 +4881,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4627,7 +4910,7 @@
     {
       "id": "krea_2_raw",
       "composed": false,
-      "selectorDigest": "sha256:94fcb2364ce9dd4483a42c2b86944d9667172d5b9c31dca611f02a3af4254471",
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
       "surfaces": [
         {
           "selector": {
@@ -4727,11 +5010,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4785,11 +5071,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4811,7 +5100,7 @@
     {
       "id": "krea_2_turbo",
       "composed": false,
-      "selectorDigest": "sha256:94fcb2364ce9dd4483a42c2b86944d9667172d5b9c31dca611f02a3af4254471",
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
       "surfaces": [
         {
           "selector": {
@@ -4911,11 +5200,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -4969,11 +5261,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -5179,7 +5474,7 @@
     {
       "id": "krea_2_turbo_edit",
       "composed": false,
-      "selectorDigest": "sha256:94fcb2364ce9dd4483a42c2b86944d9667172d5b9c31dca611f02a3af4254471",
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
       "surfaces": [
         {
           "selector": {
@@ -5279,11 +5574,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -5337,11 +5635,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -9836,6 +10137,678 @@
   ],
   "memoryRouteWitnesses": [
     {
+      "provider": "anima_aesthetic",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "krea_2_raw",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
       "provider": "krea_2_turbo",
       "tier": "bf16",
       "mode": "text_to_image",
@@ -10772,6 +11745,118 @@
       "mode": "text_to_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "nvfp4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "z_image_turbo",
