@@ -1206,6 +1206,50 @@ describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
     expect(reachableModeTabs()).not.toContain("Replace person");
   });
 
+  it("engages the sc-5947 download gate when the platform filter empties the catalog", async () => {
+    // `baseVideoModels` was `macVideoModels.length ? macVideoModels : videoModels` — it restored the
+    // UNFILTERED catalog exactly when the platform filter had emptied it. `modelReady` read off it,
+    // so with every installed model off-Mac-unserveable the gate stayed `ready` and the user got the
+    // whole Studio with a picker of models that serve no mode: every tab disabled, no download offer,
+    // and nothing saying why. Degraded rather than hung, but it hid the one screen that could fix it.
+    //
+    // Pre-existing, and unreachable before this story: `macAvailableModels` alone empties the list
+    // only for a Mac user whose every video model is torch-only. `candleAvailableModels` makes it
+    // the ordinary case for a Windows/Linux user with an MLX-only catalog.
+    await render(
+      baseContext({
+        videoModels: [VACE_FUN],
+        assets: [clip],
+        macCapabilities: OFF_MAC_CAPS,
+      }),
+    );
+
+    const gate = container.querySelector(".model-availability-gate");
+    expect(gate, "the sc-5947 gate must replace the studio, not sit alongside it").toBeTruthy();
+    expect(gate.textContent).toContain("Video Studio needs a video model");
+    // The Studio itself must be GONE, not merely covered — the model picker is the tell, because
+    // that is the control the old fallback repopulated with unserveable models.
+    expect(modelSelect(), "the studio's model picker must not render behind the gate").toBeFalsy();
+  });
+
+  it("does not engage the download gate for the same catalog when gating is inert", async () => {
+    // The anti-vacuity leg for the test above: same single model, same `candleSupport.supported:
+    // false`, switch off. Without this, a screen that gated unconditionally — on a Mac, where
+    // VACE-Fun renders fine — would satisfy the assertion above.
+    await render(
+      baseContext({
+        videoModels: [VACE_FUN],
+        assets: [clip],
+        macCapabilities: INERT_CAPS,
+      }),
+    );
+
+    expect(container.querySelector(".model-availability-gate")).toBeFalsy();
+    expect([...modelSelect().options].map((option) => option.value)).toContain(
+      "wan_2_2_vace_fun_14b",
+    );
+  });
+
   it("leaves every tab and model reachable when off-Mac gating is inert", async () => {
     await render(
       baseContext({

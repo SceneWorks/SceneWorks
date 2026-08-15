@@ -79,8 +79,21 @@ export function imageModelUsable(model, caps) {
 //   * the model DECLARES the mode (the manifest capability), and
 //   * under active Mac gating, MLX claims it for this model (`macVideoModeBlock`), and
 //   * under active off-Mac gating, candle claims it for this model (`candleVideoModeBlock`).
-// The two platform blocks are mutually exclusive and each is a no-op on the other's platform, so
-// exactly one of them can ever fire — declaration alone is never again the whole answer.
+// The two platform blocks are mutually exclusive and each is a no-op on the other's platform, so AT
+// MOST one of them can ever fire.
+//
+// ⚠️ NOT "exactly one", and declaration alone is NOT "never again the whole answer" — this comment
+// asserted both and each is false in the same two states, where NEITHER block fires and this
+// function collapses back to `capabilities.includes(mode)`:
+//   1. Before `GET /api/v1/capabilities/mac` responds. `DEFAULT_MAC_CAPABILITIES` sets both
+//      `macGatingActive` and `candleGatingActive` false, so both helpers short-circuit to "not
+//      blocked" on every platform. Every consumer of this predicate renders at least one pass in
+//      that window.
+//   2. On a Mac in observe mode, permanently. `macGatingActive` is the SCENEWORKS_MLX_REQUIRED
+//      rollout flag rather than a fact about the host, and `candleGatingActive` is `!is_mac`, so a
+//      Mac with the flag off has neither.
+// Both are deliberate — a client that has not been told what it is running on must not invent a
+// gate — but a reader who believes the stronger claim will look for a bug that is not there.
 export function videoModelServesMode(model, mode, caps) {
   return (
     Boolean(model?.capabilities?.includes(mode)) &&

@@ -289,14 +289,33 @@ export function VideoStudio() {
   // model can't serve the others.
   const macGating = macGatingActive(macCapabilities);
   const candleGating = candleGatingActive(macCapabilities);
-  const baseVideoModels = macVideoModels.length ? macVideoModels : videoModels;
+  // sc-19570 — NO `macVideoModels.length ? macVideoModels : videoModels` FALLBACK, and its removal
+  // is the point rather than a tidy-up. That fallback restored the UNFILTERED catalog precisely when
+  // the platform filter had emptied it — i.e. exactly when every installed video model is blocked on
+  // this host. `modelReady` read off it, so it stayed `true`, the sc-5947 gate never engaged, and
+  // the user got the full Studio with a picker of models that cannot serve any mode: every tab
+  // disabled by `modeTabBlocked`, no download offer, and no statement of why. Degraded rather than
+  // hung, but it hid the one screen that could fix it.
+  //
+  // Pre-existing, and it did not fire before this story because `macAvailableModels` alone empties
+  // the list only for a Mac user whose every video model is torch-only. `candleAvailableModels`
+  // makes it reachable for an ordinary Windows/Linux user with an MLX-only catalog, which is the
+  // common case off-Mac.
+  //
+  // `ImageStudio.jsx:765` is the precedent and settles the semantics: `modelReady =
+  // macImageModels.length > 0`, filtered list, no fallback. This is the video twin.
+  //
+  // Not a behaviour change when no gate is engaged: `macAvailableModels` and `candleAvailableModels`
+  // both return the input list unfiltered when their gate is inactive (and before the capabilities
+  // endpoint responds), so `macVideoModels === videoModels` and the two expressions are identical.
+  // The difference appears only when a gate is active AND has filtered everything out — the case the
+  // gate exists for.
   const modelsForMode = (value) =>
-    baseVideoModels.filter((item) => videoModelServesMode(item, value, macCapabilities));
-  // Model-availability gate (sc-5947): when the user has no mac-available video model at all,
-  // show recommended video-model downloads instead of the studio. `ready` matches the picker
-  // (which falls back to all baseVideoModels); offers come from the full catalog via
-  // videoModelUsable, recommended-first.
-  const modelReady = baseVideoModels.length > 0;
+    macVideoModels.filter((item) => videoModelServesMode(item, value, macCapabilities));
+  // Model-availability gate (sc-5947): when the user has no PLATFORM-available video model at all,
+  // show recommended video-model downloads instead of the studio. `ready` matches the picker; offers
+  // come from the full catalog via videoModelUsable, recommended-first.
+  const modelReady = macVideoModels.length > 0;
   const modelOffers = useMemo(
     () => downloadOffersFor(models, videoModelUsable, macCapabilities),
     [models, macCapabilities],
@@ -838,7 +857,7 @@ export function VideoStudio() {
     // picker on a phantom id; the mode-snap effect then moves to a model that serves the mode. Say
     // so rather than letting the swap look like the recipe's own choice.
     const recipeModelAvailable =
-      !recipe.model || baseVideoModels.some((item) => item.id === recipe.model);
+      !recipe.model || macVideoModels.some((item) => item.id === recipe.model);
     if (recipe.model && recipeModelAvailable) {
       setModel(recipe.model);
     }
@@ -1144,8 +1163,16 @@ export function VideoStudio() {
   //
   // sc-19570 — PLATFORM-AGNOSTIC. This read `macGating &&`, which is false off-Mac, so every
   // MLX-only tab (LTX 2.3's Image→Video / First-Last-Frame / Extend / Bridge / Replace) stayed
-  // enabled on Windows/Linux and the user only learned at Generate. Either gate disables the tab
-  // now; the two are mutually exclusive, so exactly one can ever be true.
+  // enabled on Windows/Linux and the user only learned at Generate. Either gate disables the tab now.
+  //
+  // The two are mutually exclusive, so AT MOST one is ever true — not "exactly one", which this
+  // comment used to claim and which is false in two ordinary states. `candleGatingActive` is
+  // `!is_mac` and `macGatingActive` is the SCENEWORKS_MLX_REQUIRED rollout flag, so BOTH are false
+  // (a) before `GET /api/v1/capabilities/mac` responds, since `DEFAULT_MAC_CAPABILITIES` sets both
+  // false, and (b) permanently on a Mac still in observe mode. In both windows this predicate is
+  // inert and the tab list falls back to the manifest declaration alone. That is deliberate — a
+  // client that has not yet been told the platform must not invent a gate — but it means the
+  // declaration IS the whole answer there, and copy that says otherwise misdescribes the screen.
   const modeTabBlocked = (value) =>
     (macGating || candleGating) && modelsForMode(value).length === 0;
   // The tab tooltip names the platform that is doing the gating — off-Mac the honest sentence is
@@ -1906,7 +1933,7 @@ export function VideoStudio() {
                   {/* Models gated on the selected tab (sc-5716): show only models that serve the
                       active mode, falling back to the full available list if none do (a reduced
                       catalog) so the picker is never empty. */}
-                  {(modelsForMode(mode).length ? modelsForMode(mode) : baseVideoModels).map((item) => (
+                  {(modelsForMode(mode).length ? modelsForMode(mode) : macVideoModels).map((item) => (
                     <option key={item.id} value={item.id}>
                       {updateOptionLabel(item)}
                     </option>
