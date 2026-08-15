@@ -52,7 +52,7 @@ jobs:
       # DELIBERATELY NOT `save-if: main` — same reasoning as desktop-linux.yml: this lane is
       # `workflow_dispatch:` only, never runs on `main`, and contributed no entry to the 2026-08-15
       # cache inventory. Do not re-symmetrise it with the PR lanes.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2 (v2.9.1+1)
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"

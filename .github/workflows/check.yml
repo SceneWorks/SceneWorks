@@ -123,7 +123,7 @@ jobs:
       # Restricting saves to main keeps exactly one baseline per lane, which is the only kind a PR
       # can read anyway. A PR whose Cargo.lock differs from main's gets rust-cache's prefix restore
       # instead of a full match: partial, and far better than cold.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2 (v2.9.1+1)
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch the pinned inference release
@@ -367,7 +367,7 @@ jobs:
           # scripts/platform-review-contracts.test.mjs, same as every other lane's input.
           toolchain: "1.97.1"
           components: clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2 (v2.9.1+1)
         with:
           # A distinct key from `parity`'s: this job compiles the same crates under a different
           # feature set, so sharing one cache would thrash both.
