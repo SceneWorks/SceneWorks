@@ -3,6 +3,7 @@
 // verbatim so the per-Studio availability gates and the screens themselves agree on
 // exactly which models qualify. Predicates are capability + Mac-gating only (no install
 // state) — callers layer installState via the helpers at the bottom.
+import { candleModelBlock, candleVideoModeBlock } from "./candleGating.js";
 import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGating.js";
 import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
 
@@ -70,16 +71,30 @@ export function imageModelUsable(model, caps) {
   );
 }
 
-// Video Studio — mirrors VideoStudio.jsx `modelServesMode`.
+// Video Studio — the ONE authority for "does this model serve this mode?" (VideoStudio.jsx imports
+// it rather than keeping the local copy it used to have; two copies is how one platform's gate got
+// added and the other's did not).
+//
+// Three conjuncts, one per layer of the reachability question (sc-19570):
+//   * the model DECLARES the mode (the manifest capability), and
+//   * under active Mac gating, MLX claims it for this model (`macVideoModeBlock`), and
+//   * under active off-Mac gating, candle claims it for this model (`candleVideoModeBlock`).
+// The two platform blocks are mutually exclusive and each is a no-op on the other's platform, so
+// exactly one of them can ever fire — declaration alone is never again the whole answer.
 export function videoModelServesMode(model, mode, caps) {
-  return Boolean(model?.capabilities?.includes(mode)) && !macVideoModeBlock(model, caps, mode);
+  return (
+    Boolean(model?.capabilities?.includes(mode)) &&
+    !macVideoModeBlock(model, caps, mode) &&
+    !candleVideoModeBlock(model, caps, mode)
+  );
 }
 
-// Usable on Video Studio: a video-type model that isn't Mac-blocked and serves ≥1 mode.
+// Usable on Video Studio: a video-type model that isn't platform-blocked and serves ≥1 mode.
 export function videoModelUsable(model, caps) {
   return (
     model?.type === "video" &&
     !macModelBlock(model, caps) &&
+    !candleModelBlock(model, caps) &&
     VIDEO_MODES.some((mode) => videoModelServesMode(model, mode, caps))
   );
 }

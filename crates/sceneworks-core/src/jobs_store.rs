@@ -36,11 +36,12 @@ pub(crate) use routing::mlx::*;
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
     candle_routed_image_models, imported_image_model_lora_advertisement, mac_capabilities,
-    model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
+    model_candle_support, model_mac_support, video_job_type_for_mode, MacCapabilities,
+    ModelCandleSupport, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, mac_rust_supported, video_request_is_claimable_by_any_lane,
-    UnsupportedReason, NATIVE_CONVERTERS,
+    video_request_is_claimable_on_platform, UnsupportedReason, NATIVE_CONVERTERS,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &[

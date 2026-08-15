@@ -169,6 +169,9 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mlx_enforce_unsupported: false,
         candle_required: false,
         candle_enforce_unsupported: false,
+        // The real host OS by default, so every existing test keeps judging the platform it runs
+        // on; the sc-19570 off-Mac guards override it with a FOREIGN one.
+        host_os: std::env::consts::OS.to_owned(),
         trust_loopback: false,
         // Placeholder for oneshot tests (the MCP self-client never dials it);
         // the live-listener MCP tests overwrite it with the bound address.

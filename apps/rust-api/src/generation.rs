@@ -518,12 +518,10 @@ pub(crate) async fn create_video_job(
     ApiJson(payload): ApiJson<VideoJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_video_job(&payload)?;
-    let job_type = match payload.mode.as_str() {
-        "extend_clip" => JobType::VideoExtend,
-        "video_bridge" => JobType::VideoBridge,
-        "replace_person" => JobType::PersonReplace,
-        _ => JobType::VideoGenerate,
-    };
+    // The mode → job-type mapping lives in core (sc-19570) because the UI-gating probes must build
+    // the SAME pair this route enqueues before asking the claim predicates about it. Two copies
+    // would let the oracle answer about a job type that is never created.
+    let job_type = video_job_type_for_mode(payload.mode.as_str());
     let requested_gpu = payload.requested_gpu.clone();
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
@@ -734,6 +732,28 @@ pub(crate) async fn create_video_job(
             "{model_id} cannot render the \"{mode}\" mode — no backend implements it, so this job \
              would wait for a worker that will never claim it. Choose a mode this model lists in \
              its capabilities, or a model that supports this one."
+        )));
+    }
+    // **THE PLATFORM HALF OF THE SAME GATE (sc-19570).** The gate above is deliberately
+    // platform-independent, so it passes a request some OTHER host's lane would claim — and off-Mac
+    // that is still a job that hangs forever, because no `mlx` worker can register on Windows or
+    // Linux. `ltx_2_3` + `image_to_video`, `wan_2_2` + `first_last_frame` and the rest of the
+    // measured MLX-only set were all admitted here, offered as Video Studio tabs off-Mac, and then
+    // claimed by nothing.
+    //
+    // Runs SECOND so the platform-independent message wins whenever it applies: "no backend
+    // implements it" is the more useful sentence than "not on this platform" for a pair that works
+    // nowhere. On macOS this is inert by construction, so every Mac-served pair is untouched.
+    if !video_request_is_claimable_on_platform(&job_type, &job_payload, &state.settings.host_os) {
+        let mode = job_payload
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or(payload.mode.as_str());
+        return Err(ApiError::bad_request(format!(
+            "{model_id} cannot render the \"{mode}\" mode on this platform — that combination runs \
+             only on the macOS MLX backend, and this host has no worker that will ever claim it, so \
+             the job would wait forever. Choose a mode this model serves here, or a model that \
+             serves this mode on Windows/Linux."
         )));
     }
     let job = create_generation_job(

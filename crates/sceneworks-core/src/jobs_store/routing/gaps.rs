@@ -81,6 +81,42 @@ pub fn video_request_is_claimable_by_any_lane(
         || video_request_is_candle_eligible(job_type, payload)
 }
 
+/// **The enqueue-time PLATFORM reachability gate (sc-19570).** True when a lane that can exist on
+/// an `os` host would claim this video request.
+///
+/// [`video_request_is_claimable_by_any_lane`] asks whether ANY backend anywhere claims the job, and
+/// is deliberately platform-independent: refusing a pair one lane serves would break that lane's
+/// host. That leaves the *other* half of the same defect open, which is what sc-19570 measured.
+/// Off-Mac there is no `mlx` worker — MLX is an Apple-silicon runtime, and the settings contract
+/// records the topology explicitly (`mlx_required` is "absent on Windows/Linux/Docker",
+/// `candle_required` is "absent on macOS") — so an MLX-only request submitted on Windows or Linux
+/// is claimed by nothing that can ever register there. It does not fail: it sits `queued` /
+/// "Waiting for an available worker." forever, exactly the sc-19504 / GH #2074 symptom, and both
+/// enforce sweeps default to **warn** so neither rescues it.
+///
+/// **Asymmetric on purpose.** On macOS this returns `true` unconditionally and makes NO claim: the
+/// platform-independent gate is the whole gate there, so every pair that works on a Mac today keeps
+/// working byte-for-byte. Only the off-Mac branch is new. The tradeoff that buys: a deployment that
+/// somehow paired a Windows/Linux API host with a remote macOS `mlx` worker would now be refused at
+/// enqueue for MLX-only pairs. That topology is not one SceneWorks ships or documents — every
+/// platform decision in this codebase reads the API host's OS the same way
+/// (`mac_capabilities(std::env::consts::OS, …)`, `host_capabilities`, `retain_downloads_for_os`) —
+/// and the alternative, keying off live worker presence, would refuse legitimate work whenever the
+/// local worker happened to be restarting.
+///
+/// `os` is a parameter rather than `std::env::consts::OS` so the guard can be exercised with a
+/// FOREIGN OS fixture. macOS structurally cannot detect this class of defect by running on itself.
+pub fn video_request_is_claimable_on_platform(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+    os: &str,
+) -> bool {
+    if matches!(os, "macos" | "darwin") {
+        return true;
+    }
+    video_request_is_candle_eligible(job_type, payload)
+}
+
 /// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
 /// worker (sc-3483). Names the model + job type so the job card and the System → Logs
 /// surface point at the real gap, never a generic failure. Prefixed `mlx_unavailable:` so

@@ -278,13 +278,19 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(fieldLabelled("Reference audio")).toBeFalsy();
   });
 
-  it("lets an audio-only reference set submit, and sends the audio ids", async () => {
-    // sc-17159 fixed exactly this spelling in `validate_video_job`: r2v needs at least one
-    // reference of ANY kind, and an audio-only set is a shape Ref2VA serves. The studio kept its
-    // own image-only copy of the old rule, so the mode rendered but could not be submitted.
+  it("refuses an audio-only reference set with a reason, and submits it alongside an image", async () => {
+    // sc-19574. This test asserted the OPPOSITE until now, because `validate_video_job` accepted
+    // an audio-only set (sc-17159 widened its arm one list too far). The reference implementation
+    // settles it: diffusers `MiniMaxH3` documents `MiniMaxH3AudioReference` as "never on its own …
+    // It never reaches the conditioner", and `before_encoder.py` raises on
+    // `set(kinds) == {"audio"}`. The worker refused it all along; the Studio enabling Generate for
+    // it is how a user built a request the product presented as valid and was then told no.
+    //
+    // An ERROR, not the silent `inputs` requirement: the audio picker is visibly full, so an empty
+    // image zone beside it reads as optional. The user must be told the rule, not left to infer it.
     const context = baseContext({
       videoModels: [MINIMAX_REF],
-      assets: [asset("aud_1", "audio", "voice")],
+      assets: [asset("aud_1", "audio", "voice"), asset("img_1", "image", "portrait")],
     });
     await render(context);
     await click(modeTab("Reference → Video"));
@@ -304,13 +310,38 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
       ),
     );
 
+    const stillBlocked = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Render clip"),
+    );
+    expect(stillBlocked.disabled, "audio alone cannot condition the picture").toBe(true);
+    expect(
+      container.textContent,
+      "the refusal must SAY why — an empty image zone next to a full audio one does not",
+    ).toContain("An audio reference can't be the only reference");
+    expect(context.createVideoJob).not.toHaveBeenCalled();
+
+    // …and adding an image clears it, with BOTH lists reaching the payload. Without this leg the
+    // assertions above would pass on a studio that had stopped sending audio references at all.
+    await click(fieldLabelled("Reference images").querySelector("button"));
+    await click(
+      [...document.querySelectorAll(".asset-picker-card")].find((card) =>
+        card.textContent.includes("portrait"),
+      ),
+    );
+    await click(
+      [...document.querySelectorAll(".asset-picker-footer button")].find(
+        (b) => b.textContent.trim() === "Use Selection",
+      ),
+    );
+
     const ready = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
-    expect(ready.disabled, "an audio-only reference set is a shape Ref2VA serves").toBe(false);
+    expect(ready.disabled, "an image + audio reference set is the shape Ref2VA serves").toBe(false);
+    expect(container.textContent).not.toContain("An audio reference can't be the only reference");
     await click(ready);
     const payload = context.createVideoJob.mock.calls[0][0];
     expect(payload.mode).toBe("reference_to_video");
     expect(payload.referenceAudioAssetIds).toEqual(["aud_1"]);
-    expect(payload.referenceAssetIds).toEqual([]);
+    expect(payload.referenceAssetIds).toEqual(["img_1"]);
   });
 
   it("does not strand an audio-reference refusal on a form that cannot clear it", async () => {

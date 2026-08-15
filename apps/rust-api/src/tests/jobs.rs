@@ -7534,8 +7534,25 @@ fn every_declared_video_capability_is_submittable() {
 /// whose numbers the test itself chose (sc-17159 — a seeded probe would prove the ROUTE works, not
 /// that the shipped family is reachable).
 async fn shipped_manifest_app(temp_dir: &tempfile::TempDir) -> (axum::Router, String) {
+    shipped_manifest_app_on_os(temp_dir, std::env::consts::OS).await
+}
+
+/// The same app, told it is running on `os` (sc-19570). The ONLY difference from
+/// [`shipped_manifest_app`] is `Settings::host_os`, which production always fills with
+/// `std::env::consts::OS`.
+///
+/// It exists because macOS structurally cannot detect the defect sc-19570 fixed by running on
+/// itself: the per-mode reachability gate refuses exactly what no Windows/Linux lane will claim,
+/// and on a Mac that branch never executes. A guard that could only run off-Mac would never run —
+/// CI's rust lane is macOS — so its only evidence would be its own doc comment. Same precedent as
+/// sc-17227: tag the fixture with the FOREIGN OS so the check runs everywhere.
+async fn shipped_manifest_app_on_os(
+    temp_dir: &tempfile::TempDir,
+    os: &str,
+) -> (axum::Router, String) {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
-    let settings = test_settings(temp_dir);
+    let mut settings = test_settings(temp_dir);
+    settings.host_os = os.to_owned();
     sceneworks_core::builtin_manifests::seed_builtin_manifests(
         &settings.config_dir,
         sceneworks_core::builtin_manifests::SeedMode::Overwrite,
@@ -7598,14 +7615,16 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
                 "referenceAudioAssetIds": ["aud-0"]
             }),
         ),
-        // The shape that was 400'd until sc-17159: `validate_video_job`'s r2v arm required a
-        // reference IMAGE, but sc-17149's acceptance is that all three reference modalities bind
-        // "individually", so an audio-only reference set is a shape the checkpoint serves.
+        // Audio references as a COMPANION to a visual one — the shape sc-17159 unblocked, minus
+        // the audio-ONLY case it also unblocked by mistake. sc-19574 refused that one again (see
+        // `minimax_h3_refusals_each_name_their_own_reason`): upstream's `before_encoder.py` raises
+        // on `set(kinds) == {"audio"}`, so it is not a shape the checkpoint serves.
         (
-            "Ref2VA audio references only",
+            "Ref2VA one image with three audio references",
             "minimax_h3_ref",
             json!({
                 "mode": "reference_to_video",
+                "referenceAssetIds": ["img-0"],
                 "referenceAudioAssetIds": ["aud-0", "aud-1", "aud-2"]
             }),
         ),
@@ -7899,7 +7918,43 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         no_refs["detail"],
-        "Reference to Video requires at least one reference image, video clip or audio clip."
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
+    );
+    // THE sc-19574 SHAPE: audio references and nothing else. sc-17159's widening went one list too
+    // far — upstream's `before_encoder.py` raises on `set(kinds) == {"audio"}` because an audio
+    // reference never reaches the visual conditioner — so the API accepted a request the worker
+    // then refused. It is refused HERE now, which is the first point the user could learn it.
+    let (status, audio_only) = submit(
+        "minimax_h3_ref",
+        json!({ "mode": "reference_to_video", "referenceAudioAssetIds": ["aud-0", "aud-1"] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an audio-only reference set must not be admitted: {audio_only}"
+    );
+    assert_eq!(
+        audio_only["detail"],
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
+    );
+    // …and the SAME audio references alongside one image are accepted, so the refusal above is
+    // about the missing visual reference and not about the audio list existing at all.
+    let (status, audio_with_image) = submit(
+        "minimax_h3_ref",
+        json!({
+            "mode": "reference_to_video",
+            "referenceAssetIds": ["img-0"],
+            "referenceAudioAssetIds": ["aud-0", "aud-1"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "audio alongside a visual reference is the shape Ref2VA serves: {audio_with_image}"
     );
     // Bernini's engine takes image references alone, so the loosened arm must not become a way to
     // hand its r2v path a clips-only conditioning set. The API admits it (the arm is
@@ -7933,7 +7988,8 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         bernini_bare["detail"],
-        "Reference to Video requires at least one reference image, video clip or audio clip."
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
     );
 }
 
@@ -8071,6 +8127,234 @@ async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
     }))
     .await;
     assert_eq!(status, StatusCode::CREATED, "{bridge}");
+}
+
+/// **THE OFF-MAC ENFORCEMENT GUARD (sc-19570).** The platform half of the same defect, proven on a
+/// FOREIGN OS through the real route.
+///
+/// sc-19504's gate is platform-independent by design — refusing a pair one lane serves would break
+/// that lane's host — so it admits every pair below. Off-Mac they are claimed by nothing: no `mlx`
+/// worker can register on Windows or Linux, and the candle worker's own gate refuses them. The job
+/// then sits `queued` / "Waiting for an available worker." with no error and no terminal state,
+/// which is strictly worse than a rejection, and neither enforce sweep rescues it (both default to
+/// warn).
+///
+/// Every pair sc-19570 measured is driven here, not a sample, and each is asserted THREE ways: it
+/// 400s on `windows`, it 400s on `linux`, and it is still `201` on `macos` — because breaking the
+/// Mac to fix Windows is the failure mode this shape invites. The final block submits pairs the
+/// candle lane genuinely serves, so a gate that simply refused everything off-Mac would go red.
+#[tokio::test]
+async fn an_mlx_only_video_mode_is_refused_at_submission_off_mac() {
+    // The measured MLX-only, candle-unclaimable pairs, with the media each mode requires so the
+    // request is legal in every OTHER respect — a 400 from a missing asset would be the wrong
+    // error and would leave this guard passing for a reason that has nothing to do with platform.
+    let stranded: &[(&str, Value)] = &[
+        (
+            "ltx_2_3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "video_bridge", "sourceClipAssetId": "clip-1", "bridgeRightClipAssetId": "clip-2" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "video_bridge", "sourceClipAssetId": "clip-1", "bridgeRightClipAssetId": "clip-2" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        (
+            "wan_2_2",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "wan_2_2",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+    ];
+
+    for os in ["windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        for (model, case) in stranded {
+            let mut full =
+                json!({ "projectId": project_id, "prompt": "a fox runs", "model": model });
+            full.as_object_mut()
+                .expect("body object")
+                .extend(case.as_object().expect("case object").clone());
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", full).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{model} + {mode} has no lane on {os} and must be REFUSED, not queued forever: \
+                 {body}"
+            );
+            // WHICH refusal, not merely "an error": every one of these requests is well-formed, so
+            // an `is_err()`-shaped assertion would be satisfied by a missing-asset 400 from a
+            // completely different arm.
+            assert_eq!(
+                body["detail"],
+                format!(
+                    "{model} cannot render the \"{mode}\" mode on this platform — that combination \
+                     runs only on the macOS MLX backend, and this host has no worker that will ever \
+                     claim it, so the job would wait forever. Choose a mode this model serves here, \
+                     or a model that serves this mode on Windows/Linux."
+                ),
+                "{model} + {mode} on {os} must name the PLATFORM gap, not some other 400"
+            );
+        }
+    }
+
+    // …and every one of them is still accepted on a Mac, where the MLX engine renders it. Without
+    // this the assertions above would be satisfied by a gate that refused these pairs everywhere.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "macos").await;
+    for (model, case) in stranded {
+        let mut full = json!({ "projectId": project_id, "prompt": "a fox runs", "model": model });
+        full.as_object_mut()
+            .expect("body object")
+            .extend(case.as_object().expect("case object").clone());
+        let mode = case["mode"].as_str().expect("case names a mode");
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", full).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{model} + {mode} renders on macOS and must stay accepted there: {body}"
+        );
+    }
+
+    // The gate is NOT "refuse everything off-Mac": these run on the candle lane on Windows and
+    // Linux and must still enqueue there.
+    let candle_served: &[(&str, Value)] = &[
+        ("wan_2_2", json!({ "mode": "text_to_video" })),
+        (
+            "wan_2_2",
+            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
+        ),
+        (
+            "wan_2_2",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        ("ltx_2_3", json!({ "mode": "text_to_video" })),
+        (
+            "wan_2_2_i2v_14b",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "svd",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        ("bernini", json!({ "mode": "text_to_video" })),
+        (
+            "bernini",
+            json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
+        ),
+    ];
+    for os in ["windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        for (model, case) in candle_served {
+            let mut full =
+                json!({ "projectId": project_id, "prompt": "a fox runs", "model": model });
+            full.as_object_mut()
+                .expect("body object")
+                .extend(case.as_object().expect("case object").clone());
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", full).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{model} + {mode} is candle-served on {os} and must still be enqueued: {body}"
+            );
+        }
+    }
+}
+
+/// The `candleSupport` block itself (sc-19570), read off the real `GET /api/v1/models` response —
+/// the off-Mac twin of `macSupport`, and what `candleVideoModeBlock` in the web client reads.
+///
+/// Emitted on EVERY platform (the client decides whether to act on it from `candleGatingActive`),
+/// so this asserts it from a macOS test run too. A block that only appeared off-Mac could never be
+/// asserted by the macOS rust lane — which is how the off-Mac half of this defect stayed invisible.
+#[tokio::test]
+async fn the_models_endpoint_carries_a_candle_support_block_for_every_video_model() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, _project_id) = shipped_manifest_app(&temp_dir).await;
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    let models = models["models"]
+        .as_array()
+        .or_else(|| models.as_array())
+        .expect("models list");
+    let mut video_models = 0_usize;
+    for model in models {
+        if model["type"].as_str() != Some("video") {
+            continue;
+        }
+        video_models += 1;
+        let id = model["id"].as_str().expect("model id");
+        let candle = &model["candleSupport"];
+        assert!(
+            candle.is_object(),
+            "{id}: every video model must carry a candleSupport block"
+        );
+        // The block must AGREE with the routing predicate, per mode. Restating the verdict here
+        // would assert nothing; deriving it from `model_candle_support` is what makes a routing
+        // change move this guard with it.
+        let expected = serde_json::to_value(sceneworks_core::jobs_store::model_candle_support(
+            id, "video",
+        ))
+        .expect("candle support serializes");
+        assert_eq!(
+            *candle, expected,
+            "{id}: the serialized candleSupport drifted from the predicate"
+        );
+    }
+    assert!(
+        video_models >= 12,
+        "only {video_models} video models were checked — the catalog read is wrong and this guard \
+         is vacuous"
+    );
+
+    // The two gating switches the client reads, and the reason `candleGatingActive` is
+    // platform-intrinsic rather than the `candle_required` rollout flag: the pairs it hides are
+    // unreachable off-Mac whether or not a deployment opted into terminal gap reporting.
+    let caps = |os: &str| sceneworks_core::jobs_store::mac_capabilities(os, false);
+    assert!(!caps("macos").candle_gating_active, "inert on a Mac");
+    assert!(!caps("darwin").candle_gating_active, "inert on the alias");
+    assert!(caps("windows").candle_gating_active, "engaged on Windows");
+    assert!(caps("linux").candle_gating_active, "engaged on Linux");
 }
 
 /// The withdrawal itself (sc-19504), read off the SHIPPED manifest bytes rather than restated: the

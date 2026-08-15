@@ -1201,6 +1201,14 @@ export function VideoStudio() {
     // screen cannot violate must not be able to refuse.
     audio: showAudioReferences ? referenceAudioAssetIds.length : 0,
   });
+  // sc-19574 — the audio-only Ref2VA shape, named so the Generate gate can SAY why rather than
+  // leaving the user to infer it from an empty image zone next to a full audio one. Counted off the
+  // outgoing lists so a stale audio selection on a model that declares no audio cap can't raise it.
+  const audioOnlyReferenceSet =
+    mode === "reference_to_video" &&
+    outgoingReferenceAudioAssetIds.length > 0 &&
+    referenceAssetIds.length === 0 &&
+    outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
     (mode === "image_to_video" && sourceAssetId) ||
@@ -1210,16 +1218,21 @@ export function VideoStudio() {
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId) ||
     // Bernini editing / reference-driven modes (sc-4703).
     (mode === "video_to_video" && sourceClipAssetId) ||
-    // `reference_to_video` needs at least one reference of ANY kind the model takes, not
-    // specifically an IMAGE (sc-17159 fixed the same spelling in `validate_video_job`). Bernini was
-    // the only model serving r2v when this line was written and it conditions on images alone, so
-    // "an image" and "a reference" were the same sentence; MiniMax-H3 Ref2VA broke that identity —
-    // an audio-only or clip-only set is a shape its checkpoint serves and the API admits. Gated on
-    // what the MODEL declares, so Bernini keeps needing an image: its clip/audio counts are 0 here.
+    // `reference_to_video` needs at least one VISUAL reference — an image or a video clip. Audio
+    // references ride along and can never be the only one.
+    //
+    // sc-17159 widened this from images-alone because MiniMax-H3 Ref2VA also takes clips and audio;
+    // the clip half was right and the audio half was not. sc-19574 settled it against the reference
+    // implementation: diffusers `MiniMaxH3` refuses `set(kinds) == {"audio"}` outright — an audio
+    // reference never reaches the conditioner, so an audio-only set leaves the visual stream
+    // unconditioned — and the worker refuses it too (sc-19508). Enabling Generate for a shape three
+    // layers down rejects is exactly the "the product offers it and then says no" gap this closes;
+    // `validate_video_job` now 400s the same shape with the same rule.
+    //
+    // Bernini is unaffected: it declares no clip or audio caps, so `outgoingSourceClipAssetIds` is
+    // empty there and this stays "needs an image".
     (mode === "reference_to_video" &&
-      (referenceAssetIds.length > 0 ||
-        outgoingSourceClipAssetIds.length > 0 ||
-        outgoingReferenceAudioAssetIds.length > 0)) ||
+      (referenceAssetIds.length > 0 || outgoingSourceClipAssetIds.length > 0)) ||
     (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0) ||
     // Bernini multi-source modes (sc-5425): mv2v needs >=2 clips; ads2v needs a source
     // clip, a reference video, and >=1 reference image.
@@ -1299,6 +1312,7 @@ export function VideoStudio() {
       hasLtxIcLora,
       replaceReady,
       referenceLimitMessage,
+      audioOnlyReferenceSet,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1317,6 +1331,7 @@ export function VideoStudio() {
       hasLtxIcLora,
       replaceReady,
       referenceLimitMessage,
+      audioOnlyReferenceSet,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
