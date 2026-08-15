@@ -15,16 +15,23 @@ Two entries ship from the same family:
 | **MiniMax-H3** | Text-to-video, and first and/or last frame conditioning. |
 | **MiniMax-H3 References** | Reference-driven video — up to 9 images, 3 video clips and 3 audio clips (12 files total). |
 
-> **This is the open-weights model, not the hosted Hailuo product.** Three pieces of MiniMax's own
-> stack are not released, and it is worth knowing which:
+> **This is the open-weights model, not the hosted Hailuo product.** Four things MiniMax's own stack
+> has, these weights do not, and each one changes how you should prompt:
 >
 > - **H3-Context-IR**, the hosted prompt-understanding front end. Prompts here go to the model
 >   verbatim, so **prompt adherence differs from the API** no matter how the port is written. Write
 >   more explicitly than you would for the hosted product.
-> - **H3-Regenerate-2K**, the in-context 2K upscaler. **2K is not reachable from these weights.** If
->   you need it, render at the native size and run an upscaler afterwards.
+> - **H3-Regenerate-2K**, the in-context 2K upscaler. **2K is not reachable from these weights.** The
+>   checkpoint's canvas budget is about 1.03 megapixels — 1344x768 at 16:9 — and a request over the
+>   budget is refused rather than refitted. A 2K frame is more than twice that area, so plan the
+>   shot at the sizes below — and note that the bound is the AREA, so a wider canvas buys you a
+>   shorter one rather than more pixels.
 > - **Sparse-attention inference.** The open weights run *dense* attention, which is why renders are
->   measured in hours at the large canvas.
+>   measured in hours at the large canvas. It is not what caps the clip at 14.38 s — that ceiling is
+>   the checkpoint's own — but it is why the long end of the range is expensive.
+> - **The `<d>` dialogue markers**, and the six other special tokens the model card's examples use.
+>   They are declared in the tokenizer and **do nothing** against these weights — see *Markers from
+>   the upstream examples that do nothing*, below.
 
 ## Cost Comes From The Canvas, Not The Length
 
@@ -72,6 +79,20 @@ budget. Ratios between 1:4 and 4:1 are accepted.
 | 1024x768 / 768x1024 | 4:3 and 3:4. |
 | 768x768 | Square. |
 | 1344x768 / 768x1344 | Full size, 16:9 and 9:16. The default, and the expensive one. |
+| 1536x672 / 672x1536 | 21:9 and its transpose. Same pixel budget as full size, same cost. **Pending an engine change — see below.** |
+
+Every bucket in the table is the same fixed area budget or less — the 21:9 pair is 1,032,192 px,
+byte for byte what 1344x768 is. **The bound is the area, not the long edge**, which is why a wider
+canvas is not automatically a bigger one.
+
+> **The 21:9 pair is not renderable yet.** The area budget already accommodates it, but the engine
+> *also* caps each edge independently, and that per-edge ceiling currently sits below this pair's
+> long edge — so a 21:9 request is refused today even though the menu offers it. **inference PR
+> #640** raises the per-edge ceiling to the widest canvas the resolver can itself produce, which is
+> what makes this pair reachable. Until it lands, treat **1344x768** as the widest canvas that
+> actually renders; every other bucket above works now. **This row and #640 must not be separated at
+> merge** — shipping this table without that engine change re-advertises a canvas the engine
+> refuses.
 
 A keyframe is **stretched** onto the canvas, not letterboxed — crop your reference to the target
 shape first or the subject will distort.
@@ -152,9 +173,35 @@ Part of the schema's advantage is simply that a structured prompt tends to be lo
 specific, and you would get some of that from a detailed paragraph too. The timed cuts are the part
 you cannot get any other way.
 
-> **Do not use the `<d>[English] …</d>` dialogue syntax** that appears in the upstream guides. It is
-> inert against these open weights — it was tested and does nothing. Write dialogue as plain text in
-> the prompt instead.
+### Markers from the upstream examples that do nothing
+
+The model card's prompt examples use a `<d>[English] …</d>` dialogue syntax, and its tokenizer
+declares seven special markers in total:
+
+`<d>` · `</d>` · `<|cutoff|>` · `<|lyrics_start|>` · `<|lyrics_end|>` · `<|caption_start|>` ·
+`<|caption_end|>`
+
+**None of them do anything here.** They are declared as strings in the tokenizer config, but the
+open text encoder has no trained representation for them — the embedding rows they resolve to are
+indistinguishable from the model's unused padding. They almost certainly belong to the withheld
+H3-Context-IR front end, which is not in this loop.
+
+**Nothing strips or repairs the markers.** They are not removed, not rewritten and not warned about
+at submit time. Two features can still change what the text encoder sees, and both are things you
+switched on yourself:
+
+- The **Refine** button hands your prompt *and this guide* to a language model and shows you the
+  rewrite as a suggestion. The box does not change until you press **Apply** — *Keep original*
+  leaves it exactly as you typed it. But because the model has just read this page, a rewrite you
+  do apply may well drop the markers.
+- A **Style Catalog** entry or a **preset stack** is folded into the outgoing prompt at submit time.
+  There is no confirmation step: the Studio previews the composed string above the Generate button,
+  and then sends it.
+
+With no style, no stack and no applied refinement, whatever is in the box is exactly what the text
+encoder sees. Either way the markers cost you prompt space and contribute nothing. **Write dialogue
+as plain text instead** — name the speaker, give the line, give the delivery, exactly as in the
+*Prompt the audio explicitly* section above. That works; the markup does not.
 
 ### Keep the action inside the clip
 
