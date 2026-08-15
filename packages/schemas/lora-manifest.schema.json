@@ -98,6 +98,29 @@
             "description": "Sampling-regime role marker (the sibling of 'conditioningRole', which is about how a job is CONDITIONED). 'accelerator' = a step-distill / turbo LoRA (e.g. the Krea 2 turbo adapter, sc-13882) whose weights load additively like any other LoRA but whose intent is to change the sampler regime — fewer steps, CFG off. Selecting one auto-switching the model to that regime is separately wired per model; absent that wiring the weights still stack as a plain residual.",
             "enum": ["accelerator"]
           },
+          "sampling": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["steps", "schedulerShift", "audioSchedulerShift"],
+            "description": "The sampling recipe a `role: accelerator` adapter was DISTILLED AGAINST — the values that make selecting it change the job rather than merely stack a residual (sc-18726). Declared here, per adapter, because a step-distill family's recipe differs per FILE: lightx2v's four MiniMax-H3 turbo checkpoints publish (4, 6.0), (8, 12.0), (4, 12.0) and (4, 12.0), and the four files are format-identical, so no sniff can tell them apart and a family-wide constant would be wrong for three of them. Read by `sceneworks_core::minimax_h3_turbo::turbo_recipes` (which resolves the selected job LoRA's catalog id against the EMBEDDED builtin manifest, so a forged payload cannot invent a recipe) and applied by `video_jobs::minimax_h3::minimax_h3_sampling`. Meaningful only alongside `role: accelerator`; an adapter with no `sampling` block still loads as a plain additive residual, which is exactly what `role` alone meant before this key existed.",
+            "properties": {
+              "steps": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The denoise step count the adapter was distilled for, in MODEL EVALUATIONS (NFE) — the same unit `advanced.steps` carries and the same unit the engine's `req.steps` carries. The engine appends the terminal sigma = 0 grid point itself (`JointSchedule::with_shifts(evaluations + 1, ..)`), so there is NO +1 anywhere in SceneWorks and this number is passed through verbatim. Must satisfy the paired model's own `limits.hardMinSteps` / `limits.steps` gate, or the recipe would build a job the enqueue gate refuses; pinned by `every_turbo_recipe_step_count_clears_the_model_step_gate`."
+              },
+              "schedulerShift": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "The VIDEO flow-matching sigma shift the adapter was trained against, forwarded as `GenerationRequest::scheduler_shift`. It is a real per-variant axis, not a constant: lightx2v's model-specs table publishes shift 6 for the 768p 4-step file and 12 for the 544p files, and rendering a turbo checkpoint on the base 12.0 is off-distribution (sc-18729 measured the 768p one at 6)."
+              },
+              "audioSchedulerShift": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "The AUDIO sigma shift the adapter was trained against. MiniMax-H3 runs dual schedulers and the audio one is a genuinely separate axis, so it is declared per variant and recorded on the asset as `effectiveAudioSchedulerShift`. ⚠️ It is NOT a request knob: `mlx-gen-minimax-h3` holds audio at its own `AUDIO_SIGMA_SHIFT` constant and exposes no override, because every published variant trains at 3.0 (12/3 and 6/3 are the two published pairs). Declaring it anyway is what makes a future variant that moves it LOUD instead of silently rendering on 3.0 — `every_turbo_variant_declares_the_audio_shift_the_engine_is_fixed_at` fails the moment a declared value diverges."
+              }
+            }
+          },
           "source": { "$ref": "#/$defs/loraSource" }
         }
       }

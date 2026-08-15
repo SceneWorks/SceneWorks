@@ -324,6 +324,15 @@ Expected failure modes: no/wrong token → `401` with
    frame lattice at 24 fps, so nothing between them renders, and the 15 s its own
    documentation advertises is between the last rung and the next. `minSteps` is
    the same shape — below it the request is refused, not raised.
+
+   ⚡ **A `loras` entry whose `list_loras` row carries `role: "accelerator"` and a
+   `sampling` block is a step-distill accelerator, and attaching it changes the
+   SCHEDULE as well as the weights** (sc-18726): the render switches to that
+   adapter's own `sampling.steps` and `sampling.schedulerShift`. This is the
+   difference between a two-and-a-half-hour MiniMax-H3 render and a twelve-minute
+   one, and there is no separate "turbo" parameter — the adapter *is* the switch.
+   Omit `steps` to take the adapter's trained count; set it to override. Attach at
+   most one accelerator per job: two asking for different schedules are refused.
 5. Poll `get_job_status` until `"status": "completed"`, then `get_job_result`
    → download each asset URL within the ticket TTL (300 s; re-call for fresh
    links). If the absolute URL host is not reachable from your machine, apply
