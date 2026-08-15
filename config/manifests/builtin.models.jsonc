@@ -16778,7 +16778,105 @@
       // a follow-up re-measures the now-lighter q4 default on-device.
       "mlx": {
         "minMemoryGb": 44,
-        "quantize": 4
+        "quantize": 4,
+        // SC-18602: the identity-conditioned PuLID provider owns this exact ladder declaration.
+        // The public `character_image` route is one provider-side ImageToImage reference; identity
+        // weights are part of LoadSpec/cache identity and the same `identity` value is the provider
+        // evidence overlay. No base FLUX, LoRA, PiD, multi-phase, File-source, or Candle coordinate
+        // inherits this authority. No calibration binding is declared: until final frozen-code
+        // evidence is promoted, optimized admission is conservative and Estimated only.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "pulid_flux",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // SC-15839: static capability for the bespoke Candle route is separate from calibration and
       // measurement. The provider/worker execute the full ladder only for the exact identity request;

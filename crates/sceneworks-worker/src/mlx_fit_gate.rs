@@ -34,15 +34,15 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use gen_core::{
-    GenerationMemory, LoadSpec, MemoryBackend, MemoryBackendRealization, MemoryBudget,
-    MemoryCacheState, MemoryConformanceState, MemoryDecodeArtifactIdentity,
-    MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery, MemoryDecodeQualityDisposition,
-    MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity, MemoryEvidence,
-    MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryOptimizationAuthority, MemoryParityContract, MemoryParityResult,
-    MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
-    PerComponentBytes, Precision, Quant, TransformerComponent, WeightsSource,
-    MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
+    GenerationMemory, LoadShapeDeclarationResult, LoadSpec, MemoryBackend,
+    MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryConformanceState,
+    MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery,
+    MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
+    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
+    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
+    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
+    TransformerComponent, WeightsSource, MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -461,6 +461,10 @@ pub(crate) struct MlxRequestPlan {
     /// `<= activation_headroom_bytes`, so the area term below can never go negative.
     fixed_reserve_bytes: u64,
     calibration: MlxCalibrationConfig,
+    /// Terminal declaration refusals retain safe eager execution, but may not consume any optimized
+    /// provider strategy later in the cache-aware selector. NotEvaluated preserves every legacy
+    /// route; Applied preserves the exact declaration-owned provider contract.
+    load_shape_declaration_result: LoadShapeDeclarationResult,
 }
 
 impl MlxRequestPlan {
@@ -674,6 +678,7 @@ impl MlxRequestPlan {
             activation_headroom_bytes: activation_anchor_bytes.saturating_add(fixed_reserve_bytes),
             fixed_reserve_bytes,
             calibration,
+            load_shape_declaration_result: spec.load_shape_declaration_result,
         }
     }
 
@@ -2768,7 +2773,7 @@ fn evaluate_request_with_budget_using_bundle(
     let geometry = request_geometry(inputs);
     let (mode, mode_key) = provider_request_mode(plan.engine_id, inputs);
     let mut fallback_contract;
-    let contract = if let Some(contract) = generator.memory_strategy_contract() {
+    let provider_contract = if let Some(contract) = generator.memory_strategy_contract() {
         contract
     } else {
         fallback_contract = MemoryProviderContract::compatibility_default(
@@ -2786,6 +2791,25 @@ fn evaluate_request_with_budget_using_bundle(
         // split — so carry the whole sum on the transformer axis rather than fail conformance.
         fallback_contract.asset_facts.transformer_bytes = plan.asset_bytes;
         &fallback_contract
+    };
+    let refused_contract;
+    let contract = if plan.load_shape_declaration_result == LoadShapeDeclarationResult::Refused {
+        // A declaration refusal is terminal authority, not an invitation for the later request
+        // selector to rediscover lower optimized rungs directly from the provider. Preserve only
+        // the exact provider/load/calibration handshake needed for a safe resident request; the
+        // provider's optimized table remains unreachable until a complete declaration applies.
+        let mut resident = MemoryProviderContract::compatibility_default(
+            provider_contract.provider_id.clone(),
+            provider_contract.backend.clone(),
+        );
+        resident.load_shape = provider_contract.load_shape;
+        resident.calibration = provider_contract.calibration.clone();
+        resident.asset_facts = provider_contract.asset_facts;
+        resident.resident_request_memory = provider_contract.resident_request_memory;
+        refused_contract = resident;
+        &refused_contract
+    } else {
+        provider_contract
     };
     if plan.engine_id.starts_with("mage_flow")
         && inputs.adapter_count > 0
@@ -6617,6 +6641,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -7044,6 +7069,7 @@ mod tests {
                 bindings: vec![fixture_binding("q4", variant)],
                 resolved: fixture_provenance("q4", variant),
             }),
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -7168,6 +7194,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(2.0),
             fixed_reserve_bytes: 0,
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -7948,6 +7975,131 @@ mod tests {
     }
 
     #[test]
+    fn pulid_identity_route_is_estimated_only_and_refusal_is_terminal() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "pulid_flux";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = "pulid_flux".to_owned();
+        contract.calibration = None;
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        decode.parameters.decode_tile_edges = vec![768, 640, 512];
+        decode.parameters.decode_overlaps = vec![64];
+        let attention = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedAttention)
+            .expect("bounded attention capability");
+        attention.parameters.attention_chunk_sizes = vec![67_108_864];
+        let transformer = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedTransformerResidency)
+            .expect("bounded transformer capability");
+        transformer.parameters.transformer_window_sizes = vec![1];
+
+        let mut plan = fixture_plan();
+        plan.engine_id = "pulid_flux";
+        plan.model_id = "pulid_flux_dev".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        plan.load_shape_declaration_result = LoadShapeDeclarationResult::Applied;
+        let mut inputs = fixture_inputs(1024, 1024);
+        inputs.mode = "character_image".to_owned();
+        inputs.overlay = Some("identity".to_owned());
+        inputs.has_reference = true;
+        inputs.reference_count = 1;
+
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Sequential,
+            fixture_budget(8.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect("the exact unmeasured PuLID identity route must reach the estimate ladder");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        assert_eq!(
+            evaluation.context.optimization_authority,
+            MemoryOptimizationAuthority::Estimated,
+            "PuLID must not inherit flux_dev measurements"
+        );
+        assert_eq!(evaluation.context.mode, MemoryMode::ImageToImage);
+        assert_eq!(evaluation.context.overlay.as_deref(), Some("identity"));
+        assert_eq!(evaluation.context.geometry.reference_count, 1);
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_tile_edge,
+            Some(512)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_overlap,
+            Some(64)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.attention_chunk_size,
+            Some(67_108_864)
+        );
+        assert_eq!(
+            evaluation
+                .context
+                .selection
+                .parameters
+                .transformer_window_size,
+            Some(1)
+        );
+        assert!(evaluation.process_limit_bytes.is_none());
+
+        let mut refused = plan.clone();
+        refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
+        let resident = evaluate_request_with_budget(
+            &generator,
+            &refused,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(20.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect("a refused declaration keeps the safe roomy resident path");
+        assert_eq!(
+            resident.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert_eq!(
+            resident.context.optimization_authority,
+            MemoryOptimizationAuthority::Resident
+        );
+        let error = evaluate_request_with_budget(
+            &generator,
+            &refused,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect_err("a refused over-budget eager request cannot rediscover an optimized rung")
+        .to_string();
+        assert!(
+            error.contains("needs") && error.contains("safely available"),
+            "terminal refusal must surface the safe resident fit failure: {error}"
+        );
+    }
+
+    #[test]
     fn krea_raw_estimate_floor_selects_exact_native_and_pid_decode_domains() {
         let mut generator = full_ladder_generator();
         generator.descriptor.id = "krea_2_raw";
@@ -8297,6 +8449,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let inputs = fixture_inputs(1024, 1024);
 
@@ -8447,6 +8600,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let inputs = fixture_inputs(1024, 1024);
 
@@ -12794,6 +12948,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         // Go through `request_geometry` rather than hand-building a `batch: 1` geometry, so this
         // exercises the production count -> batch seam instead of asserting a value it supplies.
@@ -12920,6 +13075,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let peak_gb = |width, height| {
             plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1)))
@@ -12998,6 +13154,7 @@ mod tests {
                     .saturating_add(fixed_reserve_bytes),
                 fixed_reserve_bytes,
                 calibration: MlxCalibrationConfig::Absent,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
             }
         };
         let dense = plan(HeadroomAllowance::LENS_DENSE);
@@ -13094,6 +13251,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let selected = evaluate_request_with_budget(
             &request_generator(None),

@@ -272,6 +272,40 @@ fn pulid_raw_settings(
     raw
 }
 
+fn pulid_memory_route_context() -> crate::memory_route_registry::MemoryRouteRequestContext {
+    crate::memory_route_registry::MemoryRouteRequestContext {
+        mode: crate::memory_route_registry::MemoryRouteMode::CharacterImage,
+        reference_count: 1,
+        use_pid: false,
+        has_phases: false,
+    }
+}
+
+fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxRequestInputs {
+    crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        // The worker drives outputs one at a time and opens one provider request scope per item.
+        // `request.count` is queue cardinality, not a tensor batch or evidence-key geometry axis.
+        count: 1,
+        mode: "character_image".to_owned(),
+        overlay: Some("identity".to_owned()),
+        adapter_count: 0,
+        has_reference: true,
+        reference_count: 1,
+        use_pid: false,
+        has_phases: false,
+    }
+}
+
+fn pulid_declared_load_policy(spec: LoadSpec) -> LoadSpec {
+    if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::Applied {
+        spec.with_offload_policy(gen_core::OffloadPolicy::Sequential)
+    } else {
+        spec
+    }
+}
+
 /// Real PuLID-FLUX generation: resolve the reference + weights on the async side, feed the engine's
 /// env-var weight seam from the worker cache, then load the registry `pulid_flux` generator once
 /// (cached) + generate each image on the blocking thread. Each image is a single-identity render at
@@ -398,17 +432,52 @@ async fn generate_pulid_flux_stream(
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 
-    let mut spec = load_spec(flux_base, quant, Vec::new(), None);
+    let resolved_tier = resolved_mlx_artifact_tier(&flux_base, recipe_bits);
+    let mut spec = load_spec(flux_base, quant, Vec::new(), None)
+        .with_resolved_route(PULID_MODEL);
     // PuLID identity sub-model paths ride the spec (sc-8827) — the `pulid_flux` loader reads them from
     // `LoadSpec::identity` instead of the process-global `PULID_*` env vars.
     spec.identity = Some(identity);
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let route_context = pulid_memory_route_context();
+    let route_mode = route_context.mode;
+    let spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        PULID_ENGINE_ID,
+        resolved_tier,
+        Some(route_mode),
+        &request.model_manifest_entry,
+        spec,
+        route_context,
+    );
+    // PuLID's exact provider publishes BTR only for Sequential+Deferred. The declaration proves
+    // Deferred independently; this dedicated route then binds the matching load policy before the
+    // cache loads the generator. A refusal remains Resident+Eager and can only take the safe dense
+    // path (or fail fit) through the terminal authority carried by the request plan.
+    let spec = pulid_declared_load_policy(spec);
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        PULID_ENGINE_ID,
+        PULID_MODEL,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    );
+    let memory_plan = match resolved_tier {
+        Some(tier) => memory_plan.with_resolved_artifact_tier(Some(tier))?,
+        None => memory_plan,
+    };
+    let memory_inputs = pulid_memory_inputs(width, height);
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         PULID_ENGINE_ID,
         0,
         spec,
         format!("{PULID_ENGINE_ID} load failed"),
-        move |generator, tx, cancel| {
+        move |generator,
+              cache_state,
+              loaded_policy,
+              _requested_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
             // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
             // face stack lives here); source embedded once, reused across every output (sc-4411).
             let scorer = match (&face_stack_dir, &likeness_source) {
@@ -417,13 +486,26 @@ async fn generate_pulid_flux_stream(
                 }
                 _ => None,
             };
+            let mut request_cache_state = cache_state;
             drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    generator,
+                    &memory_plan,
+                    &memory_inputs,
+                    request_cache_state,
+                    loaded_policy.offload_policy,
+                    external_committed_bytes,
+                )?;
+                request_cache_state = gen_core::MemoryCacheState::Warm;
+                let _request_memory_limit = memory_evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 // One reference face per image (the engine consumes it into the id-embedding +
                 // CA injector). idWeight → strength; timestepToStartCfg → timestep_to_start_cfg.
-                let req = GenerationRequest {
+                let mut req = GenerationRequest {
                     prompt: prompt.clone(),
                     negative_prompt: None,
                     width,
@@ -441,11 +523,17 @@ async fn generate_pulid_flux_stream(
                         image: reference.clone(),
                         strength: Some(id_weight),
                     }],
+                    memory: Some(memory_evaluation.memory),
                     preview,
                     cancel: cancel.clone(),
                     ..Default::default()
                 };
-                let output = match generator.generate(&req, on_progress) {
+                let output = match crate::memory_strategy::generate_with_scope(
+                    generator,
+                    &mut req,
+                    Some(&memory_evaluation.context),
+                    on_progress,
+                ) {
                     Ok(output) => output,
                     Err(_) if cancel.is_cancelled() => return Ok(None),
                     Err(error) => {
@@ -500,4 +588,44 @@ async fn generate_pulid_flux_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod pulid_tests {
+    use super::*;
+
+    #[test]
+    fn pulid_memory_identity_is_exact_character_to_provider_image_to_image() {
+        let context = pulid_memory_route_context();
+        assert_eq!(
+            context.mode,
+            crate::memory_route_registry::MemoryRouteMode::CharacterImage
+        );
+        assert_eq!(context.reference_count, 1);
+        assert!(!context.use_pid);
+        assert!(!context.has_phases);
+
+        let inputs = pulid_memory_inputs(1024, 1024);
+        assert_eq!(inputs.mode, "character_image");
+        assert_eq!(inputs.overlay.as_deref(), Some("identity"));
+        assert!(inputs.has_reference);
+        assert_eq!(inputs.reference_count, 1);
+        assert_eq!(inputs.count, 1, "PuLID scopes each queued output independently");
+        assert_eq!(inputs.adapter_count, 0);
+        assert!(!inputs.use_pid);
+        assert!(!inputs.has_phases);
+
+        let applied = pulid_declared_load_policy(
+            LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))
+                .with_applied_load_shape_declaration(),
+        );
+        assert_eq!(applied.offload_policy, gen_core::OffloadPolicy::Sequential);
+        assert_eq!(applied.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        let refused = pulid_declared_load_policy(
+            LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))
+                .with_refused_load_shape_declaration(),
+        );
+        assert_eq!(refused.offload_policy, gen_core::OffloadPolicy::Resident);
+        assert_eq!(refused.load_shape, gen_core::LoadShape::EagerMaterialization);
+    }
 }

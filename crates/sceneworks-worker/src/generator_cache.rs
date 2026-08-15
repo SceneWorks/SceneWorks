@@ -1764,6 +1764,68 @@ mod tests {
     }
 
     #[test]
+    fn pulid_cache_identity_binds_route_tier_and_each_identity_component() {
+        let root = tempfile::tempdir().expect("PuLID cache fixture");
+        let base = root.path().join("base-q4");
+        let face = root.path().join("face");
+        let other_face = root.path().join("other-face");
+        std::fs::create_dir_all(&base).expect("base dir");
+        std::fs::create_dir_all(&face).expect("face dir");
+        std::fs::create_dir_all(&other_face).expect("other face dir");
+        let encoder = root.path().join("pulid.safetensors");
+        let other_encoder = root.path().join("other-pulid.safetensors");
+        let eva = root.path().join("eva.safetensors");
+        let other_eva = root.path().join("other-eva.safetensors");
+        for (path, bytes) in [
+            (&encoder, b"pulid".as_slice()),
+            (&other_encoder, b"other-pulid".as_slice()),
+            (&eva, b"eva".as_slice()),
+            (&other_eva, b"other-eva".as_slice()),
+        ] {
+            std::fs::write(path, bytes).expect("identity component");
+        }
+        let exact = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(base.clone()))
+                .with_quant(Quant::Q4)
+                .with_resolved_route("pulid_flux_dev");
+            spec.identity = Some(gen_core::IdentityWeights {
+                encoder: Some(WeightsSource::File(encoder.clone())),
+                eva: Some(WeightsSource::File(eva.clone())),
+                face_dir: Some(WeightsSource::Dir(face.clone())),
+            });
+            spec
+        };
+        let key = LoadIdentity::from_load_spec("pulid_flux", &exact());
+        assert_eq!(key, LoadIdentity::from_load_spec("pulid_flux", &exact()));
+
+        let mut crossed_route = exact();
+        crossed_route.resolved_route = Some("flux_dev".to_owned());
+        let mut crossed_tier = exact();
+        crossed_tier.quantize = Some(Quant::Q8);
+        let mut crossed_encoder = exact();
+        crossed_encoder.identity.as_mut().expect("identity").encoder =
+            Some(WeightsSource::File(other_encoder));
+        let mut crossed_eva = exact();
+        crossed_eva.identity.as_mut().expect("identity").eva = Some(WeightsSource::File(other_eva));
+        let mut crossed_face = exact();
+        crossed_face.identity.as_mut().expect("identity").face_dir =
+            Some(WeightsSource::Dir(other_face));
+        for (label, crossed) in [
+            ("route", crossed_route),
+            ("tier", crossed_tier),
+            ("PuLID encoder", crossed_encoder),
+            ("EVA", crossed_eva),
+            ("face stack", crossed_face),
+        ] {
+            assert_ne!(
+                key,
+                LoadIdentity::from_load_spec("pulid_flux", &crossed),
+                "{label} must be cache-distinct"
+            );
+        }
+    }
+
+    #[test]
     fn load_identity_fingerprints_named_component_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let component = dir.path().join("component.safetensors");

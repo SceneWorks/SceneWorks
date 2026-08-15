@@ -291,6 +291,7 @@ struct MemoryRouteRule {
 const ALL_TIERS: &[MemoryRouteTier] = &MemoryRouteTier::ALL;
 const ALL_MODES: &[MemoryRouteMode] = &MemoryRouteMode::ALL;
 const PLAIN: &[MemoryRouteLoadProfile] = &[MemoryRouteLoadProfile::Plain];
+const IDENTITY_ONLY: &[MemoryRouteLoadProfile] = &[MemoryRouteLoadProfile::Identity];
 const SINGLE_CONTROL: &[MemoryRouteLoadProfile] = &[MemoryRouteLoadProfile::SingleControl];
 const PLAIN_LORA: &[MemoryRouteLoadProfile] =
     &[MemoryRouteLoadProfile::Plain, MemoryRouteLoadProfile::Lora];
@@ -319,6 +320,7 @@ const LEGACY_Z_IMAGE_TURBO_PROFILES: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Identity,
 ];
 const TEXT_ONLY: &[MemoryRouteMode] = &[MemoryRouteMode::TextToImage];
+const CHARACTER_ONLY: &[MemoryRouteMode] = &[MemoryRouteMode::CharacterImage];
 const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
     MemoryRouteMode::TextToImage,
     MemoryRouteMode::StyleVariations,
@@ -413,6 +415,15 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: ALL_TIERS,
         modes: EDIT_MODES,
         load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "pulid_flux",
+        tiers: ALL_TIERS,
+        modes: CHARACTER_ONLY,
+        load_profiles: IDENTITY_ONLY,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -800,10 +811,18 @@ fn mlx_request_implementation_matches(
     if !includes("loadProfiles", load_profile.as_str())? || !includes("sourceKinds", source_kind)? {
         return Ok(false);
     }
+    let expected_provider_overlay = match load_profile {
+        MemoryRouteLoadProfile::Identity | MemoryRouteLoadProfile::IpAdapter => "identity",
+        MemoryRouteLoadProfile::SingleControl | MemoryRouteLoadProfile::MultiControl => "control",
+        MemoryRouteLoadProfile::Plain
+        | MemoryRouteLoadProfile::Lora
+        | MemoryRouteLoadProfile::LoraPid
+        | MemoryRouteLoadProfile::Pid => "none",
+    };
     if implementation
         .get("providerOverlay")
         .and_then(Value::as_str)
-        != Some("none")
+        != Some(expected_provider_overlay)
     {
         return Err(());
     }
@@ -822,6 +841,7 @@ fn mlx_request_implementation_matches(
     };
     let expected_provider_mode = match context.mode {
         MemoryRouteMode::EditImage => "edit_image",
+        MemoryRouteMode::CharacterImage if context.reference_count == 1 => "image_to_image",
         MemoryRouteMode::TextToImage if context.reference_count == 1 => "image_to_image",
         MemoryRouteMode::TextToImage => "text_to_image",
         other => other.as_str(),
@@ -2799,6 +2819,304 @@ mod tests {
             .load_shape_declaration_result,
             LoadShapeDeclarationResult::Refused
         );
+    }
+
+    #[test]
+    fn pulid_mlx_declaration_is_exhaustive_identity_only_and_fail_closed() {
+        let manifest = shipped_model("pulid_flux_dev");
+        let implementations = manifest["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("PuLID MLX implementations");
+        let rungs = implementations
+            .iter()
+            .map(|implementation| implementation["rung"].as_str().expect("PuLID rung"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            rungs,
+            [
+                "resident",
+                "staged_residency",
+                "bounded_decode",
+                "bounded_attention",
+                "bounded_transformer_residency",
+            ]
+            .into_iter()
+            .collect(),
+            "the exhaustive declaration must publish every implemented PuLID strategy"
+        );
+        assert_eq!(implementations.len(), 5, "no duplicate PuLID rung rows");
+        let btr_index = implementations
+            .iter()
+            .position(|implementation| {
+                implementation["rung"].as_str() == Some("bounded_transformer_residency")
+            })
+            .expect("PuLID BTR implementation");
+        for implementation in implementations {
+            assert_eq!(
+                implementation["tiers"],
+                serde_json::json!(["bf16", "q4", "q8"])
+            );
+            assert_eq!(
+                implementation["modes"],
+                serde_json::json!(["character_image"])
+            );
+            assert_eq!(implementation["overlays"], serde_json::json!(["identity"]));
+            assert_eq!(
+                implementation["loadProfiles"],
+                serde_json::json!(["identity"])
+            );
+            assert_eq!(implementation["sourceKinds"], serde_json::json!(["dir"]));
+            assert_eq!(implementation["providerOverlay"], "identity");
+            assert_eq!(
+                implementation["requestContexts"],
+                serde_json::json!([{
+                    "mode": "character_image",
+                    "providerMode": "image_to_image",
+                    "referenceCounts": [1],
+                    "pid": [false],
+                    "hasPhases": false,
+                }]),
+                "every PuLID rung is bound to the same exact provider request"
+            );
+        }
+        let context = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::CharacterImage,
+            reference_count: 1,
+            use_pid: false,
+            has_phases: false,
+        };
+        let provider_accepts = |candidate: &LoadSpec| {
+            candidate.offload_policy == OffloadPolicy::Sequential
+                && candidate.load_shape == LoadShape::DeferredMaterialization
+                && matches!(candidate.weights, WeightsSource::Dir(_))
+                && candidate.resolved_route.as_deref() == Some("pulid_flux_dev")
+                && candidate.identity.as_ref().is_some_and(|identity| {
+                    identity.encoder.is_some()
+                        && identity.eva.is_some()
+                        && identity.face_dir.is_some()
+                })
+                && candidate.adapters.is_empty()
+                && candidate.pid.is_none()
+                && candidate.control.is_none()
+                && candidate.extra_controls.is_empty()
+                && candidate.ip_adapter.is_none()
+                && candidate.text_encoder.is_none()
+                && candidate.components.is_empty()
+        };
+        let evaluate = |tier: MemoryRouteTier,
+                        candidate: LoadSpec,
+                        request_context: MemoryRouteRequestContext,
+                        candidate_manifest: &JsonObject<String, Value>| {
+            evaluate_declared_mlx_load_shape_for_request_with(
+                "pulid_flux",
+                Some(tier.as_str()),
+                Some(MemoryRouteMode::CharacterImage),
+                candidate_manifest,
+                candidate,
+                request_context,
+                provider_accepts,
+            )
+        };
+
+        for tier in [
+            MemoryRouteTier::Bf16,
+            MemoryRouteTier::Q4,
+            MemoryRouteTier::Q8,
+        ] {
+            let applied = evaluate(
+                tier,
+                spec(tier, MemoryRouteLoadProfile::Identity).with_resolved_route("pulid_flux_dev"),
+                context,
+                &manifest,
+            );
+            assert_eq!(
+                applied.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied,
+                "PuLID {tier:?}"
+            );
+            assert_eq!(applied.load_shape, LoadShape::DeferredMaterialization);
+            assert_eq!(applied.offload_policy, OffloadPolicy::Resident);
+        }
+
+        let evaluate_refused = |candidate: LoadSpec, request_context: MemoryRouteRequestContext| {
+            evaluate(MemoryRouteTier::Q4, candidate, request_context, &manifest)
+        };
+        let q4_identity = || {
+            spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Identity)
+                .with_resolved_route("pulid_flux_dev")
+        };
+        for (label, candidate, request_context) in [
+            (
+                "missing identity",
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain)
+                    .with_resolved_route("pulid_flux_dev"),
+                context,
+            ),
+            (
+                "route missing",
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Identity),
+                context,
+            ),
+            (
+                "route crossed",
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Identity)
+                    .with_resolved_route("flux_dev"),
+                context,
+            ),
+            (
+                "reference missing",
+                q4_identity(),
+                MemoryRouteRequestContext {
+                    reference_count: 0,
+                    ..context
+                },
+            ),
+            (
+                "reference duplicated",
+                q4_identity(),
+                MemoryRouteRequestContext {
+                    reference_count: 2,
+                    ..context
+                },
+            ),
+            (
+                "PiD crossed",
+                q4_identity(),
+                MemoryRouteRequestContext {
+                    use_pid: true,
+                    ..context
+                },
+            ),
+            (
+                "phases crossed",
+                q4_identity(),
+                MemoryRouteRequestContext {
+                    has_phases: true,
+                    ..context
+                },
+            ),
+            (
+                "mode crossed",
+                q4_identity(),
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    ..context
+                },
+            ),
+        ] {
+            let refused = evaluate_refused(candidate, request_context);
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "{label}"
+            );
+            assert_eq!(refused.load_shape, LoadShape::EagerMaterialization);
+        }
+
+        let file = {
+            let mut candidate = q4_identity();
+            candidate.weights = WeightsSource::File("pulid.safetensors".into());
+            candidate
+        };
+        let external_te =
+            q4_identity().with_text_encoder(WeightsSource::Dir("external-text-encoder".into()));
+        let mut unknown_component = q4_identity();
+        unknown_component.components.insert(
+            "unexpected".to_owned(),
+            WeightsSource::File("unexpected.safetensors".into()),
+        );
+        let mut incomplete_identity = q4_identity();
+        incomplete_identity
+            .identity
+            .as_mut()
+            .expect("identity fixture")
+            .eva = None;
+        for (label, candidate) in [
+            ("File source", file),
+            ("external text encoder", external_te),
+            ("unknown component", unknown_component),
+            ("incomplete identity", incomplete_identity),
+        ] {
+            let refused = evaluate_refused(candidate, context);
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "{label}"
+            );
+        }
+
+        let mut crossed_overlay = manifest.clone();
+        crossed_overlay["mlx"]["memoryStrategyContract"]["implementations"][btr_index]
+            ["providerOverlay"] = Value::String("none".to_owned());
+        assert_eq!(
+            evaluate(
+                MemoryRouteTier::Q4,
+                q4_identity(),
+                context,
+                &crossed_overlay,
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "identity profile cannot consume a none-overlay provider coordinate"
+        );
+        let mut crossed_provider_mode = manifest.clone();
+        crossed_provider_mode["mlx"]["memoryStrategyContract"]["implementations"][btr_index]
+            ["requestContexts"][0]["providerMode"] = Value::String("character_image".to_owned());
+        assert_eq!(
+            evaluate(
+                MemoryRouteTier::Q4,
+                q4_identity(),
+                context,
+                &crossed_provider_mode,
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "public CharacterImage must map to provider ImageToImage"
+        );
+        let mut missing_context = manifest.clone();
+        missing_context["mlx"]["memoryStrategyContract"]["implementations"][btr_index]
+            .as_object_mut()
+            .expect("PuLID BTR implementation")
+            .remove("requestContexts");
+        assert_eq!(
+            evaluate(
+                MemoryRouteTier::Q4,
+                q4_identity(),
+                context,
+                &missing_context,
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "a missing request identity cannot become a context-free declaration"
+        );
+
+        let mut no_btr = manifest.clone();
+        no_btr["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array_mut()
+            .expect("PuLID implementations")
+            .retain(|implementation| {
+                implementation.get("rung").and_then(Value::as_str)
+                    != Some("bounded_transformer_residency")
+            });
+        let undeclared = evaluate(MemoryRouteTier::Q4, q4_identity(), context, &no_btr);
+        assert_eq!(
+            undeclared.load_shape_declaration_result,
+            LoadShapeDeclarationResult::NotEvaluated
+        );
+        assert_eq!(
+            apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "pulid_flux",
+                MemoryRouteMode::CharacterImage,
+                undeclared,
+                true,
+            )
+            .load_shape,
+            LoadShape::EagerMaterialization,
+            "a missing PuLID declaration cannot fall through to legacy shaping"
+        );
+        assert!(manifest["mlx"].get("supportsSequentialOffload").is_none());
+        assert!(manifest["candle"].get("memoryStrategyContract").is_none());
     }
 
     #[test]
