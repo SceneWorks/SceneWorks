@@ -12275,16 +12275,32 @@ fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> te
 /// A shared/base snapshot root carrying every component `mlx-gen-minimax-h3::load` probes under
 /// `spec.weights` — the upstream repo's half of the install, which is a DIFFERENT download from the
 /// tiers.
+///
+/// It writes the probed **files**, and derives which ones from
+/// [`super::minimax_h3::MINIMAX_H3_SHARED_PROBES`] plus the conditional
+/// [`super::minimax_h3::MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`] rather than restating a directory
+/// list. sc-19558 moved the completeness gate from `is_dir()` to `is_file()` precisely because an
+/// interrupted co-requisite download leaves the directory behind, so a directory-only fixture
+/// described an install the resolver now refuses — and a hand-copied file list here would drift from
+/// the gate the same way the catalog drifted from the loader.
 #[cfg(target_os = "macos")]
 fn minimax_h3_base_root(prefix: &str) -> tempfile::TempDir {
     let guard = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
         .expect("temp dir");
-    for component in ["text_encoder", "tokenizer", "vae", "audio_vae"] {
-        std::fs::create_dir_all(guard.path().join(component)).expect("component dir");
+    for probe in super::minimax_h3::MINIMAX_H3_SHARED_PROBES
+        .iter()
+        .copied()
+        .chain(std::iter::once(
+            super::minimax_h3::MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE,
+        ))
+    {
+        let path = guard.path().join(probe);
+        std::fs::create_dir_all(path.parent().expect("a probe is a nested path"))
+            .expect("component dir");
+        std::fs::write(&path, "{}").expect("probed file");
     }
-    std::fs::create_dir_all(guard.path().join("FL2VA").join("audio_vae")).expect("FL2VA dir");
     guard
 }
 
@@ -12907,6 +12923,77 @@ fn minimax_h3_tier_resolution_requires_both_dit_partitions() {
         message.contains("no complete MiniMax-H3 tier found"),
         "an empty install must not be reported as a torn one: {message}"
     );
+}
+
+/// sc-19558 — **a shared probe that is missing is refused BY NAME**, one probe at a time.
+///
+/// The control is the whole point. `minimax_h3_base_root` now writes files rather than directories,
+/// so a fixture regression would silently turn every resolver test above into a test of the *first*
+/// gate it hits. This drives the same complete root, deletes exactly ONE probed file, and asserts
+/// the refusal names that file — then restores it and asserts the load resolves again. Deleting all
+/// of them at once would prove the SET is gated, not each member: a gate that checked only
+/// `vae/config.json` would pass that and still admit a snapshot with no tokenizer.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_names_each_missing_shared_probe() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_SHARED_PROBES,
+        MINIMAX_H3_TIER_DIR_ENV, MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE,
+    };
+    let base = minimax_h3_base_root("mm_probe_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    // No packed TE in the tier, so the conditional upstream text-encoder probe is live too.
+    let tier = minimax_h3_tier_root(
+        "mm_probe_tier_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let resolve = || {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier.path().to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    resolve().expect("the control: a complete base root and a complete q4 tier resolve");
+
+    let probes: Vec<&str> = MINIMAX_H3_SHARED_PROBES
+        .iter()
+        .copied()
+        .chain(std::iter::once(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE))
+        .collect();
+    assert!(
+        probes.len() >= 7,
+        "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
+        probes.len()
+    );
+    for probe in probes {
+        let path = base.path().join(probe);
+        let saved = std::fs::read(&path).expect("the fixture wrote every probed file");
+        std::fs::remove_file(&path).expect("remove one probe");
+        let message = resolve()
+            .expect_err("a missing shared probe must be refused before the engine loads")
+            .to_string();
+        assert!(
+            message.contains(probe),
+            "the refusal must name `{probe}` rather than restating the whole list: {message}"
+        );
+        std::fs::write(&path, saved).expect("restore the probe");
+        resolve().unwrap_or_else(|e| panic!("restoring `{probe}` must resolve again: {e}"));
+    }
 }
 
 /// sc-19120 / sc-19506 — a q4/q8 tier's PACKED text encoder is STAGED, and the dense upstream one
