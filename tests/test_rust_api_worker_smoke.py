@@ -595,7 +595,18 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         for index in range(5):
             detection_job = httpx.post(
                 f"{rust_api}/api/v1/projects/{project_id}/person-tracks/detections",
-                json={"sourceAssetId": asset_id, "sourceTimestamp": index * 0.1},
+                # `preview: True`, not the default: this test spawns ONE worker with
+                # SCENEWORKS_GPU_ID=cpu, and `worker_capabilities_with_utility` gives a CPU worker
+                # `person_detect_preview` but deliberately NOT `person_detect` — real model-backed
+                # detection routes to the MLX/candle GPU worker. Without this the five jobs stayed
+                # `queued` with `workerId: None` forever and the test timed out. Same latent class
+                # as the export resolution above: invisible until the ffmpeg skip stopped hiding
+                # this test from CI (sc-19549).
+                json={
+                    "sourceAssetId": asset_id,
+                    "sourceTimestamp": index * 0.1,
+                    "preview": True,
+                },
                 timeout=5,
             )
             detection_job.raise_for_status()
@@ -663,6 +674,9 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
                 "representativeFrameAssetId": detection_completed[0]["result"]["frameAssetId"],
                 "detection": first_detection,
                 "trackName": "Hero",
+                # Same reason as the detections above: a CPU worker advertises
+                # `person_track_preview`, never `person_track`.
+                "preview": True,
             },
             timeout=5,
         )
