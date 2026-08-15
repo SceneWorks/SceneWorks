@@ -2266,10 +2266,17 @@ fn frame_scale_pad_filter(width: u32, height: u32) -> String {
 /// take the SAFE per-frame path). We deliberately probe with `ffmpeg` and not `ffprobe`: the desktop
 /// app ships only the imageio-ffmpeg binary (no `ffprobe`), so `ffprobe` is not guaranteed present.
 ///
-/// `-c copy -f null -` walks every packet without re-encoding and prints the running `frame=<N>`
-/// counter to stderr; the last value is the exact decodable frame count. This is VFR-safe (it counts
-/// real frames rather than trusting an `avg_frame_rate` metadata field that lies on VFR/screen-record
-/// sources). Probe failures are non-fatal: `None` simply routes to the accurate-seek fallback.
+/// `-f null -` decodes every frame and prints the running `frame=<N>` counter to stderr; the last
+/// value is the exact decodable frame count. This is VFR-safe (it counts real frames rather than
+/// trusting an `avg_frame_rate` metadata field that lies on VFR/screen-record sources). Probe
+/// failures are non-fatal: `None` simply routes to the accurate-seek fallback.
+///
+/// The pass must NOT add `-c copy`, which is what it used to do. MEASURED on ffmpeg 6.1.1-3ubuntu5:
+/// under stream copy that build prints no `frame=` token at all (`size=N/A time=00:00:01.87
+/// bitrate=N/A speed=1.28e+03x`), so this probe returned `None` on every input and silently routed
+/// EVERY caller to the slow accurate-seek fallback — a real regression that hid behind the
+/// documented non-fatal `None`, because the bundled 7.1 and current 9.0.1 both print `frame=`
+/// either way. Decoding reports `frame=   48` on all three builds (sc-19549).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2287,8 +2294,6 @@ async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> Option<us
             &source_path.display().to_string(),
             "-map",
             "0:v:0",
-            "-c",
-            "copy",
             "-f",
             "null",
             "-",
