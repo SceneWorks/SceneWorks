@@ -4,8 +4,10 @@ import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { appConfirm } from "../appConfirm.jsx";
 import {
+  borrowedLicenseAcknowledgmentBlocked,
   licenseAckRefusalMessage,
   licenseAcknowledgmentBlocked,
+  licenseAcknowledgmentSource,
   requiresLicenseAcknowledgment,
 } from "../licenseAcknowledgment.js";
 import { upsertJobNewest } from "../sorters.js";
@@ -379,10 +381,27 @@ export function useModelsAndLoras({
   // Mirrors createModelDownloadJob.
   const createLoraDownloadJob = useCallback(
     async (lora) => {
+      // The LoRA half of the licence CHOKE POINT (sc-17227). `POST /api/v1/loras/:id/download`
+      // gates on the repo the catalog row resolves to, so a LoRA whose `source.repo` is a
+      // restricted repo is refused exactly as the model download is — and without this the refusal
+      // is a bare 403 no shipped surface can clear: nothing sends the assertion, and no LoRA row
+      // renders a licence checkbox. The server stamps the gating model onto the row; the gate here
+      // reads that stamp and the ack the Models screen already persists, so accepting the licence
+      // once on the model's card is what makes its LoRAs downloadable.
+      const licenseSource = licenseAcknowledgmentSource(lora);
+      if (borrowedLicenseAcknowledgmentBlocked(lora)) {
+        setLoraError(licenseAckRefusalMessage(licenseSource));
+        return null;
+      }
       try {
+        const body = { requestedGpu: "auto" };
+        // Sent only for a row the server flagged, so no other LoRA download changes shape.
+        if (licenseSource) {
+          body.licenseAcknowledged = true;
+        }
         const job = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}/download`, token, {
           method: "POST",
-          body: JSON.stringify({ requestedGpu: "auto" }),
+          body: JSON.stringify(body),
         });
         setJobs((items) => upsertJobNewest(items, job));
         setLoraError("");

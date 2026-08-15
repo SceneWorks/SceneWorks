@@ -550,7 +550,7 @@ fn huggingface_repo_from_url(url: &str) -> Option<String> {
 /// to be reachable. A licence requirement is not a platform capability.
 async fn license_acknowledgment_repo_index(
     state: &AppState,
-) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+) -> Result<std::collections::BTreeMap<String, LicenseAcknowledgmentSource>, ApiError> {
     let (models, _) = merged_model_manifest_entries(state).await?;
     let mut index = std::collections::BTreeMap::new();
     for model in models {
@@ -560,6 +560,11 @@ async fn license_acknowledgment_repo_index(
         let Some(model_id) = model.get("id").and_then(Value::as_str) else {
             continue;
         };
+        let model_name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(model_id)
+            .to_owned();
         for download in model
             .get("downloads")
             .and_then(Value::as_array)
@@ -573,10 +578,88 @@ async fn license_acknowledgment_repo_index(
             else {
                 continue;
             };
-            index.entry(key).or_insert_with(|| model_id.to_owned());
+            index
+                .entry(key)
+                .or_insert_with(|| LicenseAcknowledgmentSource {
+                    model_id: model_id.to_owned(),
+                    model_name: model_name.clone(),
+                });
         }
     }
     Ok(index)
+}
+
+/// The catalog entry whose licence acknowledgment covers a fetch of some repo. The NAME travels
+/// with the id because the surfaces that have to explain the requirement — the LoRA rows on the
+/// Models screen — have no licence copy of their own and must point the user at the model card
+/// that does.
+#[derive(Clone)]
+pub(crate) struct LicenseAcknowledgmentSource {
+    pub(crate) model_id: String,
+    pub(crate) model_name: String,
+}
+
+/// Client-visible keys naming the model whose licence acknowledgment covers a catalog row that is
+/// not itself a model (sc-17227). Written onto LoRA catalog rows by `list_loras`.
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY: &str = "licenseAcknowledgmentModelId";
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY: &str = "licenseAcknowledgmentModelName";
+
+/// Stamp each catalog row whose Hugging Face source repo is licence-gated with the model that
+/// gates it (sc-17227), so a client can raise the SAME acknowledgment gate it raises on a model
+/// and send the assertion the server now requires.
+///
+/// Without this, `create_lora_download_job`'s repo-keyed gate is unsatisfiable from the shipped UI:
+/// the row carries nothing that says an acknowledgment is needed, `createLoraDownloadJob` sends no
+/// `licenseAcknowledged`, and the click yields a bare 403 with no checkbox anywhere to clear it.
+///
+/// Derived here rather than authored in `builtin.loras.jsonc` on purpose. A manifest flag is a
+/// second copy of a fact the model manifest already states, and the two drift; this reads the one
+/// source. It is also the only form that is correct on every host — the index is built from the
+/// UNFILTERED model manifest, so it does not evaporate on a platform where the gating model's
+/// download rows are filtered out, which is exactly where a client-side re-derivation would fail.
+///
+/// Applied at the CATALOG-READ door (`list_loras`) and not inside `lora_catalog`, which the
+/// per-job-create validation sweep also calls (sc-8819): the annotation is for rendering, and the
+/// enforcement path resolves the repo itself.
+pub(crate) async fn annotate_license_acknowledgment_sources(
+    state: &AppState,
+    rows: &mut [Value],
+    repo_of: impl Fn(&Value) -> Option<String>,
+) -> Result<(), ApiError> {
+    let keyed: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(position, row)| {
+            repo_of(row)
+                .as_deref()
+                .and_then(huggingface_repo_key)
+                .map(|key| (position, key))
+        })
+        .collect();
+    if keyed.is_empty() {
+        return Ok(());
+    }
+    let index = license_acknowledgment_repo_index(state).await?;
+    if index.is_empty() {
+        return Ok(());
+    }
+    for (position, key) in keyed {
+        let Some(source) = index.get(key.as_str()) else {
+            continue;
+        };
+        let Some(object) = rows[position].as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY.to_owned(),
+            Value::String(source.model_id.clone()),
+        );
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY.to_owned(),
+            Value::String(source.model_name.clone()),
+        );
+    }
+    Ok(())
 }
 
 /// The license-acknowledgment refusal for a request that named its weights by REPO (sc-17227).
@@ -619,15 +702,16 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
         return Ok(());
     }
     let index = license_acknowledgment_repo_index(state).await?;
-    let Some((requested, model_id)) = candidates
+    let Some((requested, source)) = candidates
         .iter()
-        .find_map(|(named, key)| index.get(key.as_str()).map(|model_id| (named, model_id)))
+        .find_map(|(named, key)| index.get(key.as_str()).map(|source| (named, source)))
     else {
         return Ok(());
     };
     if acknowledged {
         return Ok(());
     }
+    let model_id = &source.model_id;
     Err(ApiError {
         status: StatusCode::FORBIDDEN,
         detail: format!(
@@ -785,6 +869,7 @@ pub(crate) async fn create_model_download_job(
         &download,
         requested_variant,
         true,
+        payload.license_acknowledged,
         &state.settings.data_dir,
     )?;
 
@@ -805,6 +890,7 @@ pub(crate) async fn create_model_download_job(
             co_requisite,
             None,
             false,
+            payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
         create_generation_job(
@@ -864,6 +950,7 @@ fn build_model_download_job_payload(
     download: &Value,
     explicit_variant: Option<&str>,
     include_family: bool,
+    license_acknowledged: bool,
     data_dir: &FsPath,
 ) -> Result<JsonObject, ApiError> {
     let repo = required_string_field(download, "repo")?.to_owned();
@@ -896,13 +983,21 @@ fn build_model_download_job_payload(
     insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
     // Record the acknowledgment ON the job (sc-17227). `create_model_download_job` — the only
     // non-test caller — has already refused the request unless the caller asserted it, so reaching
-    // here for a `requiresLicenseAcknowledgment` model means the assertion was made. Writing it
-    // into the payload is what keeps RETRY and DUPLICATE working: those re-run
-    // `validate_raw_job_payload` over the stored payload, and the repo-keyed gate there would
-    // otherwise refuse a download the typed route had already authorized. Co-requisites carry it
-    // too — `MiniMaxAI/MiniMax-H3` is itself a co-requisite repo, and it is the one the review's
-    // bypass named.
-    if model_requires_license_acknowledgment(model) {
+    // here for a gated fetch means the assertion was made. Writing it into the payload is what
+    // keeps RETRY and DUPLICATE working: those re-run `validate_raw_job_payload` over the stored
+    // payload, and the repo-keyed gate there would otherwise refuse a download the typed route had
+    // already authorized. Co-requisites carry it too — `MiniMaxAI/MiniMax-H3` is itself a
+    // co-requisite repo, and it is the one the review's bypass named.
+    //
+    // Keyed on the FLAG OR the caller's own assertion, not on the flag alone. The two gates in
+    // `create_model_download_job` do not fire on the same predicate: the id gate reads the entry's
+    // flag, while the repo gate reads the repos the job will queue. For the shape the repo gate
+    // exists to catch — an entry with NO flag whose download names a repo a flagged entry declares
+    // — a flag-keyed stamp writes nothing, and the RETRY of that authorized download is then
+    // refused by the repo gate over its own stored `repo`. `license_acknowledged` is the caller's
+    // assertion carried verbatim, so the stamp records exactly what was asserted rather than
+    // re-deriving it from a predicate that already disagreed once.
+    if model_requires_license_acknowledgment(model) || license_acknowledged {
         job_payload.insert(
             LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
             Value::Bool(true),
@@ -1105,6 +1200,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             None,
             true,
+            false,
             data.path(),
         )
         .expect("primary payload");
@@ -1118,6 +1214,7 @@ mod memory_calibration_job_payload_tests {
             "fixture-model",
             &download(),
             None,
+            false,
             false,
             data.path(),
         )
@@ -1138,6 +1235,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             client.variant.as_deref(),
             true,
+            false,
             data.path(),
         )
         .expect("uncalibrated payload");

@@ -5447,6 +5447,36 @@ async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_decl
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job:?}");
     assert_eq!(job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    // The STAMP, for the shape this test exists to cover. `shared_repo_model` carries no
+    // `requiresLicenseAcknowledgment`, so a stamp keyed on the entry's flag writes nothing here —
+    // and the RETRY below then re-runs the repo-keyed gate over the stored `repo` and 403s a
+    // download this same server had just authorized. Asserting CREATED and `payload.repo` alone
+    // does not see that; the stamp and the retry leg are what do.
+    assert_eq!(
+        job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "an authorized no-flag gated download must record its acknowledgment: {job:?}",
+    );
+
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (retry_status, retry_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        retry_status,
+        StatusCode::CREATED,
+        "an authorized no-flag gated download must stay retryable: {retry_job:?}",
+    );
+    assert_eq!(retry_job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    assert_eq!(
+        retry_job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "and the retry must carry the stamp forward: {retry_job:?}",
+    );
 
     let (status, job) = request(
         app,
@@ -5457,6 +5487,12 @@ async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_decl
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job:?}");
     assert_eq!(job["payload"]["repo"], "owner/plain");
+    // The stamp is not blanket: an unrestricted download whose caller asserted nothing carries no
+    // acknowledgment key, so a future gate cannot read one that was never made.
+    assert!(
+        job["payload"].get("licenseAcknowledged").is_none(),
+        "an unasserted, unrestricted download must not be stamped: {job:?}",
+    );
 }
 
 #[test]
@@ -5773,6 +5809,30 @@ async fn license_acknowledgment_lora_download_refuses_a_catalog_named_restricted
         .find(|item| item["id"] == "restricted_lora")
         .expect("the restricted LoRA fixture is in the catalog");
     assert_eq!(restricted["source"]["repo"], "MiniMaxAI/MiniMax-H3");
+    // The row must SAY it is gated, and name the model whose card takes the acknowledgment. This is
+    // the client's only route to the assertion the refusal below demands: a LoRA row renders no
+    // licence copy and no checkbox, so without this stamp the 403 is unclearable from every shipped
+    // surface and the gate is a dead end rather than a gate.
+    assert_eq!(
+        restricted["licenseAcknowledgmentModelId"], "minimax_h3",
+        "the gated LoRA row must name the model that gates it: {restricted:?}",
+    );
+    assert_eq!(
+        restricted["licenseAcknowledgmentModelName"], "MiniMax-H3",
+        "and the name the refusal copy points the user at: {restricted:?}",
+    );
+    // Not blanket: an unrestricted LoRA is untouched, so a client cannot read a requirement onto
+    // every row.
+    let plain = loras
+        .as_array()
+        .expect("loras is an array")
+        .iter()
+        .find(|item| item["id"] == "plain_lora")
+        .expect("the unrestricted LoRA fixture is in the catalog");
+    assert!(
+        plain.get("licenseAcknowledgmentModelId").is_none(),
+        "an unrestricted LoRA must carry no acknowledgment source: {plain:?}",
+    );
 
     let (status, body) = request(
         app.clone(),

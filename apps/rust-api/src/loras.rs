@@ -5,6 +5,19 @@ pub(crate) async fn list_loras(
     Query(query): Query<LorasQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let mut items = lora_catalog(&state, query.project_id.as_deref()).await?;
+    // Tell the client which rows sit behind a licence acknowledgment (sc-17227). The download route
+    // below refuses an unacknowledged fetch of a licence-gated repo; without this the refusal has no
+    // remedy in any shipped surface, because nothing on the row says an acknowledgment is needed and
+    // no LoRA card carries licence copy of its own. The annotation names the MODEL whose card does.
+    crate::models::annotate_license_acknowledgment_sources(&state, &mut items, |item| {
+        item.get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("repo"))
+            .or_else(|| item.get("repo"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .await?;
     if let Some(model_family) = query.model_family {
         // `lora_families` returns canonical tokens, so canonicalize the raw query
         // param too — otherwise a `?model_family=krea-2` filter would miss a stored
