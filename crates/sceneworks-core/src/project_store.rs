@@ -4824,7 +4824,7 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         Some(value) if !value.is_null() => value.clone(),
         _ => get(requested),
     };
-    let file = json!({
+    let mut file = json!({
         "path": get("mediaPath"),
         "mimeType": get("mimeType"),
         "width": get("width"),
@@ -4833,6 +4833,19 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "fps": measured("encodedFps", "fps"),
         "frameCount": fact.get("encodedFrameCount").cloned().unwrap_or(Value::Null),
     });
+    // sc-19577: whether the mp4 carries a soundtrack, measured off what the worker actually MUXED.
+    //
+    // Written ONLY when the fact carries it, and deliberately not defaulted to `false`. Every asset
+    // generated before sc-19577 has no such fact, and a `false` there would be a fresh claim that
+    // those clips are silent — which for the LTX renders among them is untrue. Absent means UNKNOWN
+    // and the UI shows nothing; `false` means measured-and-silent. Same shape `frameCount` would
+    // have needed had a wrong default been possible for it.
+    if let (Some(has_audio), Some(object)) = (
+        fact.get("hasAudio").filter(|value| value.is_boolean()),
+        file.as_object_mut(),
+    ) {
+        object.insert("hasAudio".to_owned(), has_audio.clone());
+    }
     // ...whereas `normalizedSettings` is the REPLAY record: the knobs the user picked off the
     // model's `limits.durations` / `limits.fps` menus, which "re-run this generation" (sc-12324 /
     // sc-12345) rebuilds the payload from. It must round-trip the ask, not the measurement.
@@ -9144,6 +9157,69 @@ mod tests {
         // No measurement was recorded, so the file block reports no frame count rather than
         // inventing one.
         assert_eq!(asset["file"]["frameCount"], Value::Null);
+    }
+
+    /// sc-19577: `file.hasAudio` is THREE-STATE, and each state is asserted against a fact that
+    /// genuinely has it.
+    ///
+    /// This is the acute case for the sc-19488 "a test asserting a default passes whether or not the
+    /// code ran" trap: `true` alone would pass against a hard-coded `true`, and `false` alone against
+    /// an omission. So all three facts are built and all three outcomes pinned:
+    ///
+    /// * a render that produced audio → `true`;
+    /// * a render that produced none → `false` (NOT absent — "measured, and silent" is a fact);
+    /// * a fact written before sc-19577 → ABSENT (NOT `false` — claiming an LTX clip from last month
+    ///   is silent is a fresh lie about a file on disk).
+    #[test]
+    fn video_sidecar_records_the_muxed_soundtrack_as_three_distinct_states() {
+        let fact = |audio: Option<bool>| {
+            let mut fact = json!({
+                "type": "video",
+                "assetId": "asset-av",
+                "mediaPath": "assets/videos/av.mp4",
+                "mimeType": "video/mp4",
+                "width": 1344, "height": 768, "duration": 5.1667, "fps": 24,
+                "encodedFrameCount": 124, "encodedDuration": 5.1667, "encodedFps": 24,
+                "quality": "balanced", "family": "minimax-h3",
+                "seed": 7, "displayName": "AV", "createdAt": "2026-08-15T00:00:00Z",
+                "mode": "text_to_video", "model": "minimax_h3", "adapter": "mlx_minimax_h3",
+                "prompt": "a lighthouse keeper hums", "negativePrompt": "", "loras": [],
+                "rawAdapterSettings": {},
+                "timelineContext": {},
+            });
+            if let (Some(audio), Some(object)) = (audio, fact.as_object_mut()) {
+                object.insert("hasAudio".to_owned(), json!(audio));
+            }
+            build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact)
+        };
+
+        assert_eq!(fact(Some(true))["file"]["hasAudio"], json!(true));
+        assert_eq!(
+            fact(Some(false))["file"]["hasAudio"],
+            json!(false),
+            "a render that produced no audio must record that it did not — the SAME model id \
+             produces both, so the record is the only place the difference lives"
+        );
+        assert!(
+            fact(None)["file"].get("hasAudio").is_none(),
+            "a pre-sc-19577 fact must leave the key ABSENT; defaulting it to false would claim \
+             every existing LTX render is silent"
+        );
+
+        // A non-boolean `hasAudio` is not a measurement and must not be carried through as one.
+        let mut junk = json!({
+            "type": "video", "assetId": "a", "mediaPath": "assets/videos/j.mp4",
+            "mimeType": "video/mp4", "width": 16, "height": 16, "duration": 1.0, "fps": 24,
+            "quality": "balanced", "family": "ltx", "seed": 1, "displayName": "J",
+            "createdAt": "2026-08-15T00:00:00Z", "mode": "text_to_video", "model": "ltx_2_3",
+            "adapter": "mlx_ltx", "prompt": "j", "negativePrompt": "", "loras": [],
+            "rawAdapterSettings": {}, "timelineContext": {},
+        });
+        junk.as_object_mut()
+            .expect("object")
+            .insert("hasAudio".to_owned(), json!("yes"));
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &junk);
+        assert!(asset["file"].get("hasAudio").is_none());
     }
 
     /// sc-12345: the fit and the list-valued source ids survive onto `recipe.normalizedSettings`

@@ -1743,6 +1743,18 @@ struct EncodedClip {
     /// The framerate the file is encoded at. `decoded.fps.max(1)` — the SAME clamp `encode_inner`
     /// applies when it hands `-framerate` to ffmpeg, so the record matches the container.
     fps: u32,
+    /// Whether the mp4 carries an AAC soundtrack (sc-19577).
+    ///
+    /// `decoded.audio.is_some()` is the ONE condition `encode_inner` branches on to run the mux, so
+    /// this is the muxer's own predicate rather than a claim about the model: a MiniMax-H3 t2va job
+    /// whose pipeline returned no audio records `false` here, and an LTX render that did record
+    /// `true`. Reading it from the model id — the obvious shortcut for the app's first joint
+    /// audio+video family — would be a per-family hardcode that is wrong for exactly the renders a
+    /// user would most want to check.
+    ///
+    /// Measured here rather than after `encode_media` because `decoded` is MOVED into the encoder;
+    /// this is the last point at which the question can be asked at all.
+    has_audio: bool,
 }
 
 impl EncodedClip {
@@ -1751,6 +1763,7 @@ impl EncodedClip {
         Self {
             frames: decoded.frames.len(),
             fps: decoded.fps.max(1),
+            has_audio: decoded.audio.is_some(),
         }
     }
 
@@ -1831,6 +1844,12 @@ fn video_asset_fact(
         "encodedFrameCount": clip.frames,
         "encodedDuration": clip.duration_seconds(),
         "encodedFps": clip.fps,
+        // sc-19577 — whether this file has a soundtrack, measured off what was actually MUXED. It
+        // lands in the asset's `file` block beside the other measurements and is the only thing any
+        // audio indicator in the UI reads. Emitted unconditionally (never omitted for `false`), so an
+        // ABSENT key means "recorded before sc-19577" and a `false` means "measured, and silent" —
+        // two different facts that a presence check alone would conflate.
+        "hasAudio": clip.has_audio,
         "quality": request.quality,
         "family": plan.family,
         "seed": seed,
