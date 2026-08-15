@@ -1883,6 +1883,12 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
 /// ladder and its `candle_video_engine_id` registry join.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    // SC-18902 withdrew Eros from Candle after its exact-head CUDA acceptance produced unusable
+    // noise. Keep capability facts on the same terminal-refusal truth as production dispatch:
+    // generic replacement/extension fallbacks must never advertise Wan-VACE for this stable id.
+    if model == "ltx_2_3_eros" {
+        return Vec::new();
+    }
     if model == "wan_2_2_vace_fun_14b" {
         return if mode == "replace_person" {
             vec!["wan2_2_vace_fun_14b"]

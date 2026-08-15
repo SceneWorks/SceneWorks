@@ -5504,7 +5504,14 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
     settings.backend_candle_enabled = true;
     // sc-18902: a replayed Eros job gets a terminal worker-side refusal before every mode arm. It
     // must never fall through to procedural Stub output or borrow the Wan-VACE replace/extend lane.
-    for mode in ["text_to_video", "replace_person", "extend_clip"] {
+    for mode in [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "replace_person",
+        "extend_clip",
+        "video_bridge",
+    ] {
         let eros = request(json!({
             "projectId": "p", "model": "ltx_2_3_eros", "mode": mode,
         }));
@@ -5512,6 +5519,10 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
             resolve_candle_video_route(&eros, &settings),
             CandleVideoRoute::UnsupportedEros,
             "Eros {mode} must fail loudly rather than reach a real or stub Candle route",
+        );
+        assert!(
+            runtime_descriptor_engine_ids("ltx_2_3_eros", mode).is_empty(),
+            "Eros {mode} must not advertise a Candle runtime descriptor",
         );
     }
     let error = reject_unsupported_candle_video_route(CandleVideoRoute::UnsupportedEros)
@@ -5536,20 +5547,18 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&vace_fun, &settings),
         CandleVideoRoute::ReplacePersonWanVaceFun,
     );
-    for model in ["ltx_2_3", "ltx_2_3_eros"] {
-        for mode in ["replace_person", "extend_clip", "video_bridge"] {
-            let native = request(json!({ "projectId": "p", "model": model, "mode": mode }));
-            assert_eq!(
-                resolve_candle_video_route(&native, &settings),
-                CandleVideoRoute::CandleVideo,
-                "{model} {mode} must stay on the native LTX provider",
-            );
-            assert_eq!(
-                runtime_descriptor_engine_ids(model, mode),
-                vec!["ltx_2_3_distilled"],
-                "runtime facts must report the same native LTX engine",
-            );
-        }
+    for mode in ["replace_person", "extend_clip", "video_bridge"] {
+        let native = request(json!({ "projectId": "p", "model": "ltx_2_3", "mode": mode }));
+        assert_eq!(
+            resolve_candle_video_route(&native, &settings),
+            CandleVideoRoute::CandleVideo,
+            "base LTX {mode} must stay on the native LTX provider",
+        );
+        assert_eq!(
+            runtime_descriptor_engine_ids("ltx_2_3", mode),
+            vec!["ltx_2_3_distilled"],
+            "runtime facts must report the same native LTX engine",
+        );
     }
     assert_eq!(
         runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
