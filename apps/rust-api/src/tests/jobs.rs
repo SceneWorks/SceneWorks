@@ -8148,3 +8148,205 @@ fn a_fractional_resolved_duration_keeps_the_manifests_own_decimal() {
     assert_eq!(crate::generation::contract_number(6.0), json!(6));
     assert!(crate::generation::contract_number(4.0).is_i64());
 }
+
+/// **sc-19563 — the declared-partition refusal is reachable from a REAL request.**
+///
+/// The unit tests in `loras.rs` call `validate_lora_specs_for_model` directly. That proves the
+/// function refuses; it does not prove a user can ever reach it. This one goes through the actual
+/// route — `POST /api/v1/video/jobs` — with the manifests on disk, the adapter file on disk and the
+/// app assembled by `create_app`, and asserts the exact body a client receives.
+///
+/// The epic's own rule is why this arm exists at all: **declaration ≠ enforcement ≠ reachability.**
+/// `loraCompatibility` declared the relationship, the validator enforces it, and only a submission
+/// shows the enforcement is on the path a request takes.
+///
+/// Both directions, plus both positive controls. The controls are load-bearing twice over: they
+/// prove the gate is not refusing every H3 LoRA, and they prove the fixture is well-formed enough to
+/// reach the LoRA check at all.
+#[tokio::test]
+async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job_route() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // Both H3 partitions, declared exactly as `builtin.models.jsonc` declares them: ONE family,
+    // ONE architecture. That identity is the point — the family check passes both ways, so the
+    // refusal below can only come from the declared-partition gate.
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "minimax_h3",
+              "name": "MiniMax-H3",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "minimax_h3",
+              "capabilities": ["text_to_video", "image_to_video", "first_last_frame"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["minimax-h3"] },
+              "ui": {}
+            },
+            {
+              "id": "minimax_h3_ref",
+              "name": "MiniMax-H3 References",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "minimax_h3",
+              "capabilities": ["text_to_video", "reference_to_video"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["minimax-h3"] },
+              "ui": {}
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    // The two adapters, each declaring the ONE partition it is distilled for — the same shape
+    // `builtin.loras.jsonc` now ships.
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "minimax_h3_turbo_8step",
+              "name": "MiniMax-H3 Turbo (8-step)",
+              "family": "minimax-h3",
+              "modelIds": ["minimax_h3"],
+              "triggerWords": [],
+              "compatibility": { "families": ["minimax-h3"] },
+              "source": { "provider": "local", "path": "loras/h3_fl2v.safetensors" }
+            },
+            {
+              "id": "minimax_h3_ref2v_turbo_4step",
+              "name": "MiniMax-H3 Ref2VA Turbo (4-step)",
+              "family": "minimax-h3",
+              "modelIds": ["minimax_h3_ref"],
+              "triggerWords": [],
+              "compatibility": { "families": ["minimax-h3"] },
+              "source": { "provider": "local", "path": "loras/h3_ref2v.safetensors" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    // Real MiniMax-H3 diffusers keys, so `detect_lora_family` reports `minimax-h3` and the
+    // detected-family check is exercised rather than skipped on a `None`.
+    let keys: Vec<String> = ["attn.to_q", "attn.to_out.0", "ff.net.0.proj", "ff.net.2"]
+        .iter()
+        .flat_map(|target| {
+            ["lora_A.default.weight", "lora_B.default.weight"]
+                .iter()
+                .flat_map(move |suffix| {
+                    [
+                        format!("transformer_blocks.0.{target}.{suffix}"),
+                        format!("token_refiner.refiner_blocks.0.{target}.{suffix}"),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    write_test_safetensors_with_keys(&lora_dir.join("h3_fl2v.safetensors"), &keys);
+    write_test_safetensors_with_keys(&lora_dir.join("h3_ref2v.safetensors"), &keys);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "H3 partitions" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let submit = |model: &'static str, lora: &'static str| {
+        let app = app.clone();
+        let project_id = project_id.to_owned();
+        async move {
+            request(
+                app,
+                "POST",
+                "/api/v1/video/jobs",
+                json!({
+                    "projectId": project_id,
+                    "mode": "text_to_video",
+                    "prompt": "a cellist on a rooftop",
+                    "model": model,
+                    "loras": [{ "id": lora, "weight": 1.0 }]
+                }),
+            )
+            .await
+        }
+    };
+
+    // ── the ref2v adapter on the fl2v partition.
+    let (status, body) = submit("minimax_h3", "minimax_h3_ref2v_turbo_4step").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "cross-selecting must be refused at submit; got {body:?}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("minimax_h3_ref2v_turbo_4step"),
+        "the message must name the LoRA; got {detail}"
+    );
+    // The exact phrase, not a substring search: `minimax_h3_ref2v_turbo_4step` CONTAINS
+    // `minimax_h3_ref`, so `detail.contains("minimax_h3_ref")` is satisfied by the LoRA id already
+    // in the message and asserts nothing about the partition.
+    assert!(
+        detail.contains("is declared for model minimax_h3_ref"),
+        "the message must name the partition it IS for; got {detail}"
+    );
+
+    // ── and the reverse.
+    let (status, body) = submit("minimax_h3_ref", "minimax_h3_turbo_8step").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body:?}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("minimax_h3_turbo_8step"), "{detail}");
+    assert!(
+        detail.contains("is declared for model minimax_h3,"),
+        "{detail}"
+    );
+
+    // ── the controls. Each adapter on its OWN partition must NOT be refused for a LoRA reason.
+    //    A later gate in `create_video_job` (the sc-19504 no-lane check) may still stop a job in a
+    //    test environment with no worker, so the assertion is on the REASON rather than on a 201:
+    //    what this proves is that the LoRA gate let it past, which is exactly the control needed.
+    for (model, lora) in [
+        ("minimax_h3", "minimax_h3_turbo_8step"),
+        ("minimax_h3_ref", "minimax_h3_ref2v_turbo_4step"),
+    ] {
+        let (status, body) = submit(model, lora).await;
+        let detail = body["detail"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            !detail.contains("is declared for model"),
+            "{lora} on its OWN partition {model} must not trip the partition gate; got \
+             {status} {detail}"
+        );
+    }
+}

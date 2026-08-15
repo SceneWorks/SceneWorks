@@ -227,7 +227,42 @@ export function loraMatchesModel(lora, model) {
   if (!modelFamilies.length) {
     return true;
   }
-  return families.length > 0 && families.some((family) => modelFamilies.includes(family));
+  if (!families.some((family) => modelFamilies.includes(family))) {
+    return false;
+  }
+  // The DECLARED-PARTITION gate (sc-19563), mirroring `validate_lora_specs_for_model`'s. A LoRA
+  // may name the exact model ids it is for, which is the case `family` cannot express: MiniMax-H3's
+  // `minimax_h3` and `minimax_h3_ref` are one architecture and one family, so the family test above
+  // passes both ways, and lightx2v's fl2v and ref2v turbo adapters are distilled for one partition
+  // each. Without this the picker keeps offering the mismatched adapter and the API 400s on it —
+  // the dead-end selection the sc-10509 comment above describes.
+  //
+  // Absent `modelIds` means family gating alone, so no existing LoRA is affected. Gated on the
+  // model actually having an id: with no model selected there is nothing to compare against, and
+  // the permissive branch above already covers that case.
+  const declaredModelIds = loraModelIds(lora);
+  if (declaredModelIds.length && model?.id) {
+    return declaredModelIds.includes(model.id);
+  }
+  return true;
+}
+
+// The exact model ids a LoRA declares it is for (sc-19563), or `[]` when it declares none.
+// Mirrors the API's `lora_model_ids`, including the snake_case alias an inline spec may carry.
+export function loraModelIds(lora) {
+  for (const key of ['modelIds', 'model_ids']) {
+    const raw = lora?.[key];
+    if (Array.isArray(raw)) {
+      const ids = raw
+        .filter((id) => typeof id === 'string')
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (ids.length) {
+        return ids;
+      }
+    }
+  }
+  return [];
 }
 
 // Resolve an edit-capable model whose family matches the asset's generating model.
