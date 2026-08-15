@@ -2146,6 +2146,10 @@
     {
       "adapter": "z_image_diffusers",
       "cacheState": "missing",
+      "candleSupport": {
+        "features": {},
+        "supported": true
+      },
       "capabilities": [
         "text_to_image"
       ],
@@ -2230,6 +2234,10 @@
     {
       "adapter": "z_image_diffusers",
       "cacheState": "missing",
+      "candleSupport": {
+        "features": {},
+        "supported": true
+      },
       "capabilities": [
         "text_to_image",
         "edit_image",
