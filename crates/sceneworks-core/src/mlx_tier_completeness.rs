@@ -338,6 +338,19 @@ pub fn minimax_h3_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
 // the check that stands in front of the loader ([`minimax_h3_shared_is_complete`]) and the check that
 // stands in front of the download ([`crate::builtin_manifests`]' guard) cannot disagree with each
 // other, so a wrong entry here goes red in one place and is fixed in one place.
+//
+// ⚠️ NO TRIPWIRE BINDS THIS TO THE ENGINE. Being the only mirror keeps the two SceneWorks-side
+// readers consistent with EACH OTHER; nothing here can go red when the engine's probe list changes
+// upstream, because at the current pin (`014134e3`) `mlx-gen-minimax-h3` is not in the tree at all
+// and there is no symbol to import or construct. Every constant below was transcribed by reading
+// the engine source, and it stays a transcription until the pin carries the crate.
+//
+// The obligation therefore rides the PIN BUMP: sc-18650 must re-read
+// `mlx-gen-minimax-h3::model::load` and reconcile it against these constants, and — once the crate
+// is linkable — bind them to it (importing `DIT_COMPONENT` / `TEXT_ENCODER_COMPONENT` directly, and
+// asserting the shared-dir list against a real `load` of a fixture missing each path in turn) so
+// this stops being a mirror. Recorded on sc-18650 rather than only here, because a comment in this
+// file is not something a pin-bump session is guaranteed to open.
 // ---------------------------------------------------------------------------
 
 /// The shared component DIRECTORIES a MiniMax-H3 load opens under the snapshot it is handed as

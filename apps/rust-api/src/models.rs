@@ -8428,10 +8428,7 @@ mod variant_delete_tests {
         assert_eq!(
             other_entries_repo_file_scopes(&catalog, "minimax_h3_ref", "SceneWorks/minimax-h3-mlx"),
             SiblingRepoScopes {
-                primaries: vec![
-                    "q4/transformer/*".to_owned(),
-                    "q8/transformer/*".to_owned()
-                ],
+                primaries: vec!["q4/transformer/*".to_owned(), "q8/transformer/*".to_owned()],
                 co_requisites: Vec::new(),
             }
         );
