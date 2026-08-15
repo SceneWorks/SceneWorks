@@ -411,27 +411,37 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
 /// [`video_request_candle_vace_eligible`] (VACE modes), [`bernini_video_candle_eligible`] (Bernini),
 /// and [`scail2_animate_candle_eligible`] / [`scail2_replace_candle_eligible`].
 pub(crate) fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+    video_request_is_candle_eligible(&job.job_type, &job.payload)
+}
+
+/// The `(job_type, payload)` form of [`video_job_is_candle_eligible`] — the same predicate,
+/// reachable before a [`JobSnapshot`] exists (sc-19504). See
+/// [`super::mlx::video_request_is_mlx_eligible`] for why the seam is shaped this way.
+pub(crate) fn video_request_is_candle_eligible(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+) -> bool {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    match job.job_type {
+    match job_type {
         // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
         // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
         JobType::VideoGenerate => {
-            video_request_candle_eligible(model, &job.payload)
-                || scail2_animate_candle_eligible(model, &job.payload)
+            video_request_candle_eligible(model, payload)
+                || scail2_animate_candle_eligible(model, payload)
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
-                || bernini_video_candle_eligible(model, &job.payload)
+                || bernini_video_candle_eligible(model, payload)
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
-            video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
-                || scail2_replace_candle_eligible(model, &job.payload)
+            video_request_candle_vace_eligible(model, payload, job_type)
+                || scail2_replace_candle_eligible(model, payload)
         }
         // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
         JobType::VideoExtend | JobType::VideoBridge => {
-            video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
+            video_request_candle_vace_eligible(model, payload, job_type)
         }
         _ => false,
     }
