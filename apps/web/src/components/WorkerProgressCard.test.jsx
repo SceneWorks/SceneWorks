@@ -1225,3 +1225,87 @@ describe("live preview support states", () => {
     );
   });
 });
+
+// sc-19577 — the queue card is the FIRST place a just-finished render is seen, and for the joint
+// audio+video family it is where "did this one come out with sound?" is asked. The badge's own
+// suite covers the component and the review-grid/detail mount sites; this covers the queue card's
+// `video-player` variant, which renders a different subtree (`VideoThumbnail`) and so is not
+// reached by any of those.
+describe("WorkerProgressCard audio track badge (sc-19577)", () => {
+  let api = null;
+
+  afterEach(() => {
+    api?.cleanup();
+    api = null;
+  });
+
+  // One fixture, `hasAudio` spliced in per case, so every assertion below discriminates on that one
+  // key rather than on some unrelated absence.
+  const clip = (hasAudio) => {
+    const file = {
+      path: "asset_1.mp4",
+      mimeType: "video/mp4",
+      width: 1344,
+      height: 768,
+      duration: 5.1667,
+      fps: 24,
+      frameCount: 124,
+    };
+    if (hasAudio !== undefined) {
+      file.hasAudio = hasAudio;
+    }
+    return {
+      id: "asset_1",
+      type: "video",
+      url: "/api/v1/files/asset_1.mp4",
+      projectId: "project_1",
+      generationSetId: "genset_1",
+      file,
+      status: {},
+      recipe: { model: "minimax_h3", prompt: "a lighthouse keeper hums" },
+    };
+  };
+
+  const videoJob = {
+    id: "job-1",
+    type: "video_generate",
+    status: "succeeded",
+    stage: "done",
+    payload: { prompt: "a lighthouse keeper hums" },
+  };
+
+  const renderCard = (asset) =>
+    render(
+      <WorkerProgressCard
+        job={videoJob}
+        thumbnailsVariant="video-player"
+        thumbnailAssets={[asset]}
+      />,
+      makeContext([appleWorker]),
+    );
+
+  it("badges a measured soundtrack on the queue card, and nothing else", () => {
+    api = renderCard(clip(true));
+    expect(api.container.querySelector(".audio-track-badge")).not.toBeNull();
+    expect(api.container.querySelector(".audio-track-badge").getAttribute("aria-label")).toBe(
+      "Has audio",
+    );
+    api.cleanup();
+
+    // Measured and SILENT — the same MiniMax-H3 checkpoint produces both, so a family lookup would
+    // wrongly badge this one.
+    api = renderCard(clip(false));
+    expect(api.container.querySelector(".audio-track-badge")).toBeNull();
+    api.cleanup();
+
+    // Never measured (every render predating sc-19577): no claim either way.
+    api = renderCard(clip(undefined));
+    expect(api.container.querySelector(".audio-track-badge")).toBeNull();
+    api.cleanup();
+
+    // …and back, so the two negatives above are discriminating on `hasAudio` rather than on the
+    // queue card having quietly stopped rendering the badge at all.
+    api = renderCard(clip(true));
+    expect(api.container.querySelector(".audio-track-badge")).not.toBeNull();
+  });
+});

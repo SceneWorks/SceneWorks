@@ -12287,7 +12287,8 @@ details[open] > summary.lora-scope-group-heading::before,
   display: none;
 }
 
-.preview-modal.is-fullscreen .likeness-badge {
+.preview-modal.is-fullscreen .likeness-badge,
+.preview-modal.is-fullscreen .audio-track-badge {
   display: none;
 }
 
@@ -15840,6 +15841,36 @@ details[open] > summary.lora-scope-group-heading::before,
   position: relative;
 }
 
+/* Soundtrack indicator (sc-19577). Sits opposite the likeness badge — top-LEFT — so the two never
+   overlap on an asset that carries both (a replace_person render of an LTX clip). Same pill
+   geometry and shadow so the card reads as one system. */
+.audio-track-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 12px);
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  box-shadow: var(--shadow-sm);
+  background: var(--accent-soft, color-mix(in oklch, var(--accent) 18%, var(--surface)));
+  color: color-mix(in oklch, var(--accent) 78%, var(--text));
+  pointer-events: auto;
+  cursor: help;
+}
+
+.audio-track-badge__glyph {
+  font-size: 12px;
+  line-height: 1;
+}
+
 .likeness-badge {
   position: absolute;
   top: 6px;
@@ -15900,6 +15931,13 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-modal-stage .likeness-badge {
   top: 12px;
   right: 12px;
+  font-size: 12px;
+  padding: 3px 9px;
+}
+
+.preview-modal-stage .audio-track-badge {
+  top: 12px;
+  left: 12px;
   font-size: 12px;
   padding: 3px 9px;
 }
