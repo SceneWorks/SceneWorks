@@ -1457,7 +1457,7 @@
       // flag previously caused Character Studio to silently ignore the reference
       // image and generate from the prompt only (sc-2005). For SDXL-style reference
       // work pick sdxl / realvisxl; for identity pick instantid_realvisxl.
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8670, epic 8506): a public/ungated
         // re-host of Tongyi-MAI/Z-Image-Turbo (Apache-2.0). Per-tier subdirs, each a complete
@@ -1643,7 +1643,7 @@
               "rung": "bounded_decode",
               "fingerprint": "z-image-mlx-independent-materialization-v3",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations", "edit_image", "image_to_image"],
+              "modes": ["text_to_image", "edit_image", "image_to_image"],
               "overlays": ["none", "lora", "control"],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
@@ -1654,7 +1654,7 @@
               "rung": "bounded_attention",
               "fingerprint": "z-image-mlx-independent-materialization-v3",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations", "edit_image", "image_to_image"],
+              "modes": ["text_to_image", "edit_image", "image_to_image"],
               "overlays": ["none", "lora", "control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
@@ -1665,7 +1665,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "z-image-mlx-independent-materialization-v3",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations", "edit_image", "image_to_image"],
+              "modes": ["text_to_image", "edit_image", "image_to_image"],
               "overlays": ["none", "lora", "control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -1714,7 +1714,7 @@
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Z-Image-Turbo",
         "description": "Fast first image target for local text-to-image generation.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Z-Image-Turbo Prompt Guide",
@@ -1759,7 +1759,7 @@
       "family": "z-image",
       "type": "image",
       "adapter": "z_image_diffusers",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8670, epic 8506): public/ungated re-host
         // of the undistilled Tongyi-MAI/Z-Image base (Apache-2.0, bf16-native source). Per-tier
@@ -1840,7 +1840,7 @@
               "rung": "bounded_decode",
               "fingerprint": "z-image-mlx-independent-materialization-v3",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora", "control"],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
@@ -1851,7 +1851,7 @@
               "rung": "bounded_attention",
               "fingerprint": "z-image-mlx-independent-materialization-v3",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora", "control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
@@ -1862,7 +1862,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "z-image-mlx-independent-materialization-v3",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora", "control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -1906,7 +1906,7 @@
               "rung": "bounded_decode",
               "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -1917,7 +1917,7 @@
               "rung": "bounded_decode",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["control"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -1928,7 +1928,7 @@
               "rung": "bounded_attention",
               "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
@@ -1939,7 +1939,7 @@
               "rung": "bounded_attention",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["control"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
@@ -1950,7 +1950,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -1961,7 +1961,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["control"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -1985,7 +1985,7 @@
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Z-Image",
         "description": "Undistilled base Z-Image text-to-image (real CFG, ~50 steps); higher quality than Turbo at a higher compute cost.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Z-Image Prompt Guide",
@@ -2107,7 +2107,7 @@
       "family": "qwen-image",
       "type": "image",
       "adapter": "qwen_image",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): a public/ungated
         // re-host of Qwen/Qwen-Image-2512 (Apache-2.0). Per-tier subdirs, each a complete
@@ -2353,7 +2353,7 @@
               "rung": "bounded_decode",
               "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
@@ -2364,7 +2364,7 @@
               "rung": "bounded_attention",
               "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
@@ -2375,7 +2375,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -2428,7 +2428,7 @@
       "ui": {
         "label": "Qwen Image",
         "description": "Higher-control Qwen text-to-image target backed by Diffusers.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         // PiD pixel-diffusion decoder (epic 7840): an optional per-generation VAE
         // replacement that decodes + super-resolves to 2K/4K in one pass. `checkpointId`
         // names the downloadable PiD checkpoint for this latent space (qwenimage); the
@@ -2880,7 +2880,7 @@
       "family": "lens",
       "type": "image",
       "adapter": "lens_turbo",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8767, epic 8506, Group-B): the recovered +
         // rebuilt non-distilled base Lens, re-hosted from Comfy-Org/Lens (the original microsoft/Lens
@@ -2977,7 +2977,8 @@
         "families": ["lens"],
         "types": ["style", "enhance", "character"]
       },
-      // macOS-only native-MLX backend. mlx.quantize/tier config is consumed by the RUST worker
+      // Native MLX configuration; the same q4/q8/bf16 turnkey tiers are also consumed by the
+      // native Candle route on Windows/Linux. mlx.quantize/tier config is consumed by the RUST worker
       // (standard_tier_subdir / resolve_quant). q4/ default tier (sc-8767); q8/ + bf16/ hosted +
       // selectable via advanced.mlxQuantize (standard_tier_subdir resolves the subdir). Base Lens is
       // NOT dense-TE: the gpt-oss-20b MoE text encoder is packed per-tier alongside the transformer,
@@ -2993,7 +2994,7 @@
       "ui": {
         "label": "Lens (base)",
         "description": "Microsoft Lens base text-to-image (20-step, CFG 5.0): higher quality than Lens-Turbo, slower. Also the LoRA training base (sc-1583). gpt-oss-20b text encoder + FLUX.2 VAE; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
           "title": "Lens Prompt Guide",
@@ -3011,7 +3012,7 @@
       "family": "lens",
       "type": "image",
       "adapter": "lens_turbo",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8763, epic 8506, Group-B): a re-host of
         // microsoft/Lens-Turbo. Per-tier self-contained subdirs (transformer DiT + gpt-oss-20b MXFP4
@@ -3098,7 +3099,8 @@
         "families": ["lens"],
         "types": ["style", "enhance", "character"]
       },
-      // macOS-only native-MLX backend. mlx.quantize/tier config is consumed by the RUST worker
+      // Native MLX configuration; the same q4/q8/bf16 turnkey tiers are also consumed by the
+      // native Candle route on Windows/Linux. mlx.quantize/tier config is consumed by the RUST worker
       // (standard_tier_subdir / resolve_quant). q4/ default tier (sc-8763); q8/ + bf16/ hosted +
       // selectable via advanced.mlxQuantize (standard_tier_subdir resolves the subdir). lens_turbo is
       // NOT dense-TE: the gpt-oss-20b MoE text encoder is packed per-tier alongside the transformer,
@@ -3132,7 +3134,7 @@
               "rung": "bounded_decode",
               "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -3143,7 +3145,7 @@
               "rung": "bounded_attention",
               "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
@@ -3154,7 +3156,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -3167,7 +3169,7 @@
       "ui": {
         "label": "Lens-Turbo",
         "description": "Microsoft Lens distilled 4-step text-to-image (gpt-oss-20b text encoder + FLUX.2 VAE). Strong prompt following and text rendering; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
           "title": "Lens-Turbo Prompt Guide",
@@ -3274,16 +3276,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        // SenseNova-U1 is an 8B MoT autoregressive image model with no diffusion-LoRA merge path,
-        // so no user LoRAs apply. Declare the model's own family rather than [] (sc-6038): an empty
-        // list matches EVERY LoRA in the picker (loraMatchesModel returns true when the model has no
-        // families) while the worker drops them all (sensenova.rs loads Vec::new()) — a silent
-        // ignore. No LoRA declares `sensenova-u1`, so the picker correctly offers none. (An 8-step
-        // distill LoRA exists upstream but is not wired.)
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3332,12 +3324,13 @@
         "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image and instruction-based editing with strong prompt following, dense text, and infographics. In Character Studio, drives a *wardrobe-preserving* reference flow: SenseNova carries the tank, jacket, props, tattoos, and hair color from the reference into new scenes very faithfully, but face geometry can drift — best when outfit consistency matters more than face identity (for face-locked identity, pick InstantID or PuLID-FLUX). Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         // Edit-style backbone (no IP-Adapter / face-ID engine): the variation knob
-        // rides imageGuidanceScale. Higher = closer to the source/reference, lower
+        // rides trueCfgScale. Higher = closer to the source/reference, lower
         // = more prompt-driven variation. sc-2018 audit accepts this as the
         // character_image engine declaration. Default 1.5 for character_image
         // (the adapter raises the default vs the 1.0 edit baseline so the
         // reference subject pulls harder by default).
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b.md",
@@ -3424,10 +3417,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3469,7 +3458,8 @@
         "label": "SenseNova-U1 8B Infographic V2",
         "description": "Infographic-specialized variant of SenseNova-U1 (NEO-unify, ~16B), a coexisting checkpoint refresh of the base 8B model. Tuned for information-dense visual content — posters, presentations, comics, resumes, knowledge illustrations — with sharper dense small-text, more stable complex layouts, improved aesthetics, and a fix for the black-background issue. Same unified surface as the base: text-to-image, instruction editing, wardrobe-preserving Character Studio, VQA, and Document Studio (interleaved text+image). Heavy: ~35GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Infographic V2 Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b-infographic-v2.md",
@@ -3555,10 +3545,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3600,7 +3586,8 @@
         "label": "SenseNova-U1 8B Infographic V3",
         "description": "Infographic-specialized variant of SenseNova-U1 (NEO-unify, ~16B), the third-generation checkpoint. Tuned for information-dense visual content — posters, presentations, comics, resumes, knowledge illustrations — with the same dense small-text and stable-layout strengths as V2, plus notably stronger image editing (localized text/content edits and global style/layout changes). Same unified surface: text-to-image, instruction editing, wardrobe-preserving Character Studio, VQA, and Document Studio (interleaved text+image). Heavy: ~35GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Infographic V3 Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b-infographic-v3.md",
@@ -3690,14 +3677,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        // No user-LoRA path (MoT autoregressive; the distill LoRA is baked into this variant).
-        // Declare the model's own family rather than [] (sc-6038): an empty list matches every LoRA
-        // in the picker but the worker drops them — no LoRA declares `sensenova-u1`, so none are
-        // offered.
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3744,9 +3723,10 @@
         "label": "SenseNova-U1 8B Fast",
         "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image, editing, and Character Studio reference (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base SenseNova-U1 8B (carries outfit + accessories + tattoos across new scenes, face may drift — pick InstantID or PuLID-FLUX for face-locked identity). Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality reference work.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        // Edit-style variation knob (imageGuidanceScale); see SenseNova-U1 8B
+        // Edit-style variation knob (trueCfgScale); see SenseNova-U1 8B
         // for context. The fast variant defaults match the base variant.
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         // Multi-backbone angle set: same prompt-driven SenseNova turnaround path
         // as the base model, but practical for MPS batch use via the 8-step
         // distill LoRA.
@@ -3842,10 +3822,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -3887,7 +3863,8 @@
         "label": "SenseNova-U1 8B Infographic V2 Fast",
         "description": "8-step distilled SenseNova-U1 Infographic V2 — ~5–6× faster infographic/poster text-to-image, editing, and Character Studio reference at a small quality trade-off. Same infographic strengths as the V2 base (dense small-text, stable layouts, black-background fix) at 8 steps / cfg 1.0. Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Use the V2 base for max-quality dense-text work.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "viewAngles": [
           { "id": "three_quarter_left", "label": "Three-quarter left" },
           { "id": "three_quarter_right", "label": "Three-quarter right" },
@@ -3982,10 +3959,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        "families": ["sensenova-u1"],
-        "types": []
-      },
       // candle/CUDA VRAM gate — MEASURED on an idle RTX PRO 6000 (sm_120), 1024x1024, the
       // distilled 8-step id, via `candle-gen-sensenova/examples/sensenova-txt2img.rs --vram-probe`
       // (sc-14249). Before that story the candle lane mmapped this bf16 checkpoint at F32 and could
@@ -4027,7 +4000,8 @@
         "label": "SenseNova-U1 8B Infographic V3 Fast",
         "description": "8-step distilled SenseNova-U1 Infographic V3 — ~5–6× faster infographic/poster text-to-image, editing, and Character Studio reference at a small quality trade-off. Same infographic strengths and stronger editing as the V3 base, at 8 steps / cfg 1.0. Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Use the V3 base for max-quality dense-text work.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
-        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "hideReferenceStrength": true,
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1 },
         "viewAngles": [
           { "id": "three_quarter_left", "label": "Three-quarter left" },
           { "id": "three_quarter_right", "label": "Three-quarter right" },
@@ -4066,7 +4040,7 @@
       "family": "flux",
       "type": "image",
       "adapter": "flux_diffusers",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): a public re-host of
         // FLUX.1-schnell (Apache-2.0). Per-tier subdirs (q4/ default, q8/, bf16/), each a complete
@@ -4239,7 +4213,7 @@
       "ui": {
         "label": "FLUX.1 [schnell]",
         "description": "Black Forest Labs FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). 12B transformer + T5-XXL text encoder; ~34GB bf16 VRAM, needs a large-VRAM GPU.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "FLUX.1 [schnell] Prompt Guide",
@@ -4268,7 +4242,7 @@
       // character_image: XLabs-AI/flux-ip-adapter (sc-2011 resemblance tier);
       // faithful face likeness belongs to PuLID-FLUX — sc-2012. flux_schnell has
       // no native IP-Adapter trained for it, so this stays flux_dev-only.
-      "capabilities": ["text_to_image", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "character_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): a public re-host of
         // FLUX.1-dev under the FLUX.1 [dev] Non-Commercial License (LICENSE + NOTICE included).
@@ -4427,7 +4401,7 @@
       "ui": {
         "label": "FLUX.1 [dev]",
         "description": "Black Forest Labs FLUX.1 [dev] — higher-quality ~28-step (guidance 3.5) text-to-image. Distributed under the FLUX.1 [dev] Non-Commercial License: generations are for non-commercial use only. Gated Hugging Face download — accept the license at huggingface.co/black-forest-labs/FLUX.1-dev and add a Hugging Face token under Settings → Service credentials (or set HF_TOKEN on a server) before downloading. For commercial use choose FLUX.1 [schnell] (Apache-2.0). 12B transformer + T5-XXL; ~34GB bf16 VRAM, large-VRAM GPU. With a character reference, runs XLabs IP-Adapter for scene-flexible resemblance (faithful identity belongs to PuLID-FLUX).",
-        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "recommendedFor": ["text_to_image", "character_image"],
         "pid": { "checkpointId": "pid_flux" },
         // FLUX is guidance-distilled; real CFG against the negative prompt rides
         // on the parallel true_cfg_scale kwarg, distinct from the IP-Adapter
@@ -4831,7 +4805,7 @@
       // Boogu-Image-0.1 Base (epic 6387) — a Lumina-Image-2.0 / OmniGen2-lineage flow-matching image
       // model: a mixed single/double-stream DiT (hidden 3360, 40 layers = 8 double + 32 single + 2
       // refiner, GQA 28q/7kv, 3-axis RoPE) + a Qwen3-VL-8B condition encoder + the FLUX.1 16-channel
-      // VAE. Native MLX only (mlx-gen-boogu, no torch backend) → macOnly. True-CFG text-to-image.
+      // VAE. Native MLX on macOS and native Candle on CUDA hosts. True-CFG text-to-image.
       // Worker routing through engines::MODEL_TABLE / the gen_core registry lands in sc-6399 (until
       // then macSupport.supported is false — the model is downloadable but not yet a Studio picker).
       // `adapter` is the asset stamp (mirrors mlx_<family>).
@@ -4936,7 +4910,7 @@
         // default (the downloaded `base/` subfolder); on sends advanced `mlxQuantize: 0` and the
         // worker fetches the `base-bf16/` subfolder on demand. Needs a larger Mac (~96 GB).
         "precisionToggle": true,
-        "description": "Boogu-Image-0.1 — a Lumina-Image-2.0 / OmniGen2-lineage flow-matching text-to-image model (~10.3B DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE), native MLX (Apple Silicon). True-CFG, natural-language prompting with strong bilingual (English/Chinese) in-image text rendering. Pre-quantized Q8 (~23 GB, default; full-precision bf16 also hosted). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
+        "description": "Boogu-Image-0.1 — a Lumina-Image-2.0 / OmniGen2-lineage flow-matching text-to-image model (~10.3B DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE), served by native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. True-CFG, natural-language prompting with strong bilingual (English/Chinese) in-image text rendering. Pre-quantized Q8 (~23 GB, default; full-precision bf16 also hosted). Apache-2.0 (ungated). Requires a large-memory accelerator.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
@@ -4967,7 +4941,7 @@
       "type": "image",
       // Boogu-Image-0.1 Turbo (epic 6387) — the DMD few-step, CFG-free distilled variant: same
       // architecture as Base but ~4 steps and no unconditional branch (guidance inert), so a render is
-      // several times faster — the variant to iterate with. Native MLX only; same gen_core engine
+      // several times faster — the variant to iterate with. Native MLX and Candle; same gen_core engine
       // code (BooguPipeline::generate_turbo), the `turbo/` checkpoint.
       "adapter": "mlx_boogu",
       "capabilities": ["text_to_image"],
@@ -5059,7 +5033,7 @@
         // Full-precision bf16 opt-in (sc-6568): on sends `mlxQuantize: 0`; the worker fetches the
         // `turbo-bf16/` subfolder on demand. Off = the packed Q8 `turbo/` default.
         "precisionToggle": true,
-        "description": "Boogu-Image-0.1 Turbo — the few-step (~4), CFG-free fast variant of Boogu Image: the same ~10.3B flow-matching model distilled (DMD) for much faster renders, native MLX (Apple Silicon). Best for quick iteration. Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
+        "description": "Boogu-Image-0.1 Turbo — the few-step (~4), CFG-free fast variant of Boogu Image: the same ~10.3B flow-matching model distilled (DMD) for much faster renders, served by native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. Best for quick iteration. Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Requires a large-memory accelerator.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
@@ -5089,7 +5063,7 @@
       // faithful semantic edit (BooguPipeline::generate_edit → forward_edit). The vision-tower
       // semantic edit is an EDIT-checkpoint capability — Base produces incoherent output for it
       // (verified against the reference pipeline, E7b-3), so editing ships on these dedicated weights
-      // only. Native MLX only; the `edit/` checkpoint (carries the lazily-loaded f32 vision tower).
+      // only. Native MLX and Candle; the `edit/` checkpoint carries the vision tower.
       "adapter": "mlx_boogu",
       "capabilities": ["edit_image"],
       // sc-9092: macOnly is a no-op label (see `boogu_image`) — the candle (Windows/Linux) lane packed-loads
@@ -5147,7 +5121,7 @@
         // Full-precision bf16 opt-in (sc-6568): on sends `mlxQuantize: 0`; the worker fetches the
         // `edit-bf16/` subfolder on demand. Off = the packed Q8 `edit/` default.
         "precisionToggle": true,
-        "description": "Boogu-Image-0.1 Edit — instruction-driven image editing: give a source image and a text instruction and Boogu produces a faithful edited image (the source is read by the Qwen3-VL vision tower). Native MLX (Apple Silicon). Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Needs a 64 GB-class Mac.",
+        "description": "Boogu-Image-0.1 Edit — instruction-driven image editing: give a source image and a text instruction and Boogu produces a faithful edited image (the source is read by the Qwen3-VL vision tower). Native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. Pre-quantized Q8 (~23 GB, default). Apache-2.0 (ungated). Requires a large-memory accelerator.",
         "recommendedFor": ["edit_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
@@ -6589,7 +6563,8 @@
       "type": "image",
       "adapter": "mlx_krea",
       // Text-to-image GENERATION model, PLUS the Kontext-style image-edit surface (epic 10871 — Raw only;
-      // the full-CFG variant the `krea2_identity_edit` LoRA targets, Turbo stays t2i-only). This top-level
+      // the full-CFG variant the `krea2_identity_edit` LoRA targets; Turbo retains its separate
+      // reference-guided img2img surface but does not expose instruction edit). This top-level
       // `capabilities` array is what the web layer keys on: ImageStudio/`imageModelServesMode` gates the
       // model into the picker on `capabilities.includes("text_to_image")` and surfaces the Edit tab on
       // `edit_image` (further gated by `macSupport.features.edit`, which the router probe flips true for
@@ -6791,15 +6766,14 @@
       "name": "FLUX.2 [klein] 9B",
       "family": "flux2-klein",
       "type": "image",
-      // First MLX-only image-generation model family in SceneWorks. There is
-      // no diffusers torch backend for FLUX.2 today, so the adapter field
-      // points directly at mlx_flux2 (sc-2164). Non-Mac hosts hide the model
-      // via the macOnly flag below; on Mac the adapter requires the shared
-      // mflux sidecar venv (/opt/mlx-flux-venv).
+      // FLUX.2 first shipped through MLX and now also has native Candle/CUDA generation and edit
+      // lanes off-Mac. There is still no Python/diffusers worker fallback; the adapter field names
+      // the MLX dispatch key while Candle routing owns its explicit native lanes. `macOnly` below is
+      // a legacy no-op label; backend availability comes from the routing and descriptor contracts.
       "adapter": "mlx_flux2",
       // Unified model: txt2img + edit (single reference image) via mflux's
       // Flux2Klein / Flux2KleinEdit variants.
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
       "macOnly": true,
       "downloads": [
         {
@@ -6928,8 +6902,8 @@
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [klein] 9B",
-        "description": "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). 9B flow transformer + 8B Qwen3 text embedder; ~36 GB bf16 peak at 1024². Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — downloads ready-to-run with no install-time conversion. Only the transformer is quantized; the Qwen3 text encoder stays full-precision bf16 in every tier for fidelity. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. For faster reference editing on the same architecture, see FLUX.2 [klein] 9B-KV.",
-        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "description": "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. 9B flow transformer + 8B Qwen3 text embedder; ~36 GB bf16 peak at 1024². Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — downloads ready-to-run with no install-time conversion. Only the transformer is quantized; the Qwen3 text encoder stays full-precision bf16 in every tier for fidelity. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. For faster reference editing on the same architecture, see FLUX.2 [klein] 9B-KV.",
+        "recommendedFor": ["text_to_image", "character_image"],
         "pid": { "checkpointId": "pid_flux2" },
         // Edit-style backbone (Flux2KleinEdit handles reference natively; no
         // IP-Adapter, no face-ID). The variation knob maps to image_strength
@@ -6992,7 +6966,7 @@
       // Without a reference it runs plain text-to-image on par with the base
       // 9B — the cache simply doesn't engage (sc-2173), so the full
       // capability set is exposed rather than gating to character_image only.
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
       "macOnly": true,
       "downloads": [
         {
@@ -7080,7 +7054,7 @@
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-kv-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [klein] 9B-KV",
-        "description": "A KV-optimized distill of FLUX.2 [klein] 9B: text-to-image, reference editing, and style variations, plus KV-cache acceleration that makes reference editing ~2.4× faster than the base 9B edit path on Apple Silicon (validated M5 Max 128 GB, sc-2163). The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B (sc-2173). Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — only the transformer is quantized, the Qwen3 text encoder stays full-precision bf16 in every tier. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. Same ~36 GB bf16 peak at 1024² as the base 9B.",
+        "description": "A KV-optimized distill of FLUX.2 [klein] 9B: text-to-image and reference editing, plus KV-cache acceleration that makes reference editing ~2.4× faster than the base 9B edit path on Apple Silicon (validated M5 Max 128 GB, sc-2163). The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B (sc-2173). Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — only the transformer is quantized, the Qwen3 text encoder stays full-precision bf16 in every tier. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. Same ~36 GB bf16 peak at 1024² as the base 9B.",
         "recommendedFor": ["character_image"],
         "pid": { "checkpointId": "pid_flux2" },
         // Same edit-style knob as the base 9B (Flux2KleinEdit). The cache
@@ -7133,7 +7107,7 @@
       // pipeline — so it is converted at install (mlx.requiresConversion) into a
       // local diffusers dir that borrows the VAE/text-encoder/tokenizer from the
       // base FLUX.2-klein-9B install (mlx.convertBaseRepo). sc-2235.
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
       "macOnly": true,
       "downloads": [
         {
@@ -7210,8 +7184,8 @@
       "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [klein] 9B True V2",
-        "description": "Community full fine-tune of FLUX.2 [klein] 9B (wikeeyang) tuned for stronger realism, texture, and prompt adherence, with cleaner reference editing. Runs on Apple Silicon via the same MLX path as the base klein. This is the undistilled line, so it uses ~24 steps at guidance 1.0 (slower than the 4-step distill, ~50 s/image at 1024² on an M5 Max). Requires the base FLUX.2 [klein] 9B to be installed (its VAE/text-encoder/tokenizer are reused) and is converted locally at install. Distributed under the FLUX Non-Commercial License.",
-        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "description": "Community full fine-tune of FLUX.2 [klein] 9B (wikeeyang) tuned for stronger realism, texture, and prompt adherence, with cleaner reference editing. Runs through native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. This is the undistilled line, so it uses ~24 steps at guidance 1.0 (slower than the 4-step distill, ~50 s/image at 1024² on an M5 Max). Requires the base FLUX.2 [klein] 9B to be installed (its VAE/text-encoder/tokenizer are reused); local conversion applies only to the MLX install path. Distributed under the FLUX Non-Commercial License.",
+        "recommendedFor": ["text_to_image", "character_image"],
         "pid": { "checkpointId": "pid_flux2" },
         "variationStrength": {
           "label": "Prompt strength",
@@ -7278,7 +7252,7 @@
       // Fun-Controlnet-Union; engine sc-2292 / candle sc-7460). On MLX the pose library is
       // best-effort (skeleton-as-edit-image) below the strict `flux2_dev_control` tier.
       "adapter": "mlx_flux2",
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
       "macOnly": true,
       "downloads": [
         {
@@ -7435,35 +7409,24 @@
           ]
         }
       },
-      // candle/CUDA VRAM gate — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the
-      // candle-gen-flux2 offload A/B harness (flux2_dev_probed_generate_for_offload_ab, device-level
-      // nvidia-smi PeakSampler on an idle GPU 0), the FLUX.1 (sc-10856) / Qwen-Image (sc-10969) methodology.
-      // Two peaks per tier: `vramGbByTier` = RESIDENT (packed TE + DiT + VAE co-resident, the default
-      // cross-request-cached path); `sequentialPeakGb` = SEQUENTIAL residency (sc-10868: the Mistral text
-      // encoder dropped before the DiT loads) — always lower, byte-identical pixels (md5-verified). The
-      // fit-gate compares the resident peak against free VRAM to pick sequential-offload vs reject, then
-      // (sc-10856) REJECTS if even the sequential peak won't fit rather than OOM.
-      // MEASURED (sc-10920): q4 res 44.0 / seq 35.6, q8 res 70.7 / seq 64.9. The reclaim is MODEST because
-      // the packed q4/q8 tiers ALSO pack the Mistral TE (q4 15 GB / q8 25 GB on disk), so dropping it frees
-      // far less than a dense TE would. This CORRECTS the earlier sc-10868 "95 GB resident / ~60 GB reclaim"
-      // figure, which was taken against a DENSE-bf16-TE staging that does NOT match the shipping packed tier
-      // (sc-10868's SEQUENTIAL 35.4 reproduces exactly here at 35.6; only its resident diverged) — and it
-      // agrees with the older sc-9094 VramProbe (q4 47.2). bf16 is CARRIED (measured:false): its 113 GB
-      // dense weights exceed a 96 GB card even sequentially (Mistral TE bf16 ~48 GB + f32 activation), so it
-      // is un-measurable on the dev box — the ~128 GB resident / ~97 GB sequential estimates both exceed
-      // 96 GB, so the gate rejects bf16 off-Mac before OOM (the intended outcome). minMemoryGb 56 stays the
-      // conservative STATIC admit floor (sc-9094 memory-eligibility); the dynamic fit-gate now drives the
-      // true resident/sequential/reject decision per card.
+      // Candle/CUDA prompt-enhancement high water re-measured for the v3 caption-upsample lifecycle on
+      // RTX PRO 6000 Blackwell (sm_120), with VramProbe on an otherwise idle GPU. Exact merged-source Q8
+      // edit evidence is under `.codex/evidence/sc-18474/inference-e1995384...`; Q4 T2I/edit and Q8 T2I
+      // evidence is under `.codex/evidence/sc-18474/inference-351a482f...`, whose inference commit is an
+      // ancestor of e1995384 and differs from the merge tree only in the MLX FLUX.2 model adapter.
+      // All captures use the native Candle route, 256x256, one diffusion step, one caption token, and an
+      // exactly-once typed Enhanced report: Q4 T2I 40.8 GB, Q4 edit 42.7 GB, Q8 T2I 70.8 GB, Q8 edit
+      // 70.8 GB. These are bounded route high-waters, NOT 1024 calibration records. `vramMeasuredPixels`
+      // therefore stays honest at 256², and the old v2 1024 ladder bindings below remain historical only:
+      // the live v3 provider fingerprint rejects them before selection. The static rows use the largest
+      // observed high-water per tier; the common gate adds its 2 GB reserve, yielding conservative host
+      // tiers of 48 GB for Q4 and 80 GB for Q8. No BF16 row is published without fresh evidence.
       "candle": {
-        // SC-15833: exact Q4 base-only CUDA memory-ladder evidence. Edit and strict ControlNet
-        // loadability are captured separately, but only the text-to-image/none coordinates below
-        // are admitted as runtime-complete memory evidence. The captures remain truthfully pinned
-        // to 5ffd; `docs/calibration/sc-15833/inference-compatibility-a4f4.json` proves the Candle
-        // FLUX.2 closure still describes the same compiled code at a4f409ae, so only that later pin
-        // is admitted as compatible. sc-17524: two closure paths DID move across that window
-        // (`Cargo.lock` and `candle-gen`) and the audited `candle-gen-flux2` lib test binary is
-        // byte-identical at both ends, so the proof is a measured digest rather than tree identity.
-        // The MLX FLUX.2 changes in between are outside this CUDA closure.
+        // Historical SC-15833 Q4 base-only CUDA ladder bindings. Keep their exact 5ffd revision,
+        // closure digest, v2 fingerprint, and 1024 geometry for auditability; do not restamp them.
+        // The live provider reports the v3 caption-upsample fingerprint, and the worker requires an
+        // exact calibration-identity match before a packaged record can enter selection. These rows
+        // therefore document prior behavior only and cannot authorize a v3 route or a small GPU.
         "calibrations": [
           {
             "abi": 3, "loadShape": "deferred_materialization",
@@ -7548,18 +7511,18 @@
             "overlays": ["none", "control"]
           }
         },
-        "minMemoryGb": 56,
-        "vramGbByTier": { "q4": 44.0, "q8": 70.7, "bf16": 128.0 },
-        "vramMeasuredPixels": 1048576,
-        "sequentialPeakGb": { "q4": 35.6, "q8": 64.9, "bf16": 97.0 },
-        "measured": true
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 42.7, "q8": 70.8 },
+        "vramMeasuredPixels": 65536,
+        "sequentialPeakGb": { "q4": 42.7, "q8": 70.8 },
+        "measured": false
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [dev]",
-        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image + reference-editing model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Supports reference editing — drop in a source or character image and the model conditions on it (single + multi-image), the same surface as FLUX.2 [klein]. Pre-quantized and hosted by SceneWorks (Q4 ~31 GB default; Q8 available) — downloads ready-to-run with no install-time conversion or 112 GB gated download. Needs a 128 GB Mac (~74 GB peak at 1024²; reference editing adds the reference tokens on top, so expect higher peaks and slower renders than klein). Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. LoRAs are coming separately.",
-        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image + reference-editing model, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Supports reference editing — drop in a source or character image and the model conditions on it (single + multi-image), the same surface as FLUX.2 [klein]. Pre-quantized and hosted by SceneWorks (Q4 ~31 GB default; Q8 available) — downloads ready-to-run with no install-time conversion or gated source download. The MLX configuration needs a 128 GB Mac (~74 GB peak at 1024²; reference editing adds the reference tokens on top, so expect higher peaks and slower renders than klein). Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. LoRAs are coming separately.",
+        "recommendedFor": ["text_to_image", "character_image"],
         "pid": { "checkpointId": "pid_flux2" },
         // Embedded-guidance edit knob: maps to the dev guidance scale (default 4.0,
         // 1–10), the same "Prompt strength" surface as the klein edit variants
@@ -7640,7 +7603,7 @@
       "family": "chroma",
       "type": "image",
       "adapter": "chroma_diffusers",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8777, epic 8506, Group-B): public/ungated
         // re-host of lodestones/Chroma1-HD (Apache-2.0). Per-tier self-contained subdirs q4/ (default),
@@ -7707,7 +7670,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -7740,7 +7703,7 @@
       "ui": {
         "label": "Chroma1-HD",
         "description": "Lodestones Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Chroma1-HD Prompt Guide",
@@ -7759,7 +7722,7 @@
       "family": "chroma",
       "type": "image",
       "adapter": "chroma_diffusers",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8777, epic 8506, Group-B): public/ungated
         // re-host of lodestones/Chroma1-Base (Apache-2.0). Per-tier self-contained subdirs q4/ (default),
@@ -7880,7 +7843,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -7913,7 +7876,7 @@
       "ui": {
         "label": "Chroma1-Base",
         "description": "Lodestones Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Chroma1-Base Prompt Guide",
@@ -7932,7 +7895,7 @@
       "family": "chroma",
       "type": "image",
       "adapter": "chroma_diffusers",
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8777, epic 8506, Group-B): public/ungated
         // re-host of lodestones/Chroma1-Flash (Apache-2.0). Per-tier self-contained subdirs q4/ (default),
@@ -7999,7 +7962,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -8035,7 +7998,7 @@
       "ui": {
         "label": "Chroma1-Flash",
         "description": "Lodestones Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); Heun ~12-step generation with CFG disabled (guidance 1.0, negative prompt ignored). Needs a large-VRAM GPU.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux" },
         "promptGuide": {
           "title": "Chroma1-Flash Prompt Guide",
@@ -8054,7 +8017,7 @@
       "family": "kolors",
       "type": "image",
       "adapter": "kolors_diffusers",
-      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
       // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
       // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
       // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
@@ -8070,8 +8033,8 @@
           // Pre-quantized MLX turnkey tiers (sc-9946, epic 8506): SDXL-style UNet + ChatGLM3-6B
           // encoder packed (group-64 affine, weight-only), dense SDXL VAE, baked derived fast
           // tokenizer. Loads packed via mlx-gen-kolors packed-detect — no install-time convert peak.
-          // q4 is the default tier. Tiers are all-platform (mirroring z-image/flux1); the candle
-          // bf16-only cross-cutting caveat is tracked separately across Group-B.
+          // q4 is the default tier. All three tiers are all-platform: the native Candle Kolors
+          // loader packed-detects q4/q8 and also serves bf16 (sc-10819), matching the MLX matrix.
           "provider": "huggingface",
           "repo": "SceneWorks/kolors-mlx",
           "revision": "aadbd49f53b66a33ef1be09384eac409cbc44061",
@@ -8184,7 +8147,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "kolors-mlx-chatglm3-sdxl-unet-ladder-v1",
               "tiers": ["bf16"],
-              "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
               "overlays": ["none", "identity"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -8195,7 +8158,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "kolors-mlx-chatglm3-sdxl-unet-ladder-v1",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
               "overlays": ["none", "lora", "identity"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -8220,7 +8183,7 @@
       "ui": {
         "label": "Kolors",
         "description": "Kwai-Kolors Kolors — photorealistic text-to-image and image-to-image editing with strong Chinese + English prompting and text rendering (Midjourney-v6-level human eval). Apache-2.0 (commercial-safe). ChatGLM3-6B text encoder + SDXL-style UNet; ~16.5GB checkpoint, real CFG + negative prompt. Recommended ~25 steps at guidance 5.0.",
-        "recommendedFor": ["text_to_image", "edit_image", "character_image", "style_variations"],
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "pid": { "checkpointId": "pid_sdxl" },
         // Strict pose tier (sc-2264): the official Kolors-ControlNet-Pose (DWPose)
         // loaded via the vendored Kolors_ControlNetModel + ControlNet img2img pipeline,
@@ -8359,8 +8322,8 @@
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Stable Diffusion 3.5 Large",
-        "description": "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship, ported natively to MLX (Apple Silicon only). Triple text encoder (CLIP-L + CLIP-G + T5-XXL) for strong prompt adherence and in-image text; true classifier-free guidance with negative prompts. Runs ~28 steps at guidance 3.5 (flow-match Euler, shift 3.0); native 1024×1024. Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "description": "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. Triple text encoder (CLIP-L + CLIP-G + T5-XXL) for strong prompt adherence and in-image text; true classifier-free guidance with negative prompts. Runs ~28 steps at guidance 3.5 (flow-match Euler, shift 3.0); native 1024×1024. Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
+        "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "Stable Diffusion 3.5 Prompt Guide",
           "path": "/prompt-guides/sd3-5.md",
@@ -8487,8 +8450,8 @@
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Stable Diffusion 3.5 Large Turbo",
-        "description": "Stable Diffusion 3.5 Large Turbo — the few-step (~4), CFG-free distilled variant of SD3.5 Large: the same 8B multimodal diffusion transformer with a triple text encoder, distilled (ADD) for much faster renders, native MLX (Apple Silicon). Best for fast iteration at flagship quality; native 1024×1024. Runs CFG-free (the negative prompt is inert). Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "description": "Stable Diffusion 3.5 Large Turbo — the few-step (~4), CFG-free distilled variant of SD3.5 Large: the same 8B multimodal diffusion transformer with a triple text encoder, distilled (ADD) for much faster renders. Runs through native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. Best for fast iteration at flagship quality; native 1024×1024. Runs CFG-free (the negative prompt is inert). Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
+        "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "Stable Diffusion 3.5 Prompt Guide",
           "path": "/prompt-guides/sd3-5.md",
@@ -8611,8 +8574,8 @@
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Stable Diffusion 3.5 Medium",
-        "description": "Stability AI Stable Diffusion 3.5 Medium — the 2.5B MMDiT-X (dual-attention) mid-tier of the SD3.5 family, ported natively to MLX (Apple Silicon only). Same triple text encoder (CLIP-L + CLIP-G + T5-XXL) and true CFG as Large, with a smaller transformer that renders up to 1440×1440 and a lighter memory footprint. Runs ~40 steps at guidance 4.5 (flow-match Euler, shift 3.0). Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "description": "Stability AI Stable Diffusion 3.5 Medium — the 2.5B MMDiT-X (dual-attention) mid-tier of the SD3.5 family, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. Same triple text encoder (CLIP-L + CLIP-G + T5-XXL) and true CFG as Large, with a smaller transformer that renders up to 1440×1440 and a lighter memory footprint. Runs ~40 steps at guidance 4.5 (flow-match Euler, shift 3.0). Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
+        "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "Stable Diffusion 3.5 Prompt Guide",
           "path": "/prompt-guides/sd3-5.md",
@@ -8650,7 +8613,7 @@
       "family": "sana",
       "type": "image",
       "adapter": "mlx_sana",
-      "capabilities": ["text_to_image"],
+      "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
       "nonCommercial": true,
       "gated": false,
@@ -8750,12 +8713,6 @@
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
-      "loraCompatibility": {
-        // No SANA LoRA wired yet (the engine descriptor reports supports_lora: false). Family
-        // reserved for when/if adapters are added.
-        "families": ["sana"],
-        "types": []
-      },
       "mlx": {
         // Quant-matrix turnkey (sc-8489/sc-8513): default q4 (`standard_tier_subdir` resolves the
         // `q4/` subdir; q8/bf16 selectable via advanced.mlxQuantize). The transformer + Gemma-2 TE are
@@ -8775,8 +8732,8 @@
         // (`model_supports_img2img` reads `ui.img2img`) — no per-model worker routing. Strength 0.5.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT text-to-image model, ported natively to MLX (Apple Silicon only). A 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) for fast 1024×1024 generation with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Ships q4 (default) / q8 / bf16 quant tiers — pick per available RAM; each loads pre-packed with no conversion peak. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
-        "recommendedFor": ["text_to_image"],
+        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). Its 1.6B linear-attention transformer, deep-compression 32× DC-AE, and Gemma 2 instruction text encoder support text-to-image plus reference-guided image-to-image with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
           "path": "/prompt-guides/sana.md",
@@ -8824,7 +8781,7 @@
       "family": "sana",
       "type": "image",
       "adapter": "mlx_sana",
-      "capabilities": ["text_to_image"],
+      "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
       "nonCommercial": true,
       "gated": false,
@@ -8918,12 +8875,6 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
-        // No SANA LoRA wired yet (the engine descriptor reports supports_lora: false). Family reserved
-        // for when/if adapters are added.
-        "families": ["sana"],
-        "types": []
-      },
       "mlx": {
         // Quant-matrix turnkey (sc-8490/sc-8513): default q4 (`standard_tier_subdir` resolves `q4/`;
         // q8/bf16 selectable via advanced.mlxQuantize). Transformer + Gemma-2 TE pre-packed +
@@ -8941,8 +8892,8 @@
         // few-step, so the strength window is narrower than base SANA — validate the band on-device.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA-Sprint 1.6B — the few-step distillation of SANA, ported natively to MLX (Apple Silicon only). The same 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) as base SANA, distilled for ~2-step CFG-free generation via a continuous-time consistency (SCM) sampler and a guidance-embedding trunk — so it generates a 1024×1024 image in a couple of steps with no negative prompt. Ships q4 (default) / q8 / bf16 quant tiers — pick per available RAM; each loads pre-packed with no conversion peak. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
-        "recommendedFor": ["text_to_image"],
+        "description": "NVIDIA SANA-Sprint 1.6B — the few-step SANA distillation, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same 1.6B linear-attention transformer, 32× DC-AE, and Gemma 2 instruction text encoder as base SANA support text-to-image plus reference-guided image-to-image. Its CFG-free SCM/TrigFlow sampler and guidance-embedding trunk generate a 1024×1024 image in about two steps with no negative prompt. Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
           "path": "/prompt-guides/sana.md",
@@ -9172,7 +9123,7 @@
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
         "label": "Anima 2B",
-        "description": "CircleStone Labs Anima 2B — an anime text-to-image model ported natively to MLX (Apple Silicon only). A Cosmos-Predict2 diffusion transformer conditioned by a compact query-token text adapter over a Qwen3-0.6B encoder, decoded through the Qwen-Image VAE. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting works (e.g. `(chibi:2)`), applied to the text query tokens. Convert-at-install: the ~5.6 GB source is packed on-device into bf16 / q8 (default) / q4 tiers — q8 is the default (near-lossless, ≈bf16); pick bf16 for max fidelity (and, on this small 2B model, often the fastest on Apple Silicon), or q4 for a softer, more painterly look (and to save RAM). Distributed under the CircleStone Labs Non-Commercial License v1.2: generations are for non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "description": "CircleStone Labs Anima 2B — an anime text-to-image model running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. A Cosmos-Predict2 diffusion transformer conditioned by a compact query-token text adapter over a Qwen3-0.6B encoder, decoded through the Qwen-Image VAE. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting works (e.g. `(chibi:2)`), applied to the text query tokens. Convert-at-install on Mac: the ~5.6 GB source is packed on-device into bf16 / q8 (default) / q4 tiers — q8 is the default (near-lossless, ≈bf16); pick bf16 for max fidelity (and, on this small 2B model, often the fastest on Apple Silicon), or q4 for a softer, more painterly look (and to save RAM). Distributed under the CircleStone Labs Non-Commercial License v1.2: generations are for non-commercial use only. Runs comfortably on a 16 GB-class Mac; the Candle lane uses the dense checkpoint off-Mac.",
         "recommendedFor": ["text_to_image"],
         // Booru quality prefix + negative (sc-10523, sc-10760). Image Studio seeds `defaultPrompt` into an
         // UNEDITED prompt box and `defaultNegativePrompt` into an EMPTY negative box (text-to-image AND
@@ -9365,7 +9316,7 @@
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
         "label": "Anima 2B Aesthetic",
-        "description": "CircleStone Labs Anima 2B Aesthetic — the aesthetic fine-tune of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE as the base, tuned for a stronger aesthetic. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 (softer, painterly) tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "description": "CircleStone Labs Anima 2B Aesthetic — the aesthetic fine-tune of Anima 2B, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE as the base, tuned for a stronger aesthetic. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install on Mac into bf16 / q8 (default) / q4 (softer, painterly) tiers; the Candle lane uses the dense checkpoint off-Mac. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         // Booru quality prefix + negative (sc-10523, sc-10760) — same seams as anima_base.
         "defaultPrompt": "masterpiece, best quality, ",
@@ -9561,7 +9512,7 @@
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
         "label": "Anima 2B Turbo",
-        "description": "CircleStone Labs Anima 2B Turbo — the merged few-step student of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE, guidance-distilled to run CFG-free in ~10 steps (much faster than the 30-step base). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "description": "CircleStone Labs Anima 2B Turbo — the merged few-step student of Anima 2B, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE, guidance-distilled to run CFG-free in ~10 steps (much faster than the 30-step base). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install on Mac into bf16 / q8 (default) / q4 tiers; the Candle lane uses the dense checkpoint off-Mac. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         // Booru quality prefix (sc-10523, sc-10760) — same seam as anima_base. (Turbo is CFG-free,
         // so its q4 tier stays crisp — no painterly note in the description.)
@@ -9593,7 +9544,7 @@
       // (sc-2007 resemblance tier; faithful likeness belongs to InstantID — sc-2009).
       // image_inpaint: StableDiffusionXLInpaintPipeline masked edits (sc-2476).
       // image_detail: tile-ControlNet detail refine (image_detail job, sc-2437/sc-2438).
-      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
       // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
       // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
       // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
@@ -9821,7 +9772,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
               "tiers": ["bf16"],
-              "modes": ["text_to_image", "style_variations", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              "modes": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
@@ -9834,7 +9785,7 @@
       "ui": {
         "label": "Stable Diffusion XL",
         "description": "Stability AI Stable Diffusion XL base 1.0 — the widely-supported open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP text encoders; ~6.9GB fp16, real CFG + negative prompt. Recommended ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
-        "recommendedFor": ["text_to_image", "edit_image", "character_image", "style_variations"],
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "Stable Diffusion XL Prompt Guide",
@@ -9858,7 +9809,7 @@
       // The recommended detail backbone per the spike (photoreal micro-texture).
       // Plain photoreal alternative to InstantID — IP-Adapter plus-face for
       // resemblance, sdxl-family LoRA support.
-      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
       // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
       // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
       // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
@@ -9999,7 +9950,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
               "tiers": ["bf16"],
-              "modes": ["text_to_image", "style_variations", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              "modes": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
@@ -10010,7 +9961,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "style_variations", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              "modes": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
@@ -10023,7 +9974,7 @@
       "ui": {
         "label": "RealVisXL (photoreal SDXL)",
         "description": "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL — the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable for general photoreal work. openrail++ (commercial use OK, ungated). Drop-in SDXL: same UNet, same dual-CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
-        "recommendedFor": ["text_to_image", "edit_image", "character_image", "style_variations"],
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "RealVisXL Prompt Guide",
@@ -10051,7 +10002,7 @@
       // ONLY: the few-step accel sampler is engine-incompatible with img2img / reference /
       // mask conditioning, so edit / inpaint / reference / detail stay on the 30-step base
       // `realvisxl`. openrail++ (commercial use OK, ungated), same license as the base.
-      "capabilities": ["text_to_image", "style_variations"],
+      "capabilities": ["text_to_image"],
       // Cross-platform (sc-7176): the few-step `lightning` (Euler-trailing, CFG-off) sampler now runs on
       // BOTH the macOS mlx-gen `sdxl` engine (sc-6075) AND the Windows/CUDA candle `sdxl` engine
       // (candle-gen #121 / sc-6128). The worker forces `sampler="lightning"` for this id on both backends
@@ -10193,7 +10144,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
               "tiers": ["q4"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
@@ -10206,7 +10157,7 @@
       "ui": {
         "label": "RealVisXL Lightning (fast photoreal SDXL)",
         "description": "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. A standalone SDXL-Lightning checkpoint (openrail++, commercial-OK, ungated) tuned for the same photoreal look as RealVisXL_V5.0. Runs CFG-free by default (the negative prompt is inert unless you raise guidance toward 2.0). Text-to-image only; for edits, reference identity, masked inpaint, or detail-refine use the standard RealVisXL. Accepts sdxl-family LoRAs.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "RealVisXL Lightning Prompt Guide",
@@ -10228,7 +10179,7 @@
       // Danbooru-tag anime SDXL finetune (OnomaAI). Architecturally vanilla SDXL — identical UNet,
       // dual CLIP-L + OpenCLIP-bigG, eps-pred, VAE scaling_factor 0.13025 — so it reuses the `sdxl`
       // engine and the whole sdxl-family LoRA/LoKr stack unchanged (epic 10609).
-      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
       "captionStyle": "tags",
       "downloads": [
         // SceneWorks turnkey re-host (sc-10611). Upstream OnomaAIResearch/Illustrious-XL-v1.0 ships a
@@ -10352,7 +10303,7 @@
       "ui": {
         "label": "Illustrious-XL v1.0 (anime)",
         "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
         // Image Studio seeds this into an empty negative box.
         "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
@@ -10378,7 +10329,7 @@
       // it has a materially narrower safe resolution range (see `limits`). Same vanilla-SDXL
       // architecture, and it ships no checkpoint metadata at all — `prediction_type: epsilon` was
       // read off the conversion, not the file (epic 10609).
-      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
       "captionStyle": "tags",
       "downloads": [
         // SceneWorks turnkey re-host (sc-10612). As with v1.0, upstream ships a single-file LDM
@@ -10503,7 +10454,7 @@
       "ui": {
         "label": "Illustrious-XL v2.0 (anime)",
         "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
-        "recommendedFor": ["text_to_image", "style_variations"],
+        "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
         // Image Studio seeds this into an empty negative box.
         "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
@@ -11065,6 +11016,18 @@
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
       "downloads": [
         {
+          // MLX requires the external Gemma-3-12B encoder. Provision the same pinned shared bundle
+          // component as base LTX so a fresh Eros install is runnable without relying on a
+          // previously-installed sibling model or an ambient Hugging Face cache.
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "coRequisite": true,
+          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
+          "files": ["gemma/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 26427894918
+        },
+        {
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3-10Eros",
           "revision": "84a05a13610d78dbe4340d1be23fd8185e10f697",
@@ -11078,9 +11041,9 @@
           "estimatedSizeBytes": 46139885750
         },
         {
-          // Recommended cond_safe distill LoRA. Required runtime component on the MLX
-          // path: it is auto-injected per-pass (see mlx.autoDistillLora) so 10Eros
-          // produces usable text-to-video. Only the cond_safe variant is fetched.
+          // Recommended cond_safe distill LoRA. Required runtime component on the MLX path: it is
+          // auto-injected per-pass (see mlx.autoDistillLora) so 10Eros produces usable text-to-video.
+          // Only the cond_safe variant is fetched.
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
           "revision": "9c3548954510182827d7bfc872fd7cceb64230fd",
@@ -11820,7 +11783,7 @@
       "family": "wan-video",
       "type": "video",
       "adapter": "wan_video",
-      "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+      "capabilities": ["image_to_video", "extend_clip", "video_bridge"],
       // Per-platform source: macOS downloads the turnkey pre-converted dual-expert MLX snapshot
       // from the SceneWorks HF org (sc-5600, epic 5594); Windows/Linux load the diffusers/GGUF
       // layout via the torch wan_video adapter. The API serves only the entry matching the OS.
@@ -12036,7 +11999,7 @@
       "ui": {
         "label": "Wan2.2 14B (I2V)",
         "description": "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
-        "recommendedFor": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+        "recommendedFor": ["image_to_video", "extend_clip", "video_bridge"],
         "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
         "promptGuide": {
           "title": "Wan2.2 14B Image-to-Video Prompt Guide",
@@ -12087,19 +12050,15 @@
           "estimatedSizeBytes": 81200000000
         },
         {
-          // Windows/Linux candle (sc-8613): the candle `wan_vace` provider serves replace_person off a
-          // DIFFERENT, single-expert checkpoint — `Wan-AI/Wan2.1-VACE-14B-diffusers` (transformer/ +
-          // text_encoder/ + vae/ + tokenizer/), matching the provider's `WanVaceConfig::vace_14b` dims
-          // (dim 5120, 40 layers). The candle worker resolves this repo by string from the HF cache
-          // (`CANDLE_WAN_VACE_REPO`, video_jobs.rs; overridable via SCENEWORKS_CANDLE_WAN_VACE_DIR),
-          // independent of `paths.model`. Without this entry the off-Mac VACE lane dead-ended with no
-          // way to install the snapshot. Per-OS `install_state` reads the retained download's repo
-          // (models.rs), so macOS still resolves the MLX checkpoint above.
+          // Windows/Linux Candle (sc-18478): the dedicated `wan2_2_vace_fun_14b` provider loads this
+          // same dual-expert checkpoint (`transformer/` high-noise + `transformer_2/` low-noise), not
+          // the unrelated single-expert Wan2.1 VACE model. The worker resolves the exact repo from the
+          // HF cache and fails closed unless both expert configs are present.
           "provider": "huggingface",
-          "repo": "Wan-AI/Wan2.1-VACE-14B-diffusers",
+          "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
           "files": [],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 50000000000
+          "estimatedSizeBytes": 81200000000
         }
       ],
       "paths": {
@@ -12139,8 +12098,8 @@
         "maxPixels": 921600,
         "fps": [16],
         "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
-        // Epic 7114 curated menu (sc-7296). mlx-only model (no candle/Torch backend) — the native
-        // dual-expert VACE-Fun engine over Wan's flow σ schedule exposes the native curated set.
+        // Epic 7114 curated menu (sc-7296). Both native backends expose the dedicated dual-expert
+        // VACE-Fun engine over Wan's flow σ schedule.
         // No scheduler axis (flow shift = `scheduler_shift`).
         "samplers": ["default", "uni_pc", "euler", "dpmpp_2m"],
         "schedulers": ["default"]
@@ -12160,6 +12119,14 @@
         "minMemoryGb": 64,
         "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers"
       },
+      "candle": {
+        "minMemoryGb": 96,
+        "measured": false,
+        "limits": {
+          "samplers": ["default", "uni_pc", "euler"],
+          "schedulers": ["default"]
+        }
+      },
       "ui": {
         "label": "Wan2.2 VACE-Fun (A14B)",
         "description": "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video. Native-only (no Torch); needs ample memory for both experts.",
@@ -12178,8 +12145,8 @@
     },
     // Bernini (epic 4699): ByteDance's full pipeline — a Qwen2.5-VL-7B semantic
     // planner (Latent Semantic Planning / MAR loop) driving a Wan2.2-T2V-A14B
-    // dual-expert renderer. macOS-only native MLX (mlx-gen-bernini, engine id
-    // "bernini"); no Torch path. Distributed the SceneWorks/*-mlx way (YOLO11 /
+    // dual-expert renderer. Native MLX on macOS (mlx-gen-bernini, engine id "bernini") and native
+    // Candle on Windows/Linux (candle-gen-bernini); no legacy Torch path. Distributed the SceneWorks/*-mlx way (YOLO11 /
     // SAM2 / SAM3 pattern): the full 179 GB diffusers package is converted ONCE
     // (`assemble_bernini_snapshot`, ~93 GB bf16) and published as the turnkey
     // `SceneWorks/bernini-mlx` repo, downloaded on first use (no in-app conversion
@@ -12261,8 +12228,8 @@
           // image_jobs/bernini.rs; overridable via SCENEWORKS_CANDLE_BERNINI_DIR), independent of
           // `paths.model`, and the video lane reuses the same resolver. Without this entry the off-Mac
           // candle Bernini lane dead-ended with no way to install the snapshot. Shared by bernini +
-          // bernini_image (one repo, HF cache dedupes). Loads dense today (the off-Mac packed-tier select
-          // is a follow-up). Size is the bf16 tier estimate (candle loads the converted tree dense).
+          // bernini_image (one repo, HF cache dedupes). The worker selects the published bf16/q8/q4
+          // subdirectory from this whole-repo snapshot. Size remains the bf16 tier estimate.
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
           "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
@@ -12313,7 +12280,9 @@
         "schedulers": ["default"]
       },
       "loraCompatibility": {
-        // The engine descriptor reports supports_lora: false for Bernini.
+        // MLX reports supports_lora/supports_lokr false; the off-Mac Candle descriptor reports both
+        // true. Keep the global picker types empty so MLX never exposes a no-op. The capability
+        // matrix preserves the exact Candle-only LoRA/LoKr cells from runtime descriptors.
         "families": ["bernini"],
         "types": []
       },
@@ -12341,7 +12310,7 @@
       },
       "ui": {
         "label": "Bernini",
-        "description": "ByteDance Bernini full pipeline: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B text-to-video renderer. Highest-quality, planner-guided generation — but very large (≈179 GB) and slow (the 7B planner runs many passes per clip). macOS native MLX only; needs ample unified memory.",
+        "description": "ByteDance Bernini full pipeline: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B text-to-video renderer. Highest-quality, planner-guided generation — but very large (≈179 GB) and slow (the 7B planner runs many passes per clip). Native MLX on macOS and Candle on Windows/Linux; needs ample accelerator memory.",
         "recommendedFor": ["text_to_video"],
         "durationHint": "Heavy planner + dual 14B experts — keep clips at 5s or less. Generates at 16fps.",
         "promptGuide": {
@@ -12364,7 +12333,7 @@
     // shared repo, like z_image_edit reusing the Z-Image-Turbo weights). The worker forces
     // `frames:1` + `video_mode:"t2i"|"i2i"` so the engine returns a single still
     // (`GenerationOutput::Images`), and i2i feeds the source as `Conditioning::Reference`.
-    // macOS-only native MLX; no Torch path. NOTE: routing a 7B planner + dual-14B renderer
+    // Native MLX on macOS and native Candle on Windows/Linux; no legacy Torch path. NOTE: routing a 7B planner + dual-14B renderer
     // to make ONE still is minutes-per-image at ~44 GB peak (Q4) — slow by design; the fast
     // native image models (z-image / flux / sdxl / kolors / lens / chroma / qwen / sensenova)
     // remain the default for stills. This id exists for planner-driven still images.
@@ -12418,7 +12387,7 @@
           // download (empty files list); the candle worker's `resolve_candle_bernini_model_dir` resolves it
           // by string from the HF cache (`CANDLE_BERNINI_REPO`, image_jobs/bernini.rs; overridable via
           // SCENEWORKS_CANDLE_BERNINI_DIR), independent of `paths.model`. One repo shared with the video id
-          // (HF cache dedupes). Loads dense today (off-Mac packed-tier select is a follow-up).
+          // (HF cache dedupes). The worker selects the published bf16/q8/q4 subdirectory.
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
           "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
@@ -12449,7 +12418,9 @@
         "schedulers": ["default"]
       },
       "loraCompatibility": {
-        // The engine descriptor reports supports_lora: false for Bernini.
+        // MLX reports supports_lora/supports_lokr false; the off-Mac Candle descriptor reports both
+        // true. Keep the global picker types empty so MLX never exposes a no-op. The capability
+        // matrix preserves the exact Candle-only LoRA/LoKr cells from runtime descriptors.
         "families": ["bernini"],
         "types": []
       },
@@ -12469,7 +12440,7 @@
       },
       "ui": {
         "label": "Bernini (Image)",
-        "description": "ByteDance Bernini full pipeline as a still-image generator: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B renderer to produce a single image (text-to-image) or edit a source image (image-to-image). Highest-quality, planner-guided — but very large (≈179 GB) and slow (the 7B planner runs many passes per image). macOS native MLX only; needs ample unified memory. For everyday stills the fast native image models are recommended.",
+        "description": "ByteDance Bernini full pipeline as a still-image generator: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B renderer to produce a single image (text-to-image) or edit a source image (image-to-image). Highest-quality, planner-guided — but very large (≈179 GB) and slow (the 7B planner runs many passes per image). Native MLX on macOS and Candle on Windows/Linux; needs ample accelerator memory. For everyday stills the fast native image models are recommended.",
         "recommendedFor": ["text_to_image", "edit_image"],
         "promptGuide": {
           "title": "Bernini Image Prompt Guide",
@@ -12487,8 +12458,9 @@
     // I2V (dense) + the stock Wan2.1 z16 VAE / umt5-xxl + an open-CLIP XLM-RoBERTa
     // ViT-H/14 image tower; packed-token conditioning with auto-generated color-coded
     // segmentation masks (the worker paints them from native SAM3 — no user masks).
-    // macOS-only native MLX (mlx-gen-scail2, engine id "scail2_14b"); no Torch path.
-    // Distributed the SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
+    // Native MLX on macOS and native Candle on NVIDIA Windows/Linux (engine id "scail2_14b").
+    // Both backends share the dense bf16 tier; q4/q8 remain MLX-only. Distributed the
+    // SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
     // published as `SceneWorks/scail2-mlx` (sc-5445), downloaded on first use. This entry
     // covers the standalone `animate_character` mode (sc-5447 /
     // sc-5448) AND cross-identity `replace_person` (sc-5452 — the SAME engine with
@@ -12506,7 +12478,7 @@
         "replace_person"
       ],
       "downloads": [
-        // macOS quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // Quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
         // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Each tier subdir is
         // fully self-contained (the DiT `dit.safetensors` at the tier's precision + the shared dense
         // Wan2.1 z16 VAE + UMT5 T5 encoder + open-CLIP ViT-H/14 visual tower + tokenizer + config.json
@@ -12546,7 +12518,7 @@
           "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           // Dense bf16 tier (sc-9944): the DiT as a true dense mirror of the zai-org fp32 checkpoint
           // (reconstructed for this story; the pre-sc-5445 dense snapshot had been pruned) + the shared
           // dense VAE/T5/CLIP/tokenizer. Exact on-disk size of the built bf16/ subdir.
@@ -12622,9 +12594,24 @@
           "schedulers": ["default"]
         }
       },
+      // Exact shared-package Candle/CUDA evidence (sc-18473): inference
+      // 3174984b20334bb029170e367be234de0b3f8753 loaded the Model Manager bf16 directory from
+      // SceneWorks/scail2-mlx@ce88cfdb1008f395e9c820e525e6db7b6695f7b3 through the production
+      // candle_gen_scail2 provider and rendered 832x480 / 81 frames / 1 step. GitHub Actions run
+      // 31455292141, job 93667700921, artifact 9089420126 (uploaded zip SHA-256
+      // de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9) emitted the validated
+      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. minMemoryGb is
+      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower Candle tier
+      // or sequential-offload path, so both worker modes fail closed below that live free-VRAM floor.
+      "candle": {
+        "minMemoryGb": 105,
+        "vramGbByTier": { "bf16": 102.115 },
+        "vramMeasuredPixels": 399360,
+        "measured": true
+      },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; macOS native MLX only. Needs ample unified memory and runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Candle needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve); lower-memory NVIDIA cards are rejected before load. Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {
@@ -13299,33 +13286,10 @@
       "type": "utility",
       "adapter": "aura-sr",
       "capabilities": [],
-      "downloads": [
-        {
-          // AuraSR v2 weights are Apache-2.0 on Hugging Face. The older
-          // fal/AuraSR checkpoint is CC-BY-SA-4.0 and is intentionally not used.
-          "provider": "huggingface",
-          "repo": "fal/AuraSR-v2",
-          "revision": "ff452185a7c8b51206dd62c21c292e7baad5c3a3",
-          "files": ["model.safetensors", "config.json", "LICENSE.md", "README.md"],
-          "estimatedSizeBytes": 2470000000
-        }
-      ],
-      "paths": {
-        "model": "${HF_CACHE}/fal/AuraSR-v2"
-      },
-      "resources": {
-        "imageUpscalers": {
-          "aura-sr": {
-            "x4": {
-              "repo": "fal/AuraSR-v2",
-              "file": "model.safetensors",
-              "license": "Apache-2.0",
-              "licenseUrl": "https://huggingface.co/fal/AuraSR-v2/blob/main/LICENSE.md",
-              "originalUrl": "https://huggingface.co/fal/AuraSR-v2"
-            }
-          }
-        }
-      },
+      // Retained only so stale saved selections/install records normalize cleanly. AuraSR has no
+      // live MLX or Candle route, so the catalog must not offer a dead download or capability chip.
+      "downloads": [],
+      "paths": {},
       "defaults": {},
       "limits": {},
       "loraCompatibility": {
@@ -13334,8 +13298,8 @@
       },
       "ui": {
         "label": "AuraSR v2 Upscaler",
-        "description": "Optional Apache-2.0 GigaGAN-style 4x image upscaling weights used only when Image Studio AuraSR upscaling is enabled.",
-        "recommendedFor": ["image_upscale"],
+        "description": "Retired AuraSR v2 catalog identity retained only to normalize stale saved selections. No current SceneWorks backend routes AuraSR; use Real-ESRGAN or SeedVR2 instead.",
+        "recommendedFor": [],
         "promptGuide": {
           "title": "AuraSR Upscaling Guide",
           "path": "/prompt-guides/aura-sr.md",
@@ -13676,8 +13640,8 @@
       // Boogu-Image (base/turbo/edit), Chroma (hd/base/flash), and Z-Image (turbo/edit) — Z-Image shares
       // the FLUX.1 VAE (PiD's zimage tags alias the flux checkpoint). Engine wiring: sc-7846.
       //
-      // Worker routing for the flux/flux2/sdxl families is sc-8035 (the worker map is qwenimage-only
-      // today); until that lands a usePid request on these models falls through to native VAE.
+      // Worker routing for the flux/flux2/sdxl families landed in sc-8035. The backend-neutral worker
+      // map selects this checkpoint for compatible FLUX.1/Boogu/Chroma/Z-Image generation routes.
       // LICENSE (sc-7842): NVIDIA License (NSCLv1) — non-commercial (research/evaluation) only, flows to
       // output; the SceneWorks/pid-flux repo ships the verbatim LICENSE + NOTICE + README.
       "id": "pid_flux",
@@ -13756,7 +13720,8 @@
       // sc-7847 (merged). NOTE: the re-hosted checkpoint is the `_2606` revision of the 2kto4k flux2
       // student — the un-suffixed 2kto4k flux2 checkpoint has a color-drift bug and is not used.
       //
-      // Worker routing = sc-8035 (qwenimage-only today). LICENSE (sc-7842): NVIDIA License (NSCLv1),
+      // Worker routing landed in sc-8035 for compatible FLUX.2/Klein/Lens/Ideogram generation routes.
+      // LICENSE (sc-7842): NVIDIA License (NSCLv1),
       // non-commercial (research/evaluation) only, flows to output; SceneWorks/pid-flux2 ships the
       // verbatim LICENSE + NOTICE + README.
       "id": "pid_flux2",
@@ -13835,7 +13800,8 @@
       // 4/4, #585). The `sdxl` student is variance-preserving (VP-frame); the shipped clean sigma=0
       // decode path is frame-agnostic. 2kto4k-only (no 2k release).
       //
-      // Worker routing = sc-8035 (qwenimage-only today). LICENSE (sc-7842): NVIDIA License (NSCLv1),
+      // Worker routing landed in sc-8035 for compatible SDXL/RealVisXL/Kolors generation routes.
+      // LICENSE (sc-7842): NVIDIA License (NSCLv1),
       // non-commercial (research/evaluation) only, flows to output; SceneWorks/pid-sdxl ships the
       // verbatim LICENSE + NOTICE + README.
       "id": "pid_sdxl",

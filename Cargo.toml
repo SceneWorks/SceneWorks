@@ -24,7 +24,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.8.7"
 edition = "2021"
 rust-version = "1.80"
 license-file = "LICENSE"
@@ -145,4 +145,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "0e4adc6f05884e6891e29dfecd32ee695efe8b18" }

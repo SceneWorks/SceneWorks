@@ -4,17 +4,29 @@ use super::{
     huggingface_snapshot_dir,
 };
 use super::{
-    control_kind_label, pose_entries, requested_control_kind, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
-    ApiClient, CancelFlag, CandleStrictControl, Flux1ControlPaths, Flux1ControlRequest,
-    Flux1DevControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, Settings, Value, WorkerError, WorkerResult,
+    control_kind_label, pose_entries, requested_control_kind, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, run_candle_strict_control,
+    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Flux1ControlPaths,
+    Flux1ControlRequest, Flux1DevControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
+
+pub(super) fn flux1_control_adapter_source_bytes(
+    adapters: &[gen_core::AdapterSpec],
+) -> WorkerResult<u64> {
+    gen_core::adapter_stack_resident_bytes(adapters, gen_core::AdapterResidencyMode::Additive)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.1 control cannot determine the resident size of the requested adapter stack."
+                    .to_owned(),
+            )
+        })
+}
 
 // Candle (Windows/CUDA) FLUX.1-dev strict-control Fun-Controlnet-Union route (sc-8412, epic 8236) —
 // `flux_dev` + `advanced.poses` off-Mac via `runtime_cuda::providers::flux::Flux1DevControl`. The candle sibling of the
@@ -265,6 +277,7 @@ pub(super) struct Flux1StrictControl {
     /// discrete mode index). The whole pose set shares one `controlMode`, so a single label is correct.
     control_kind: String,
     memory: gen_core::GenerationMemory,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -278,6 +291,7 @@ pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictCon
         steps: 25,
         guidance: 3.5,
         control_scale: 0.7,
+        adapters: Vec::new(),
         control_kind: "pose".to_owned(),
         memory: gen_core::GenerationMemory::default(),
     }
@@ -314,11 +328,13 @@ impl CandleStrictControl for Flux1StrictControl {
                 gate: "shared FLUX.1 memory ladder",
             };
         }
+        let mut overlays = vec![self.control.as_path()];
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "FLUX.1-dev",
             "strict-control Union-Pro-2.0 branch",
             &self.base,
-            &[&self.control],
+            &overlays,
         ))
     }
 
@@ -326,6 +342,7 @@ impl CandleStrictControl for Flux1StrictControl {
         let paths = Flux1ControlPaths {
             flux_base: self.base.clone(),
             control: self.control.clone(),
+            adapters: self.adapters.clone(),
         };
         Flux1DevControl::load_with_memory(&paths, self.memory).map_err(|error| {
             WorkerError::Engine(format!("FLUX.1-dev strict-control load failed: {error}"))
@@ -427,11 +444,15 @@ pub(super) async fn generate_candle_flux1_control_stream(
         Some("q8") => "q8",
         _ => "bf16",
     };
-    let overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control);
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_source_bytes = flux1_control_adapter_source_bytes(&adapters)?;
+    let runtime_overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control)
+        .saturating_add(adapter_source_bytes);
     let strategy_spec = apply_candle_image_load_shape(
         "flux1_dev",
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
             .with_control(gen_core::WeightsSource::File(control.clone()))
+            .with_adapters(adapters.clone())
             .with_offload_policy(gen_core::OffloadPolicy::Sequential),
     );
     let raw_budget = crate::vram_gate::apply_vram_cap(
@@ -441,7 +462,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
-        overlay_bytes,
+        runtime_overlay_bytes,
     );
     let (control_repo, control_file) = flux1_control_candle_repo_file(request)?;
     let control_revision = trusted_control_weight_revision(
@@ -485,7 +506,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         false,
         raw_budget,
         predicted_peak,
-        overlay_bytes,
+        runtime_overlay_bytes,
         gen_core::MemoryCacheState::Cold,
     )?;
     let generation_memory = memory_evaluation
@@ -510,6 +531,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         control_scale,
         control_kind,
         memory: generation_memory,
+        adapters,
     };
 
     run_candle_strict_control(

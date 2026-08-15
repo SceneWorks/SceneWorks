@@ -827,7 +827,7 @@ fn convert_flux2_dev_prequant(
     _group_size: i32,
 ) -> Result<(), String> {
     Err(
-        "FLUX.2-dev conversion requires macOS (mlx-gen-flux2); this model is macOS-only."
+        "FLUX.2-dev MLX tier conversion requires macOS (mlx-gen-flux2); model inference is also available through Candle/CUDA off-Mac."
             .to_owned(),
     )
 }
@@ -915,7 +915,7 @@ fn convert_sd3_prequant(
     _bits: i32,
     _group_size: i32,
 ) -> Result<(), String> {
-    Err("SD3.5 conversion requires macOS (mlx-gen-sd3); this model is macOS-only.".to_owned())
+    Err("SD3.5 MLX tier conversion requires macOS (mlx-gen-sd3); model inference is also available through Candle/CUDA off-Mac.".to_owned())
 }
 
 /// The THREE Anima variant DiTs (one per catalog id) under the ungated `circlestone-labs/Anima` repo,
@@ -1039,7 +1039,7 @@ fn convert_anima_prequant(
     _group_size: i32,
 ) -> Result<(), String> {
     Err(
-        "Anima conversion requires macOS (mlx-gen quantization); this model is macOS-only."
+        "Anima MLX tier conversion requires macOS (mlx-gen quantization); model inference is also available through Candle/CUDA off-Mac."
             .to_owned(),
     )
 }

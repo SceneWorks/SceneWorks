@@ -1790,13 +1790,13 @@ fn krea_control_target() -> TrainingTarget {
     }
 }
 
-/// Native MLX LoRA/LoKr training for Stable Diffusion 3.5 **Large** (epic 7841, T3 sc-7884).
+/// Native Rust LoRA/LoKr training for Stable Diffusion 3.5 **Large**.
 ///
 /// LoRAs train on the `stabilityai/stable-diffusion-3.5-large` MMDiT (the `sd3_lora` kernel →
 /// `mlx-gen-sd3` `register_trainer` id `sd3_5_large`, T2 sc-7883) and apply back at `sd3_5_large`
 /// — and the family-arch-identical `sd3_5_large_turbo` — inference via the `sd3` LoRA family
 /// (no base-model gating; the family match alone gates eligibility, mirroring Krea Raw→Turbo).
-/// Native MLX only (off-Mac/candle is epic 7982), so Apple-Silicon-gated.
+/// The same target runs through MLX on Apple Silicon and Candle on CUDA hosts.
 fn sd3_large_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "sd3_5_large_lora".to_owned(),
@@ -1854,8 +1854,8 @@ fn sd3_large_lora_target() -> TrainingTarget {
                 "qualityPreset": "balanced",
                 "outputScope": "project",
                 "requestedGpu": "auto",
-                // Native MLX trainer (surfaced for the UI; Apple-Silicon only).
-                "backend": "mlx"
+                // Native trainer; worker routing selects MLX or Candle.
+                "backend": "native"
             })),
             extra: ExtraFields::new(),
         },
@@ -1870,31 +1870,27 @@ fn sd3_large_lora_target() -> TrainingTarget {
             // (the `mlx-gen-sd3` trainer builds both; `supports_lokr: true`).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"],
-            // Native MLX trainer, mirroring the SD3 Medium target.
-            "requiresBackend": "mlx",
-            "appleSiliconOnly": true
+            "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
             "label": "SD3.5 Large LoRA",
-            "description": "Train an image LoRA for Stable Diffusion 3.5 Large (triple text encoder CLIP-L + CLIP-G + T5-XXL, 16-channel VAE). Trains on the SD3.5 Large MMDiT and applies to SD3.5 Large and Large Turbo. Apple Silicon only (native MLX).",
+            "description": "Train an image LoRA for Stable Diffusion 3.5 Large (triple text encoder CLIP-L + CLIP-G + T5-XXL, 16-channel VAE). Trains on the SD3.5 Large MMDiT and applies to SD3.5 Large and Large Turbo. Runs on CUDA and Apple Silicon.",
             "recommendedFor": ["character", "style"],
-            "appleSiliconOnly": true,
-            "backend": "mlx",
+            "backend": "native",
             "datasetModality": "image"
         })),
         extra: ExtraFields::new(),
     }
 }
 
-/// Native MLX LoRA/LoKr training for Stable Diffusion 3.5 **Medium** (MMDiT-X) (epic 7841, T4
+/// Native Rust LoRA/LoKr training for Stable Diffusion 3.5 **Medium** (MMDiT-X) (epic 7841, T4
 /// sc-7885 base; T3 sc-7884 wiring).
 ///
 /// Body-identical to the Large target (same LoRA/LoKr capability surface, same logit-normal recipe,
 /// same joint-block attention targets) — it differs only in the base model / trainer id. LoRAs train
 /// on the `stabilityai/stable-diffusion-3.5-medium` MMDiT-X (dual-attention; the `sd3_lora` kernel →
 /// `mlx-gen-sd3` `register_trainer` id `sd3_5_medium`) and apply back at `sd3_5_medium` inference via
-/// the `sd3` LoRA family (no base-model gating). Apple-Silicon-gated (native MLX only).
+/// the `sd3` LoRA family (no base-model gating), through MLX or Candle.
 fn sd3_medium_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "sd3_5_medium_lora".to_owned(),
@@ -1944,7 +1940,7 @@ fn sd3_medium_lora_target() -> TrainingTarget {
                 "qualityPreset": "balanced",
                 "outputScope": "project",
                 "requestedGpu": "auto",
-                "backend": "mlx"
+                "backend": "native"
             })),
             extra: ExtraFields::new(),
         },
@@ -1958,16 +1954,13 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"],
-            "requiresBackend": "mlx",
-            "appleSiliconOnly": true
+            "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
             "label": "SD3.5 Medium LoRA",
-            "description": "Train an image LoRA for Stable Diffusion 3.5 Medium (MMDiT-X dual-attention; triple text encoder, 16-channel VAE). Trains on the SD3.5 Medium MMDiT-X and applies to SD3.5 Medium. Apple Silicon only (native MLX).",
+            "description": "Train an image LoRA for Stable Diffusion 3.5 Medium (MMDiT-X dual-attention; triple text encoder, 16-channel VAE). Trains on the SD3.5 Medium MMDiT-X and applies to SD3.5 Medium. Runs on CUDA and Apple Silicon.",
             "recommendedFor": ["character", "style"],
-            "appleSiliconOnly": true,
-            "backend": "mlx",
+            "backend": "native",
             "datasetModality": "image"
         })),
         extra: ExtraFields::new(),
@@ -2055,11 +2048,10 @@ fn ltx_video_lora_target() -> TrainingTarget {
 /// encodes to a single Wan-VAE latent frame, `numFrames: 1`) with a flow-matching
 /// velocity loop on the `WanTransformer3DModel` attention projections
 /// (`to_q`/`to_k`/`to_v`/`to_out.0`). The trainer is per-platform: off-Mac the
-/// `wan_lora` kernel has a native in-process MLX trainer on macOS
-/// (`mlx-gen-wan`'s `wan2_2_ti2v_5b`), which
+/// `wan_lora` kernel has native MLX and Candle trainers (both registered as
+/// `wan2_2_ti2v_5b`), and
 /// loads the installed `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey's dense bf16 tier —
-/// is selected instead of the retired backend (sc-13878). Off-Mac, this dense-5B shape has no
-/// candle trainer and remains queued. The output registers as a `wan-video` family LoRA the
+/// is selected instead of the retired backend (sc-13878). The output registers as a `wan-video` family LoRA the
 /// Wan video adapter loads at generation. This dense 5B target is the base the 14B
 /// (A14B MoE) trainer extends for the two-expert (high/low-noise) case.
 fn wan_lora_target() -> TrainingTarget {
@@ -2072,8 +2064,8 @@ fn wan_lora_target() -> TrainingTarget {
         base_model: "wan_2_2".to_owned(),
         // sc-13860: intentionally the `Wan-AI/Wan2.2-TI2V-5B-Diffusers` diffusers snapshot, NOT the
         // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey. This diffusers repository remains the canonical
-        // off-Mac install artifact, although the dense-5B training shape currently has no candle
-        // trainer and remains queued. This is NOT the epic-8506 mis-naming class the sibling targets
+        // off-Mac install artifact consumed by the Candle trainer. This is NOT the epic-8506
+        // mis-naming class the sibling targets
         // hit — the repo is correct. On macOS the job runs the native MLX trainer against the installed
         // `SceneWorks/wan2.2-ti2v-5b-mlx` turnkey instead, which the platform-aware training gate +
         // base-path resolver select (apps/rust-api/src/training.rs `macos_wan_*`, sc-13878) — so
@@ -2131,10 +2123,9 @@ fn wan_lora_target() -> TrainingTarget {
             "resolutions": [512, 768],
             "batchSize": [1, 2],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Wan2.2 TI2V-5B offers LoRA and LoKr plans. The MLX trainer has no Kronecker
-            // merge yet, so a LoKr Wan job is refused by that lane and remains queued for
-            // a compatible native trainer (sc-2211; native MLX work was tracked in sc-2213).
-            "networkTypes": ["lora", "lokr"],
+            // The generated matrix advertises TI2V-5B LoRA. Unsupported adapter kinds are rejected
+            // by both single-DiT providers rather than filtered at install.
+            "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
         })),
@@ -2156,9 +2147,9 @@ fn wan_lora_target() -> TrainingTarget {
 /// saves two `wan-video` family files. Same flow-matching recipe as the dense 5B
 /// `wan_lora` target (still-image dataset). On macOS it uses the native MLX trainer against the
 /// installed `SceneWorks/wan2.2-{t2v,i2v}-a14b-mlx` turnkey's dense tier (sc-13878). Off-Mac,
-/// candle serves the T2V A14B trainer; the unsupported I2V shape remains queued.
-/// The A14B bf16 base is GPU-only (~56GB of transformers); the Q8_0 GGUF base path
-/// fits memory-bound hosts. `base_model` records the specific A14B variant so the
+/// Candle serves both A14B bases; T2V retains its LoRA+LoKr surface while I2V is LoRA-only.
+/// Training requires the physical dense bf16 A14B transformers; the trainer rejects packed/GGUF
+/// weights rather than pretending they are trainable. `base_model` records the specific variant so the
 /// inference loader gates the LoRA to the matching model (not the 5B).
 fn wan_moe_lora_target(
     id: &str,
@@ -2166,6 +2157,7 @@ fn wan_moe_lora_target(
     base_model: &str,
     base_model_repo: &str,
     description: &str,
+    supports_lokr: bool,
 ) -> TrainingTarget {
     TrainingTarget {
         id: id.to_owned(),
@@ -2215,9 +2207,11 @@ fn wan_moe_lora_target(
             "resolutions": [512, 768],
             "batchSize": [1, 2],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Wan video training currently stays `lora`-only; epic 2193 v1 validates LoKr on the
-            // image backends (Z-Image/SDXL) first.
-            "networkTypes": ["lora"],
+            "networkTypes": if supports_lokr {
+                json!(["lora", "lokr"])
+            } else {
+                json!(["lora"])
+            },
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
         })),
@@ -2237,7 +2231,8 @@ fn wan_t2v_14b_lora_target() -> TrainingTarget {
         "Wan2.2 14B T2V Video LoRA",
         "wan_2_2_t2v_14b",
         "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
+        "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
+        true,
     )
 }
 
@@ -2247,7 +2242,8 @@ fn wan_i2v_14b_lora_target() -> TrainingTarget {
         "Wan2.2 14B I2V Video LoRA",
         "wan_2_2_i2v_14b",
         "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
-        "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
+        "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
+        false,
     )
 }
 
@@ -2654,7 +2650,7 @@ impl std::error::Error for TrainingPlanError {}
 pub fn build_training_plan(
     input: BuildTrainingPlan<'_>,
 ) -> Result<TrainingPlan, TrainingPlanError> {
-    validate_training_config(&input.config)?;
+    validate_training_config_for_target(input.target, &input.config)?;
     if input.dataset.items.is_empty() {
         return Err(TrainingPlanError::EmptyDataset);
     }
@@ -2809,6 +2805,82 @@ fn resolve_item_path(
     Ok(path.display().to_string())
 }
 
+fn validate_training_config_for_target(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    validate_training_config(config)?;
+    let network_type = match config.advanced.get("networkType") {
+        None => "lora",
+        Some(Value::String(value)) if value.trim().is_empty() => "lora",
+        Some(Value::String(value)) => value.trim(),
+        Some(_) => {
+            return Err(TrainingPlanError::InvalidConfig(
+                "networkType must be a string.".to_owned(),
+            ));
+        }
+    };
+    if let Some(supported) = target.limits.get("networkTypes").and_then(Value::as_array) {
+        let admitted = supported.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(network_type))
+        });
+        if !admitted {
+            let supported = supported
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(TrainingPlanError::InvalidConfig(format!(
+                "Training target '{}' does not support networkType '{network_type}'. Supported network types: {supported}.",
+                target.id
+            )));
+        }
+    }
+    if config_is_full_finetune(config) {
+        // Platform-effective API catalogs may publish stricter full-tune execution requirements.
+        // The core builtins retain MLX defaults; only the cloned Candle target carries this marker.
+        let requirements = target
+            .defaults
+            .advanced
+            .get("fullFinetuneConfig")
+            .and_then(Value::as_object);
+        if let Some(required_precision) = requirements
+            .and_then(|values| values.get("mixedPrecision"))
+            .and_then(Value::as_str)
+        {
+            let precision = config
+                .advanced
+                .get("mixedPrecision")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !precision.eq_ignore_ascii_case(required_precision) {
+                return Err(TrainingPlanError::InvalidConfig(format!(
+                    "{} full base fine-tuning requires mixedPrecision={required_precision}.",
+                    target.name
+                )));
+            }
+        }
+        if requirements
+            .and_then(|values| values.get("gradientCheckpointing"))
+            .and_then(Value::as_bool)
+            == Some(false)
+            && config
+                .advanced
+                .get("gradientCheckpointing")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            return Err(TrainingPlanError::InvalidConfig(format!(
+                "{} full base fine-tuning does not support gradient checkpointing.",
+                target.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
     let positive = |value: u32, field: &str| {
         if value == 0 {
@@ -2880,11 +2952,9 @@ fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanErro
 /// 10512, sc-10522). Trained on the undistilled `anima_base` (like Krea Raw→Turbo / SD3 Large→turbo);
 /// the family-arch-identical aesthetic/turbo variants apply the same adapter back via
 /// `apply_anima_adapters`. The native `mlx-gen-anima` trainer trains the 448 DiT targets **and** the
-/// 60 `llm_adapter` conditioner targets (508 total). MLX-only (no candle Anima trainer). NB the
-/// `mlx-gen-anima` trainer does not yet honor gradient checkpointing or preview sampling (dense-only,
-/// no in-training previews), so those advanced knobs default off here — that parity work (gradient
-/// checkpointing + OOM guard, in-training preview, mid-run resume, and the >1024 resolution ceiling)
-/// is tracked in sc-10576, not deferred in prose.
+/// 60 `llm_adapter` conditioner targets (508 total). Both native backends expose this surface. The
+/// cross-platform defaults keep activation checkpointing and in-training previews off because the
+/// Candle trainer does not implement either yet; the MLX trainer may still honor an explicit opt-in.
 fn anima_base_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "anima_base_lora".to_owned(),
@@ -2914,9 +2984,7 @@ fn anima_base_lora_target() -> TrainingTarget {
                 "mixedPrecision": "bf16",
                 "cacheLatents": true,
                 "cacheTextEmbeddings": true,
-                // Dense-only for now (the mlx-gen-anima trainer does not implement block
-                // checkpointing yet — tracked in sc-10576); keep it off so the UI does not advertise
-                // a no-op.
+                // The Candle path is dense-only; keep the shared default off.
                 "gradientCheckpointing": false,
                 "networkType": "lora",
                 // Flow-match noising: sigmoid timestep with a high-noise tilt, MSE on the velocity
@@ -2926,8 +2994,8 @@ fn anima_base_lora_target() -> TrainingTarget {
                 "lossType": "mse",
                 "weightDecay": 0.0001,
                 "lrScheduler": "constant",
-                // In-training preview sampling is not implemented in the mlx-gen-anima trainer yet
-                // (tracked in sc-10576), so sampling defaults off.
+                // In-training preview sampling is not implemented in the Candle trainer, so the
+                // cross-platform default stays off.
                 "sampleEvery": 0,
                 "sampleSteps": 10,
                 "sampleGuidanceScale": 4.5,

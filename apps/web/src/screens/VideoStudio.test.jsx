@@ -1083,7 +1083,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       .find((label) => label.textContent.trim().startsWith("Quantization"))
       ?.querySelector("select") ?? null;
 
-  it("shows ALL possible MLX tiers (disabling un-installed), stays q4-first (sc-12165)", async () => {
+  it("shows all possible MLX tiers and honors the shared generation-quality default", async () => {
     await render(
       baseContext({
         videoModels: [tieredVideoModel(["q4", "q8"])],
@@ -1105,7 +1105,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       [...tierPicker().options].map((option) => [option.value, option.disabled]),
     );
     expect(disabledByTier).toEqual({ q4: false, q8: false, bf16: true });
-    expect(tierPicker().value).toBe("q4");
+    expect(tierPicker().value).toBe("q8");
 
     // Even with a single installed tier the picker now shows (others disabled), and q4 still rides the payload.
     await unmountRoot(root, container);
@@ -1125,6 +1125,28 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(soloInstalled).toEqual({ q4: false, q8: true, bf16: true });
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("uses the native tier picker on Candle Wan and never emits Torch GGUF quantization", async () => {
+    const wan = {
+      ...tieredVideoModel(["q4", "q8"], {
+        variants: { "gguf-q4_k_m": { label: "Torch Q4" } },
+      }),
+      id: "wan_2_2",
+      name: "Wan2.2",
+      family: "wan-video",
+      adapter: "wan_video",
+    };
+    const context = baseContext({ videoModels: [wan], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeTruthy();
+    expect(quantizationPicker()).toBeNull();
+    setSelect(tierPicker(), "q4");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 4 });
+    expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
   it("keeps the candle-only NVFP4 tier out of the MLX video picker (sc-11042)", async () => {

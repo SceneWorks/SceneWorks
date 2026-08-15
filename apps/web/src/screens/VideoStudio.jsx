@@ -81,6 +81,9 @@ import {
   tierPickerOptions,
   tierQuantize,
 } from "../quantTier.js";
+import { suggestTier } from "../tierSuggestion.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
   finiteRecipeNumber,
   recipeLoraSelection,
@@ -98,13 +101,12 @@ import {
 } from "../samplerOptions.js";
 
 const ltxVideoModelId = "ltx_2_3";
+const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
+const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
-const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
-// Keep Video Studio's MLX lane q4-first (sc-10859). Unlike Image Studio, it deliberately does not
-// inherit the app-wide generation-quality setting: video activation peaks need a larger safety margin.
+const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
 const TIER_SCREEN = "video";
-const VIDEO_DEFAULT_TIER = "q4";
 
 // Video sub-modes that map onto a recipe workflow. extend_clip / replace_person
 // aren't recipe workflows, so "Save as Preset" is gated to these.
@@ -479,36 +481,43 @@ export function VideoStudio() {
   // `macGating` is the worker `mlx_required` master switch, so the menu reflects the
   // manifest's `mlx.limits` override on Mac/MLX and `candle.limits` on the candle build.
   const activeBackend = macGating ? "mlx" : "candle";
-  // MLX tier installs and the torch/GGUF quantization variants can coexist on one catalog model,
-  // but they target different worker lanes. Only derive an MLX tier while the MLX lane is active;
-  // the existing quantization picker owns the non-MLX lane. The explicit false gates keep the
-  // candle-only INT8-ConvRot and NVFP4 image tiers out of this MLX video control.
-  const mlxTierLane = activeBackend === "mlx";
+  // The same hosted q4/q8/bf16 matrices drive both native video backends. Candle Wan tiers must use
+  // this explicit picker too: sending the unrelated Torch GGUF `advanced.quantization` field to the
+  // Candle worker would otherwise be ignored and silently replaced by its default tier.
+  const nativeTierLane =
+    activeBackend === "mlx" ||
+    (activeBackend === "candle" && candleTierModelIds.has(selectedModel?.id));
   const tierOptions = useMemo(
-    () => ({ convRotEligible: false, nvfp4Eligible: false, defaultQuality: VIDEO_DEFAULT_TIER }),
+    () => ({ convRotEligible: false, nvfp4Eligible: false }),
     [],
   );
   const availableTiers = useMemo(
-    () => (mlxTierLane ? installedTiers(selectedModel, tierOptions) : []),
-    [mlxTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? installedTiers(selectedModel, tierOptions) : []),
+    [nativeTierLane, selectedModel, tierOptions],
   );
   // The full display set (all possible tiers, installed or not) + the picker option list with
   // un-downloaded tiers disabled — same show-all/disable-unavailable rule as Image Studio. `availableTiers`
   // stays the SELECTABLE/send set; the picker shows whenever there is more than one POSSIBLE tier and at
   // least one is installed to select.
   const possibleTiers = useMemo(
-    () => (mlxTierLane ? allPossibleTiers(selectedModel, tierOptions) : []),
-    [mlxTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? allPossibleTiers(selectedModel, tierOptions) : []),
+    [nativeTierLane, selectedModel, tierOptions],
   );
   const tierPickerItems = useMemo(
-    () => (mlxTierLane ? tierPickerOptions(selectedModel, tierOptions) : []),
-    [mlxTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? tierPickerOptions(selectedModel, tierOptions) : []),
+    [nativeTierLane, selectedModel, tierOptions],
   );
   const showTierPicker = useMemo(
-    () => mlxTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
-    [mlxTierLane, possibleTiers, availableTiers],
+    () => nativeTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
+    [nativeTierLane, possibleTiers, availableTiers],
   );
-  // Seed from the per-(video, model) sticky, then the video-specific q4 base, clamped to installed.
+  const hostMemory = useHostMemory();
+  const nativeMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
+  const autoTier = useMemo(
+    () => suggestTier(selectedModel, nativeMemoryGb, { backend: activeBackend }),
+    [selectedModel, nativeMemoryGb, activeBackend],
+  );
+  // Seed from the per-(video, model) sticky, then the global quality/Auto policy, clamped to installed.
   // A model transition always re-seeds even when both models happen to expose the same tier list.
   const {
     quantTier,
@@ -522,11 +531,13 @@ export function VideoStudio() {
     selectedModel,
     availableTiers,
     tierOptions,
+    autoTier,
+    useGenerationQuality: true,
     reseedOnModelChange: true,
   });
-  const showTorchQuantization = !mlxTierLane && supportsQuantization;
-  const selectedMlxQuantize =
-    mlxTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
+  const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
+  const selectedTierQuantize =
+    nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
   const tierHasMemoryRisk = showTierPicker && ["q8", "bf16"].includes(quantTier);
   const samplerOptions = useMemo(
     () => samplerOptionsFromModel(selectedModel, activeBackend),
@@ -565,8 +576,8 @@ export function VideoStudio() {
       : schedulerOptions[0];
     setScheduler(preferred);
   }, [schedulerOptions, scheduler, selectedModel]);
-  const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
-  const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
+  const requiresLtxIcLora = ltxIcLoraModelIds.has(selectedModel?.id) && ltxIcLoraRequiredModes.has(mode);
+  const hasLtxIcLora = selectedLoras.some((lora) => loraLooksLikeIcLora(lora));
 
   // Sync the source from a genuine USER asset-selection TRANSITION after mount — but NEVER from
   // App's non-user auto-default (sc-11964). App derives `selectedAsset = assets.find(id ===
@@ -1320,7 +1331,7 @@ export function VideoStudio() {
             ? { textEncoderModel: selectedTextEncoderModel }
             : {}),
           ...(showTorchQuantization && quantization !== "auto" ? { quantization } : {}),
-          ...(selectedMlxQuantize !== null ? { mlxQuantize: selectedMlxQuantize } : {}),
+          ...(selectedTierQuantize !== null ? { mlxQuantize: selectedTierQuantize } : {}),
           // Configurable sampler / scheduler (epic 1753). Sealed adapters
           // (LTX native, MLX) silently fall back to default; only the Wan
           // diffusers (torch) path actually applies these.

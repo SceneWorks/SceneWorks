@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. dad3f3df is the permanent epic-18803 inference main commit; its tree is byte-identical to reviewed feature head 165e9a31. The exact scanner found 625 provenance candidates and 94 production-Rust crate prefixes. Against 3c2ec9dd, only crates/media/mlx-gen/mlx-gen-ltx/src/model.rs changed to add the explicitly authorized calibration fault hook: one existing candidate source blob changed while its provenance marker hash and existing mlx-gen-ltx architecture disposition stayed unchanged. No candidate path, marker set, crate prefix, LICENSE/NOTICE file, production include_str!/include_bytes! site, or shipped third-party artifact changed.",
-  "inferenceRevision": "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
-  "auditDigest": "0cceda05460c6fe77eb694bfa371d68f9ea0c3c28d3b4b3953a091cd90a74c66",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Permanent epic merge 0e4adc6f publishes the cross-backend video memory contracts and corrects MMAudio's canonical DFN5B repository identity. The exact scanner finds 625 provenance candidates and 94 production-Rust crate prefixes. One newly marker-bearing Candle LTX file and two changed marker hashes remain covered by their existing architecture areas; 44 other classified blobs changed while their normalized markers and source-area classifications remained stable. MMAudio's NOTICE corrects the DFN5B source from the 384 alias to the canonical 378 repository under the same Apple license. No LICENSE file, production include_str!/include_bytes! site, crate prefix, or crate-prefix classification changed.",
+  "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
+  "auditDigest": "4b8cae68991a6a3dd17d38934077f9af76881b8b27ea6020d21f2749f0b44f30",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
+    "revision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 625,
-    "populationSha256": "844a5b1c5bff9c0746b0efa09db79dc7ec0bc09c9fa8ffd9db9db64039b7fae3"
+    "populationSha256": "05feed7e5bd9ccd5eb5e93889f88ead2b76537ff2cf4a6710b1717aa0f1c371b"
   },
   "portedSourceAreas": [
     {
@@ -818,7 +818,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
+    "revision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"

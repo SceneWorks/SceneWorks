@@ -43,10 +43,10 @@ use crate::architecture_tests::code_without_comments_or_literals;
 /// The bespoke candle request literals whose upstream struct carries a `preview` field at the pinned
 /// inference revision, and the worker file that builds each.
 ///
-/// All fourteen request types are present at inference `35251a88`. sc-16950/sc-16952 introduced the
-/// first three; sc-16954…sc-16957 added the other eleven as their families wired up, and sc-17393
+/// Thirteen request types remain bespoke at this pin. sc-16950/sc-16952 introduced the
+/// first three; sc-16954…sc-16957 added the others as their families wired up, and sc-17393
 /// listed them here at the closeout pin bump. Until then only the original three were named, so the
-/// *positive* guard below — "this lane binds a live sink" — covered three of fourteen lanes. The
+/// *positive* guard below — "this lane binds a live sink" — initially covered only three lanes. The
 /// generic sweeps still saw the rest, but a sweep can only prove the absence of a bad spelling; it
 /// cannot prove the field is there at all. Reverting `Flux2EditRequest.preview` to an inert default
 /// was caught, while deleting the line outright was not.
@@ -64,7 +64,6 @@ const WIRED_LANES: &[(&str, &str)] = &[
     ("IpAdapterFluxRequest", "flux_ipadapter.rs"),
     ("PulidFluxRequest", "pulid_candle.rs"),
     ("ZImageControlRequest", "zimage_control.rs"),
-    ("ZImageEditRequest", "zimage_identity_candle.rs"),
 ];
 
 /// Files that receive the job's live sink and must forward it into a bespoke provider. Each must
@@ -77,8 +76,8 @@ const WIRED_LANES: &[(&str, &str)] = &[
 /// * a [`crate::image_jobs::candle_strict_control::CandleStrictControl::generate_one`] **trait
 ///   parameter** (`preview: &gen_core::PreviewSink`), which is how every strict-control lane gets it.
 ///
-/// `zimage_identity_candle.rs` was absent from this list until sc-17393 even though it threads a
-/// sink, so its closure could have been reverted to `_preview` with every guard still green.
+/// Z-Image edit/identity left this list in sc-18477 when both routes joined the generic registered-
+/// generator stream; `GenerationRequest.preview` is guarded by the registry-wide path instead.
 const SINK_CONSUMERS: &[&str] = &[
     "candle_strict_control.rs",
     "qwen_edit_candle.rs",
@@ -94,7 +93,6 @@ const SINK_CONSUMERS: &[&str] = &[
     "flux_ipadapter.rs",
     "pulid_candle.rs",
     "zimage_control.rs",
-    "zimage_identity_candle.rs",
 ];
 
 /// `*Request` types under `src/image_jobs/` that are **not** bespoke by-name provider requests, and

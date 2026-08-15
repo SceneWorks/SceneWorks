@@ -1162,10 +1162,9 @@ export function ImageEditor() {
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
   // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.
   const macUpscaleBlock = macFeatureBlock(macCapabilities, "imageUpscale");
-  // Smart-select (sc-3751) runs native-MLX SAM3 — Mac-only, no torch/candle path. Gate it on the
-  // platform-intrinsic `imageSegment` capability (true only on a Mac backend, false off-Mac and
-  // pre-load), like the seedvr2 engine — independent of the Mac gating-rollout switch. When false,
-  // the mask tool shows only the hand brush (graceful degradation).
+  // Smart-select runs native SAM3 on MLX (Mac) and Candle (Windows/Linux). Gate it on the
+  // platform-intrinsic `imageSegment` capability, independent of the Mac gating-rollout switch.
+  // When false or still loading, the mask tool shows only the hand brush (graceful degradation).
   const smartSelectSupported = macCapabilities?.features?.imageSegment?.supported === true;
 
   // The working document (sc-6117): an ordered raster layer stack composited

@@ -1,4 +1,7 @@
 {
+  "retiredModes": {
+    "style_variations": "Retired by sc-18481 because Image Studio has no distinct style mode; its historical captures remain provenance only and are excluded from active matrix coordinates."
+  },
   "overlayCoverage": {
     "decision": "mlx-krea-pose-control-measurable",
     "story": "sc-16099",

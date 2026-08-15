@@ -2,11 +2,11 @@
 
 ## Best For
 
-The 32B Black Forest Labs FLUX.2 [dev] checkpoint — the high-fidelity flagship of the FLUX.2 family, ported natively to MLX (Apple Silicon only). A larger, sharper sibling of FLUX.2 [klein]: a Mistral-3 text encoder and a 48-layer flow transformer give it stronger prompt adherence, finer detail, and better text rendering than the 9B klein, at the cost of speed and memory. Guidance-distilled text-to-image; reference editing and LoRAs land separately.
+The 32B Black Forest Labs FLUX.2 [dev] checkpoint — the high-fidelity flagship of the FLUX.2 family, running through native MLX on Apple Silicon and Candle/CUDA on Windows/Linux. A larger, sharper sibling of FLUX.2 [klein]: a Mistral-3 text encoder and a 48-layer flow transformer give it stronger prompt adherence, finer detail, and better text rendering than the 9B klein, at the cost of speed and memory. Guidance-distilled text-to-image and single/multi-reference editing are live; LoRAs land separately.
 
-> **License:** FLUX [dev] Non-Commercial License v2.0 — gated Hugging Face download. Accept the license at the model card and add a Hugging Face token under Settings → Service credentials before downloading. The model is for non-commercial use; the images you generate are yours to use commercially.
+> **License:** FLUX [dev] Non-Commercial License v2.0. SceneWorks provides a public, ungated re-host, so download does not require a Hugging Face token or separate license acceptance. The model is for non-commercial use; the images you generate are yours to use commercially.
 
-> **Hardware:** 128 GB Mac only. The dense weights are too large to quantize in memory, so the model is pre-quantized to Q4 on disk at install (a one-time conversion step after download). Generation peaks ~74 GB at 1024². macOS only.
+> **Hardware:** The MLX configuration needs a 128 GB Mac and peaks around 74 GB at 1024². Off-Mac, the native Candle/CUDA lane loads the selected GPU tier; exact VRAM depends on tier and reference count.
 
 ## Prompt Shape
 

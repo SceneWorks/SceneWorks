@@ -213,6 +213,31 @@ function cargoUpdate(sha) {
   execFileSync("cargo", ["update", ...spec], { cwd: repoRoot, stdio: "inherit" });
 }
 
+function updateLockIfNeededAndVerifySkew(
+  sha,
+  manifestsAlreadyPinned,
+  {
+    lockText = readFileSync(LOCKFILE, "utf8"),
+    update = cargoUpdate,
+    verify = verifyNoSkew,
+  } = {},
+) {
+  // A transition always needs Cargo to resolve the rewritten manifests. On a re-run, only resolve
+  // again when an inference source is stale: Cargo may otherwise choose a different, still-valid
+  // solution for unrelated transitive dependencies and make an already-complete bump non-idempotent.
+  const needsUpdate = !manifestsAlreadyPinned || lockHasStaleInferenceRevision(sha, lockText);
+  if (needsUpdate) update(sha);
+  else {
+    console.log(
+      "bump-inference: Cargo.lock already carries the requested inference revision; skipping update",
+    );
+  }
+
+  // Keep this unconditional. Revision-string agreement cannot detect gen-core or pmetal-mlx-rs skew.
+  verify();
+  return needsUpdate;
+}
+
 function distinctResolutions(crate) {
   // One `cargo tree` over both platform bundles (--target all), so macOS + CUDA resolutions are
   // visible even off-macOS -- the same data source check-gen-core-skew.sh uses.
@@ -275,9 +300,10 @@ function regenerateMemoryMatrix() {
 // to be regenerated here as the second step of the matrix cascade. The memory matrix now has no
 // generated consumer, so the regen above is the whole of that cascade.
 
-// `config/engine-capabilities/capabilities.<backend>.json` is keyed to the pin exactly like the
+// Every checked-in file under `config/engine-capabilities/` is keyed to the pin exactly like the
 // licence audit above: each file stamps `generatedFrom.inferenceRevision`, and it is a dump of
-// `Capabilities.supports_preview` read off the LINKED provider registry at that revision (sc-16965,
+// the preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability
+// surfaces read off the LINKED registries at that revision (sc-16965,
 // epic 16948). A bump can move any descriptor's flag — every remaining family story in that epic
 // flips more of them — so the checked-in dumps go stale by construction.
 //
@@ -302,6 +328,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   // keeps the two sets apart on its own. They are validated for staleness together and for coverage
   // separately, because their declared backend sets are different consts.
   const audioDir = join(dir, "audio");
+  const runtimeDir = join(dir, "runtime");
   const factsFileNames = (from) => {
     try {
       return readdirSync(from).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
@@ -311,6 +338,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   };
   const names = factsFileNames(dir);
   const audioNames = factsFileNames(audioDir);
+  const runtimeNames = factsFileNames(runtimeDir);
   if (names.length === 0) {
     throw new Error(
       `no engine-capability facts under ${dir}. Dump them on a lane that links engines: ` +
@@ -359,6 +387,56 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
     parseSceneworksBackends(factsDeclarationSource),
     dumpedBackendsIn(dir, names, "SCENEWORKS_BACKENDS", "media"),
   );
+  const runtimeBackends = runtimeNames.map((name) => {
+    const facts = JSON.parse(readFileSync(join(runtimeDir, name), "utf8"));
+    const backend = facts?.snapshot?.backend;
+    if (facts?.schemaVersion !== 2 || typeof backend !== "string" || backend.length === 0) {
+      throw new Error(
+        `runtime/${name} is not a schema-2 rich runtime descriptor dump; re-dump it on the ` +
+          "matching platform rather than projecting or hand-editing descriptor facts.",
+      );
+    }
+    const generators = facts?.snapshot?.generator_capabilities;
+    const trainers = facts?.snapshot?.trainer_capabilities;
+    if (
+      !Array.isArray(generators) ||
+      generators.length === 0 ||
+      !Array.isArray(trainers) ||
+      trainers.length === 0 ||
+      !Array.isArray(facts?.workerCapabilities) ||
+      facts.workerCapabilities.length === 0 ||
+      !Array.isArray(facts?.videoModelMappings) ||
+      facts.videoModelMappings.length === 0 ||
+      facts.videoModelMappings.some(
+        (mapping) =>
+          typeof mapping?.modelId !== "string" ||
+          typeof mapping?.mode !== "string" ||
+          !Array.isArray(mapping?.engineIds) ||
+          mapping.engineIds.length === 0,
+      ) ||
+      generators.some(
+        (descriptor) =>
+          !Array.isArray(descriptor?.conditioning) ||
+          !Array.isArray(descriptor?.supported_quants) ||
+          typeof descriptor?.supports_lora !== "boolean" ||
+          typeof descriptor?.supports_lokr !== "boolean" ||
+          typeof descriptor?.supports_prompt_enhancement !== "boolean",
+      )
+    ) {
+      throw new Error(
+        `runtime/${name} omits video mappings, conditioning, adapter, quant, prompt-enhancement, trainer, or worker capability truth; ` +
+          "re-dump the full runtime snapshot on the matching platform.",
+      );
+    }
+    return backend;
+  });
+  if (runtimeNames.length === 0) {
+    throw new Error(
+      "rich runtime descriptor facts are missing. Re-run dump-engine-capabilities on the MLX and " +
+        "Candle matching-platform lanes; the runtime/ files cannot be projected or hand-authored.",
+    );
+  }
+  assertBackendCoverage(parseSceneworksBackends(factsDeclarationSource), runtimeBackends);
   // sc-17593. The audio registry is dumped separately and its coverage must be asserted separately:
   // `candle` in SCENEWORKS_BACKENDS is satisfied by the media dump alone, so an undumped audio
   // registry cleared the check above every time — which is how it stayed invisible.
@@ -372,6 +450,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   for (const [from, fileNames, label] of [
     [dir, names, ""],
     [audioDir, audioNames, "audio/"],
+    [runtimeDir, runtimeNames, "runtime/"],
   ]) {
     for (const name of fileNames) {
       const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
@@ -398,7 +477,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   if (root === repoRoot) {
     console.log(
       `OK: ${names.length} engine-capability facts file(s) + ${audioNames.length} audio file(s) ` +
-        `dumped at ${sha}`,
+        `+ ${runtimeNames.length} rich runtime file(s) dumped at ${sha}`,
     );
   }
 }
@@ -564,6 +643,28 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
     ),
   );
+  let updateCalls = 0;
+  let verifyCalls = 0;
+  check(
+    "an already-current lock skips cargo update but still verifies skew",
+    !updateLockIfNeededAndVerifySkew(SHA, true, {
+      lockText: duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
+      update: () => updateCalls++,
+      verify: () => verifyCalls++,
+    }) &&
+      updateCalls === 0 &&
+      verifyCalls === 1,
+  );
+  check(
+    "a pin transition updates the lock and still verifies skew",
+    updateLockIfNeededAndVerifySkew(SHA, false, {
+      lockText: duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
+      update: () => updateCalls++,
+      verify: () => verifyCalls++,
+    }) &&
+      updateCalls === 1 &&
+      verifyCalls === 2,
+  );
   let stampThrew = false;
   try {
     repinSemanticProvenance(`const OTHER: &str = "x";`, SHA);
@@ -591,7 +692,39 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
       engines: [{ id: "x", modality: "image", supportsPreview: false }],
     });
-  const fixture = ({ audio = true, revision = SHA, swapped = false } = {}) => {
+  const runtimeFactsFile = (backend, revision, narrow = false) =>
+    JSON.stringify({
+      schemaVersion: 2,
+      generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
+      modelMappings: { x: "x" },
+      videoModelMappings: [{ modelId: "video-x", mode: "text_to_video", engineIds: ["x"] }],
+      trainerMappings: { x: "x" },
+      workerCapabilities: ["gpu", "image_generate", "lora_train_execute"],
+      snapshot: {
+        backend,
+        generator_capabilities: narrow
+          ? [{ id: "x" }]
+          : [
+              {
+                id: "x",
+                conditioning: ["reference"],
+                supported_quants: ["q4"],
+                supports_lora: true,
+                supports_lokr: false,
+                supports_prompt_enhancement: true,
+              },
+            ],
+        trainer_capabilities: [{ id: "x", supports_lora: true }],
+      },
+    });
+  const fixture = ({
+    audio = true,
+    runtime = true,
+    revision = SHA,
+    runtimeRevision = SHA,
+    narrowRuntime = false,
+    swapped = false,
+  } = {}) => {
     const root = mkdtempSync(join(tmpdir(), "bump-inference-facts-"));
     mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
     writeFileSync(
@@ -614,6 +747,15 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
         join(dir, "audio/capabilities.candle.json"),
         factsFile("candle", revision, swapped ? {} : { registry: "audio" }),
       );
+    }
+    if (runtime) {
+      mkdirSync(join(dir, "runtime"), { recursive: true });
+      for (const backend of ["candle", "mlx"]) {
+        writeFileSync(
+          join(dir, `runtime/capabilities.${backend}.json`),
+          runtimeFactsFile(backend, runtimeRevision, narrowRuntime),
+        );
+      }
     }
     return root;
   };
@@ -647,6 +789,63 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   check(
     "a stale audio dump is reported, named by its subdirectory path",
     !!staleAudio && /audio\/capabilities\.candle\.json/.test(staleAudio),
+  );
+  const missingRuntime = verifyFacts({ runtime: false });
+  check(
+    "a missing rich runtime descriptor dump fails coverage",
+    !!missingRuntime && /rich runtime descriptor facts are missing/.test(missingRuntime),
+  );
+  const staleRuntime = verifyFacts({ runtimeRevision: "b".repeat(40) });
+  check(
+    "a stale rich runtime descriptor dump is reported by exact path",
+    !!staleRuntime && /runtime\/capabilities\.candle\.json/.test(staleRuntime),
+  );
+  const narrowRuntime = verifyFacts({ narrowRuntime: true });
+  check(
+    "a narrow runtime projection without parity axes is refused",
+    !!narrowRuntime &&
+      /omits video mappings, conditioning, adapter, quant, prompt-enhancement, trainer, or worker/.test(
+        narrowRuntime,
+      ),
+  );
+  const missingPromptEnhancement = (() => {
+    const root = fixture();
+    try {
+      const path = join(root, "config/engine-capabilities/runtime/capabilities.mlx.json");
+      const facts = JSON.parse(readFileSync(path, "utf8"));
+      delete facts.snapshot.generator_capabilities[0].supports_prompt_enhancement;
+      writeFileSync(path, JSON.stringify(facts));
+      verifyEngineCapabilityFacts(SHA, root);
+      return null;
+    } catch (error) {
+      return error?.message ?? String(error);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  check(
+    "a runtime snapshot missing prompt-enhancement support is refused",
+    !!missingPromptEnhancement &&
+      /omits video mappings, conditioning, adapter, quant/.test(missingPromptEnhancement),
+  );
+  const missingVideoMappings = (() => {
+    const root = fixture();
+    try {
+      const path = join(root, "config/engine-capabilities/runtime/capabilities.mlx.json");
+      const facts = JSON.parse(readFileSync(path, "utf8"));
+      facts.videoModelMappings = [];
+      writeFileSync(path, JSON.stringify(facts));
+      verifyEngineCapabilityFacts(SHA, root);
+      return null;
+    } catch (error) {
+      return error?.message ?? String(error);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  check(
+    "a runtime snapshot missing production video mappings is refused",
+    !!missingVideoMappings && /omits video mappings/.test(missingVideoMappings),
   );
   // Both dumps carry `backend: "candle"`, so swapping the two directories is invisible to a check
   // that reads `backend` alone — it would count an audio file as media coverage and vice versa, and
@@ -801,11 +1000,10 @@ function main() {
   // early-return on the manifests alone, so a tree whose manifests were correct but whose
   // `Cargo.lock` still carried the previous revision could never self-heal -- re-running the script
   // just said "already pinned" and did nothing. That is precisely the state a partially-applied bump
-  // leaves behind. Fall through to `cargoUpdate()` + `verifyNoSkew()` instead: both are cheap, and
-  // running them unconditionally makes the script idempotent AND verifying rather than idempotent
-  // and blind. `lockHasStaleInferenceRevision` narrows the report to the case that actually needs
-  // repair; it deliberately does NOT gate the skew check, which catches divergences (gen-core,
-  // pmetal-mlx-rs) that no revision-string comparison can see.
+  // leaves behind. Fall through to the lock/skew step instead. It resolves Cargo.lock when the
+  // manifests changed or an inference source is stale, and always runs the independent skew guards.
+  // Skipping Cargo's resolver for an already-current lock is important: a fresh resolution can pick
+  // a different, still-valid solution for unrelated transitive dependencies, violating idempotence.
   // Captured before anything is written: after the rewrite loop below the previous revision is gone
   // from the tree, and `verifyFlux2AuditWindow` needs it to tell a bump that MOVES the pin out of
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
@@ -850,8 +1048,7 @@ function main() {
     writeFileSync(m.path, m.bumped);
     console.log(`  wrote ${m.path}`);
   }
-  cargoUpdate(sha);
-  verifyNoSkew();
+  updateLockIfNeededAndVerifySkew(sha, manifestsAlreadyPinned);
   regenerateMemoryMatrix();
   verifyLicenseAudit();
   // Beside the licence re-scan for the same reason: both are pin-keyed artifacts that need an input

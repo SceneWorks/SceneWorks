@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildPlans,
   FINGERPRINT,
+  INFERENCE_REVISION,
   RUNG2_PARAMETERS,
   SEED,
   TIERS,
@@ -56,7 +57,7 @@ test("every campaign identity and derived geometry fact is exact and collision-f
   assert.equal(new Set(rows.map((row) => row.fixture)).size, rows.length, "fixtures are globally unique");
   for (const plan of Object.values(plans)) {
     assert.deepEqual(plan.campaignIdentity, {
-      inferenceRevision: "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
+      inferenceRevision: INFERENCE_REVISION,
       calibrationFingerprint: FINGERPRINT,
       seed: SEED,
     });
@@ -97,6 +98,12 @@ test("the flip bands, deep anchors, original six and held-out transfer cells are
 test("rung two is q4 q8 bf16 by f305 f449 with the exact 384 by 64 carrier", () => {
   const rows = plans["ltx-mlx-rung2-sweep.json"].providers;
   assert.equal(rows.length, 6);
+  assert.deepEqual(TIERS, ["q4", "q8", "bf16"]);
+  assert.deepEqual(
+    rows.map((row) => `${row.target.geometry.frames}:${row.target.tier}`),
+    ["305:q4", "305:q8", "305:bf16", "449:q4", "449:q8", "449:bf16"],
+    "the checked-in matrix preserves the reviewed serialized launch order",
+  );
   assert.deepEqual(new Set(rows.map((row) => row.target.tier)), new Set(TIERS));
   assert.deepEqual(new Set(rows.map((row) => row.target.geometry.frames)), new Set([305, 449]));
   for (const row of rows) {

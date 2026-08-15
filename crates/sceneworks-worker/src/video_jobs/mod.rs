@@ -41,7 +41,17 @@ use crate::media_jobs::{run_ffmpeg, run_ffmpeg_with_stdin_chunks, FfmpegContext}
 /// list explicit prevents a family from silently inheriting newly imported parent
 /// names or flattening another engine family's namespace.
 mod prelude {
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
+    pub(super) use super::load_reference_image;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle"),
+        test
+    ))]
     #[allow(unused_imports)]
     pub(super) use super::ltx_frame_count;
     #[cfg(any(
@@ -74,12 +84,15 @@ mod prelude {
     pub(super) use super::{classify_adapter, lora_path};
     #[cfg(target_os = "macos")]
     #[allow(unused_imports)]
-    pub(super) use super::{load_reference_image, resolve_mlx_dense_quant, AdapterKind, MoeExpert};
+    pub(super) use super::{resolve_mlx_dense_quant, AdapterKind, MoeExpert};
 }
 
 // Real MLX Wan2.2 generation (macOS, sc-3034). `runtime-macos` explicitly includes all three Wan
 // registrations in its validated media catalog.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use crate::image_jobs::load_reference_image;
 #[cfg(any(
     target_os = "macos",
@@ -129,13 +142,15 @@ use sceneworks_core::character_store::CharacterStore;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::video_request::{video_frame_count, wan_frame_count};
-// `ltx_frame_count` is the MLX LTX arm's own stride expression (the candle lane resolves LTX through
-// the shared `video_frame_count` ladder, so the candle LIB never names it) and is also asserted by
-// the lattice + asset-fact tests, which run on EVERY cfg — hence `any(macos, test)`.
+// `ltx_frame_count` is used by both native LTX conditioning lanes and by cross-platform tests.
 // `mochi_frame_count` is named only by tests that are themselves macOS/candle-gated.
 // Each is gated to exactly the configs that use it: an import left dead on a single cfg fails the
 // parity lane's `-D warnings` while a macOS check stays green (sc-10404's trap).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 use sceneworks_core::video_request::ltx_frame_count;
 #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 use sceneworks_core::video_request::mochi_frame_count;
@@ -231,9 +246,14 @@ enum VideoRoute {
 /// ladder for every other mode.
 #[cfg(target_os = "macos")]
 fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
+    if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
+        return VideoRoute::Stub;
+    }
     if request.mode == "replace_person" {
         if let Some(engine_id) = scail2_engine_id(&request.model) {
             VideoRoute::ReplacePersonScail2(engine_id)
+        } else if let Some(engine_id) = ltx_engine_id(&request.model) {
+            VideoRoute::Ltx(engine_id)
         } else if request.model == "wan_2_2_vace_fun_14b" {
             VideoRoute::ReplacePersonWanVaceFun
         } else {
@@ -288,8 +308,9 @@ fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRout
 /// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). The Eros terminal refusal precedes the
 /// backend flag so even a directly invoked legacy job cannot produce a stub; every supported arm is
 /// gated on `settings.backend_candle_enabled`, and returns [`CandleVideoRoute::Stub`] when disabled.
-/// Conditioning shapes never reach the candle lane — the router's `video_job_is_candle_eligible`
-/// confines it — so this is a narrow replace/animate/extend/txt2video ladder.
+/// The ladder preserves each accepted model-native conditioned provider: base LTX owns I2V, FLF,
+/// extend, bridge, and replacement;
+/// Wan TI2V-5B owns I2V/FLF; VACE-Fun owns its dedicated dual-expert replacement route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleVideoRoute {
@@ -299,6 +320,8 @@ enum CandleVideoRoute {
     UnsupportedEros,
     /// `replace_person` on a `scail2_*` model → candle SCAIL-2 replacement (sc-6837). Carries the id.
     ReplacePersonScail2(&'static str),
+    /// `replace_person` on `wan_2_2_vace_fun_14b` → the dedicated dual-expert Candle engine.
+    ReplacePersonWanVaceFun,
     /// `replace_person` on any other candle-VACE model → candle Wan-VACE replacement (sc-5494).
     ReplacePersonWanVace,
     /// `animate_character` on a `scail2_*` model → candle SCAIL-2 animation (sc-6837). Carries the id.
@@ -346,14 +369,27 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
     if !settings.backend_candle_enabled {
         return CandleVideoRoute::Stub;
     }
+    if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
+        return CandleVideoRoute::Stub;
+    }
     if request.mode == "replace_person" {
         match scail2_engine_id(&request.model) {
             Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
+            None if request.model == "wan_2_2_vace_fun_14b" => {
+                CandleVideoRoute::ReplacePersonWanVaceFun
+            }
+            None if candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled") => {
+                CandleVideoRoute::CandleVideo
+            }
             None => CandleVideoRoute::ReplacePersonWanVace,
         }
     } else if request.mode == "animate_character" && scail2_engine_id(&request.model).is_some() {
         let engine_id = scail2_engine_id(&request.model).expect("scail2 model");
         CandleVideoRoute::AnimateScail2(engine_id)
+    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
+        && candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled")
+    {
+        CandleVideoRoute::CandleVideo
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
         CandleVideoRoute::WanVaceExtendBridge
     } else if let Some(engine_id) = bernini_engine_id(&request.model) {
@@ -484,18 +520,16 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
     // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B routes to the NEW dual-expert VACE engine
-    // `wan2_2_vace_fun_14b`. macOS is served natively (mlx-gen sc-6604, merged + pinned) via
-    // `generate_wan_vace_fun` in the macOS block below. The native **candle** engine (sc-6605) is
-    // not done, so on Windows/Linux (candle) and the no-backend stub path a VACE-Fun job must fail
-    // honestly here — it must NEVER fall through to the Wan2.1 `generate_candle_wan_vace` /
-    // `generate_wan_vace` backend, which would silently render with the WRONG checkpoint (the exact
-    // failure the epic forbids).
-    #[cfg(not(target_os = "macos"))]
+    // `wan2_2_vace_fun_14b`. macOS is served natively via MLX and Windows/Linux via Candle. A worker
+    // binary built without either native backend must fail honestly here — it must NEVER fall
+    // through to the Wan2.1 `generate_wan_vace` backend, which would silently render with the wrong
+    // checkpoint (the exact failure the epic forbids).
+    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
     if request.model == "wan_2_2_vace_fun_14b" {
         return Err(WorkerError::InvalidPayload(
-            "wan_2_2_vace_fun_14b: the native Wan2.2 VACE-Fun engine is macOS-only for now (the \
-             candle backend is pending sc-6605). The job will not be routed to the Wan2.1 VACE \
-             backend. Choose another model on this platform."
+            "wan_2_2_vace_fun_14b requires the native MLX worker on macOS or a worker built with \
+             Candle backend support on Windows/Linux. This worker has neither backend, and the job \
+             will not be routed to the incompatible Wan2.1 VACE engine."
                 .to_owned(),
         ));
     }
@@ -531,7 +565,7 @@ pub(crate) async fn run_video_generate_job(
             // (a person-replace must never silently degrade to a different backend or the stub). Both
             // report the honest `replacementStatus` the asset sidecar folds in.
             VideoRoute::ReplacePersonScail2(engine_id) => {
-                let (decoded, status) = generate_scail2_replace(
+                let (decoded, status, lightning) = generate_scail2_replace(
                     api,
                     settings,
                     job,
@@ -542,10 +576,9 @@ pub(crate) async fn run_video_generate_job(
                 )
                 .await?;
                 (
-                    // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
                     decoded,
                     SCAIL2_ADAPTER,
-                    scail2_raw_settings(&request, false),
+                    scail2_raw_settings(&request, lightning),
                     Some(status),
                 )
             }
@@ -631,8 +664,8 @@ pub(crate) async fn run_video_generate_job(
                 wan_raw_settings(&request, engine_id),
                 None,
             ),
-            VideoRoute::Ltx(engine_id) => (
-                generate_ltx(
+            VideoRoute::Ltx(engine_id) => {
+                let (decoded, status) = generate_ltx(
                     api,
                     settings,
                     job,
@@ -641,11 +674,9 @@ pub(crate) async fn run_video_generate_job(
                     engine_id,
                     backend,
                 )
-                .await?,
-                LTX_ADAPTER,
-                ltx_raw_settings(&request),
-                None,
-            ),
+                .await?;
+                (decoded, LTX_ADAPTER, ltx_raw_settings(&request), status)
+            }
             VideoRoute::Svd(engine_id) => (
                 generate_svd(
                     api,
@@ -777,7 +808,7 @@ pub(crate) async fn run_video_generate_job(
             // keeps candle Wan-VACE. Routed by model id, not weight availability — `generate_candle_scail2_
             // replace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
             CandleVideoRoute::ReplacePersonScail2(engine_id) => {
-                let (decoded, status) = generate_candle_scail2_replace(
+                let (decoded, status, lightning) = generate_candle_scail2_replace(
                     api,
                     settings,
                     job,
@@ -790,8 +821,7 @@ pub(crate) async fn run_video_generate_job(
                 (
                     decoded,
                     CANDLE_SCAIL2_ADAPTER,
-                    // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
-                    scail2_raw_settings(&request, false),
+                    scail2_raw_settings(&request, lightning),
                     Some(status),
                 )
             }
@@ -808,6 +838,23 @@ pub(crate) async fn run_video_generate_job(
                     decoded,
                     CANDLE_WAN_VACE_ADAPTER,
                     wan_vace_raw_settings(&request, "wan_vace"),
+                    Some(status),
+                )
+            }
+            CandleVideoRoute::ReplacePersonWanVaceFun => {
+                let (decoded, status) = generate_candle_wan_vace_fun(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_WAN_VACE_FUN_ADAPTER,
+                    wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
                     Some(status),
                 )
             }
@@ -874,10 +921,10 @@ pub(crate) async fn run_video_generate_job(
                 )
             }
             CandleVideoRoute::CandleVideo => {
-                let (decoded, adapter, raw_settings) =
+                let (decoded, adapter, raw_settings, status) =
                     generate_candle_video(api, settings, job, &request, &project_path, backend)
                         .await?;
-                (decoded, adapter, raw_settings, None::<Value>)
+                (decoded, adapter, raw_settings, status)
             }
             CandleVideoRoute::WanComfyui => {
                 let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
@@ -1756,7 +1803,8 @@ use bernini::{
 use candle::{
     generate_candle_scail2, generate_candle_scail2_replace, generate_candle_video,
     generate_candle_wan_comfyui, generate_candle_wan_vace, generate_candle_wan_vace_extend_bridge,
-    is_candle_video_engine, wan_comfyui_available, CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER,
+    generate_candle_wan_vace_fun, is_candle_video_engine, wan_comfyui_available,
+    CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER, CANDLE_WAN_VACE_FUN_ADAPTER,
 };
 mod scail2;
 #[cfg(target_os = "macos")]
@@ -1790,6 +1838,79 @@ use vace::{
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use vace::{wan_vace_extend_raw_settings, wan_vace_raw_settings};
+
+/// Resolve the inference generator descriptors the production dispatch can load for one routed
+/// video model/mode. This is the matching-platform mapping source consumed by the capability-facts
+/// dumper; it deliberately reuses the same family resolvers as [`resolve_video_route`] and
+/// [`resolve_candle_video_route`] instead of maintaining a second model table.
+#[cfg(target_os = "macos")]
+pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    if model == "wan_2_2_vace_fun_14b" {
+        return if mode == "replace_person" {
+            vec!["wan2_2_vace_fun_14b"]
+        } else {
+            Vec::new()
+        };
+    }
+    if mode == "replace_person" {
+        return if let Some(engine_id) = scail2_engine_id(model) {
+            vec![engine_id]
+        } else if let Some(engine_id) = ltx_engine_id(model) {
+            vec![engine_id]
+        } else {
+            vec!["wan_vace"]
+        };
+    }
+    if matches!(mode, "extend_clip" | "video_bridge")
+        && wan_engine_id(model) == Some("wan2_2_ti2v_5b")
+    {
+        // Production prefers the ControlClip VACE engine and falls back to the TI2V keyframe path
+        // when that snapshot is not provisioned. Both descriptors therefore govern the route.
+        return vec!["wan_vace", "wan2_2_ti2v_5b"];
+    }
+    wan_engine_id(model)
+        .or_else(|| ltx_engine_id(model))
+        .or_else(|| svd_engine_id(model))
+        .or_else(|| bernini_engine_id(model))
+        .or_else(|| scail2_engine_id(model))
+        .or_else(|| krea_realtime_engine_id(model))
+        .or_else(|| mochi_engine_id(model))
+        .into_iter()
+        .collect()
+}
+
+/// Candle sibling of [`runtime_descriptor_engine_ids`], sourced from the actual Candle dispatch
+/// ladder and its `candle_video_engine_id` registry join.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    if model == "wan_2_2_vace_fun_14b" {
+        return if mode == "replace_person" {
+            vec!["wan2_2_vace_fun_14b"]
+        } else {
+            Vec::new()
+        };
+    }
+    if mode == "replace_person" {
+        return vec![scail2_engine_id(model)
+            .or_else(|| {
+                candle::candle_video_engine_id(model)
+                    .filter(|engine_id| *engine_id == "ltx_2_3_distilled")
+            })
+            .unwrap_or("wan_vace")];
+    }
+    if mode == "animate_character" {
+        return scail2_engine_id(model).into_iter().collect();
+    }
+    if matches!(mode, "extend_clip" | "video_bridge") {
+        return vec![candle::candle_video_engine_id(model)
+            .filter(|id| *id == "ltx_2_3_distilled")
+            .unwrap_or("wan_vace")];
+    }
+    bernini_engine_id(model)
+        .or_else(|| candle::candle_video_engine_id(model))
+        .into_iter()
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Backend-neutral video helpers shared by the MLX (macOS) and candle

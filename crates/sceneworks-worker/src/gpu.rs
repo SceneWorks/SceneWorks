@@ -139,6 +139,22 @@ pub(crate) fn with_candle_capabilities(
                 return gpu;
             }
             extend_capabilities_unique(&mut gpu.capabilities, derived);
+            // Advanced video generation is routed through production video-engine predicates,
+            // not the generic descriptor modality: Candle's Wan-VACE/SCAIL providers serve
+            // replace_person, extend_clip, and video_bridge, but `registry_capabilities` can only
+            // derive the coarse `video_generate` capability. Advertise the three concrete job
+            // types so scheduler eligibility, worker claiming, and the rich descriptor mappings
+            // describe the same executable surface. Per-model/mode routing remains fail-closed in
+            // `jobs_store::video_job_is_candle_eligible`; advertising these capabilities does not
+            // admit unsupported video models.
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::VideoExtend,
+                    WorkerCapability::VideoBridge,
+                    WorkerCapability::PersonReplace,
+                ],
+            );
             // Plain Image Edit (sc-5487, epic 5480): the distinct `image_edit` job type
             // (`mode == "edit_image"` + `sourceAssetId`, epic 2427) runs the bespoke candle edit lanes
             // (SdxlEdit / Flux2Edit / QwenEdit) via `run_image_generate_job`, which dispatches by payload
@@ -201,6 +217,17 @@ pub(crate) fn with_candle_capabilities(
             extend_capabilities_unique(
                 &mut gpu.capabilities,
                 [WorkerCapability::FaceLikenessCompare],
+            );
+            // SDXL-family tile detail and SAM3 box smart-select are bespoke job surfaces rather
+            // than registry modalities, so advertise the concrete handlers explicitly. The SAM3
+            // handler rejects point prompts before I/O because the pinned Candle provider exposes
+            // box PVS only; the capability truthfully advertises the executable box surface.
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::ImageDetail,
+                    WorkerCapability::ImageSegment,
+                ],
             );
             // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
@@ -684,6 +711,32 @@ pub(crate) async fn nvidia_vram_budget_gb(gpu_id: &str) -> Option<crate::vram_ga
     })
 }
 
+/// Fresh, bounded NVIDIA budget probe for the serialized generator-cache cold-load transaction.
+///
+/// The cache worker is a dedicated OS thread, not a Tokio executor thread. Building a private
+/// current-thread runtime here therefore cannot block the worker runtime that owns the request, and
+/// lets [`run_bounded_command`] retain its three-second timeout/kill-on-drop contract. This bypasses
+/// [`gpu_utilization`]'s one-second heartbeat cache deliberately: SCAIL calls it only after evicting
+/// a different resident generator, so a pre-eviction sample could reject a load whose reclaimed VRAM
+/// now fits (or, worse, credit memory that was not actually returned).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(
+    gpu_id: &str,
+) -> Option<crate::vram_gate::VramBudget> {
+    if gpu_id == "cpu" {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let snapshot = runtime.block_on(query_gpu_utilization(gpu_id))?;
+    Some(crate::vram_gate::VramBudget {
+        free_gb: snapshot.memory_free_mb? as f64 / 1024.0,
+        total_gb: snapshot.memory_total_mb? as f64 / 1024.0,
+    })
+}
+
 /// Apple-Silicon unified-memory + GPU-load snapshot for the `mlx` worker, shaped
 /// like the nvidia path. Total = the machine's unified RAM (`sysctl hw.memsize`).
 /// Used = **system-wide** memory pressure from `vm_stat` (App + Wired + Compressed,
@@ -734,8 +787,8 @@ async fn sysctl_memsize_mb() -> Option<u64> {
 
 /// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the
 /// FLUX.2-dev multi-reference edit footprint check (sc-6124). `None` if the probe fails (the guard
-/// then no-ops rather than blocking a possibly-fine job). macOS-only — its sole caller, the FLUX.2
-/// edit path (`image_jobs/flux2.rs`), is itself `#[cfg(target_os = "macos")]`.
+/// then no-ops rather than blocking a possibly-fine job). This helper is macOS-only because its sole
+/// caller is the MLX FLUX.2 edit path; the native Candle lane applies its own device-memory policy.
 #[cfg(target_os = "macos")]
 pub(crate) async fn total_unified_memory_gb() -> Option<f64> {
     sysctl_memsize_mb().await.map(|mb| mb as f64 / 1024.0)
@@ -1045,9 +1098,8 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation, served in-process by `segment_jobs::run_image_segment_job` (the
         // box-PVS path of the sc-4926 SAM3 stack). The Image Editor smart-select tool's
-        // backend: a box prompt → a binary inpaint mask asset. Advertised ONLY here (there is no
-        // off-Mac standalone image-segment lane), so a segment job routes to the Mac worker by
-        // construction.
+        // backend: a box prompt → a binary inpaint mask asset. The off-Mac Candle worker advertises
+        // the sibling box-PVS handler explicitly in `with_candle_capabilities`.
         WorkerCapability::ImageSegment,
         // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
         // (`mlx-gen-seedvr2`), served in-process by `video_jobs::run_video_upscale_job` —
