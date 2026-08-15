@@ -213,6 +213,10 @@
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",
       "defaultWeight": 1.0,
+      // sc-18726 — the recipe sc-18729 MEASURED end to end: 4 NFE, video shift 6, audio shift 3.
+      // This is the ONLY published variant whose video shift is not 12, which is exactly why the
+      // shift is declared per entry rather than once per family.
+      "sampling": { "steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0 },
       "source": {
         "provider": "huggingface",
         "repo": "lightx2v/Minimax-h3-Turbo",
@@ -232,6 +236,10 @@
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",
       "defaultWeight": 1.0,
+      // sc-18726 — 8 NFE at the checkpoint's own published 12/3 pair. The shift equalling the base
+      // 12.0 is NOT a reason to omit it: an absent value would mean "engine default", which is the
+      // same number today and would silently follow the base if that ever moved.
+      "sampling": { "steps": 8, "schedulerShift": 12.0, "audioSchedulerShift": 3.0 },
       "source": {
         "provider": "huggingface",
         "repo": "lightx2v/Minimax-h3-Turbo",
@@ -253,6 +261,10 @@
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",
       "defaultWeight": 1.0,
+      // sc-18726 — 4 NFE at 12/3. Same NFE as the 768p file and a DIFFERENT shift, which is the pair
+      // that makes "one recipe per family" impossible: the two 4-step files disagree on the shift and
+      // the 8-step one agrees with this file on the shift while disagreeing on the NFE.
+      "sampling": { "steps": 4, "schedulerShift": 12.0, "audioSchedulerShift": 3.0 },
       "source": {
         "provider": "huggingface",
         "repo": "lightx2v/Minimax-h3-Turbo",
@@ -279,6 +291,12 @@
       "compatibility": { "families": ["minimax-h3"] },
       "role": "accelerator",
       "defaultWeight": 1.0,
+      // sc-18726 — 4 NFE at 12/3. Upstream's model-specs table publishes per-variant shifts for the
+      // fl2v files only (12/3 for the 544p ones, 6/3 for the 768p one) and carries NO separate ref2v
+      // row, so this v0.1 file takes the 544p v0.1 pair rather than the 768p one: same version, same
+      // training canvas, same declared alpha 8. If upstream later publishes a ref2v-specific shift,
+      // this is the one line that changes.
+      "sampling": { "steps": 4, "schedulerShift": 12.0, "audioSchedulerShift": 3.0 },
       "source": {
         "provider": "huggingface",
         "repo": "lightx2v/Minimax-h3-Turbo",
