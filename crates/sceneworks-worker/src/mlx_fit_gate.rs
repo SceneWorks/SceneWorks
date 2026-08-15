@@ -28,6 +28,7 @@
 //! The pure decision logic is cross-platform and unit-tested on every lane; only the live
 //! `sysctl hw.memsize` probe is macOS-only (it returns `None` elsewhere, so the gate no-ops).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -1298,6 +1299,43 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     }
 }
 
+/// Provider-facing behavior identity for an exact routed request.
+///
+/// Krea Raw's public reference toggle deliberately remains the catalog's `image_generation`
+/// coordinate, but the provider executes that one-reference request through its latent-init
+/// image-to-image entrypoint. Keep that internal contract identity exact without inventing a new
+/// public route or a generic CFG axis.
+fn provider_request_mode(engine_id: &str, inputs: &MlxRequestInputs) -> (MemoryMode, &'static str) {
+    if is_krea_raw_reference_route(engine_id, inputs) {
+        (MemoryMode::ImageToImage, "image_to_image")
+    } else {
+        request_mode(&inputs.mode)
+    }
+}
+
+fn is_krea_raw_reference_route(engine_id: &str, inputs: &MlxRequestInputs) -> bool {
+    engine_id == "krea_2_raw"
+        && matches!(inputs.mode.as_str(), "image_generation" | "text_to_image")
+        && inputs.has_reference
+        && inputs.reference_count == 1
+}
+
+/// Remove the generic UI-reference label from Krea Raw's provider identity. The exact provider
+/// contract keys this route by `ImageToImage + reference_count=1`; carrying `references:1` as an
+/// overlay would invent a second evidence/decode-policy coordinate which Krea does not declare.
+fn provider_request_inputs<'a>(
+    engine_id: &str,
+    inputs: &'a MlxRequestInputs,
+) -> Cow<'a, MlxRequestInputs> {
+    if is_krea_raw_reference_route(engine_id, inputs) && inputs.overlay.is_some() {
+        let mut normalized = inputs.clone();
+        normalized.overlay = None;
+        Cow::Owned(normalized)
+    } else {
+        Cow::Borrowed(inputs)
+    }
+}
+
 /// Translate a selection into the engine's per-rung engagement knobs.
 ///
 /// SC-15805: this asks the contract which rungs the selection ENGAGES rather than re-deriving the
@@ -2176,13 +2214,23 @@ fn estimate_floor_parameters(
                 .collect();
             return (candidates, vec![refusal]);
         }
-        let pair = decode
-            .parameters
-            .decode_tile_edges
-            .iter()
-            .copied()
-            .min()
-            .zip(decode.parameters.decode_overlaps.iter().copied().min());
+        let pair = if let Some(routes) = &contract.pid_decode_routes {
+            let route = if use_pid { &routes.pid } else { &routes.native };
+            route
+                .tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(Some(route.tile_overlap))
+        } else {
+            decode
+                .parameters
+                .decode_tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(decode.parameters.decode_overlaps.iter().copied().min())
+        };
         let Some((tile_edge, overlap)) = pair else {
             return (
                 Vec::new(),
@@ -2686,8 +2734,10 @@ fn evaluate_request_with_budget_using_bundle(
         &effective_plan
     };
 
+    let provider_inputs = provider_request_inputs(plan.engine_id, inputs);
+    let inputs = provider_inputs.as_ref();
     let geometry = request_geometry(inputs);
-    let (mode, mode_key) = request_mode(&inputs.mode);
+    let (mode, mode_key) = provider_request_mode(plan.engine_id, inputs);
     let mut fallback_contract;
     let contract = if let Some(contract) = generator.memory_strategy_contract() {
         contract
@@ -6598,6 +6648,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn krea_raw_true_cfg_and_reference_img2img_keep_exact_public_and_provider_shapes() {
+        let plain = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 4,
+            mode: "image_generation".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        let (mode, mode_key) = request_mode(&plain.mode);
+        assert_eq!(mode, MemoryMode::TextToImage);
+        assert_eq!(mode_key, "text_to_image");
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &plain),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(request_geometry(&plain).batch, 1);
+        assert_eq!(request_geometry(&plain).reference_count, 0);
+
+        let reference = MlxRequestInputs {
+            overlay: Some("references:1".to_owned()),
+            has_reference: true,
+            reference_count: 1,
+            ..plain.clone()
+        };
+        assert_eq!(
+            request_mode(&reference.mode).0,
+            MemoryMode::TextToImage,
+            "the public catalog coordinate remains generation"
+        );
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &reference),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "the Raw provider behavior contract sees its one-reference latent-init route"
+        );
+        assert_eq!(
+            provider_request_mode("krea_2_turbo", &reference),
+            (MemoryMode::TextToImage, "text_to_image"),
+            "Raw routing must not change Turbo's request identity"
+        );
+        assert_eq!(
+            provider_request_inputs("krea_2_raw", &reference)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            None,
+            "reference count is the exact Raw provider axis; no synthetic overlay is retained"
+        );
+        assert_eq!(
+            provider_request_inputs("krea_2_turbo", &reference)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            Some("references:1"),
+            "normalizing Raw must not change Turbo's preexisting evidence identity"
+        );
+        assert_eq!(request_geometry(&reference).batch, 1);
+        assert_eq!(request_geometry(&reference).reference_count, 1);
+
+        let reference_low_rank_pid = MlxRequestInputs {
+            overlay: Some("references:1+adapters:1".to_owned()),
+            adapter_count: 1,
+            use_pid: true,
+            ..reference.clone()
+        };
+        let provider_inputs = provider_request_inputs("krea_2_raw", &reference_low_rank_pid);
+        assert_eq!(provider_inputs.as_ref().overlay, None);
+        assert_eq!(provider_inputs.as_ref().adapter_count, 1);
+        assert!(provider_inputs.as_ref().use_pid);
+        assert_eq!(provider_inputs.as_ref().reference_count, 1);
+
+        let pid = MlxRequestInputs {
+            use_pid: true,
+            ..plain
+        };
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &pid),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(request_geometry(&pid).batch, 1);
+        assert!(pid.use_pid);
+    }
+
     /// The fixture record carries its own synthetic revision and [`FIXTURE_CLOSURE_DIGEST`].
     ///
     /// This used to rewrite every record's `inference.revision` to the live Cargo pin, because
@@ -7749,6 +7887,73 @@ mod tests {
             error.contains("needs 6.60 GiB"),
             "the refusal must quote the WIDENED rung-4 floor: {error}"
         );
+    }
+
+    #[test]
+    fn krea_raw_estimate_floor_selects_exact_native_and_pid_decode_domains() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "krea_2_raw";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = "krea_2_raw".to_owned();
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        decode.parameters.decode_tile_edges = vec![2048, 512];
+        decode.parameters.decode_overlaps = vec![256, 64];
+        contract.pid_decode_routes = Some(gen_core::MemoryPidDecodeRoutes {
+            native: gen_core::MemoryDecodeRouteDomain {
+                tile_edges: vec![512],
+                tile_overlap: 64,
+            },
+            pid: gen_core::MemoryDecodeRouteDomain {
+                tile_edges: vec![2048],
+                tile_overlap: 256,
+            },
+        });
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_raw";
+        plan.model_id = "krea_2_raw".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        for (profile, adapter_count, use_pid, expected_edge, expected_overlap) in [
+            ("plain", 0, false, 512, 64),
+            ("low-rank", 1, false, 512, 64),
+            ("plain+pid", 0, true, 2048, 256),
+            ("low-rank+pid", 1, true, 2048, 256),
+        ] {
+            let mut inputs = fixture_inputs(1024, 1024);
+            inputs.use_pid = use_pid;
+            inputs.adapter_count = adapter_count;
+            let evaluation = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                fixture_budget(8.0),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("the exact Raw decode domain must admit the deep estimate rung");
+            assert_eq!(
+                evaluation.context.selection.strategy,
+                MemoryStrategy::BoundedTransformerResidency
+            );
+            assert_eq!(
+                evaluation.context.selection.parameters.decode_tile_edge,
+                Some(expected_edge),
+                "profile={profile}"
+            );
+            assert_eq!(
+                evaluation.context.selection.parameters.decode_overlap,
+                Some(expected_overlap),
+                "profile={profile}"
+            );
+            assert_eq!(evaluation.context.use_pid, use_pid);
+            assert_eq!(evaluation.context.overlay, None);
+        }
     }
 
     #[test]
