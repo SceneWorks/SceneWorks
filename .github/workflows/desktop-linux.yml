@@ -34,6 +34,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"
+      # DELIBERATELY NOT `save-if: main`, unlike the PR and release lanes (see the note on the
+      # `parity-rust` cache step in check.yml). This workflow is `workflow_dispatch:` only, so its
+      # runs are manual packaging iterations on whatever branch the operator is working from —
+      # a branch-scoped cache is the point here, not waste. It also never runs on `main`, so a
+      # main-only save would leave it with nothing to restore and cold on every dispatch. The
+      # 2026-08-15 cache inventory carried no entry from this lane at all, so it is not what was
+      # starving the PR lanes. Do not re-symmetrise this with the lanes above.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
 
       # Tauri v2's Ubuntu/WebKitGTK build prerequisites. gstreamer1.0-libav

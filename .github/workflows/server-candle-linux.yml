@@ -49,6 +49,9 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy
+      # DELIBERATELY NOT `save-if: main` — same reasoning as desktop-linux.yml: this lane is
+      # `workflow_dispatch:` only, never runs on `main`, and contributed no entry to the 2026-08-15
+      # cache inventory. Do not re-symmetrise it with the PR lanes.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
       - name: Fetch the pinned inference release
         env:
