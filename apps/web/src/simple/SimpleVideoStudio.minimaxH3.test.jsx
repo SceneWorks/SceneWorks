@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
+import { readSimpleStudioSnapshot } from "../simpleStudioStore.js";
 
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -42,6 +43,20 @@ const MINIMAX = {
   installState: "installed",
   usable: true,
 };
+
+/// The shipped 768p turbo entry as the catalog route serves it — the manifest entry (so the step
+/// count and the declared `modelIds` partition are the real ones) plus the install state
+/// `normalize_lora_entry` probes.
+function turboFixture() {
+  return {
+    ...JSON5.parse(
+      readFileSync(resolve(HERE, "../../../../config/manifests/builtin.loras.jsonc"), "utf8"),
+    ).loras.find((lora) => lora.id === "minimax_h3_turbo_4step_768p"),
+    scope: "builtin",
+    installState: "installed",
+    installedPath: "/data/loras/minimax_h3_turbo_4step_768p.safetensors",
+  };
+}
 
 function baseContext() {
   return {
@@ -180,14 +195,7 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
   // Asserted on the PAYLOAD, not on any control: there is nothing to click, so the only observable
   // difference between "seeded" and "not seeded" is the job that gets submitted.
   it("seeds the turbo adapter into the submitted job, with no control to set it", async () => {
-    const turbo = {
-      ...JSON5.parse(
-        readFileSync(resolve(HERE, "../../../../config/manifests/builtin.loras.jsonc"), "utf8"),
-      ).loras.find((lora) => lora.id === "minimax_h3_turbo_4step_768p"),
-      scope: "builtin",
-      installState: "installed",
-      installedPath: "/data/loras/minimax_h3_turbo_4step_768p.safetensors",
-    };
+    const turbo = turboFixture();
     // 4 against the model's own 50 — a non-default recipe, so this cannot pass against a shell that
     // simply forwards the model defaults.
     expect(turbo.sampling.steps).toBe(4);
@@ -214,5 +222,64 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     // …and it is not counted against the user's own LoRA budget: it is a builtin, which is the one
     // slot of headroom MAX_USER_JOB_LORAS (4) leaves inside MAX_JOB_LORAS_TOTAL (5).
     expect(payload.loras.find((lora) => lora.id === turbo.id).scope).toBe("builtin");
+  });
+
+  // sc-18727 — the other half of a default-on seed: it has to be turn-off-able.
+  //
+  // Simple ships NO turbo control, so deselecting the adapter in the LoRA picker is the only way a
+  // Simple user can decline it. The seed effect re-runs on every `selectedLoraIds` change, so
+  // without the one-shot marker (`turboSeededModels`) the removal would re-fire the seed and put
+  // the adapter straight back — turbo would be literally un-turn-off-able from this shell, with no
+  // error and no control to explain it. Nothing about that is visible in the seeding test above,
+  // which is why it needs its own.
+  //
+  // Both halves of the marker are exercised: the IN-SESSION half (the effect must not re-add on the
+  // very next render) and the DURABLE half (Simple's studio snapshot is mirrored to server
+  // ui-preferences, so a relaunch that read back only `selectedLoraIds` would re-seed on every
+  // launch and re-defeat the same "Off").
+  it("does not re-add the turbo adapter after it is removed from the picker, across a relaunch", async () => {
+    const turbo = turboFixture();
+    const generate = async (context) => {
+      const textarea = container.querySelector("textarea");
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype,
+          "value",
+        ).set;
+        setter.call(textarea, "a lighthouse in a storm");
+        textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      });
+      await click(
+        [...container.querySelectorAll("button")].find((node) =>
+          /generate|create|render/i.test(node.textContent.trim()),
+        ),
+      );
+      return (context.createVideoJob.mock.calls.at(-1)[0].loras ?? []).map((lora) => lora.id);
+    };
+
+    const context = { ...baseContext(), loras: [turbo] };
+    await openVideo(context);
+    // Seeded, and shown as a normal selected LoRA — which is what makes the picker's own Remove
+    // button the off switch.
+    const remove = container.querySelector(`button[aria-label="Remove ${turbo.name}"]`);
+    expect(remove, "the seeded adapter must be visible as a removable selection").toBeTruthy();
+    await click(remove);
+    expect(container.querySelector(`button[aria-label="Remove ${turbo.name}"]`)).toBeNull();
+    expect(await generate(context)).not.toContain(turbo.id);
+
+    // The snapshot the next launch reads. `writeSimpleStudioSnapshot` is debounced, so the unmount
+    // flush is what makes the stored value observable (same rule as useStudioState.test.jsx).
+    await unmountRoot(root, container);
+    const stored = readSimpleStudioSnapshot("project-1");
+    expect(stored.video.turboSeededModels).toContain(MINIMAX.id);
+    expect(stored.video.selectedLoraIds ?? []).not.toContain(turbo.id);
+
+    // Relaunch: a brand-new shell restoring that snapshot. The marker is what stops the seed from
+    // firing again against an empty selection.
+    ({ container, root } = mountRoot());
+    const relaunched = { ...baseContext(), loras: [turbo] };
+    await openVideo(relaunched);
+    expect(container.querySelector(`button[aria-label="Remove ${turbo.name}"]`)).toBeNull();
+    expect(await generate(relaunched)).not.toContain(turbo.id);
   });
 });
