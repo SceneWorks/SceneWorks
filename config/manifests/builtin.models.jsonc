@@ -13187,6 +13187,56 @@
           // tensors) rather than bf16 — same correction as the video VAE above.
           "estimatedSizeBytes": 605431611
         },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "tokenizer",
+          "subdir": "tokenizer",
+          // ⚠️ sc-19558 CORRECTION — THIS ROW DID NOT EXIST, AND ITS ABSENCE MADE THE WHOLE FAMILY
+          // UNLOADABLE ON A FRESH INSTALL. `mlx-gen-minimax-h3::load` probes
+          // `<root>/tokenizer/tokenizer.json` on every load, and `minimax_h3_shared_is_complete`
+          // (crates/sceneworks-worker/src/video_jobs/minimax_h3.rs) mirrors that probe — but no
+          // macOS row supplied the directory, so a manifest-driven install of ANY tier failed the
+          // gate before it reached the loader. `minimax_h3_macos_download_set_covers_every_probed_
+          // shared_file` binds the two together so a future probe added on one side goes red on the
+          // other.
+          //
+          // No `variant`: the tokenizer is dense and identical in every tier, so it is a floor no
+          // tier shrinks — the `video_vae` / `audio_vae` shape, not the per-tier `text_encoder` one.
+          "files": ["tokenizer/*"],
+          "platforms": ["macos"],
+          // 4 files: tokenizer.json, tokenizer_config.json, vocab.json, merges.txt.
+          "estimatedSizeBytes": 11492078
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // ⚠️ sc-19558 CORRECTION — the second half of the same gap. `load` probes all THREE of
+          // `FL2VA/audio_vae/{config.json,config.yaml,metadata.json}`, and both `decode_audio` and
+          // `load_audio_encoder` parse them for the audio VAE's constructor arguments; the
+          // repackaged root config carries none of them. No macOS row supplied them either.
+          //
+          // ONLY the three documents, NOT `FL2VA/audio_vae/*`. That glob would also pull
+          // `model.safetensors` — 605,429,308 B of audio-VAE weights that are a near-duplicate of
+          // the `audio_vae/` row above, which is where the MLX lane actually reads its weights
+          // (`Weights::from_dir(self.root.join("audio_vae"))`). The off-Mac row below DOES glob the
+          // directory, because candle's `load_audio_vae` reads the component from there. Different
+          // engines, different read patterns, so different file lists rather than one copied twice.
+          "files": [
+            "FL2VA/audio_vae/config.json",
+            "FL2VA/audio_vae/config.yaml",
+            "FL2VA/audio_vae/metadata.json"
+          ],
+          "platforms": ["macos"],
+          // 1,973 + 91 + 440.
+          "estimatedSizeBytes": 2504
+        },
 
         // ── THE OFF-MAC (candle) ARTIFACT SET — sc-19558 ────────────────────────────────────────
         //
@@ -13225,7 +13275,14 @@
         // NO `variant` ON ANY OF THESE. The candle provider advertises `supported_quants: &[]`, so
         // there is no tier axis off-Mac and a `variant` would advertise a choice nothing can honour.
         // Sizes are EXACT `os.stat` totals over the pinned snapshot with symlinks dereferenced,
-        // measured 2026-08-15; they sum to 144,633,651,263 B (134.7 GiB).
+        // measured 2026-08-15; they sum to 144,633,607,972 B (134.7 GiB).
+        //
+        // ⚠️ THE METHOD MATTERS, because the first pass got one row wrong. A hub snapshot dir holds
+        // repository content as SYMLINKS into `blobs/`; anything else in it is a local dropping.
+        // Only symlinked entries are counted here. A recursive walk that stats every regular file
+        // too swept a `__pycache__/` of 8 `*.cpython-314.pyc` files (43,291 B) into the
+        // `FL2VA/audio_vae` row — see that row below, which carries the correction. The stated total
+        // was 144,633,651,263 B for exactly that reason and is now the symlink-only figure.
         {
           "provider": "huggingface",
           "repo": "MiniMaxAI/MiniMax-H3",
@@ -13286,9 +13343,24 @@
           // than from a fallback. macOS has no such row because the MLX audio VAE does not read it.
           "files": ["FL2VA/audio_vae/*"],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 605504746
+          // 13 files. NOT 605,504,746 — that figure was a mis-measurement, corrected here: the
+          // measuring walk was recursive and swept up a local `__pycache__/` of 8 `*.pyc` files
+          // (43,291 B) that a Python import of the vendored `dac_*.py` modules had left in the
+          // snapshot dir hours after the download. Those are local droppings, not repository
+          // content — they are regular files, while every real snapshot entry is a symlink into
+          // `blobs/`. See the measurement note above the first row for the method that excludes
+          // them.
+          "estimatedSizeBytes": 605461455
         }
       ],
+      // ⚠️ NOT PLATFORM-SCOPED, and off-Mac it names a repo with no surviving rows (sc-19558).
+      // `paths` has no `platforms` axis — it is one value per entry — while the off-Mac primary
+      // above is `MiniMaxAI/MiniMax-H3`. On Windows/Linux this therefore points at the MLX rehost,
+      // which those platforms never fetch. INERT TODAY: nothing off-Mac reads it, because the candle
+      // columns in `VIDEO_MODEL_CAPS` are all false and there is no H3 arm in the candle ladder, so
+      // no off-Mac code path resolves this value. Recorded rather than silently left, because the
+      // change that flips a candle column must either scope this key or teach the off-Mac lane to
+      // resolve the upstream snapshot the way `resolve_minimax_h3_load` resolves the macOS one.
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
       },
@@ -13635,6 +13707,40 @@
           "files": ["audio_vae/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 605431611
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "tokenizer",
+          "subdir": "tokenizer",
+          // sc-19558 CORRECTION, identical to `minimax_h3`'s new row — see it for why the absence
+          // of this row made a fresh install of EITHER entry fail `minimax_h3_shared_is_complete`
+          // before the loader was reached. Declared per entry because the download set is per
+          // catalog id: installing only Ref2VA must still bring every shared component the engine
+          // probes.
+          "files": ["tokenizer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 11492078
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // sc-19558 CORRECTION — same three documents, same reason. They matter MORE on this
+          // partition: ref2va is the only route that constructs `MiniMaxH3AudioVaeEncoder`, and
+          // `load_audio_encoder` parses this same triple for its geometry.
+          "files": [
+            "FL2VA/audio_vae/config.json",
+            "FL2VA/audio_vae/config.yaml",
+            "FL2VA/audio_vae/metadata.json"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 2504
         }
         // NO OFF-MAC ROWS HERE, and that is deliberate rather than an omission (sc-19558).
         // `minimax_h3` gained a `platforms: ["windows", "linux"]` raw-snapshot set because

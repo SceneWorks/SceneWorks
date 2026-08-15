@@ -159,19 +159,72 @@ pub(super) fn minimax_h3_tier_dir_is_complete(dir: &Path) -> bool {
         && sceneworks_core::mlx_tier_completeness::minimax_h3_ref_tier_complete(dir)
 }
 
+/// The files under the UPSTREAM snapshot root that `mlx-gen-minimax-h3::load` probes on EVERY load,
+/// whatever tier is selected and whatever is staged as a component.
+///
+/// Kept as a `const` outside the `cfg(target_os = "macos")` fence — and as the file paths rather
+/// than the directory names — for one reason: it is the list
+/// `minimax_h3_macos_download_set_covers_every_probed_shared_file` compares the shipped manifest
+/// against, and that test must run on every host. A directory-only list could not have caught the
+/// sc-19558 defect either way round, because the defect was a MISSING DOWNLOAD ROW and the check
+/// that finds those has to name files a `files` pattern can be matched against.
+///
+/// Mirrors the engine's own loop verbatim (`mlx-gen-minimax-h3/src/model.rs`, the
+/// `for (partition, probe) in [...]` block). `text_encoder/config.json` is deliberately NOT here —
+/// see [`MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`], which is conditional.
+pub(super) const MINIMAX_H3_SHARED_PROBES: &[&str] = &[
+    "vae/config.json",
+    "audio_vae/config.json",
+    "tokenizer/tokenizer.json",
+    // The audio VAE's CONSTRUCTOR arguments live only in these three; the repackaged root config
+    // carries none of them, and both `decode_audio` and `load_audio_encoder` parse all three.
+    "FL2VA/audio_vae/config.json",
+    "FL2VA/audio_vae/config.yaml",
+    "FL2VA/audio_vae/metadata.json",
+];
+
+/// The upstream DENSE text encoder's probe — required only when the resolved tier stages no PACKED
+/// one (sc-19120). Split out of [`MINIMAX_H3_SHARED_PROBES`] because it is the one probe whose
+/// necessity depends on the install, and treating it as unconditional is what made the whole family
+/// unloadable: `resolve_co_requisites_for_tier` and the API's
+/// `model_co_requisite_downloads_for_variant` both pick exactly ONE row per `componentId`, and the
+/// upstream `text_encoder` row is `variant: "bf16"`-scoped — so a q4 or q8 install never fetches it
+/// and `<root>/text_encoder` does not exist there at all.
+pub(super) const MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE: &str = "text_encoder/config.json";
+
 /// Whether `root` carries the SHARED components the loader probes under `spec.weights`. Every one
 /// of these is a `coRequisite` download from a DIFFERENT repo than the tiers, so a user can
-/// genuinely have a complete `q4/` and no text encoder.
+/// genuinely have a complete `q4/` and no tokenizer.
 ///
-/// The probe list mirrors `mlx-gen-minimax-h3::load`'s own: `vae/`, `audio_vae/`, `text_encoder/`,
-/// `tokenizer/` and the `FL2VA/audio_vae/` constructor documents (the repackaged root config
-/// carries none of the audio VAE's constructor arguments).
+/// `has_packed_text_encoder` says whether the resolved tier staged a packed text encoder into
+/// `LoadSpec::components["text_encoder"]`. When it did, the provider's `resolve_text_encoder_dir`
+/// never looks under this root, so requiring `<root>/text_encoder` here would refuse a load that
+/// would have succeeded — and, because the upstream text-encoder row is `variant: "bf16"`-scoped,
+/// would refuse EVERY q4 and q8 install.
+///
+/// FILES, not `is_dir()`. An interrupted co-requisite download leaves the directory present and
+/// empty, and the engine probes files — so a directory check would pass a snapshot the loader then
+/// rejects, moving the failure past the point where this function can name it.
 #[cfg(target_os = "macos")]
-pub(super) fn minimax_h3_shared_is_complete(root: &Path) -> bool {
-    ["text_encoder", "tokenizer", "vae", "audio_vae"]
+pub(super) fn minimax_h3_shared_is_complete(root: &Path, has_packed_text_encoder: bool) -> bool {
+    minimax_h3_missing_shared_probes(root, has_packed_text_encoder).is_empty()
+}
+
+/// The probes [`minimax_h3_shared_is_complete`] would fail on, in declaration order — so the refusal
+/// can name what is actually absent instead of restating the whole list.
+#[cfg(target_os = "macos")]
+pub(super) fn minimax_h3_missing_shared_probes(
+    root: &Path,
+    has_packed_text_encoder: bool,
+) -> Vec<&'static str> {
+    MINIMAX_H3_SHARED_PROBES
         .iter()
-        .all(|component| root.join(component).is_dir())
-        && root.join("FL2VA").join("audio_vae").is_dir()
+        .copied()
+        .chain(
+            (!has_packed_text_encoder).then_some(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE),
+        )
+        .filter(|probe| !root.join(probe).is_file())
+        .collect()
 }
 
 /// Everything a MiniMax-H3 load needs, resolved as ONE unit — the two roots are in different repos
@@ -247,12 +300,16 @@ pub(super) fn resolve_minimax_h3_load(
             })?
         }
     };
-    if !minimax_h3_shared_is_complete(&base_root) {
+    // The UNCONDITIONAL shared probes, checked before the tier scan so a missing co-requisite is
+    // named ahead of "no complete tier". The upstream text encoder is deliberately excluded here
+    // (`has_packed_text_encoder: true`) because whether it is needed at all depends on the tier
+    // that has not been chosen yet — it is checked below, once `te_dir` is known.
+    let missing = minimax_h3_missing_shared_probes(&base_root, true);
+    if !missing.is_empty() {
         return Err(WorkerError::InvalidPayload(format!(
-            "{}: the shared MiniMax-H3 text encoder / tokenizer / VAEs are incomplete (expected \
-             text_encoder/, tokenizer/, vae/, audio_vae/ and FL2VA/audio_vae/ under {}). These are \
-             a separate co-requisite download from the quality tiers — re-download MiniMax-H3 in \
-             the Model Manager.",
+            "{}: the shared MiniMax-H3 tokenizer / VAEs are incomplete under {} — missing \
+             {missing:?}. These are a separate co-requisite download from the quality tiers — \
+             re-download MiniMax-H3 in the Model Manager.",
             request.model,
             base_root.display()
         )));
@@ -304,6 +361,19 @@ pub(super) fn resolve_minimax_h3_load(
     // resolves to `None` and the provider's upstream fallback — not to an error.
     let te_dir = Some(tier_root.join(tier).join(MINIMAX_H3_TE_COMPONENT))
         .filter(|dir| minimax_h3_packed_te_is_complete(dir));
+    // …and NOW the conditional probe. With no packed text encoder staged, the provider falls back
+    // to `<root>/text_encoder`, so that must exist — but the upstream row is `variant: "bf16"`
+    // scoped, so it is absent on a q4/q8 install by design. Requiring it before the tier was known
+    // is what refused every packed install (sc-19558).
+    if !minimax_h3_shared_is_complete(&base_root, te_dir.is_some()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{}: the {tier} tier stages no packed text encoder, so the load falls back to the \
+             dense upstream one — and {} is missing. Re-download MiniMax-H3 in the Model Manager, \
+             or install a tier that ships its own text encoder.",
+            request.model,
+            base_root.join(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE).display()
+        )));
+    }
     Ok(MiniMaxH3Load {
         root: base_root,
         dit_dir: tier_root.join(tier).join(MINIMAX_H3_DIT_COMPONENT),

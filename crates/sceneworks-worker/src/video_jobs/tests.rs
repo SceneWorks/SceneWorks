@@ -13337,3 +13337,98 @@ fn generate_minimax_h3_using_refuses_a_wrong_partition_shape_before_loading() {
          53 GB text encoder, let alone render from the wrong DiT"
     );
 }
+
+/// sc-19558: every file `mlx-gen-minimax-h3::load` probes under the UPSTREAM root is supplied by a
+/// macOS download row of the catalog entry that needs it.
+///
+/// The defect this closes was a MISSING DOWNLOAD ROW, not a wrong one: `tokenizer/` and the three
+/// `FL2VA/audio_vae/` constructor documents were probed by the loader and by
+/// `minimax_h3_shared_is_complete`, and supplied by nothing — so a manifest-driven install of ANY
+/// tier failed the completeness gate before it reached the loader, on both catalog entries.
+///
+/// Deliberately NOT `#[cfg(target_os = "macos")]`. The probe list is a fact about the manifest and
+/// the engine's own loop, and it is on the Linux lane that a macOS-only row is easiest to delete by
+/// accident. `MINIMAX_H3_SHARED_PROBES` is kept outside the platform fence for the same reason.
+///
+/// Mutation checks (each verified RED by construction of the assertion): delete either new row from
+/// either entry; narrow `"tokenizer/*"` to `"tokenizer/tokenizer_config.json"`; drop
+/// `"FL2VA/audio_vae/config.yaml"` from the three-document list.
+#[test]
+fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    // The upstream snapshot `spec.weights` resolves to. Spelled here rather than imported because
+    // `MINIMAX_H3_BASE_REPO` is macOS-fenced and this test is not; the two are tied together below.
+    const UPSTREAM_REPO: &str = "MiniMaxAI/MiniMax-H3";
+    #[cfg(target_os = "macos")]
+    assert_eq!(UPSTREAM_REPO, super::minimax_h3::MINIMAX_H3_BASE_REPO);
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+
+    // Every probe, including the conditional text encoder: the upstream row is `variant: "bf16"`
+    // scoped, so a bf16 install DOES fall back to it and it must be declared somewhere.
+    let probes: Vec<&str> = super::minimax_h3::MINIMAX_H3_SHARED_PROBES
+        .iter()
+        .copied()
+        .chain(std::iter::once(
+            super::minimax_h3::MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE,
+        ))
+        .collect();
+    assert!(
+        probes.len() >= 7,
+        "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
+        probes.len()
+    );
+
+    for entry_id in ["minimax_h3", "minimax_h3_ref"] {
+        let model = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some(entry_id))
+            .unwrap_or_else(|| panic!("{entry_id} present in the builtin catalog"));
+
+        // macOS rows against the upstream repo only. The tier rows live in the SceneWorks rehost
+        // and the off-Mac rows serve candle, neither of which supplies `spec.weights` on this lane.
+        let patterns: Vec<&str> = model["downloads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{entry_id} declares downloads"))
+            .iter()
+            .filter(|row| row["repo"].as_str() == Some(UPSTREAM_REPO))
+            .filter(|row| {
+                row["platforms"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().any(|v| v.as_str() == Some("macos")))
+            })
+            .flat_map(|row| row["files"].as_array().into_iter().flatten())
+            .filter_map(|f| f.as_str())
+            .collect();
+        assert!(
+            !patterns.is_empty(),
+            "{entry_id} declares no macOS {UPSTREAM_REPO} rows at all"
+        );
+
+        for probe in &probes {
+            let covered = patterns.iter().any(|pattern| match pattern.strip_suffix('*') {
+                // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
+                // what stops `vae/*` from claiming `audio_vae/config.json`.
+                Some(prefix) => probe.starts_with(prefix),
+                None => pattern == probe,
+            });
+            assert!(
+                covered,
+                "{entry_id}: `mlx-gen-minimax-h3::load` probes `{probe}` under the {UPSTREAM_REPO} \
+                 snapshot, but no macOS download row supplies it. A probe with no row is not a slow \
+                 download — it is an install that fails the completeness gate before the loader \
+                 runs. Declared patterns: {patterns:?}"
+            );
+        }
+    }
+}
