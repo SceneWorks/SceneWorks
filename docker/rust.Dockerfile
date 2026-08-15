@@ -78,7 +78,8 @@ COPY config ./config
 # evidence and video-curve inputs via `include_str!`, and those embeds are NOT test-gated, so a
 # release build of the API cannot compile without them.
 #
-# Deliberately the three embedded FILES rather than `docs/generated`: that directory also holds
+# Deliberately the two singleton embeds plus the LTX evidence family rather than
+# `docs/generated`: that directory also holds
 # `memory-matrix.json`, which is regenerated and re-hashed by any change to the selector's source,
 # so copying the directory would invalidate this layer and rebuild the whole Rust graph on edits
 # the image does not depend on.
@@ -89,7 +90,7 @@ COPY config ./config
 # `--release` without tests.
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
-COPY docs/generated/ltx-mlx-geometry-sweep-sc-18810.json ./docs/generated/
+COPY docs/generated/ltx-mlx-*.json ./docs/generated/
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -214,7 +215,7 @@ COPY config ./config
 # Generated calibration inputs embedded by sceneworks-core (see the ordinary builder above).
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
-COPY docs/generated/ltx-mlx-geometry-sweep-sc-18810.json ./docs/generated/
+COPY docs/generated/ltx-mlx-*.json ./docs/generated/
 
 # nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
 # The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in

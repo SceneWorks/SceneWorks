@@ -30,9 +30,12 @@ const PACKAGED_VIDEO_MEMORY_CURVE_SOURCES: &[(&str, &str)] = &[(
     "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
     include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
 )];
-const PACKAGED_VIDEO_MEMORY_CURVE_FIT_PATH: &str =
+#[cfg(test)]
+const HISTORICAL_VIDEO_MEMORY_CURVE_FIT_PATH: &str =
     "docs/generated/ltx-temporal-form-fit-sc-18810.json";
 const PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR: &str = "scripts/fit-ltx-temporal-form.mjs";
+const VIDEO_MEMORY_CURVE_FIT_PREFIX: &str = "docs/generated/ltx-temporal-form-fit-sc-";
+const VIDEO_MEMORY_CURVE_FIT_SUFFIX: &str = ".json";
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -211,7 +214,7 @@ impl VideoMemoryCurveBundle {
     pub fn evaluate(&self, query: VideoCurveQuery<'_>) -> Option<VideoCurveEvaluation<'_>> {
         if self.schema_version != VIDEO_MEMORY_CURVE_SCHEMA_VERSION
             || self.generated_by != PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR
-            || self.source_fit != PACKAGED_VIDEO_MEMORY_CURVE_FIT_PATH
+            || !is_canonical_video_memory_curve_fit_path(&self.source_fit)
         {
             return None;
         }
@@ -327,7 +330,7 @@ fn validate_video_memory_curve_bundle_ref(
         return Err("video-memory curve bundle is empty".to_owned());
     }
     if bundle.generated_by != PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR
-        || bundle.source_fit != PACKAGED_VIDEO_MEMORY_CURVE_FIT_PATH
+        || !is_canonical_video_memory_curve_fit_path(&bundle.source_fit)
     {
         return Err("video-memory curve bundle provenance is incomplete".to_owned());
     }
@@ -394,6 +397,12 @@ fn validate_video_memory_curve_bundle_ref(
         );
     }
     Ok(())
+}
+
+fn is_canonical_video_memory_curve_fit_path(path: &str) -> bool {
+    path.strip_prefix(VIDEO_MEMORY_CURVE_FIT_PREFIX)
+        .and_then(|story| story.strip_suffix(VIDEO_MEMORY_CURVE_FIT_SUFFIX))
+        .is_some_and(|story| !story.is_empty() && story.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 #[derive(Debug)]
@@ -869,6 +878,27 @@ mod tests {
     }
 
     #[test]
+    fn fit_provenance_accepts_canonical_story_reports_only() {
+        assert!(is_canonical_video_memory_curve_fit_path(
+            HISTORICAL_VIDEO_MEMORY_CURVE_FIT_PATH
+        ));
+        assert!(is_canonical_video_memory_curve_fit_path(
+            "docs/generated/ltx-temporal-form-fit-sc-18946.json"
+        ));
+        for path in [
+            "docs/generated/ltx-temporal-form-fit.json",
+            "docs/generated/ltx-temporal-form-fit-sc-.json",
+            "docs/generated/ltx-temporal-form-fit-sc-18946-extra.json",
+            "../docs/generated/ltx-temporal-form-fit-sc-18946.json",
+        ] {
+            assert!(
+                !is_canonical_video_memory_curve_fit_path(path),
+                "{path} must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn frames_change_the_phase_peaks_and_binding_phase_inside_the_hull() {
         let bundle = packaged_video_memory_curves().unwrap();
         let at_121 = bundle.evaluate(packaged_query()).unwrap().phases;
@@ -1028,7 +1058,7 @@ mod tests {
         let bundle = VideoMemoryCurveBundle {
             schema_version: VIDEO_MEMORY_CURVE_SCHEMA_VERSION,
             generated_by: PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR.to_owned(),
-            source_fit: PACKAGED_VIDEO_MEMORY_CURVE_FIT_PATH.to_owned(),
+            source_fit: HISTORICAL_VIDEO_MEMORY_CURVE_FIT_PATH.to_owned(),
             source_catalog: sources
                 .iter()
                 .map(|(path, source)| VideoCurveSourceCatalogEntry {

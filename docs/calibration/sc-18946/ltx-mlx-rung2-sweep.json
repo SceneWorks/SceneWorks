@@ -1,0 +1,275 @@
+{
+  "_comment": "SC-18946 rung-2-first matrix. Every q4/q8/bf16 row explicitly selects decodeTileEdge=384 and decodeOverlap=64 at 1280x704 f305/f449. These records are ingested as canonical evidence but never pooled into the single-pass temporal fit.",
+  "story": "sc-18946",
+  "campaignIdentity": {
+    "inferenceRevision": "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
+    "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+    "seed": 18946
+  },
+  "providers": [
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f305-fps30-bounded_decode",
+      "_role": "rung2_boundary",
+      "_campaignPhase": "rung2_first",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 34320,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 274841600,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 305
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f305-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 384,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ],
+      "_predictedDecodeBytes": 18540396800,
+      "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes"
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f449-fps30-bounded_decode",
+      "_role": "rung2_boundary",
+      "_campaignPhase": "rung2_first",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 50160,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 404602880,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f449-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 384,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ],
+      "_predictedDecodeBytes": 23730848000,
+      "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes"
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+      "_role": "rung2_boundary",
+      "_campaignPhase": "rung2_first",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 34320,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 274841600,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 305
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f305-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 384,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ],
+      "_predictedDecodeBytes": 18540396800,
+      "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes"
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f449-fps30-bounded_decode",
+      "_role": "rung2_boundary",
+      "_campaignPhase": "rung2_first",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 50160,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 404602880,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f449-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 384,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ],
+      "_predictedDecodeBytes": 23730848000,
+      "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes"
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f305-fps30-bounded_decode",
+      "_role": "rung2_boundary",
+      "_campaignPhase": "rung2_first",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 34320,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 274841600,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 305
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f305-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 384,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ],
+      "_predictedDecodeBytes": 18540396800,
+      "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes"
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f449-fps30-bounded_decode",
+      "_role": "rung2_boundary",
+      "_campaignPhase": "rung2_first",
+      "_coverageExpectation": "captured_or_attempted_or_arithmetic_unmeasurable",
+      "_latentTokens": 50160,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 404602880,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f449-fps30-seed18946",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 384,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ],
+      "_predictedDecodeBytes": 23730848000,
+      "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes"
+    }
+  ]
+}

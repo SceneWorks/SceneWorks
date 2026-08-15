@@ -157,7 +157,7 @@ on:
         required: false
         type: string
       run_ltx_eros_acceptance:
-        description: "Capture the fixed SC-18902 current-route LTX-2.3 10Eros CUDA baseline"
+        description: "Reproduce the fixed SC-18902 rejected historical LTX-2.3 10Eros CUDA baseline"
         required: false
         type: boolean
         default: false
@@ -555,6 +555,7 @@ jobs:
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
       - name: Verify capabilities.candle.json is a real dump, not a restamp
+        id: verify-candle-facts
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
@@ -597,11 +598,25 @@ jobs:
           :audio_restamped
           echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump at this pin. Either box re-dumps it - the audio registry is candle-native everywhere - then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
           exit /b 1
-      # SC-18902's product decision requires an actual Eros render, not source inference. These
-      # dispatch-only steps run after the ordinary PR verdicts so the capability dump remains last
-      # on the PR path. This captures only the current no-adapter Candle route. A candidate is
-      # intentionally absent: the published cond_safe LoRA has 3,320 keys while the current Candle
-      # adapter surface accepts only 768, so filtering it would not be an honest comparison.
+      # A routine pin bump is expected to fail the comparison above exactly once. Preserve the
+      # fresh, weights-free registry walk so the developer can commit the bytes the trusted CUDA
+      # lane actually produced instead of reconstructing a diff or restamping the revision label.
+      # The verification step remains red: this artifact is remediation evidence, not a bypass.
+      - name: Preserve fresh Candle capability facts after a pin mismatch
+        if: ${{ always() && steps.verify-candle-facts.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candle-engine-capability-facts-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}\engine-capability-facts-verify\capabilities.candle.json
+            ${{ runner.temp }}\engine-capability-facts-verify\audio\capabilities.candle.json
+          if-no-files-found: warn
+          retention-days: 7
+      # SC-18902's product decision required an actual Eros render, not source inference. These
+      # dispatch-only steps are retained only to reproduce that rejected historical baseline; they
+      # do not restore an Eros Candle product route. A candidate is intentionally absent: the
+      # published cond_safe LoRA has 3,320 keys while the retained Candle adapter surface accepts
+      # only 768, so filtering it would not be an honest comparison.
       - name: Validate the fixed LTX Eros acceptance dispatch
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
         shell: powershell

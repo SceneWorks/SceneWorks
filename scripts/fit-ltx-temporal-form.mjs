@@ -473,6 +473,8 @@ function persistedObservation(point) {
  * Terminal states, all four of which the logs distinguish:
  *   `completed`           — the driver wrote `OK`.
  *   `failed`              — the driver wrote `FAIL`; the child exited non-zero or was killed.
+ *   `arithmetic_unmeasurable` — no child was started; the driver wrote an explicit
+ *                           `ARITHMETIC_UNMEASURABLE name :: reason` proof.
  *   `no_terminal_record`  — a `BEGIN` with no `OK`/`FAIL`. The driver ITSELF did not survive to
  *                           write one. Attempted, and it did not survive; not "never run".
  *   `not_begun`           — no `BEGIN` line. `stoppedBefore` marks the entry the driver named when
@@ -492,7 +494,14 @@ export function driverStatesFrom(logs) {
   const states = new Map();
   const of = (name) => {
     if (!states.has(name)) {
-      states.set(name, { begins: 0, oks: 0, fails: 0, stoppedBefore: false });
+      states.set(name, {
+        begins: 0,
+        oks: 0,
+        fails: 0,
+        failReasons: [],
+        arithmeticReasons: [],
+        stoppedBefore: false,
+      });
     }
     return states.get(name);
   };
@@ -506,7 +515,12 @@ export function driverStatesFrom(logs) {
         // No open BEGIN ⇒ this line cannot be the driver's verdict on this entry.
         if (state.begins <= state.oks + state.fails) continue;
         if (match[1] === "OK") state.oks += 1;
-        else state.fails += 1;
+        else {
+          state.fails += 1;
+          state.failReasons.push(line.split(" :: ").slice(1).join(" :: "));
+        }
+      } else if ((match = /^ARITHMETIC_UNMEASURABLE (\S+) :: (.+)$/.exec(line))) {
+        of(match[1]).arithmeticReasons.push(match[2]);
       } else if ((match = /^STOP .* before (\S+)\s*$/.exec(line))) {
         of(match[1]).stoppedBefore = true;
       }
@@ -516,6 +530,8 @@ export function driverStatesFrom(logs) {
     state.terminal =
       state.oks > 0
         ? "completed"
+        : state.begins === 0 && state.arithmeticReasons.length > 0
+          ? "arithmetic_unmeasurable"
         : state.begins === 0
           ? "not_begun"
           : state.fails > 0
@@ -647,7 +663,7 @@ export function coverageOf(plan, points, driverStates = new Map()) {
   const entries = plan.providers.map((provider) => {
     const state = driverStates.get(provider.name);
     const terminal = state?.terminal ?? "not_begun";
-    const attempted = terminal !== "not_begun";
+    const attempted = (state?.begins ?? 0) > 0;
     if (provider._role === "not_attempted_host_limit" && attempted) {
       throw new Error(
         `${provider.fixture} is declared not_attempted_host_limit but the driver log records it as ` +
@@ -678,8 +694,14 @@ export function coverageOf(plan, points, driverStates = new Map()) {
       state:
         captures > 0
           ? "captured"
-          : terminal === "failed" || terminal === "no_terminal_record"
-            ? "attempted_failed_host_limit"
+          : terminal === "arithmetic_unmeasurable"
+            ? "arithmetic_unmeasurable"
+            : terminal === "failed" &&
+              state.failReasons.length > 0 &&
+              state.failReasons.every((reason) => reason.startsWith("arithmetic_unmeasurable:"))
+            ? "arithmetic_unmeasurable"
+            : terminal === "failed" || terminal === "no_terminal_record"
+              ? "attempted_failed_host_limit"
             : // The driver wrote OK and the dataset has no record for it — a retention hole, not a
               // host limit. Given its own bucket rather than folded into either neighbour, because
               // silently calling it "failed" is the same class of mislabel this function exists to
@@ -786,7 +808,281 @@ function selectorFitReport(scopedPoints) {
   return fits;
 }
 
-export function buildReport(points, plan = null, driverStates = new Map(), sourceSessions = []) {
+function tierAnalysisFits(selectorFits) {
+  const eligible = selectorFits.filter(
+    (entry) =>
+      entry.selector.rung === "staged_residency" &&
+      entry.selector.decodePass === "single_pass",
+  );
+  const grouped = new Map();
+  for (const entry of eligible) {
+    if (!grouped.has(entry.selector.tier)) grouped.set(entry.selector.tier, []);
+    grouped.get(entry.selector.tier).push(entry);
+  }
+  return grouped;
+}
+
+export function heldOutCoefficientTransfer(selectorFits) {
+  const grouped = tierAnalysisFits(selectorFits);
+  const byTier = new Map(
+    [...grouped].filter(([, entries]) => entries.length === 1).map(([tier, entries]) => [tier, entries[0]]),
+  );
+  const q8 = byTier.get("q8");
+  const requiredTargets = ["q4", "bf16"];
+  const targets = requiredTargets.filter((tier) => byTier.has(tier));
+  const missingTiers = ["q8", ...requiredTargets].filter((tier) => !byTier.has(tier));
+  if (missingTiers.length > 0) {
+    return {
+      status: "insufficient_data",
+      referenceTier: "q8",
+      targetTiers: requiredTargets,
+      missingTiers,
+      verdict: "open",
+      reason: "one unambiguous staged-residency single-pass selector is required for q8, q4 and bf16",
+      phases: {},
+    };
+  }
+  const phases = {};
+  let allFullTransfersPass = true;
+  let allSlopeTransfersPass = true;
+  let allFullTransfersMeasured = true;
+  let allSlopeTransfersMeasured = true;
+  for (const series of ["text", "denoise", "decode"]) {
+    const q8Cross = q8.fits?.[series]?.candidates?.cross;
+    phases[series] = {};
+    if (!q8Cross || q8Cross.singular) {
+      phases[series].status = "insufficient_data";
+      phases[series].reason = "q8 cross fit is absent or singular";
+      allFullTransfersMeasured = false;
+      allSlopeTransfersMeasured = false;
+      continue;
+    }
+    const q8Coefficients = q8Cross.coefficients;
+    for (const tier of targets) {
+      const target = byTier.get(tier);
+      const targetFit = target.fits?.[series];
+      const targetCross = targetFit?.candidates?.cross;
+      const points = target.points.map((point) => ({ ...point, value: point.series[series] }));
+      const fitPoints = points.filter((point) => point.role === "fit");
+      const heldOutPoints = points.filter((point) => point.role.startsWith("held_out"));
+      if (!targetCross || targetCross.singular || fitPoints.length === 0 || heldOutPoints.length === 0) {
+        phases[series][tier] = { status: "insufficient_data" };
+        allFullTransfersMeasured = false;
+        allSlopeTransfersMeasured = false;
+        continue;
+      }
+      const direct = residuals(heldOutPoints, "cross", Object.values(q8Coefficients));
+      const temporalSlope = q8Coefficients.perMpxFrameGb;
+      const interceptArea = leastSquares(
+        fitPoints.map((point) => [1, point.geometry.mpx]),
+        fitPoints.map((point) => point.value - temporalSlope * point.geometry.mpx * point.geometry.frames),
+      );
+      if (!interceptArea) {
+        phases[series][tier] = { status: "insufficient_data", reason: "target intercept/area refit is singular" };
+        allFullTransfersMeasured = false;
+        allSlopeTransfersMeasured = false;
+        continue;
+      }
+      const slopeTransfer = heldOutPoints.map((point) => {
+        const predicted = interceptArea[0] + interceptArea[1] * point.geometry.mpx +
+          temporalSlope * point.geometry.mpx * point.geometry.frames;
+        return {
+          fixture: point.fixture,
+          measuredGib: point.value,
+          predictedGib: predicted,
+          residualGib: predicted - point.value,
+        };
+      });
+      const targetNoise = noiseFloor(points);
+      const toleranceGib = targetCross.heldOut.maxAbsGib + (targetNoise.maxSpreadGib ?? 0);
+      const directSummary = summarise(direct);
+      const directPassed = directSummary.maxAbsGib <= toleranceGib + 1e-12;
+      const slopeSummary = summarise(slopeTransfer);
+      const passed = slopeSummary.maxAbsGib <= toleranceGib + 1e-12;
+      allFullTransfersPass &&= directPassed;
+      allSlopeTransfersPass &&= passed;
+      phases[series][tier] = {
+        status: "measured",
+        directQ8Coefficients: {
+          coefficients: q8Coefficients,
+          ...directSummary,
+          residuals: direct,
+          toleranceGib,
+          verdict: directPassed ? "transfers" : "does_not_transfer",
+        },
+        q8TemporalSlopeWithTargetInterceptArea: {
+          coefficients: {
+            fixedGb: interceptArea[0],
+            perMpxGb: interceptArea[1],
+            perMpxFrameGb: temporalSlope,
+          },
+          ...slopeSummary,
+          residuals: slopeTransfer,
+          toleranceGib,
+          targetOwnHeldOutEnvelopeGib: targetCross.heldOut.maxAbsGib,
+          sameSelectorReplicateNoiseGib: targetNoise.maxSpreadGib,
+          verdict: passed ? "transfers" : "does_not_transfer",
+        },
+      };
+    }
+  }
+  return {
+    status: allFullTransfersMeasured ? "measured" : "insufficient_data",
+    referenceTier: "q8",
+    targetTiers: targets,
+    verdict: !allFullTransfersMeasured
+      ? "open"
+      : allFullTransfersPass
+        ? "q8_coefficients_transfer"
+        : "per_tier_coefficients_required",
+    temporalSlopeStatus: allSlopeTransfersMeasured ? "measured" : "insufficient_data",
+    temporalSlopeVerdict: !allSlopeTransfersMeasured
+      ? "open"
+      : allSlopeTransfersPass
+        ? "q8_temporal_slopes_transfer_after_target_intercept_area_refit"
+        : "per_tier_temporal_slopes_required",
+    threshold: "target tier own cross held-out max absolute residual plus same-selector replicate spread",
+    phases,
+  };
+}
+
+export function phaseFlipVerdict(selectorFits) {
+  const tiers = {};
+  const grouped = tierAnalysisFits(selectorFits);
+  for (const [tier, entries] of grouped) {
+    if (entries.length !== 1) {
+      tiers[tier] = {
+        status: "insufficient_data",
+        reason: "tier has multiple staged-residency single-pass selectors",
+        selectors: entries.map((entry) => entry.selector),
+      };
+      continue;
+    }
+    const entry = entries[0];
+    const bindings = entry.points
+      .filter((point) => point.role === "fit" || point.role.startsWith("held_out"))
+      .map((point) => {
+        const values = Object.fromEntries(["text", "denoise", "decode"].map((phase) => [phase, point.series[phase]]));
+        const maximum = Math.max(...Object.values(values));
+        const bindingPhases = Object.entries(values)
+          .filter(([, value]) => value === maximum)
+          .map(([phase]) => phase);
+        const bindingPhase = bindingPhases.length === 1 ? bindingPhases[0] : null;
+        return {
+          fixture: point.fixture,
+          geometry: point.geometry,
+          activeGib: values,
+          bindingPhase,
+          ...(bindingPhase === null ? { bindingPhases } : {}),
+        };
+      });
+    const surfaces = [];
+    for (const [left, right] of [["text", "denoise"], ["text", "decode"], ["denoise", "decode"]]) {
+      const a = entry.fits?.[left]?.candidates?.cross?.coefficients;
+      const b = entry.fits?.[right]?.candidates?.cross?.coefficients;
+      if (!a || !b) continue;
+      const byArea = [...new Set(bindings.map((binding) => binding.geometry.mpx))].sort((x, y) => x - y)
+        .map((mpx) => {
+          const denominator = (a.perMpxFrameGb - b.perMpxFrameGb) * mpx;
+          const frames = Math.abs(denominator) < 1e-12
+            ? null
+            : -((a.fixedGb - b.fixedGb) + (a.perMpxGb - b.perMpxGb) * mpx) / denominator;
+          return { mpx, frames: Number.isFinite(frames) && frames > 0 ? frames : null };
+        });
+      surfaces.push({ phases: [left, right], byArea });
+    }
+    const bindingCounts = {
+      ...Object.fromEntries(["text", "denoise", "decode"].map((phase) => [
+        phase,
+        bindings.filter((binding) => binding.bindingPhase === phase).length,
+      ])),
+      ambiguous: bindings.filter((binding) => binding.bindingPhase === null).length,
+    };
+    const observedBindingPhases = ["text", "denoise", "decode"]
+      .filter((phase) => bindingCounts[phase] > 0);
+    tiers[tier] = {
+      status: "measured",
+      selector: entry.selector,
+      bindingCounts,
+      verdict: bindingCounts.ambiguous > 0
+        ? "ambiguous_binding_at_captured_geometry"
+        : observedBindingPhases.length > 1
+          ? "phase_binding_flips_with_geometry"
+          : "one_phase_binds_across_captured_geometry",
+      bindings,
+      curvePhaseFlipSurfaces: surfaces,
+    };
+  }
+  const requiredTiers = ["q4", "bf16"];
+  const tierEntries = requiredTiers.map((tier) => tiers[tier]);
+  let tierPhaseFlip;
+  if (tierEntries.some((entry) => entry?.status !== "measured")) {
+    tierPhaseFlip = {
+      status: "insufficient_data",
+      tiers: requiredTiers,
+      verdict: "open",
+      reason: "measured q4 and bf16 staged-residency single-pass selectors are required",
+      matchedGeometries: [],
+    };
+  } else {
+    const geometryKey = (binding) => JSON.stringify([
+      binding.geometry.width,
+      binding.geometry.height,
+      binding.geometry.frames,
+      binding.geometry.fps,
+    ]);
+    const q4Bindings = new Map(tiers.q4.bindings.map((binding) => [geometryKey(binding), binding]));
+    const bf16Bindings = new Map(tiers.bf16.bindings.map((binding) => [geometryKey(binding), binding]));
+    const matchedGeometries = [...q4Bindings]
+      .filter(([key]) => bf16Bindings.has(key))
+      .map(([key, q4]) => {
+        const bf16 = bf16Bindings.get(key);
+        const ambiguous = q4.bindingPhase === null || bf16.bindingPhase === null;
+        return {
+          geometry: q4.geometry,
+          q4BindingPhase: q4.bindingPhase,
+          bf16BindingPhase: bf16.bindingPhase,
+          ...(ambiguous ? { ambiguous: true } : { differs: q4.bindingPhase !== bf16.bindingPhase }),
+        };
+      })
+      .sort((left, right) => compareText(JSON.stringify(left.geometry), JSON.stringify(right.geometry)));
+    const ambiguous = matchedGeometries.filter((entry) => entry.ambiguous).length;
+    const differences = matchedGeometries.filter((entry) => entry.differs).length;
+    tierPhaseFlip = matchedGeometries.length === 0 || ambiguous > 0
+      ? {
+          status: "insufficient_data",
+          tiers: requiredTiers,
+          verdict: "open",
+          reason: matchedGeometries.length === 0
+            ? "q4 and bf16 have no matched scored geometries"
+            : "one or more matched geometries has an ambiguous binding phase",
+          matchedGeometries,
+        }
+      : {
+          status: "measured",
+          tiers: requiredTiers,
+          verdict: differences > 0
+            ? "tier_phase_flip_observed_at_matched_geometry"
+            : "no_tier_phase_flip_observed_at_matched_geometry",
+          differingGeometries: differences,
+          matchedGeometries,
+        };
+  }
+  return {
+    status: tierPhaseFlip.status,
+    distinction: "cross-tier binding differences and within-tier geometry flips are reported separately",
+    tierPhaseFlip,
+    tiers,
+  };
+}
+
+export function buildReport(
+  points,
+  plan = null,
+  driverStates = new Map(),
+  sourceSessions = [],
+  story = "sc-18810",
+) {
   const orderedPoints = points
     .slice()
     .sort((left, right) => compareText(left.recordId ?? "", right.recordId ?? ""));
@@ -803,6 +1099,7 @@ export function buildReport(points, plan = null, driverStates = new Map(), sourc
       key,
       selector,
       recordIds: scopedPoints.map((point) => point.recordId).sort(compareText),
+      points: scopedPoints,
       fits: selectorFitReport(scopedPoints),
     }))
     .sort((left, right) => compareText(left.key, right.key));
@@ -830,9 +1127,12 @@ export function buildReport(points, plan = null, driverStates = new Map(), sourc
   // Avoid duplicating the large residual tables on the ordinary one-selector-per-tier artifact:
   // that selector references the exact legacy slice just populated above. Only ambiguous tiers
   // carry their fit inline, because no truthful tier-only slice exists for them.
+  const coefficientTransfer = heldOutCoefficientTransfer(completeSelectorFits);
+  const phaseFlip = phaseFlipVerdict(completeSelectorFits);
   const selectorFits = completeSelectorFits.map((entry) => {
-    if ((selectorFitsByTier.get(entry.selector.tier) ?? []).length !== 1) return entry;
-    const { fits: _fits, ...identity } = entry;
+    const { points: _points, ...persisted } = entry;
+    if ((selectorFitsByTier.get(entry.selector.tier) ?? []).length !== 1) return persisted;
+    const { fits: _fits, ...identity } = persisted;
     return { ...identity, legacyFitTier: entry.selector.tier };
   });
   const noiseFloors = Object.fromEntries(
@@ -843,7 +1143,7 @@ export function buildReport(points, plan = null, driverStates = new Map(), sourc
   );
   return {
     schemaVersion: 1,
-    story: "sc-18810",
+    story,
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
     capturedRecords: orderedPoints.length,
     tiers,
@@ -855,6 +1155,7 @@ export function buildReport(points, plan = null, driverStates = new Map(), sourc
     ...(plan ? { coverage: coverageOf(plan, orderedPoints, driverStates) } : {}),
     noiseFloors,
     selectorFits,
+    ...(story === "sc-18810" ? {} : { coefficientTransfer, phaseFlip }),
     ...(legacyFitsOmittedForTiers.length > 0 ? { legacyFitsOmittedForTiers } : {}),
     observations: orderedPoints
       .map(persistedObservation)
@@ -931,7 +1232,13 @@ export function geometryHull(geometries) {
  * those boundaries. Each curve names the exact immutable record subset it consumed, partitioned by
  * source path and bound to the digest of that source's exact committed bytes.
  */
-export function buildVideoMemoryCurveBundle(report, records, manifest, sourceEvidenceInput) {
+export function buildVideoMemoryCurveBundle(
+  report,
+  records,
+  manifest,
+  sourceEvidenceInput,
+  sourceFit = "docs/generated/ltx-temporal-form-fit-sc-18810.json",
+) {
   if (!Array.isArray(records) || records.length === 0) {
     throw new Error("the video curve source dataset has no records");
   }
@@ -1191,7 +1498,7 @@ export function buildVideoMemoryCurveBundle(report, records, manifest, sourceEvi
   return {
     schemaVersion: 2,
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
-    sourceFit: "docs/generated/ltx-temporal-form-fit-sc-18810.json",
+    sourceFit,
     sourceCatalog,
     curves,
   };
@@ -1216,30 +1523,48 @@ async function main() {
     const found = args.flatMap((arg, index) => (arg === flag ? [args[index + 1]] : []));
     return found.length > 0 ? found : fallback;
   };
+  const story = value("--story", "sc-18810");
+  if (!/^sc-[0-9]+$/.test(story)) throw new Error(`--story must be sc-<digits>, got ${story}`);
   const datasetPaths = repeated("--dataset", [
-    "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+    story === "sc-18810"
+      ? "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"
+      : `docs/generated/ltx-mlx-single-pass-${story}.json`,
   ]).map((relative) => path.resolve(ROOT, relative));
   const planPath = path.resolve(
     ROOT,
-    value("--plan", "docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json"),
+    value(
+      "--plan",
+      story === "sc-18810"
+        ? "docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json"
+        : `docs/calibration/${story}/ltx-mlx-single-pass-sweep.json`,
+    ),
   );
   const reportPath = path.resolve(
     ROOT,
-    value("--write", "docs/generated/ltx-temporal-form-fit-sc-18810.json"),
+    value("--write", `docs/generated/ltx-temporal-form-fit-${story}.json`),
   );
   const curvePath = path.resolve(
     ROOT,
     value("--curve-write", "docs/generated/video-memory-curves.json"),
   );
+  const sourceFit = value("--source-fit", `docs/generated/ltx-temporal-form-fit-${story}.json`);
+  if (!isCanonicalRepoPath(sourceFit)) {
+    throw new Error(`--source-fit must be a canonical repository-relative path, got ${sourceFit}`);
+  }
   const manifestPath = path.resolve(ROOT, "config/manifests/builtin.models.jsonc");
   const curveSchemaPath = path.resolve(ROOT, "packages/schemas/video-memory-curves.schema.json");
   // BOTH driver sessions, in chronological order. The first crashed the host after four captures
   // and its log went uncommitted in the original PR, which is what let four of the thirteen records
   // ship with no terminal line anywhere. `--driver-log` may be repeated.
-  const driverLogPaths = repeated("--driver-log", [
-    "docs/calibration/sc-18810/precrash-q8-run.log",
-    "docs/calibration/sc-18810/sweep-run.log",
-  ]).map((relative) => path.resolve(ROOT, relative));
+  const driverLogPaths = repeated(
+    "--driver-log",
+    story === "sc-18810"
+      ? [
+          "docs/calibration/sc-18810/precrash-q8-run.log",
+          "docs/calibration/sc-18810/sweep-run.log",
+        ]
+      : [],
+  ).map((relative) => path.resolve(ROOT, relative));
   const datasets = await Promise.all(
     datasetPaths.map(async (file) => {
       const raw = await readFile(file, "utf8");
@@ -1267,9 +1592,16 @@ async function main() {
     plan,
     driverStates,
     sessionsFrom(logs, points, fixtureByName),
+    story,
   );
   const serialised = `${JSON.stringify(report, null, 2)}\n`;
-  const curveBundle = buildVideoMemoryCurveBundle(report, records, manifest, datasets);
+  const curveBundle = buildVideoMemoryCurveBundle(
+    report,
+    records,
+    manifest,
+    datasets,
+    sourceFit,
+  );
   const curveSchemaProblems = videoCurveSchemaErrors(curveSchema, curveBundle);
   if (curveSchemaProblems.length > 0) {
     throw new Error(

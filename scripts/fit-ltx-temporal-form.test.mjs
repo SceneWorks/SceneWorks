@@ -15,10 +15,12 @@ import {
   driverStatesFrom,
   fitSlice,
   geometryHull,
+  heldOutCoefficientTransfer,
   latentTemporalDepth,
   latentTokens,
   leastSquares,
   noiseFloor,
+  phaseFlipVerdict,
   pointsFrom,
   rolesFromPlan,
   sessionsFrom,
@@ -97,6 +99,112 @@ function mixedCurveInputs() {
   ];
   return { bounded, mixedReport, q4, records, sources };
 }
+
+test("held-out tier analysis uses only the exact staged single-pass selector", () => {
+  const { records } = mixedCurveInputs();
+  const report = buildReport(
+    pointsFrom(records, rolesFromPlan(PLAN), MANIFEST),
+    null,
+    new Map(),
+    [],
+    "sc-18946",
+  );
+  assert.equal(report.coefficientTransfer.verdict, "open");
+  assert.deepEqual(report.coefficientTransfer.missingTiers, ["bf16"]);
+  assert.equal(report.phaseFlip.tiers.q8.status, "measured");
+  assert.equal(report.phaseFlip.tiers.q8.selector.rung, "staged_residency");
+  assert.equal(report.phaseFlip.tiers.q8.selector.decodePass, "single_pass");
+
+});
+
+function analysisSelector(tier, phaseValues, roles = ["fit", "fit", "fit", "held_out"]) {
+  const geometries = [
+    geometry(768, 512, 121),
+    geometry(768, 512, 241),
+    geometry(1280, 704, 121),
+    geometry(640, 640, 177),
+  ];
+  const points = geometries.map((entry, index) => ({
+    fixture: `${tier}-${index}`,
+    role: roles[index],
+    geometry: entry,
+    series: phaseValues[index],
+  }));
+  const candidate = {
+    singular: false,
+    coefficients: { fixedGb: 1, perMpxGb: 1, perMpxFrameGb: 0.01 },
+    heldOut: { maxAbsGib: 0.5 },
+  };
+  return {
+    selector: { tier, rung: "staged_residency", decodePass: "single_pass" },
+    points,
+    fits: Object.fromEntries(["text", "denoise", "decode"].map((phase) => [
+      phase,
+      { candidates: { cross: structuredClone(candidate) } },
+    ])),
+  };
+}
+
+test("coefficient transfer stays open unless q8 q4 and bf16 are all complete", () => {
+  const values = [
+    { text: 2, denoise: 3, decode: 4 },
+    { text: 3, denoise: 4, decode: 5 },
+    { text: 4, denoise: 5, decode: 6 },
+    { text: 5, denoise: 6, decode: 7 },
+  ];
+  const q8 = analysisSelector("q8", values);
+  const q4 = analysisSelector("q4", values);
+  const incomplete = heldOutCoefficientTransfer([q8, q4]);
+  assert.equal(incomplete.status, "insufficient_data");
+  assert.equal(incomplete.verdict, "open");
+  assert.deepEqual(incomplete.missingTiers, ["bf16"]);
+
+  const bf16 = analysisSelector("bf16", values);
+  delete bf16.fits.decode.candidates.cross;
+  const missingPhase = heldOutCoefficientTransfer([q8, q4, bf16]);
+  assert.equal(missingPhase.status, "insufficient_data");
+  assert.equal(missingPhase.verdict, "open");
+  assert.equal(missingPhase.temporalSlopeStatus, "insufficient_data");
+  assert.equal(missingPhase.temporalSlopeVerdict, "open");
+  assert.equal(missingPhase.phases.decode.bf16.status, "insufficient_data");
+});
+
+test("the tier phase-flip verdict compares q4 and bf16 only at matched scored geometries", () => {
+  const q4Values = [
+    { text: 8, denoise: 4, decode: 3 },
+    { text: 7, denoise: 5, decode: 4 },
+    { text: 9, denoise: 6, decode: 5 },
+    { text: 8, denoise: 7, decode: 6 },
+  ];
+  const bf16Values = q4Values.map((value, index) => ({
+    text: value.text,
+    denoise: index === 2 ? value.text + 1 : value.denoise,
+    decode: value.decode,
+  }));
+  const verdict = phaseFlipVerdict([
+    analysisSelector("q4", q4Values),
+    analysisSelector("bf16", bf16Values),
+  ]);
+  assert.equal(verdict.status, "measured");
+  assert.equal(verdict.tierPhaseFlip.verdict, "tier_phase_flip_observed_at_matched_geometry");
+  assert.equal(verdict.tierPhaseFlip.differingGeometries, 1);
+  assert.equal(verdict.tierPhaseFlip.matchedGeometries.length, 4);
+});
+
+test("an exact phase tie keeps the tier phase-flip question open", () => {
+  const q4Values = Array.from({ length: 4 }, () => ({ text: 8, denoise: 4, decode: 3 }));
+  const bf16Values = structuredClone(q4Values);
+  bf16Values[0].denoise = 8;
+  const verdict = phaseFlipVerdict([
+    analysisSelector("q4", q4Values),
+    analysisSelector("bf16", bf16Values),
+  ]);
+  assert.equal(verdict.status, "insufficient_data");
+  assert.equal(verdict.tierPhaseFlip.verdict, "open");
+  assert.match(verdict.tierPhaseFlip.reason, /ambiguous binding phase/);
+  assert.equal(verdict.phaseFlip, undefined);
+  assert.equal(verdict.tiers.bf16.bindingCounts.ambiguous, 1);
+});
 
 test("video curve generation leaves the image calibration corpus byte-identical", () => {
   const imageCorpus = path.join(ROOT, "docs/generated/memory-calibration-evidence.json");
@@ -272,8 +380,8 @@ test("the persisted video curve has an explicit strict schema contract", () => {
   assert.equal(schema.properties.schemaVersion.const, 2);
   assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
   assert.equal(
-    schema.properties.sourceFit.const,
-    "docs/generated/ltx-temporal-form-fit-sc-18810.json",
+    schema.properties.sourceFit.pattern,
+    "^docs/generated/ltx-temporal-form-fit-sc-[0-9]+\\.json$",
   );
   assert.deepEqual(schema.required, [
     "schemaVersion",
@@ -404,6 +512,8 @@ test("multi-dataset CLI output stays current when source order is reversed", () 
     const curvePath = path.join(output, "curves.json");
     const args = (orderedPaths, check = false) => [
       path.join(ROOT, "scripts/fit-ltx-temporal-form.mjs"),
+      "--story", "sc-18946",
+      "--plan", path.join(ROOT, "docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json"),
       ...orderedPaths.flatMap((file) => ["--dataset", file]),
       "--driver-log", logPath,
       "--write", reportPath,
@@ -423,6 +533,10 @@ test("multi-dataset CLI output stays current when source order is reversed", () 
     assert.match(checked.stdout, /curves\.json are current/);
     assert.equal(JSON.parse(readFileSync(curvePath, "utf8")).curves.length, 3);
     const generatedReport = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.equal(generatedReport.story, "sc-18946");
+    assert.ok(generatedReport.coefficientTransfer);
+    assert.ok(generatedReport.phaseFlip);
+    assert.equal(JSON.parse(readFileSync(curvePath, "utf8")).sourceFit, "docs/generated/ltx-temporal-form-fit-sc-18946.json");
     assert.equal(generatedReport.selectorFits.length, 3);
     assert.deepEqual(generatedReport.legacyFitsOmittedForTiers, ["q8"]);
     assert.equal(
@@ -702,6 +816,25 @@ test("the driver log, not a hardcoded list, says what was attempted", () => {
   assert.equal(stopped.stoppedBefore, true);
   assert.equal(stopped.terminal, "not_begun");
   assert.equal(states.has("mlx-ltx-2-3-q8-1280x704-f297-fps30"), false);
+});
+
+test("an explicit arithmetic-unmeasurable terminal is distinct from a host failure and never run", () => {
+  const providers = structuredClone(PLAN.providers.slice(0, 3));
+  const [arithmetic, hostFailure, neverRun] = providers;
+  const states = driverStatesFrom([
+    [
+      `ARITHMETIC_UNMEASURABLE ${arithmetic.name} :: exact predicted floor exceeds the host budget`,
+      `BEGIN ${hostFailure.name} tier=${hostFailure.target.tier} free=1GiB 10:00:01`,
+      `FAIL ${hostFailure.name} 1s :: process killed by the host`,
+    ].join("\n"),
+  ]);
+  const coverage = coverageOf({ providers }, [], states);
+  const stateOf = (provider) =>
+    coverage.entries.find((entry) => entry.fixture === provider.fixture).state;
+  assert.equal(stateOf(arithmetic), "arithmetic_unmeasurable");
+  assert.equal(states.get(arithmetic.name).begins, 0, "arithmetic proof is not mislabeled as a run");
+  assert.equal(stateOf(hostFailure), "attempted_failed_host_limit");
+  assert.equal(stateOf(neverRun), "not_reached");
 });
 
 test("coverage buckets are derived from the log and the dataset, not from the role", () => {

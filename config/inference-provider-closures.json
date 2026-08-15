@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v3",
-  "inferenceRevision": "b4a29108e1eaf873bae3aa85262cd0849c24b311",
+  "inferenceRevision": "dad3f3df421c3e29cd732e6eb4fba4c82be4fbff",
   "providers": {
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
@@ -141,7 +141,7 @@
     },
     "mlx:ltx_2_3": {
       "crate": "crates/media/mlx-gen/mlx-gen-ltx",
-      "digest": "93316917cd278aa379557b5f08286614034abf6bcfbd81c76fc480d257d3833f",
+      "digest": "8790f418db3b8b8cc83dfa65297d86b714020edd0d90bced3b2ef81c34809f11",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
