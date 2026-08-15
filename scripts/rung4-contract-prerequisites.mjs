@@ -38,6 +38,27 @@
 // building its prerequisite vector some new way fails the derivation instead of silently recording
 // "no edges" — which is the fail-open direction, and the one that would put this module back where
 // the blanket proxy was.
+//
+// ...EXCEPT FOR ONE RESIDUAL FAIL-OPEN, STATED RATHER THAN HIDDEN
+//
+// Everything above is conditioned on the construction being IN THE CRATE'S OWN `src/`, because that
+// is all `crateSources` lists. The closed set is closed over occurrences the extractor SEES, and an
+// edge appended by a shared builder living outside the crate is not one of them: the crate's sources
+// contain no `additional_prerequisites` occurrence at all, so there is no unrecognised shape to
+// throw on, and `deriveCrateRecord` returns `additionalPrerequisites: []` at exit 0. That is a
+// silent zero of exactly the class this module exists to remove — reached by a route the "fails
+// closed" argument above does not cover.
+//
+// It is not reachable at the pinned revision: every provider constructs its own contract in its own
+// `src/`. It becomes reachable the moment a shared `gen_core` contract builder ships (sc-19591 is
+// scheduled to add one), because a provider that adopts it stops declaring the field itself and
+// silently loses its recorded edges without any derivation going red.
+//
+// Closing it needs the extractor to attribute a shared builder's appends back to each ADOPTING
+// crate — resolving the builder's own edge set once and unioning it into every caller's record —
+// which is a different derivation shape from "read this crate's own constructions", not a wider
+// glob. Whoever lands that builder must land it here in the same change; a record set that
+// silently drops to `[]` looks identical to a provider that genuinely declares no edges.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -70,33 +91,6 @@ export const STAGED_RESIDENCY_ENGAGED_IN_SAME_REQUEST = Object.freeze({
 const RUNG4 = "BoundedTransformerResidency";
 
 /**
- * Strip comments and whitespace so a construction spanning fifteen rustfmt'd lines is one token
- * sequence.
- *
- * LITERALS ARE BLANKED FIRST, and that ordering is the whole correctness argument. An earlier
- * version ran the comment regexes over RAW source and claimed the failure mode of getting it wrong
- * "is a red derivation and not a wrong record". That claim was FALSE, and the counterexample is two
- * ordinary constants. One holds a glob whose slash-star OPENS a block comment from inside a string
- * literal (`"shards/<star>.safetensors"`); a later one holds a ratio whose star-slash CLOSES it
- * (`"peak<star>/base ratio"`). The block-comment regex then DELETES everything between them —
- * including a real `.push((MemoryStrategy::BoundedTransformerResidency, …))`. The extractor sees no
- * construction at all, so it has nothing to fail closed ON: it derives `[]` and exits 0. A silent
- * zero, which is the exact defect class sc-19542 exists to remove. (Both spellings are written here
- * as `<star>` because this is itself a block comment; the executable form is in the self-test and
- * in `scripts/rung4-contract-prerequisites.test.mjs`.)
- *
- * `blankLiterals` already blanks comments AND literals in one left-to-right pass that cannot be
- * confused by either appearing inside the other, so it is the only primitive that may see raw
- * source. The comment regexes below are kept as a belt-and-braces no-op over its output.
- */
-export function normalizeRust(source) {
-  return blankLiterals(source)
-    .replace(/\/\/.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\s+/g, "");
-}
-
-/**
  * Every path qualifier a provider may write in front of these types.
  *
  * Providers reach gen-core three ways — directly, re-exported through `mlx_gen::gen_core`, or
@@ -107,14 +101,9 @@ function eraseCrateQualifiers(text) {
   return text.replace(/(?:crate::)?(?:mlx_gen|candle_gen|gen_core)::/g, "");
 }
 
-/** Rust `path::to::Ident` -> the shape patterns' single-form spelling. */
-function canonical(text) {
-  return eraseCrateQualifiers(normalizeRust(text));
-}
-
 /**
- * `canonical`, but keeping a map from every surviving character back to its offset in the BLANKED
- * source.
+ * Collapse whitespace and erase crate qualifiers, keeping a map from every surviving character back
+ * to its offset in the BLANKED source.
  *
  * The shape patterns need the collapsed single-token form; the reset and conditionality rules need
  * to know WHERE in the file each occurrence sits (which function encloses it, whether a `#[cfg]`
@@ -454,8 +443,28 @@ function functionExtents(scan) {
 }
 
 /**
- * Blank every string, raw-string and char literal so brace counting cannot be thrown by a `}` inside
- * one. Lengths are preserved, so offsets into the result index the original.
+ * Blank every comment, string, raw-string and char literal so brace counting cannot be thrown by a
+ * `}` inside one. Lengths are preserved, so offsets into the result index the original.
+ *
+ * THIS IS THE ONLY PRIMITIVE THAT MAY SEE RAW SOURCE, and that is the whole correctness argument
+ * for the extractor. An earlier version stripped comments with regexes over RAW source and claimed
+ * the failure mode of getting it wrong "is a red derivation and not a wrong record". That claim was
+ * FALSE, and the counterexample is two ordinary constants. One holds a glob whose slash-star OPENS
+ * a block comment from inside a string literal (`"shards/<star>.safetensors"`); a later one holds a
+ * ratio whose star-slash CLOSES it (`"peak<star>/base ratio"`). A block-comment regex then DELETES
+ * everything between them — including a real
+ * `.push((MemoryStrategy::BoundedTransformerResidency, …))`. The extractor sees no construction at
+ * all, so it has nothing to fail closed ON: it derives `[]` and exits 0. A silent zero, which is
+ * the exact defect class sc-19542 exists to remove. (Both spellings are written here as `<star>`
+ * because this is itself a block comment; the executable form is in
+ * `scripts/rung4-contract-prerequisites.test.mjs`.)
+ *
+ * The pass below is left-to-right and single, so a comment opener inside a literal and a literal
+ * quote inside a comment are each consumed by whichever construct opened first — which is what a
+ * pair of independent regexes cannot do. Every entry point takes this output rather than `source`
+ * (`stripTestOnlyItems`, `additionalPrerequisiteEdges`, `stagedResidencySupport`), as do the
+ * helpers they hand it to (`cfgAttributedItems`, `functionExtents`, `canonicalWithOffsets`);
+ * handing any of them raw source reintroduces the silent zero above.
  */
 export function blankLiterals(source) {
   const out = source.split("");
@@ -723,7 +732,14 @@ function git(repo, args) {
   });
 }
 
-/** Non-test Rust sources of one crate at `revision`. */
+/**
+ * Non-test Rust sources of one crate at `revision`.
+ *
+ * `<crate>/src/` ONLY, which bounds what every guard downstream can possibly see: a construction
+ * outside this list is not "unrecognised", it is invisible, and invisible reads as `[]` at exit 0.
+ * See the residual fail-open in the module header — a shared out-of-crate contract builder is the
+ * case that makes this bite, and it must be taught to this module in the same change that ships it.
+ */
 function crateSources(repo, revision, cratePath) {
   const listed = git(repo, ["ls-tree", "-r", "--name-only", revision, "--", `${cratePath}/src/`]);
   return listed

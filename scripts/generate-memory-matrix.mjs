@@ -1638,8 +1638,31 @@ export const RUNG4_DECLARED_SUPPORTS = Object.freeze([
  * `record.additionalPrerequisites` is derived from the pinned revision by
  * `scripts/rung4-contract-prerequisites.mjs`, and 21 of the catalog's 40 (family, backend) pairs
  * carry the rung-1 edge while 19 do not — so which families this consults the rung-1 predicate for
- * is now a property of the providers rather than a blanket rule. That 21/19 is a fact about the
- * RECORD SET; what it does to today's catalog is measured, and much smaller (see below).
+ * is now a property of the providers rather than a blanket rule.
+ *
+ * WHAT THAT 21/19 IS AND IS NOT (measured, sc-19542 review f6)
+ *
+ * 21/19 is a fact about the RECORD SET, not about this catalog. Instrumenting this arm over a full
+ * generation run measures the difference it actually makes:
+ *
+ *   * 426 evaluations reach `rung4ContractAdmits`, spanning 17 of the 40 (family, backend) pairs.
+ *     The other 23 pairs are never evaluated at all: the `&&` chains at both call sites short-
+ *     circuit on `structuralApplicability` and on `rung4Implementation` first, so a pair whose
+ *     rung-4 verdict is `none`, or which has no implementation parameters, never asks the contract.
+ *   * Of those 17 reached pairs, exactly 2 carry NO rung-1 edge and are therefore the only lanes
+ *     whose answer this fix can change: `15510:mlx` (Z-Image) and `15527:candle` (PuLID). The other
+ *     17 no-edge pairs are in the 23 that never arrive.
+ *   * `stagedResidencyIsAvailable` returned `true` at every one of the 426 evaluations, so the
+ *     edge-carrying pairs are admitted on the same term the old blanket proxy admitted them on.
+ *   * Old and new therefore agree on 40/40 probed keys, which is why the generated artifact is
+ *     BYTE-IDENTICAL across this change.
+ *
+ * So "19 lanes no longer consult the rung-1 proxy" is true of the record set and reaches 2 lanes in
+ * practice. The fix is still the right one — it replaces a proxy that happens to agree today with
+ * the graph the contract actually walks, and the divergence it prevents is the first time a
+ * provider's prerequisites change — but it is a correctness change with a byte-identical artifact,
+ * not a change in what this catalog admits. Stated here because a reader who takes 21/19 as the
+ * blast radius will over-read every one of those numbers.
  *
  * An edge flagged `conditional` — appended by a `then_some` on a runtime condition, or inside a
  * `#[cfg]`-gated item that is not in every production build — is evaluated as PRESENT. "This

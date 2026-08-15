@@ -182,7 +182,22 @@ test("a block-comment opener inside a string literal cannot delete a constructio
   // star-slash inside a later one made `/\*[\s\S]*?\*\//` swallow everything between them —
   // including the push. Exit 0, `[]` derived, nothing to fail closed on.
   //
-  // MUTATION: drop the `blankLiterals` call from `normalizeRust` and this derives `[]`.
+  // MUTATION (verified, sc-19542 review N2): make `blankLiterals` return `source` unchanged and the
+  // SECOND leg below reds. The first leg does not — see why, because it matters.
+  //
+  // The recipe previously written here — "drop the `blankLiterals` call from `normalizeRust`" — was
+  // measurably FALSE: run, it reddened 0 of 10 tests, because `normalizeRust` and its only caller
+  // `canonical` had no call sites and graded nothing. Both are now deleted.
+  //
+  // Removing them also removed the last block-comment regex from the live path, which retired the
+  // first leg's mutant along with it: with nothing downstream deleting comment spans, a slash-star
+  // inside a literal can no longer swallow a construction, and the leg passes whatever
+  // `blankLiterals` does. It is kept as a cheap fossil of the original defect, and labelled as one
+  // rather than left to read as a live guard.
+  //
+  // What blankLiterals actually protects in the live path is every SPAN-BOUNDED read over the
+  // scan — brace matching, `#[cfg]` item extents, function extents. The second leg exercises that
+  // directly, so this test grades the code it runs on rather than the code it was written against.
   const glob = ["shards/", "*", ".safetensors"].join("");
   const ratio = ["peak", "*", "/base ratio"].join("");
   const source = `
@@ -210,6 +225,40 @@ const RATIO_DOC: &str = "${ratio}";
     "BoundedTransformerResidency",
   ]);
   assert.ok(source.includes("/*") && source.includes("*/"), "the fixture must contain the trap");
+
+  // The LIVE leg. A `#[cfg(test)]` spelled inside an ordinary string constant is not an attribute,
+  // but `cfgAttributedItems` reads spans out of the scan and cannot tell the difference unless the
+  // literal has been blanked first. Unblanked, the extractor decides a test-only item survived
+  // stripping and throws — so a provider would derive nothing at all because one of its doc strings
+  // quoted an attribute. Blanked, the constant is inert and the real construction is read.
+  const attributeInAString = `
+const CFG_DOC: &str = "#[cfg(test)] modules are stripped before extraction";
+
+pub fn contract() -> MemoryProviderContract {
+    contract.additional_prerequisites.push((
+        MemoryStrategy::BoundedTransformerResidency,
+        ${EDGE},
+    ));
+}
+`;
+  assert.deepEqual(
+    spell(additionalPrerequisiteEdges(attributeInAString, "attribute in a literal")),
+    ["BoundedTransformerResidency"],
+  );
+  // Non-vacuity, the same shape the first leg uses: strip the constant and the identical body
+  // derives the identical edge, so the assertion above is graded by the blanking and not by the
+  // push being found for some unrelated reason.
+  const withoutAttribute = attributeInAString.replace(
+    'const CFG_DOC: &str = "#[cfg(test)] modules are stripped before extraction";',
+    "",
+  );
+  assert.deepEqual(spell(additionalPrerequisiteEdges(withoutAttribute, "no attribute")), [
+    "BoundedTransformerResidency",
+  ]);
+  assert.ok(
+    attributeInAString.includes("#[cfg(test)]"),
+    "the fixture must contain the quoted attribute",
+  );
 });
 
 test("`=` replaces the prerequisite vector and `.push` adds to it, scoped to one function", () => {
