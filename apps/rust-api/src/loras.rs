@@ -2477,6 +2477,141 @@ mod base_model_gating_tests {
             .unwrap();
     }
 
+    /// Writes a MiniMax-H3 turbo LoRA fixture in the published DIFFUSERS key space (sc-18725):
+    /// `transformer_blocks.<n>.` + the `token_refiner.refiner_blocks.<n>.` marker, with PEFT's
+    /// `.default` adapter-name infix. Block counts are tiny — detection keys on the refiner segment,
+    /// not on a block census.
+    fn write_minimax_h3_turbo_lora(dir: &std::path::Path, file_name: &str) {
+        use std::io::Write;
+        let mut entries = Vec::new();
+        let mut offset = 0_usize;
+        let push = |name: String, len: usize, entries: &mut Vec<String>, offset: &mut usize| {
+            entries.push(format!(
+                r#""{name}":{{"dtype":"BF16","shape":[1],"data_offsets":[{},{}]}}"#,
+                *offset,
+                *offset + len
+            ));
+            *offset += len;
+        };
+        for target in ["attn.to_q", "attn.to_out.0", "ff.net.0.proj", "ff.net.2"] {
+            for suffix in ["lora_A.default.weight", "lora_B.default.weight"] {
+                push(
+                    format!("transformer_blocks.0.{target}.{suffix}"),
+                    2,
+                    &mut entries,
+                    &mut offset,
+                );
+                push(
+                    format!("token_refiner.refiner_blocks.0.{target}.{suffix}"),
+                    2,
+                    &mut entries,
+                    &mut offset,
+                );
+            }
+        }
+        let header = format!(
+            r#"{{"__metadata__":{{"alpha":"8"}},{}}}"#,
+            entries.join(",")
+        );
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&vec![0u8; offset]);
+        std::fs::File::create(dir.join(file_name))
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    /// sc-18725: the end-to-end submit gate for the turbo accelerators, on BOTH H3 partitions.
+    ///
+    /// The model surfaces and the LoRA below are `json!` fixtures that MIRROR what
+    /// `builtin.models.jsonc` and `builtin.loras.jsonc` declare — this test reads neither manifest,
+    /// so a withdrawn or mistyped `families` list does NOT turn it red. What it proves is that
+    /// `validate_lora_specs_for_model` accepts that shape on both partitions. The manifest side is
+    /// held in `sceneworks-core`, by `both_minimax_h3_partitions_advertise_the_minimax_h3_lora_family`
+    /// (the model declarations) and `minimax_h3_turbo_loras_are_registered_and_sha_pinned` (the LoRA
+    /// entries), which do read the embedded manifests. Keep these fixtures in step with them by hand.
+    ///
+    /// It also pins that detection reports `minimax-h3` — before sc-18725 it reported `None`, which
+    /// let the file through this gate by ACCIDENT (the detected-family check is skipped on `None`)
+    /// while leaving a user-imported copy family-less and hidden by the web picker's fail-closed
+    /// rule.
+    #[test]
+    fn minimax_h3_turbo_lora_passes_the_submit_gate_on_both_partitions() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_turbo_lora(
+            tmp.path(),
+            "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
+        );
+        // The fixture is only meaningful if it really detects as minimax-h3 — pin that, so a change
+        // in the detector turns into a clear failure here rather than a vacuous pass.
+        let header = read_safetensors_header(
+            &tmp.path()
+                .join("minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors"),
+        )
+        .unwrap();
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+
+        let models = vec![
+            json!({
+                "id": "minimax_h3",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+            json!({
+                "id": "minimax_h3_ref",
+                "family": "minimax-h3",
+                "loraCompatibility": { "families": ["minimax-h3"] }
+            }),
+        ];
+        let lora = json!({
+            "id": "minimax_h3_turbo_8step",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+        });
+        for model_id in ["minimax_h3", "minimax_h3_ref"] {
+            validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(&lora),
+                true,
+                "LoRA",
+            )
+            .unwrap_or_else(|error| {
+                panic!("the turbo accelerator must be accepted on {model_id}: {error:?}")
+            });
+        }
+    }
+
+    /// The detected-family gate is a REAL gate for this family, not a formality: a LoRA from another
+    /// architecture is still refused on H3. Without this, `minimax_h3_turbo_lora_passes_...` above
+    /// would pass just as well against a model surface that accepted everything.
+    #[test]
+    fn a_foreign_lora_is_still_rejected_on_minimax_h3() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wan_i2v_lightning_lora(tmp.path());
+        let models = vec![json!({
+            "id": "minimax_h3",
+            "family": "minimax-h3",
+            "loraCompatibility": { "families": ["minimax-h3"] }
+        })];
+        let lora = json!({
+            "id": "some_wan_lora",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3"],
+        });
+        let error =
+            validate_lora_specs_for_model(&models, &[], "minimax_h3", &[lora], true, "LoRA")
+                .expect_err("a wan-video LoRA must not be accepted on minimax_h3");
+        assert!(
+            format!("{error:?}").contains("wan-video"),
+            "the rejection must name the detected family; got {error:?}"
+        );
+    }
+
     /// sc-18200: the bundled `scail2_lightning` speed toggle IS a lightx2v Wan2.1-I2V LoRA, applied
     /// to SCAIL-2 cross-architecture on purpose. `detect_lora_family` therefore reports `wan-video`
     /// — correctly — while the model surface declares `scail2`. The gate used to compare the
