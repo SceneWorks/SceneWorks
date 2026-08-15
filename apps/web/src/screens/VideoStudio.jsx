@@ -63,14 +63,19 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
-import { VIDEO_MODES, downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
+import {
+  VIDEO_MODES,
+  downloadOffersFor,
+  videoModelServesMode,
+  videoModelUsable,
+} from "../modelEligibility.js";
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macGatingActive,
-  macVideoModeBlock,
 } from "../macGating.js";
+import { candleAvailableModels, candleGatingActive } from "../candleGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
 import {
@@ -240,9 +245,15 @@ export function VideoStudio() {
       };
     });
   const [guideOpen, setGuideOpen] = useState(false);
-  // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
+  // Platform UI gating: hide whole models with no lane on THIS platform and snap off one if
+  // selected. Two composed partitions, one per platform, each a no-op on the other's platform:
+  //   * `macAvailableModels` (sc-3486) — torch-only models (e.g. SVD) on a gated Mac.
+  //   * `candleAvailableModels` (sc-19570) — models with no candle lane at all off-Mac (e.g.
+  //     `wan_2_2_vace_fun_14b`, whose only advertised mode is candle-unclaimable). Before this the
+  //     export existed and NOTHING imported it, so whole-model hiding was dead in the one screen
+  //     that matters and the picker still listed a model no off-Mac worker can claim.
   const macVideoModels = useMemo(
-    () => macAvailableModels(videoModels, macCapabilities),
+    () => candleAvailableModels(macAvailableModels(videoModels, macCapabilities), macCapabilities),
     [videoModels, macCapabilities],
   );
   useEffect(() => {
@@ -268,16 +279,19 @@ export function VideoStudio() {
   const selectedTextEncoderAvailable = textEncoderOptions.some(
     (option) => option.id === selectedTextEncoderModel,
   );
-  // Models gated on the selected tab, not tabs on the selected model (sc-5716). A model "serves" a
-  // mode when it declares the capability AND, under active Mac gating, that mode is MLX-routed for
-  // it (`macVideoModeBlock` is a no-op off-Mac, so there this is pure capability). The mode tabs,
-  // the model picker, and the snap-on-mode-switch effect all derive from this so the user is never
-  // trapped on a mode whose model can't serve the others.
+  // Models gated on the selected tab, not tabs on the selected model (sc-5716). "Serves" is the
+  // SHARED `videoModelServesMode` from modelEligibility.js — this screen used to keep a local copy
+  // that read the Mac block only, and that is exactly how sc-19570's off-Mac gate got added to the
+  // shared predicate (and so to the Simple studio, the screen gate and the download offers) while
+  // the Advanced shell kept rendering MLX-only tabs off-Mac. One authority, three layers:
+  // declaration + `macVideoModeBlock` + `candleVideoModeBlock`. The mode tabs, the model picker and
+  // the snap-on-mode-switch effect all derive from it so the user is never trapped on a mode whose
+  // model can't serve the others.
   const macGating = macGatingActive(macCapabilities);
+  const candleGating = candleGatingActive(macCapabilities);
   const baseVideoModels = macVideoModels.length ? macVideoModels : videoModels;
-  const modelServesMode = (item, value) =>
-    Boolean(item?.capabilities?.includes(value)) && !macVideoModeBlock(item, macCapabilities, value);
-  const modelsForMode = (value) => baseVideoModels.filter((item) => modelServesMode(item, value));
+  const modelsForMode = (value) =>
+    baseVideoModels.filter((item) => videoModelServesMode(item, value, macCapabilities));
   // Model-availability gate (sc-5947): when the user has no mac-available video model at all,
   // show recommended video-model downloads instead of the studio. `ready` matches the picker
   // (which falls back to all baseVideoModels); offers come from the full catalog via
@@ -933,14 +947,14 @@ export function VideoStudio() {
   // current model already serves the mode (e.g. an LTX image_to_video → text_to_video switch) or
   // when no model serves it (a reduced catalog) — there's nothing to snap to.
   useEffect(() => {
-    if (modelServesMode(selectedModel, mode)) {
+    if (videoModelServesMode(selectedModel, mode, macCapabilities)) {
       return;
     }
     const fallback = modelsForMode(mode)[0];
     if (fallback && fallback.id !== model) {
       setModel(fallback.id);
     }
-    // modelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
+    // videoModelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model, selectedModel, videoModels, macCapabilities]);
 
@@ -1120,14 +1134,25 @@ export function VideoStudio() {
     // capabilities include it (today: scail2_14b); the same per-model gating as the others.
     ["animate_character", "Animate character"],
   ];
-  // Mac UI gating (sc-3486, sc-3773, sc-5716): mode tabs are gated at the MODE level, not on the
-  // selected model. A tab is disabled only under active Mac gating when NO available model serves
-  // the mode (mode-level availability across `macVideoModels`) — never on the selected model's
-  // `videoModes`, which used to trap the user on replace_person / animate_character with no way
-  // back. Off-Mac `macGating` is false so tabs are never disabled here. The active tab is always
-  // left enabled so a reduced catalog can't strand you on a disabled tab. `macVideoModeBlock` still
-  // gates the in-mode model picker + submit (via `modelsForMode` / `supportsMode`).
-  const macModeTabBlocked = (value) => macGating && modelsForMode(value).length === 0;
+  // Platform UI gating (sc-3486, sc-3773, sc-5716, sc-19570): mode tabs are gated at the MODE
+  // level, not on the selected model. A tab is disabled only under active platform gating when NO
+  // available model serves the mode (mode-level availability across `macVideoModels`) — never on
+  // the selected model's `videoModes`, which used to trap the user on replace_person /
+  // animate_character with no way back. The active tab is always left enabled so a reduced catalog
+  // can't strand you on a disabled tab; the per-mode block still gates the in-mode model picker +
+  // submit (via `modelsForMode` / `supportsMode`).
+  //
+  // sc-19570 — PLATFORM-AGNOSTIC. This read `macGating &&`, which is false off-Mac, so every
+  // MLX-only tab (LTX 2.3's Image→Video / First-Last-Frame / Extend / Bridge / Replace) stayed
+  // enabled on Windows/Linux and the user only learned at Generate. Either gate disables the tab
+  // now; the two are mutually exclusive, so exactly one can ever be true.
+  const modeTabBlocked = (value) =>
+    (macGating || candleGating) && modelsForMode(value).length === 0;
+  // The tab tooltip names the platform that is doing the gating — off-Mac the honest sentence is
+  // the inverse of the Mac one (the pair works, just not here).
+  const modeTabBlockedText = candleGating
+    ? "No installed model supports this mode on this platform (macOS/MLX only)."
+    : "No installed model supports this mode on macOS.";
   const matchingTracks = useMemo(
     () =>
       mode === "replace_person"
@@ -1554,8 +1579,8 @@ export function VideoStudio() {
               options={modeOptions}
               mode={mode}
               onChange={setMode}
-              blockFor={(value, active) => !active && macModeTabBlocked(value)
-                ? { text: "No installed model supports this mode on macOS." }
+              blockFor={(value, active) => !active && modeTabBlocked(value)
+                ? { text: modeTabBlockedText }
                 : null}
             />
             <div className="prompt-hero-links">

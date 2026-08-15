@@ -111,6 +111,7 @@ pub struct Settings {
     /// trusting `127.0.0.1`/`::1` peers keeps local use password-free while LAN callers
     /// (other source IPs) stay gated. The desktop sets `SCENEWORKS_TRUST_LOOPBACK`;
     /// Docker/server never does, so a reverse-proxied deployment stays fail-closed.
+    pub trust_loopback: bool,
     /// sc-19570 — the API host's OS (`std::env::consts::OS` in production), threaded through
     /// `Settings` rather than read at each use site so the OFF-MAC branch of the per-mode
     /// reachability gate can be exercised on a Mac. macOS structurally cannot detect that class of
@@ -120,7 +121,6 @@ pub struct Settings {
     ///
     /// Values are the `std::env::consts::OS` vocabulary (`"macos"` / `"windows"` / `"linux"`).
     pub host_os: String,
-    pub trust_loopback: bool,
     /// Epic 10231 (sc-10233) — base URL the embedded MCP server's thin API client
     /// uses to call back into this API's `/api/v1/*` routes (the MCP tools are a
     /// thin HTTP client over the existing surface, mirroring the Rust worker — no
@@ -218,13 +218,13 @@ impl Settings {
             candle_enforce_unsupported: std::env::var("SCENEWORKS_CANDLE_UNSUPPORTED_MODE")
                 .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
                 .unwrap_or(false),
+            trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
             // Always the real host OS in production — never an env override. The field exists to
             // be substitutable in a test, not configurable in a deployment: a deployment that
             // could claim to be Windows would re-open the exact hang sc-19570 closes.
             host_os: std::env::consts::OS.to_owned(),
-            trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
             // The MCP self-calls originate on this machine; derive a base URL that
             // resolves to an interface this API actually binds (sc-10260).
             // `SCENEWORKS_API_URL` still overrides for reverse-proxy/container setups.

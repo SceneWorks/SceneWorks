@@ -2337,15 +2337,28 @@ mod tests {
             .expect("VIDEO_JOB_MODES is declared in apps/rust-api/src/lib.rs");
         let body = &source[start..];
         let end = body.find("\n];").expect("VIDEO_JOB_MODES terminates");
+        // Every quoted literal on the line, not the first. The per-line parser this replaces had
+        // exactly one open-failure mode among the realistic edits: TWO entries on one source line
+        // (`"a", "b",`). Rename, re-visibility, reformat, added or dropped entry all fail CLOSED
+        // (the parse breaks or the set changes and the `assert_eq!` reds), but a second literal on
+        // a taken line silently vanished from `admitted` — and if it also had no MCP arm it
+        // vanished from `reachable` too, so both sets missed it and the guard stayed green. The
+        // vacuity floor cannot catch that either once the list is longer than the floor. rustfmt
+        // normally forbids that layout, which is why the risk was low and the fix is cheap.
         let admitted: BTreeSet<String> = body[..end]
             .lines()
             .skip(1)
             .filter(|line| !line.trim_start().starts_with("//"))
-            .filter_map(|line| {
-                let open = line.find('"')?;
-                let rest = &line[open + 1..];
-                let close = rest.find('"')?;
-                Some(rest[..close].to_owned())
+            .flat_map(|line| {
+                let mut found = Vec::new();
+                let mut rest = line;
+                while let Some(open) = rest.find('"') {
+                    let after = &rest[open + 1..];
+                    let Some(close) = after.find('"') else { break };
+                    found.push(after[..close].to_owned());
+                    rest = &after[close + 1..];
+                }
+                found
             })
             .collect();
         assert!(

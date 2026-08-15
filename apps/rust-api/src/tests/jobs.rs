@@ -8139,10 +8139,14 @@ async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
 /// which is strictly worse than a rejection, and neither enforce sweep rescues it (both default to
 /// warn).
 ///
-/// Every pair sc-19570 measured is driven here, not a sample, and each is asserted THREE ways: it
-/// 400s on `windows`, it 400s on `linux`, and it is still `201` on `macos` — because breaking the
-/// Mac to fix Windows is the failure mode this shape invites. The final block submits pairs the
-/// candle lane genuinely serves, so a gate that simply refused everything off-Mac would go red.
+/// ALL TWENTY stranded pairs are driven here, not a sample and not only the thirteen the story
+/// measured: the three mac-only-download families (`krea_realtime_14b`, `minimax_h3`,
+/// `minimax_h3_ref`) ride the same route, because "the enqueue gate must refuse a raw REST call
+/// regardless of install state" is only an argument until the REST leg actually exercises it.
+/// Each is asserted THREE ways: it 400s on `windows`, it 400s on `linux`, and it is still `201` on
+/// `macos` — because breaking the Mac to fix Windows is the failure mode this shape invites. The
+/// final block submits pairs the candle lane genuinely serves, so a gate that simply refused
+/// everything off-Mac would go red.
 #[tokio::test]
 async fn an_mlx_only_video_mode_is_refused_at_submission_off_mac() {
     // The measured MLX-only, candle-unclaimable pairs, with the media each mode requires so the
@@ -8200,6 +8204,35 @@ async fn an_mlx_only_video_mode_is_refused_at_submission_off_mac() {
         (
             "wan_2_2_vace_fun_14b",
             json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        // The seven pairs the story's measurement did NOT list, because those three families ship
+        // `platforms: ["macos"]` downloads and it scoped itself to Windows/Linux-installable
+        // models. They belong on the REST leg specifically: the whole argument for having an
+        // enqueue gate at all is that it must refuse a raw REST call REGARDLESS of install state,
+        // and a core-predicate assertion cannot exercise that. Install state is not a reachability
+        // gate — a mac-only download list is one manifest edit from changing — and the route
+        // resolves these ids from the seeded manifest on every OS, so there is nothing to exempt.
+        ("krea_realtime_14b", json!({ "mode": "text_to_video" })),
+        (
+            "krea_realtime_14b",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "krea_realtime_14b",
+            json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
+        ),
+        ("minimax_h3", json!({ "mode": "text_to_video" })),
+        (
+            "minimax_h3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "minimax_h3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "minimax_h3_ref",
+            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
         ),
     ];
 

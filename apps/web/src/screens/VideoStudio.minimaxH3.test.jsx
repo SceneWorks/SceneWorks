@@ -26,6 +26,27 @@ vi.mock("../api.js", async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn(async () => ({})) };
 });
 
+// sc-19574 — a switch that forces `audioOnlyReferenceSet` FALSE into the real validator, so the
+// OTHER guard on the same shape (`hasInputs`' r2v arm, which sc-19574 narrowed to require a VISUAL
+// reference) can be asserted on its own. The two are exactly co-extensive on the r2v arm — the
+// narrowing changes the answer only when audio is outgoing and no image or clip is, which is the
+// precise condition `audioOnlyReferenceSet` names — so through the screen neither can be observed
+// while the other holds. That is why re-widening `hasInputs` mutated silently, and why proving it
+// individually needs the other guard suppressed rather than a different fixture.
+//
+// Off by default and reset in `afterEach`, so every other test in this file runs the real thing.
+const validationOverride = vi.hoisted(() => ({ suppressAudioOnly: false }));
+vi.mock("../videoStudioValidation.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    videoGenerateValidation: (args) =>
+      actual.videoGenerateValidation(
+        validationOverride.suppressAudioOnly ? { ...args, audioOnlyReferenceSet: false } : args,
+      ),
+  };
+});
+
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 
@@ -112,6 +133,7 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
   afterEach(async () => {
     await unmountRoot(root, container);
     vi.clearAllMocks();
+    validationOverride.suppressAudioOnly = false;
   });
 
   async function render(context) {
@@ -342,6 +364,64 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(payload.mode).toBe("reference_to_video");
     expect(payload.referenceAudioAssetIds).toEqual(["aud_1"]);
     expect(payload.referenceAssetIds).toEqual(["img_1"]);
+  });
+
+  it("keeps `hasInputs` narrowed to a VISUAL r2v reference, with the audio-only refusal suppressed", async () => {
+    // sc-19574. The test above proves the PAIR; this one proves `hasInputs`' r2v arm ALONE.
+    //
+    // The two guards are exactly co-extensive on this arm — the narrowing changes the answer only
+    // when audio is outgoing and no image or clip is, which is precisely the condition
+    // `audioOnlyReferenceSet` names — so through the screen neither can be observed while the other
+    // holds, and re-widening `hasInputs` back to `referenceAssetIds.length >= 0` mutated SILENTLY.
+    // Suppressing the validator's arm is what makes the remaining one gradeable.
+    validationOverride.suppressAudioOnly = true;
+    const context = baseContext({
+      videoModels: [MINIMAX_REF],
+      assets: [asset("aud_1", "audio", "voice"), asset("img_1", "image", "portrait")],
+    });
+    await render(context);
+    await click(modeTab("Reference → Video"));
+
+    await click(fieldLabelled("Reference audio").querySelector("button"));
+    await click(
+      [...document.querySelectorAll(".asset-picker-card")].find((card) =>
+        card.textContent.includes("voice"),
+      ),
+    );
+    await click(
+      [...document.querySelectorAll(".asset-picker-footer button")].find(
+        (b) => b.textContent.trim() === "Use Selection",
+      ),
+    );
+
+    const blocked = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Render clip"),
+    );
+    expect(blocked.disabled, "`hasInputs` alone must refuse an audio-only r2v set").toBe(true);
+    // Non-vacuity in the direction that matters: the OTHER guard really is suppressed, so what is
+    // being graded above is `hasInputs` and not the validator arm leaking through.
+    expect(
+      container.textContent,
+      "the validator arm must be suppressed, or this test grades the wrong guard",
+    ).not.toContain("An audio reference can't be the only reference");
+
+    // …and the arm is not simply "always false for r2v": one visual reference admits it, still with
+    // the validator arm suppressed.
+    await click(fieldLabelled("Reference images").querySelector("button"));
+    await click(
+      [...document.querySelectorAll(".asset-picker-card")].find((card) =>
+        card.textContent.includes("portrait"),
+      ),
+    );
+    await click(
+      [...document.querySelectorAll(".asset-picker-footer button")].find(
+        (b) => b.textContent.trim() === "Use Selection",
+      ),
+    );
+    const ready = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Render clip"),
+    );
+    expect(ready.disabled, "a visual reference is what the arm requires").toBe(false);
   });
 
   it("does not strand an audio-reference refusal on a form that cannot clear it", async () => {
