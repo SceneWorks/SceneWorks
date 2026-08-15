@@ -6604,7 +6604,15 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
 ///
 /// The fixture makes the two plausible homes disagree the same way the floor test above does:
 ///   * default video model — no menu at all (30 steps is its own business)
-///   * `distilled-vid`     — menu `[8]`, the LTX-2.3 shape
+///   * `ltx_2_3_eros`      — menu `[8]`, the LTX-2.3 shape
+///
+/// Both ids are REAL routed video models, exactly as the floor test above uses `mochi_1`. The menu
+/// model cannot be a made-up id: the sc-19504 no-lane gate runs last on the enqueue path and refuses
+/// any video request no backend's claim predicate accepts, so a synthetic id 400s for
+/// "no backend implements it" and the ON-menu `201` arm below — the one that keeps the rejections
+/// above from passing for a gate that simply refuses every step count — can never be reached.
+/// `ltx_2_3_eros` is `video_mlx_routed` + `candle_video_routed` and serves `text_to_video`, and it is
+/// one of the two models this story actually declares `limits.steps` for.
 #[tokio::test]
 async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -6634,14 +6642,14 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "distilled-vid",
+              "id": "ltx_2_3_eros",
               "name": "Distilled Vid",
               "family": "ltx-video",
               "type": "video",
               "adapter": "ltx_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/distilled-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/ltx_2_3_eros", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": { "steps": 8 },
@@ -6669,7 +6677,7 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "distilled-vid",
+              "model": "ltx_2_3_eros",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -6712,11 +6720,11 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "30 steps is off distilled-vid's exact menu and must be refused at enqueue: {body}"
+        "30 steps is off ltx_2_3_eros's exact menu and must be refused at enqueue: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("distilled-vid"),
+        detail.contains("ltx_2_3_eros"),
         "names the model whose menu applied — NOT the default's: {detail}"
     );
     assert!(
@@ -6760,7 +6768,7 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "8 is the menu: {body}");
-    assert_eq!(body["payload"]["model"], "distilled-vid");
+    assert_eq!(body["payload"]["model"], "ltx_2_3_eros");
     assert_eq!(
         body["payload"]["advanced"]["steps"], 8,
         "the admitted count travels VERBATIM — the gate refuses, it never rewrites"
@@ -6819,8 +6827,8 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
         .as_array()
         .expect("catalog is an array")
         .iter()
-        .find(|model| model["id"] == "distilled-vid")
-        .expect("distilled-vid is listed");
+        .find(|model| model["id"] == "ltx_2_3_eros")
+        .expect("ltx_2_3_eros is listed");
     assert_eq!(
         listed["limits"]["steps"],
         json!([8]),
