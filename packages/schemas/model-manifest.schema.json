@@ -1084,7 +1084,7 @@
                           "type": "array",
                           "minItems": 1,
                           "uniqueItems": true,
-                          "items": { "enum": ["plain", "lora", "lora_pid", "single_control", "multi_control", "ip_adapter", "pid", "identity"] },
+                          "items": { "enum": ["plain", "lora", "lora_pid", "lora_single_control", "lora_ip_adapter", "ip_adapter_pid", "lora_ip_adapter_pid", "single_control", "multi_control", "ip_adapter", "pid", "identity"] },
                           "description": "Exact LoadSpec component profiles served by this implementation. Omission retains the legacy one-profile-per-overlay interpretation; declaration-driven request-strategy routes must name this axis explicitly."
                         },
                         "sourceKinds": {
@@ -1113,7 +1113,7 @@
                           "description": "Exact public request coordinates admitted by a declaration-owned request-strategy route, plus the provider-facing mode bound to that same coordinate. hasPhases means GenerationRequest.phases, never Hires.fix or another worker multipass."
                         },
                         "providerOverlay": {
-                          "enum": ["none", "lora", "identity", "control"],
+                          "enum": ["none", "lora", "identity", "control", "adapters", "pid", "adapters-pid", "ip-adapter", "adapters-ip-adapter", "ip-adapter-pid", "adapters-ip-adapter-pid", "control-adapters"],
                           "description": "Exact MemoryRunContext overlay sent to the provider. This may differ from the public matrix overlay when adapters are load identity rather than provider evidence identity."
                         },
                         "requiredOffloadPolicy": {

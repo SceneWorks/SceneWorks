@@ -7342,6 +7342,8 @@ async fn generate_stream(
             | "krea_2_turbo"
             | "krea_2_edit"
             | "krea_2_turbo_edit"
+            | "flux1_schnell"
+            | "flux1_dev"
             | "flux2_klein_9b"
     ) {
         mlx_request_plan.with_resolved_artifact_tier(effective_tier)?
@@ -13116,6 +13118,13 @@ mod quant_tier_reconcile_tests {
             Some(Quant::Q4),
             "unrelated loaders retain their existing load-time quantization contract"
         );
+        for engine_id in ["flux1_schnell", "flux1_dev"] {
+            assert_eq!(
+                mlx_load_quant_for_resolved_artifact(engine_id, Some(Quant::Q4)),
+                Some(Quant::Q4),
+                "{engine_id} preserves the provider's matching packed-tier quant marker"
+            );
+        }
         assert_eq!(
             fixed_mlx_artifact_quant("flux2_klein_9b_true_v2"),
             Some((None, None)),

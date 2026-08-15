@@ -179,6 +179,10 @@ pub enum MemoryRouteLoadProfile {
     Plain,
     Lora,
     LoraPid,
+    LoraSingleControl,
+    LoraIpAdapter,
+    IpAdapterPid,
+    LoraIpAdapterPid,
     SingleControl,
     MultiControl,
     IpAdapter,
@@ -187,10 +191,14 @@ pub enum MemoryRouteLoadProfile {
 }
 
 impl MemoryRouteLoadProfile {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 12] = [
         Self::Plain,
         Self::Lora,
         Self::LoraPid,
+        Self::LoraSingleControl,
+        Self::LoraIpAdapter,
+        Self::IpAdapterPid,
+        Self::LoraIpAdapterPid,
         Self::SingleControl,
         Self::MultiControl,
         Self::IpAdapter,
@@ -203,6 +211,10 @@ impl MemoryRouteLoadProfile {
             Self::Plain => "plain",
             Self::Lora => "lora",
             Self::LoraPid => "lora_pid",
+            Self::LoraSingleControl => "lora_single_control",
+            Self::LoraIpAdapter => "lora_ip_adapter",
+            Self::IpAdapterPid => "ip_adapter_pid",
+            Self::LoraIpAdapterPid => "lora_ip_adapter_pid",
             Self::SingleControl => "single_control",
             Self::MultiControl => "multi_control",
             Self::IpAdapter => "ip_adapter",
@@ -215,8 +227,14 @@ impl MemoryRouteLoadProfile {
         match self {
             Self::Plain | Self::Pid => MemoryRouteOverlay::None,
             Self::Lora | Self::LoraPid => MemoryRouteOverlay::Lora,
-            Self::SingleControl | Self::MultiControl => MemoryRouteOverlay::Control,
-            Self::IpAdapter | Self::Identity => MemoryRouteOverlay::Identity,
+            Self::SingleControl | Self::LoraSingleControl | Self::MultiControl => {
+                MemoryRouteOverlay::Control
+            }
+            Self::IpAdapter
+            | Self::LoraIpAdapter
+            | Self::IpAdapterPid
+            | Self::LoraIpAdapterPid
+            | Self::Identity => MemoryRouteOverlay::Identity,
         }
     }
 
@@ -225,6 +243,10 @@ impl MemoryRouteLoadProfile {
             "plain" => Some(Self::Plain),
             "lora" => Some(Self::Lora),
             "lora_pid" => Some(Self::LoraPid),
+            "lora_single_control" => Some(Self::LoraSingleControl),
+            "lora_ip_adapter" => Some(Self::LoraIpAdapter),
+            "ip_adapter_pid" => Some(Self::IpAdapterPid),
+            "lora_ip_adapter_pid" => Some(Self::LoraIpAdapterPid),
             "single_control" => Some(Self::SingleControl),
             "multi_control" => Some(Self::MultiControl),
             "ip_adapter" => Some(Self::IpAdapter),
@@ -237,22 +259,36 @@ impl MemoryRouteLoadProfile {
     fn from_spec(spec: &LoadSpec) -> Option<Self> {
         let has_lora = !spec.adapters.is_empty();
         let has_pid = spec.pid.is_some();
-        let has_other_profile = spec.control.is_some()
-            || !spec.extra_controls.is_empty()
-            || spec.ip_adapter.is_some()
-            || spec.identity.is_some();
-        if has_lora && has_pid && !has_other_profile {
+        let has_control = spec.control.is_some();
+        let has_ip_adapter = spec.ip_adapter.is_some();
+        let has_identity = spec.identity.is_some();
+        if !spec.extra_controls.is_empty() {
+            return (!has_lora && !has_pid && !has_ip_adapter && !has_identity)
+                .then_some(Self::MultiControl);
+        }
+        if has_identity {
+            return (!has_lora && !has_pid && !has_control && !has_ip_adapter)
+                .then_some(Self::Identity);
+        }
+        if has_control {
+            return match (has_lora, has_pid, has_ip_adapter) {
+                (false, false, false) => Some(Self::SingleControl),
+                (true, false, false) => Some(Self::LoraSingleControl),
+                _ => None,
+            };
+        }
+        if has_ip_adapter {
+            return match (has_lora, has_pid) {
+                (false, false) => Some(Self::IpAdapter),
+                (true, false) => Some(Self::LoraIpAdapter),
+                (false, true) => Some(Self::IpAdapterPid),
+                (true, true) => Some(Self::LoraIpAdapterPid),
+            };
+        }
+        if has_lora && has_pid {
             return Some(Self::LoraPid);
         }
-        let profiles = [
-            has_lora.then_some(Self::Lora),
-            (spec.control.is_some() && spec.extra_controls.is_empty())
-                .then_some(Self::SingleControl),
-            (!spec.extra_controls.is_empty()).then_some(Self::MultiControl),
-            spec.ip_adapter.is_some().then_some(Self::IpAdapter),
-            has_pid.then_some(Self::Pid),
-            spec.identity.is_some().then_some(Self::Identity),
-        ];
+        let profiles = [has_lora.then_some(Self::Lora), has_pid.then_some(Self::Pid)];
         let mut present = profiles.into_iter().flatten();
         let first = present.next();
         if present.next().is_some() {
@@ -345,6 +381,16 @@ const PLAIN_LORA_PID: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Lora,
     MemoryRouteLoadProfile::LoraPid,
     MemoryRouteLoadProfile::Pid,
+];
+const FLUX1_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::IpAdapter,
+    MemoryRouteLoadProfile::LoraIpAdapter,
+    MemoryRouteLoadProfile::IpAdapterPid,
+    MemoryRouteLoadProfile::LoraIpAdapterPid,
+];
+const FLUX1_CONTROL_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::SingleControl,
+    MemoryRouteLoadProfile::LoraSingleControl,
 ];
 const PLAIN_SINGLE_CONTROL: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Plain,
@@ -467,6 +513,46 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: ALL_TIERS,
         modes: EDIT_MODES,
         load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux1_schnell",
+        tiers: ALL_TIERS,
+        modes: TEXT_AND_STYLE,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux1_dev",
+        tiers: ALL_TIERS,
+        modes: TEXT_AND_STYLE,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux1_dev",
+        tiers: ALL_TIERS,
+        modes: CHARACTER_ONLY,
+        load_profiles: FLUX1_IP_PROFILES,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux1_dev_control",
+        tiers: ALL_TIERS,
+        modes: &[
+            MemoryRouteMode::TextToImage,
+            MemoryRouteMode::StyleVariations,
+            MemoryRouteMode::CharacterImage,
+        ],
+        load_profiles: FLUX1_CONTROL_PROFILES,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -952,21 +1038,38 @@ fn mlx_request_implementation_matches(
         MemoryRouteLoadProfile::from_str,
     )?;
     let source_kind_matches = closed_source_kind_array_contains(implementation, source_kind)?;
-    let expected_provider_overlay = match load_profile {
-        MemoryRouteLoadProfile::Identity | MemoryRouteLoadProfile::IpAdapter => "identity",
-        MemoryRouteLoadProfile::SingleControl | MemoryRouteLoadProfile::MultiControl => "control",
-        MemoryRouteLoadProfile::Plain
-        | MemoryRouteLoadProfile::Lora
-        | MemoryRouteLoadProfile::LoraPid
-        | MemoryRouteLoadProfile::Pid => "none",
+    let public_overlay = match load_profile.overlay() {
+        MemoryRouteOverlay::Control => Some("control".to_owned()),
+        MemoryRouteOverlay::Identity => Some("identity".to_owned()),
+        MemoryRouteOverlay::None | MemoryRouteOverlay::Lora => None,
     };
-    if implementation
+    let expected_provider_overlay = crate::mlx_fit_gate::provider_overlay_for_load_spec(
+        selector.provider,
+        spec,
+        public_overlay,
+    )
+    .unwrap_or_else(|| "none".to_owned());
+    let declared_provider_overlay = implementation
         .get("providerOverlay")
         .and_then(Value::as_str)
-        != Some(expected_provider_overlay)
-    {
-        return Err(());
-    }
+        .filter(|overlay| {
+            matches!(
+                *overlay,
+                "none"
+                    | "lora"
+                    | "identity"
+                    | "control"
+                    | "adapters"
+                    | "pid"
+                    | "adapters-pid"
+                    | "ip-adapter"
+                    | "adapters-ip-adapter"
+                    | "ip-adapter-pid"
+                    | "adapters-ip-adapter-pid"
+                    | "control-adapters"
+            )
+        })
+        .ok_or(())?;
     let request_contexts = request_contexts.as_array().ok_or(())?;
     let matches = request_contexts
         .iter()
@@ -975,7 +1078,11 @@ fn mlx_request_implementation_matches(
             request_strategy_context_matches(request_context, context)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if !selector_matches || !load_profile_matches || !source_kind_matches {
+    if !selector_matches
+        || !load_profile_matches
+        || !source_kind_matches
+        || declared_provider_overlay != expected_provider_overlay
+    {
         return Ok(false);
     }
     let matching = request_contexts
@@ -995,6 +1102,19 @@ fn expected_provider_mode(
     context: MemoryRouteRequestContext,
 ) -> &'static str {
     match (runtime_provider, context.mode) {
+        (
+            "flux1_schnell" | "flux1_dev",
+            MemoryRouteMode::TextToImage | MemoryRouteMode::StyleVariations,
+        ) if context.reference_count == 0 => "text_to_image",
+        ("flux1_dev", MemoryRouteMode::CharacterImage) if context.reference_count == 1 => {
+            "image_to_image"
+        }
+        (
+            "flux1_dev_control",
+            MemoryRouteMode::TextToImage
+            | MemoryRouteMode::StyleVariations
+            | MemoryRouteMode::CharacterImage,
+        ) if context.reference_count == 1 => "image_to_image",
         (
             "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit",
             MemoryRouteMode::StyleVariations
@@ -1020,6 +1140,7 @@ fn manifest_contract(
         .and_then(Value::as_object)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn request_strategy_implementation_matches(
     implementation: &Value,
     contract_provider: &str,
@@ -1028,6 +1149,7 @@ fn request_strategy_implementation_matches(
     load_profile: MemoryRouteLoadProfile,
     source_kind: &str,
     context: MemoryRouteRequestContext,
+    expected_provider_overlay: Option<&str>,
 ) -> Result<bool, ()> {
     let implementation = implementation.as_object().ok_or(())?;
     let rung = implementation_rung(implementation)?;
@@ -1065,6 +1187,16 @@ fn request_strategy_implementation_matches(
         MemoryRouteLoadProfile::from_str,
     )?;
     let source_kind_matches = closed_source_kind_array_contains(implementation, source_kind)?;
+    let provider_overlay_matches = match expected_provider_overlay {
+        Some(expected) => {
+            implementation
+                .get("providerOverlay")
+                .and_then(Value::as_str)
+                .ok_or(())?
+                == expected
+        }
+        None => true,
+    };
     let matches = request_contexts
         .iter()
         .map(|request_context| {
@@ -1076,7 +1208,8 @@ fn request_strategy_implementation_matches(
         && mode_matches
         && overlay_matches
         && load_profile_matches
-        && source_kind_matches)
+        && source_kind_matches
+        && provider_overlay_matches)
     {
         return Ok(false);
     }
@@ -1090,6 +1223,20 @@ fn request_strategy_implementation_matches(
     };
     Ok(matching.get("providerMode").and_then(Value::as_str)
         == Some(expected_provider_mode(runtime_provider, context)))
+}
+
+fn expected_provider_overlay(
+    provider: &str,
+    spec: &LoadSpec,
+    load_profile: MemoryRouteLoadProfile,
+) -> String {
+    let public_overlay = match load_profile.overlay() {
+        MemoryRouteOverlay::Control => Some("control".to_owned()),
+        MemoryRouteOverlay::Identity => Some("identity".to_owned()),
+        MemoryRouteOverlay::None | MemoryRouteOverlay::Lora => None,
+    };
+    crate::mlx_fit_gate::provider_overlay_for_load_spec(provider, spec, public_overlay)
+        .unwrap_or_else(|| "none".to_owned())
 }
 
 fn request_strategy_provider_mode_is_exact(
@@ -1277,6 +1424,7 @@ fn declared_candle_request_strategy_contract_with(
                 load_profile,
                 source_kind,
                 context,
+                None,
             )
         })
         .collect::<Result<Vec<_>, _>>();
@@ -1296,6 +1444,7 @@ fn declared_candle_request_strategy_contract_with(
             load_profile,
             source_kind,
             context,
+            None,
         ) == Ok(true)
     });
     let provider_overlay = match matching_implementation
@@ -1457,6 +1606,27 @@ fn has_relevant_btr_declaration(
     }))
 }
 
+fn has_relevant_mlx_request_declaration(manifest: &JsonObject<String, Value>) -> Result<bool, ()> {
+    let Some(backend) = manifest.get("mlx").and_then(Value::as_object) else {
+        return Ok(false);
+    };
+    let Some(contract_value) = backend.get("memoryStrategyContract") else {
+        return Ok(false);
+    };
+    let contract = contract_value.as_object().ok_or(())?;
+    let implementations = contract
+        .get("implementations")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    Ok(implementations.iter().any(|implementation| {
+        matches!(
+            implementation.get("rung").and_then(Value::as_str),
+            Some("bounded_transformer_residency")
+        ) || (implementation.get("rung").and_then(Value::as_str) == Some("staged_residency")
+            && implementation.get("requestContexts").is_some())
+    }))
+}
+
 /// Evaluate manifest-owned deferred shaping against the exact typed coordinate and linked provider.
 /// The tri-state result distinguishes a route with no BTR declaration (the only case where the
 /// caller may use legacy shaping) from a declared refusal. The resolved artifact tier is explicit:
@@ -1484,9 +1654,12 @@ pub fn evaluate_declared_mlx_load_shape(
     )
 }
 
-/// Request-exact MLX declaration intersection. Krea routes use the public request coordinate plus
-/// the provider-owned reference/PiD/phase axes; older declarations without `requestContexts` keep
-/// their established behavior through [`evaluate_declared_mlx_load_shape`].
+/// Request-exact MLX declaration intersection. Full BTR rows authorize `Applied + Deferred`;
+/// exact lower-only staged rows authorize only `Eligible + Eager` under their declared load policy.
+/// `Eligible` remains non-authorizing for BTR and is ignored by every legacy shaper. Krea and FLUX
+/// routes use the public request coordinate plus provider-owned reference/PiD/phase axes; older
+/// declarations without `requestContexts` keep their established behavior through
+/// [`evaluate_declared_mlx_load_shape`].
 pub fn evaluate_declared_mlx_load_shape_for_request(
     provider: &str,
     resolved_tier: Option<&str>,
@@ -1495,24 +1668,22 @@ pub fn evaluate_declared_mlx_load_shape_for_request(
     spec: LoadSpec,
     context: MemoryRouteRequestContext,
 ) -> LoadSpec {
-    evaluate_declared_mlx_load_shape_for_request_with(
+    evaluate_declared_mlx_load_shape_for_request_with_strategy(
         provider,
         resolved_tier,
         mode,
         manifest,
         spec,
         context,
-        |candidate| {
+        |candidate, strategy| {
             crate::inference_runtime::media()
                 .memory_strategy_contract(provider, candidate)
                 .ok()
                 .flatten()
                 .is_some_and(|contract| {
-                    contract
-                        .capability(MemoryStrategy::BoundedTransformerResidency)
-                        .is_some_and(|capability| {
-                            capability.support == MemoryStrategySupport::Implemented
-                        })
+                    contract.capability(strategy).is_some_and(|capability| {
+                        capability.support == MemoryStrategySupport::Implemented
+                    })
                 })
         },
     )
@@ -1608,6 +1779,8 @@ pub fn apply_declared_mlx_load_policy_for_request(
         WeightsSource::Dir(_) => "dir",
         WeightsSource::File(_) => "file",
     };
+    let expected_provider_overlay =
+        expected_provider_overlay(selector.provider, &spec, load_profile);
     let staged_matches = implementations
         .iter()
         .map(|candidate| {
@@ -1619,6 +1792,7 @@ pub fn apply_declared_mlx_load_policy_for_request(
                 load_profile,
                 source_kind,
                 context,
+                Some(&expected_provider_overlay),
             )
         })
         .collect::<Result<Vec<_>, _>>();
@@ -1695,6 +1869,7 @@ fn evaluate_declared_mlx_load_shape_with(
     )
 }
 
+#[cfg(test)]
 fn evaluate_declared_mlx_load_shape_for_request_with(
     provider: &str,
     resolved_tier: Option<&str>,
@@ -1704,7 +1879,27 @@ fn evaluate_declared_mlx_load_shape_for_request_with(
     context: MemoryRouteRequestContext,
     provider_implements: impl FnOnce(&LoadSpec) -> bool,
 ) -> LoadSpec {
-    match has_relevant_btr_declaration(manifest, MemoryRouteBackend::Mlx) {
+    evaluate_declared_mlx_load_shape_for_request_with_strategy(
+        provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        context,
+        |candidate, _| provider_implements(candidate),
+    )
+}
+
+fn evaluate_declared_mlx_load_shape_for_request_with_strategy(
+    provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+    context: MemoryRouteRequestContext,
+    provider_implements: impl FnOnce(&LoadSpec, MemoryStrategy) -> bool,
+) -> LoadSpec {
+    match has_relevant_mlx_request_declaration(manifest) {
         Ok(false) => return spec,
         Err(()) => return spec.with_refused_load_shape_declaration(),
         Ok(true) => {}
@@ -1765,7 +1960,7 @@ fn evaluate_declared_mlx_load_shape_for_request_with(
             return spec.with_refused_load_shape_declaration();
         }
     }
-    let matches = implementations
+    let btr_matches = implementations
         .iter()
         .map(|implementation| {
             mlx_request_implementation_matches(
@@ -1778,10 +1973,11 @@ fn evaluate_declared_mlx_load_shape_for_request_with(
             )
         })
         .collect::<Result<Vec<_>, _>>();
-    let Ok(matches) = matches else {
+    let Ok(btr_matches) = btr_matches else {
         return spec.with_refused_load_shape_declaration();
     };
-    if matches.into_iter().filter(|matched| *matched).count() != 1 {
+    let btr_count = btr_matches.into_iter().filter(|matched| *matched).count();
+    if btr_count > 1 {
         return spec.with_refused_load_shape_declaration();
     }
     let mut matching = matching_rules(selector).peekable();
@@ -1789,10 +1985,62 @@ fn evaluate_declared_mlx_load_shape_for_request_with(
         return spec.with_refused_load_shape_declaration();
     }
     if matching.all(|rule| rule.requires_sequential_selection) {
-        return spec;
+        return if btr_count == 1 {
+            spec
+        } else {
+            spec.with_refused_load_shape_declaration()
+        };
     }
     if !matches!(spec.weights, WeightsSource::Dir(_)) {
         return spec.with_refused_load_shape_declaration();
+    }
+
+    if btr_count == 0 {
+        let source_kind = "dir";
+        let expected_provider_overlay =
+            expected_provider_overlay(selector.provider, &spec, load_profile);
+        let staged_matches = implementations
+            .iter()
+            .map(|implementation| {
+                request_strategy_implementation_matches(
+                    implementation,
+                    contract_provider,
+                    selector.provider,
+                    tier,
+                    load_profile,
+                    source_kind,
+                    context,
+                    Some(&expected_provider_overlay),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(staged_matches) = staged_matches else {
+            return spec.with_refused_load_shape_declaration();
+        };
+        let matching_staged = implementations
+            .iter()
+            .zip(staged_matches)
+            .filter_map(|(implementation, matched)| matched.then_some(implementation))
+            .collect::<Vec<_>>();
+        let [matching_staged] = matching_staged.as_slice() else {
+            return spec.with_refused_load_shape_declaration();
+        };
+        if matching_staged
+            .get("requiredOffloadPolicy")
+            .and_then(Value::as_str)
+            != Some("sequential")
+        {
+            return spec.with_refused_load_shape_declaration();
+        }
+        let staged = spec
+            .clone()
+            .with_eligible_load_shape_declaration()
+            .with_offload_policy(OffloadPolicy::Sequential);
+        return if provider_implements(&staged, MemoryStrategy::StagedResidency) {
+            staged
+        } else {
+            spec.with_refused_load_shape_declaration()
+        };
     }
 
     let applied = spec.clone().with_applied_load_shape_declaration();
@@ -1804,7 +2052,10 @@ fn evaluate_declared_mlx_load_shape_for_request_with(
         Ok(_) => applied.clone(),
         Err(()) => return spec.with_refused_load_shape_declaration(),
     };
-    if provider_implements(&provider_candidate) {
+    if provider_implements(
+        &provider_candidate,
+        MemoryStrategy::BoundedTransformerResidency,
+    ) {
         applied
     } else {
         spec.with_refused_load_shape_declaration()
@@ -2428,6 +2679,37 @@ mod tests {
                     1.0,
                     gen_core::AdapterKind::Lora,
                 )])
+                .with_pid(
+                    WeightsSource::File("pid.safetensors".into()),
+                    WeightsSource::Dir("gemma".into()),
+                ),
+            MemoryRouteLoadProfile::LoraSingleControl => base
+                .with_adapters(vec![gen_core::AdapterSpec::new(
+                    "adapter.safetensors".into(),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )])
+                .with_control(WeightsSource::File("control.safetensors".into())),
+            MemoryRouteLoadProfile::LoraIpAdapter => base
+                .with_adapters(vec![gen_core::AdapterSpec::new(
+                    "adapter.safetensors".into(),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )])
+                .with_ip_adapter(WeightsSource::Dir("ip-adapter".into())),
+            MemoryRouteLoadProfile::IpAdapterPid => base
+                .with_ip_adapter(WeightsSource::Dir("ip-adapter".into()))
+                .with_pid(
+                    WeightsSource::File("pid.safetensors".into()),
+                    WeightsSource::Dir("gemma".into()),
+                ),
+            MemoryRouteLoadProfile::LoraIpAdapterPid => base
+                .with_adapters(vec![gen_core::AdapterSpec::new(
+                    "adapter.safetensors".into(),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )])
+                .with_ip_adapter(WeightsSource::Dir("ip-adapter".into()))
                 .with_pid(
                     WeightsSource::File("pid.safetensors".into()),
                     WeightsSource::Dir("gemma".into()),
@@ -3549,7 +3831,8 @@ mod tests {
         let undeclared = evaluate(MemoryRouteTier::Q4, q4_identity(), context, &no_btr);
         assert_eq!(
             undeclared.load_shape_declaration_result,
-            LoadShapeDeclarationResult::NotEvaluated
+            LoadShapeDeclarationResult::Refused,
+            "an exhaustive declaration cannot silently downgrade its full-ladder identity to staged-only"
         );
         assert_eq!(
             apply_registered_load_shape(
@@ -6063,5 +6346,280 @@ mod tests {
                     | MemoryRouteLoadProfile::Pid
             )
         }));
+    }
+
+    #[test]
+    fn flux1_mlx_declarations_separate_btr_from_exact_staged_only_authority() {
+        let schnell = shipped_model("flux_schnell");
+        let dev = shipped_model("flux_dev");
+        for (manifest, expected_rows) in [(&schnell, 11), (&dev, 23)] {
+            let contract = &manifest["mlx"]["memoryStrategyContract"];
+            assert_eq!(contract["exhaustive"], true);
+            assert_eq!(
+                contract["implementations"]
+                    .as_array()
+                    .expect("FLUX.1 implementation rows")
+                    .len(),
+                expected_rows
+            );
+            assert!(manifest["mlx"].get("supportsSequentialOffload").is_none());
+            for implementation in contract["implementations"]
+                .as_array()
+                .expect("FLUX.1 implementation rows")
+            {
+                assert_eq!(
+                    implementation["tiers"],
+                    serde_json::json!(["bf16", "q4", "q8"])
+                );
+                assert_eq!(implementation["sourceKinds"], serde_json::json!(["dir"]));
+                assert!(implementation["requestContexts"]
+                    .as_array()
+                    .is_some_and(|contexts| !contexts.is_empty()
+                        && contexts.iter().all(|context| {
+                            context["hasPhases"] == false
+                                && context["referenceCounts"]
+                                    .as_array()
+                                    .is_some_and(|counts| !counts.is_empty())
+                        })));
+            }
+        }
+        for (manifest, provider) in [(&schnell, "flux1_schnell"), (&dev, "flux1_dev")] {
+            let context = MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
+            };
+            let plain = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain)
+                .with_resolved_route(manifest["id"].as_str().expect("manifest id"));
+            let applied = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                provider,
+                Some("q4"),
+                Some(context.mode),
+                manifest,
+                plain,
+                context,
+                |candidate, strategy| {
+                    strategy == MemoryStrategy::BoundedTransformerResidency
+                        && candidate.load_shape == LoadShape::DeferredMaterialization
+                        && candidate.offload_policy == OffloadPolicy::Sequential
+                },
+            );
+            assert_eq!(
+                applied.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied
+            );
+            assert_eq!(applied.load_shape, LoadShape::DeferredMaterialization);
+
+            let low_rank = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Lora)
+                .with_resolved_route(manifest["id"].as_str().expect("manifest id"));
+            let staged = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                provider,
+                Some("q4"),
+                Some(context.mode),
+                manifest,
+                low_rank,
+                context,
+                |candidate, strategy| {
+                    strategy == MemoryStrategy::StagedResidency
+                        && candidate.load_shape == LoadShape::EagerMaterialization
+                        && candidate.offload_policy == OffloadPolicy::Sequential
+                },
+            );
+            assert_eq!(
+                staged.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Eligible,
+                "{provider}: lower-rung declaration must not fabricate BTR Applied authority"
+            );
+            assert_eq!(staged.load_shape, LoadShape::EagerMaterialization);
+            assert_eq!(staged.offload_policy, OffloadPolicy::Sequential);
+            let later = apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                provider,
+                context.mode,
+                staged.clone(),
+                true,
+            );
+            assert_eq!(
+                later.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Eligible,
+                "Eligible is non-authorizing for legacy shaping"
+            );
+            assert_eq!(later.load_shape, LoadShape::EagerMaterialization);
+            assert_eq!(later.offload_policy, OffloadPolicy::Sequential);
+        }
+
+        let control_rows = dev["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("FLUX.1 dev implementation rows")
+            .iter()
+            .filter(|implementation| {
+                implementation
+                    .get("runtimeProvider")
+                    .and_then(Value::as_str)
+                    == Some("flux1_dev_control")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(control_rows.len(), 4);
+        assert!(control_rows.iter().all(|implementation| matches!(
+            implementation["rung"].as_str(),
+            Some("resident" | "staged_residency")
+        )));
+        let control_context = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::CharacterImage,
+            reference_count: 1,
+            use_pid: false,
+            has_phases: false,
+        };
+        let control = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl)
+            .with_resolved_route("flux_dev");
+        let staged = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+            "flux1_dev_control",
+            Some("q4"),
+            Some(control_context.mode),
+            &dev,
+            control,
+            control_context,
+            |candidate, strategy| {
+                strategy == MemoryStrategy::StagedResidency
+                    && candidate.load_shape == LoadShape::EagerMaterialization
+            },
+        );
+        assert_eq!(
+            staged.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Eligible
+        );
+        assert_eq!(staged.load_shape, LoadShape::EagerMaterialization);
+        assert_eq!(staged.offload_policy, OffloadPolicy::Sequential);
+    }
+
+    #[test]
+    fn flux1_staged_only_authority_is_terminally_fail_closed_on_every_coordinate() {
+        let manifest = shipped_model("flux_dev");
+        let context = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::TextToImage,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        let candidate = || {
+            spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Lora).with_resolved_route("flux_dev")
+        };
+        let evaluate = |changed: &JsonObject<String, Value>, candidate: LoadSpec, context| {
+            evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                "flux1_dev",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                changed,
+                candidate,
+                context,
+                |_, strategy| strategy == MemoryStrategy::StagedResidency,
+            )
+        };
+        assert_eq!(
+            evaluate(&manifest, candidate(), context).load_shape_declaration_result,
+            LoadShapeDeclarationResult::Eligible
+        );
+
+        let mutate_staged = |mutator: &dyn Fn(&mut JsonObject<String, Value>)| {
+            let mut changed = manifest.clone();
+            let row = changed["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .iter_mut()
+                .find(|implementation| {
+                    implementation["rung"] == "staged_residency"
+                        && implementation["loadProfiles"] == serde_json::json!(["lora"])
+                        && implementation.get("runtimeProvider").is_none()
+                })
+                .and_then(Value::as_object_mut)
+                .expect("FLUX.1 dev low-rank staged row");
+            mutator(row);
+            changed
+        };
+        let crossed = [
+            mutate_staged(&|row| {
+                row.insert(
+                    "runtimeProvider".to_owned(),
+                    Value::String("flux1_schnell".into()),
+                );
+            }),
+            mutate_staged(&|row| {
+                row.insert("tiers".to_owned(), serde_json::json!(["q8"]));
+            }),
+            mutate_staged(&|row| {
+                row.insert("modes".to_owned(), serde_json::json!(["style_variations"]));
+            }),
+            mutate_staged(&|row| {
+                row.insert("loadProfiles".to_owned(), serde_json::json!(["plain"]));
+            }),
+            mutate_staged(&|row| {
+                row.insert("sourceKinds".to_owned(), serde_json::json!(["file"]));
+            }),
+            mutate_staged(&|row| {
+                row.insert("providerOverlay".to_owned(), Value::String("none".into()));
+            }),
+            mutate_staged(&|row| {
+                row.insert(
+                    "requiredOffloadPolicy".to_owned(),
+                    Value::String("resident".into()),
+                );
+            }),
+            mutate_staged(&|row| {
+                row["requestContexts"][0]["referenceCounts"] = serde_json::json!([1]);
+            }),
+            mutate_staged(&|row| {
+                row["requestContexts"][0]["pid"] = serde_json::json!(["malformed"]);
+            }),
+        ];
+        for changed in crossed {
+            let refused = evaluate(&changed, candidate(), context);
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+            assert_eq!(refused.load_shape, LoadShape::EagerMaterialization);
+            let later = apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "flux1_dev",
+                context.mode,
+                refused.clone(),
+                true,
+            );
+            assert_eq!(
+                later.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "Refused must not fall through to legacy shaping"
+            );
+            assert_eq!(later.load_shape, LoadShape::EagerMaterialization);
+        }
+
+        let mut missing = manifest.clone();
+        missing["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array_mut()
+            .expect("implementation rows")
+            .retain(|implementation| {
+                implementation["rung"] != "staged_residency"
+                    || implementation["loadProfiles"] != serde_json::json!(["lora"])
+                    || implementation.get("runtimeProvider").is_some()
+            });
+        assert_eq!(
+            evaluate(&missing, candidate(), context).load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+        let provider_refused = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+            "flux1_dev",
+            Some("q4"),
+            Some(context.mode),
+            &manifest,
+            candidate(),
+            context,
+            |_, _| false,
+        );
+        assert_eq!(
+            provider_refused.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+        assert_eq!(provider_refused.load_shape, LoadShape::EagerMaterialization);
     }
 }

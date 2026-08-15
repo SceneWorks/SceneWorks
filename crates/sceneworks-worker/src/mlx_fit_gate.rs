@@ -1333,7 +1333,22 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
 /// image-to-image entrypoint. Keep that internal contract identity exact without inventing a new
 /// public route or a generic CFG axis.
 fn provider_request_mode(engine_id: &str, inputs: &MlxRequestInputs) -> (MemoryMode, &'static str) {
-    if matches!(engine_id, "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit")
+    if (engine_id == "flux1_dev_control"
+        && matches!(
+            inputs.mode.as_str(),
+            "image_generation" | "text_to_image" | "style_variations" | "character_image"
+        ))
+        || (engine_id == "flux1_dev" && inputs.mode == "character_image")
+    {
+        (MemoryMode::ImageToImage, "image_to_image")
+    } else if matches!(engine_id, "flux1_schnell" | "flux1_dev")
+        && matches!(
+            inputs.mode.as_str(),
+            "image_generation" | "text_to_image" | "style_variations"
+        )
+    {
+        (MemoryMode::TextToImage, "text_to_image")
+    } else if matches!(engine_id, "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit")
         && (1..=8).contains(&inputs.reference_count)
     {
         (MemoryMode::Edit, "edit")
@@ -1360,6 +1375,13 @@ fn is_flux2_klein_provider(engine_id: &str) -> bool {
     )
 }
 
+fn is_flux1_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "flux1_schnell" | "flux1_dev" | "flux1_dev_control"
+    )
+}
+
 /// Provider-owned request overlay derived from the complete load identity.
 ///
 /// FLUX.2 Klein authenticates every load-time composition at request scope, including conservative
@@ -1374,6 +1396,31 @@ pub(crate) fn provider_overlay_for_load_spec(
 ) -> Option<String> {
     if is_krea_base_dit_provider(engine_id) {
         return None;
+    }
+    if is_flux1_provider(engine_id) {
+        let mut axes = Vec::new();
+        if engine_id == "flux1_dev_control" || spec.control.is_some() {
+            axes.push("control");
+        }
+        if !spec.extra_controls.is_empty() {
+            axes.push("extra-controls");
+        }
+        if !spec.adapters.is_empty() {
+            axes.push("adapters");
+        }
+        if spec.ip_adapter.is_some() {
+            axes.push("ip-adapter");
+        }
+        if spec.pid.is_some() {
+            axes.push("pid");
+        }
+        if spec.identity.is_some() {
+            axes.push("identity");
+        }
+        if spec.text_encoder.is_some() {
+            axes.push("external-text-encoder");
+        }
+        return (!axes.is_empty()).then(|| axes.join("-"));
     }
     if !is_flux2_klein_provider(engine_id) {
         return public_overlay;
@@ -6876,6 +6923,111 @@ mod tests {
                 .as_deref(),
             Some("adapters:1+pid"),
             "the independently keyed Krea control provider keeps its established overlay"
+        );
+    }
+
+    #[test]
+    fn flux1_provider_overlay_is_derived_from_the_complete_load_identity() {
+        let plain = LoadSpec::new(WeightsSource::Dir("flux".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &plain, None),
+            None
+        );
+        let low_rank = plain.clone().with_adapters(vec![gen_core::AdapterSpec::new(
+            "adapter.safetensors".into(),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )]);
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &low_rank, Some("lora".to_owned()))
+                .as_deref(),
+            Some("adapters")
+        );
+        let low_rank_pid = low_rank.clone().with_pid(
+            WeightsSource::File("pid.safetensors".into()),
+            WeightsSource::Dir("gemma".into()),
+        );
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &low_rank_pid, None).as_deref(),
+            Some("adapters-pid")
+        );
+        let identity = low_rank_pid.with_ip_adapter(WeightsSource::Dir("ip-adapter".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &identity, Some("identity".to_owned()))
+                .as_deref(),
+            Some("adapters-ip-adapter-pid")
+        );
+        let control = low_rank.with_control(WeightsSource::File("control.safetensors".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev_control", &control, Some("control".into()))
+                .as_deref(),
+            Some("control-adapters")
+        );
+
+        let text = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 1,
+            mode: "text_to_image".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        for provider in ["flux1_schnell", "flux1_dev"] {
+            for mode in ["text_to_image", "style_variations"] {
+                let inputs = MlxRequestInputs {
+                    mode: mode.to_owned(),
+                    ..text.clone()
+                };
+                assert_eq!(
+                    provider_request_mode(provider, &inputs),
+                    (MemoryMode::TextToImage, "text_to_image"),
+                    "{provider} {mode}"
+                );
+            }
+        }
+
+        let character = MlxRequestInputs {
+            mode: "character_image".to_owned(),
+            overlay: Some("ip-adapter".to_owned()),
+            has_reference: true,
+            reference_count: 1,
+            ..text.clone()
+        };
+        assert_eq!(
+            provider_request_mode("flux1_dev", &character),
+            (MemoryMode::ImageToImage, "image_to_image")
+        );
+        for mode in ["text_to_image", "style_variations", "character_image"] {
+            let control = MlxRequestInputs {
+                mode: mode.to_owned(),
+                overlay: Some("control".to_owned()),
+                has_reference: true,
+                reference_count: 1,
+                ..text.clone()
+            };
+            assert_eq!(
+                provider_request_mode("flux1_dev_control", &control),
+                (MemoryMode::ImageToImage, "image_to_image"),
+                "control {mode}"
+            );
+        }
+
+        assert_eq!(
+            provider_request_mode(
+                "flux1_schnell",
+                &MlxRequestInputs {
+                    mode: "character_image".to_owned(),
+                    has_reference: true,
+                    reference_count: 1,
+                    ..text
+                }
+            ),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "Schnell has no declaration-owned character route; generic normalization remains visible to fail closed"
         );
     }
 

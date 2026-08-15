@@ -141,11 +141,12 @@ fn flux1_control_generate_one(
     steps: u32,
     guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -154,11 +155,18 @@ fn flux1_control_generate_one(
         steps: Some(steps),
         guidance,
         conditioning,
+        memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_evaluation.map(|evaluation| &evaluation.context),
+        on_progress,
+    )
+    .map_err(|error| {
         WorkerError::Engine(format!("FLUX.1-dev control generation failed: {error}"))
     })?;
     match output {
@@ -317,14 +325,78 @@ async fn generate_flux1_dev_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = flux1_control_spec(weights_dir, control_weights, quant, adapters);
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let resolved_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
+    let route_mode = crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "FLUX.1 control request mode '{}' is not a declared memory route",
+                request.mode
+            ))
+        })?;
+    let route_context = crate::memory_route_registry::MemoryRouteRequestContext {
+        mode: route_mode,
+        reference_count: 1,
+        use_pid: false,
+        has_phases: false,
+    };
+    let mut spec = flux1_control_spec(weights_dir, control_weights, quant, adapters)
+        .with_resolved_route(request.model.clone());
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        FLUX1_DEV_CONTROL_ENGINE_ID,
+        resolved_tier,
+        Some(route_mode),
+        &request.model_manifest_entry,
+        spec,
+        route_context,
+    );
+    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        FLUX1_DEV_CONTROL_ENGINE_ID,
+        resolved_tier,
+        Some(route_mode),
+        &request.model_manifest_entry,
+        spec,
+        route_context,
+    );
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        FLUX1_DEV_CONTROL_ENGINE_ID,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    );
+    let memory_plan = match resolved_tier {
+        Some(tier) => memory_plan.with_resolved_artifact_tier(Some(tier))?,
+        None => memory_plan,
+    };
+    let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: 1,
+        mode: request.mode.clone(),
+        overlay: crate::mlx_fit_gate::provider_overlay_for_load_spec(
+            FLUX1_DEV_CONTROL_ENGINE_ID,
+            &spec,
+            Some("control".to_owned()),
+        ),
+        adapter_count,
+        has_reference: true,
+        reference_count: 1,
+        use_pid: false,
+        has_phases: false,
+    };
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         FLUX1_DEV_CONTROL_ENGINE_ID,
         adapter_count,
         spec,
         "FLUX.1-dev control load failed".to_owned(),
-        move |generator, tx, cancel| {
+        move |generator,
+              initial_cache_state,
+              loaded_policy,
+              _requested_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
@@ -337,6 +409,7 @@ async fn generate_flux1_dev_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            let mut cache_state = initial_cache_state;
             drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -351,6 +424,18 @@ async fn generate_flux1_dev_control_stream(
                 // FLUX.1 control has no img2img-init seam — no identity Reference (None).
                 let conditioning =
                     build_control_conditioning(control, control_kind.clone(), control_scale, None);
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    generator,
+                    &memory_plan,
+                    &memory_inputs,
+                    cache_state,
+                    loaded_policy.offload_policy,
+                    external_committed_bytes,
+                )?;
+                cache_state = gen_core::MemoryCacheState::Warm;
+                let _request_memory_limit = memory_evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let (out_w, out_h, pixels) = flux1_control_generate_one(
                     generator,
                     &prompt,
@@ -360,6 +445,7 @@ async fn generate_flux1_dev_control_stream(
                     steps,
                     guidance,
                     conditioning,
+                    Some(&memory_evaluation),
                     preview,
                     &cancel,
                     on_progress,

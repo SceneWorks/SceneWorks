@@ -7868,6 +7868,7 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
             28,
             Some(3.5), // dev embedded guidance
             conditioning,
+            None,
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
@@ -13488,6 +13489,7 @@ fn matrix_flux1_render(
         28,
         Some(3.5),
         conditioning,
+        None,
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
