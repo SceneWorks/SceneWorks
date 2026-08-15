@@ -1107,6 +1107,212 @@ mod tests {
         assert_eq!(revision, "952f49d49653cb42e7d6cf7cbfad74738073ec7d");
     }
 
+    /// The four DIFFUSERS turbo files published by `lightx2v/Minimax-h3-Turbo`, paired with the
+    /// catalog id that must carry each. Transcribed from the real published headers at revision
+    /// `5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1` (sc-18724 verified all four).
+    const MINIMAX_H3_TURBO_FILES: [(&str, &str); 4] = [
+        (
+            "minimax_h3_turbo_4step_768p",
+            "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors",
+        ),
+        (
+            "minimax_h3_turbo_8step",
+            "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
+        ),
+        (
+            "minimax_h3_turbo_4step_v01",
+            "minimax_h3_fl2v_turbo_4step_v0.1.safetensors",
+        ),
+        (
+            "minimax_h3_ref2v_turbo_4step",
+            "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+        ),
+    ];
+
+    fn builtin_loras() -> Vec<serde_json::Value> {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.loras.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.loras.jsonc parses as JSON");
+        manifest["loras"]
+            .as_array()
+            .expect("builtin.loras.jsonc has a loras array")
+            .clone()
+    }
+
+    #[test]
+    fn minimax_h3_turbo_loras_are_registered_and_sha_pinned() {
+        // sc-18725 (epic 17137). All FOUR published diffusers checkpoints register as weight-load-only
+        // accelerators. Pin every non-default field so this discriminates a real registration from an
+        // empty or renamed one, and assert the COUNT so a fifth entry (or a dropped fourth — the
+        // story's own table listed only three until sc-18724 found the ref2v file) has to be
+        // deliberate.
+        let loras = builtin_loras();
+        let registered: Vec<&serde_json::Value> = loras
+            .iter()
+            .filter(|lora| lora["family"] == serde_json::json!("minimax-h3"))
+            .collect();
+        assert_eq!(
+            registered.len(),
+            MINIMAX_H3_TURBO_FILES.len(),
+            "expected exactly {} minimax-h3 catalog LoRAs; got {:?}",
+            MINIMAX_H3_TURBO_FILES.len(),
+            registered
+                .iter()
+                .map(|lora| lora["id"].clone())
+                .collect::<Vec<_>>()
+        );
+
+        for (id, file) in MINIMAX_H3_TURBO_FILES {
+            let lora = loras
+                .iter()
+                .find(|lora| lora["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is registered in builtin.loras.jsonc"));
+
+            assert_eq!(lora["family"], serde_json::json!("minimax-h3"), "{id}");
+            assert_eq!(lora["role"], serde_json::json!("accelerator"), "{id}");
+            assert_eq!(
+                lora["compatibility"]["families"],
+                serde_json::json!(["minimax-h3"]),
+                "{id}"
+            );
+            // The runtime `lora_scale` multiplier, NOT alpha. Anything but 1.0 would silently rescale
+            // the file's own alpha/rank fold (sc-18724).
+            assert_eq!(lora["defaultWeight"], serde_json::json!(1.0), "{id}");
+            assert_eq!(
+                lora["source"]["provider"],
+                serde_json::json!("huggingface"),
+                "{id}"
+            );
+            assert_eq!(
+                lora["source"]["repo"],
+                serde_json::json!("lightx2v/Minimax-h3-Turbo"),
+                "{id}"
+            );
+            assert_eq!(lora["source"]["file"], serde_json::json!(file), "{id}");
+            let revision = lora["source"]["revision"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id} pins a source.revision"));
+            assert!(
+                is_full_sha_revision(revision),
+                "{id} must pin a full 40-hex commit SHA (a floating `main` would drift the \
+                 accelerator weights under a pinned DiT); got {revision:?}"
+            );
+            assert_eq!(revision, "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1", "{id}");
+        }
+    }
+
+    #[test]
+    fn no_minimax_h3_lora_names_a_comfyui_export() {
+        // 🔴 sc-18724 / sc-18725. `lightx2v/Minimax-h3-Turbo` publishes seven files: four diffusers
+        // and three `_comfyui_` twins. The ComfyUI exports fuse q/k/v into `attn.qkv_proj` and swap
+        // the SwiGLU halves in `mlp.fc1`, so folding one is shape-valid and numerically WRONG — the
+        // sc-18740 class that shipped green at cosine 0.73-0.78. The engine refuses them by design,
+        // which makes a `_comfyui_` filename here a HARD ERROR at install rather than a degradation.
+        //
+        // Deliberately a SUBSTRING scan over every registered file rather than a re-assertion of the
+        // four expected names. The sibling test above pins those names AND the count, so it catches
+        // both a swap and a bare fifth entry — but it checks only the names listed in
+        // `MINIMAX_H3_TURBO_FILES`, so the moment that table is legitimately extended to cover a new
+        // file, it vouches for whatever name was written into it. This scan keeps failing on any
+        // `_comfyui_` file that ever appears under this family, which is the property that matters.
+        for lora in builtin_loras() {
+            if lora["family"] != serde_json::json!("minimax-h3") {
+                continue;
+            }
+            let id = lora["id"].as_str().unwrap_or("<no id>");
+            let file = lora["source"]["file"].as_str().unwrap_or_default();
+            assert!(
+                !file.contains("_comfyui_"),
+                "{id} names the ComfyUI export {file:?}; the engine REFUSES that key space \
+                 (fused qkv_proj + swapped SwiGLU halves). Use the diffusers twin."
+            );
+        }
+    }
+
+    #[test]
+    fn no_minimax_h3_lora_declares_an_alpha() {
+        // 🔴 sc-18724 / sc-18725. Alpha differs PER FILE inside this one repo — 128, 8, 8, and absent
+        // — so a family-wide (or even per-entry) manifest alpha would be wrong for three of the four.
+        // The engine resolves it from the file itself: rank from the factor shapes, alpha by
+        // precedence, never the rank. A manifest that pinned one would re-introduce exactly the 16x /
+        // 128x overshoot sc-18724 exists to close, and it would do so SILENTLY.
+        //
+        // The `lora-manifest.schema.json` item is `additionalProperties: false` and has no alpha key,
+        // so today this is unrepresentable — this test is the guard on that staying true, since
+        // relaxing the schema is a one-line edit and the failure it enables is invisible in output.
+        const ALPHA_SPELLINGS: [&str; 6] = [
+            "alpha",
+            "loraAlpha",
+            "lora_alpha",
+            "networkAlpha",
+            "network_alpha",
+            "scale",
+        ];
+        for lora in builtin_loras() {
+            if lora["family"] != serde_json::json!("minimax-h3") {
+                continue;
+            }
+            let id = lora["id"].as_str().unwrap_or("<no id>");
+            let object = lora.as_object().expect("a LoRA entry is an object");
+            for spelling in ALPHA_SPELLINGS {
+                assert!(
+                    !object.contains_key(spelling),
+                    "{id} declares `{spelling}`. Alpha is PER FILE (128 / 8 / 8 / absent) and is \
+                     resolved by the engine from the checkpoint; declaring one here is wrong for \
+                     three of the four files."
+                );
+                assert!(
+                    lora["source"].get(spelling).is_none(),
+                    "{id} declares `source.{spelling}`; see above."
+                );
+                assert!(
+                    lora["compatibility"].get(spelling).is_none(),
+                    "{id} declares `compatibility.{spelling}`; see above."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_minimax_h3_partitions_advertise_the_minimax_h3_lora_family() {
+        // sc-18725. `loraCompatibility.families` is the LOAD gate the API
+        // (`validate_lora_specs_for_model`) and the web picker (`loraMatchesModel`) both read. Both
+        // partitions must declare it: the gate is per-model-id, and the ref2v adapter is distilled
+        // for `minimax_h3_ref` specifically, so omitting it there would leave that adapter
+        // unselectable on the only entry it belongs to.
+        //
+        // Also pins the ABSENCE of "acceleration" from `types`. That is the single token
+        // `modelSupportsMultiPhase` reads to open Image Studio's multi-phase editor, whose worker gate
+        // is `request.model == KREA_RAW_MODEL_ID` — advertising it from a video model would surface a
+        // lane no worker serves. Carrying `role: accelerator` LoRAs does NOT imply that compat type.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is present"));
+            assert_eq!(
+                model["loraCompatibility"]["families"],
+                serde_json::json!(["minimax-h3"]),
+                "{id} must advertise the minimax-h3 LoRA family"
+            );
+            let types = model["loraCompatibility"]["types"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} declares loraCompatibility.types"));
+            assert!(
+                !types.contains(&serde_json::json!("acceleration")),
+                "{id} must NOT advertise the acceleration compat type: it opens the image \
+                 multi-phase editor, which only krea_2_raw has a worker lane for. Got {types:?}"
+            );
+        }
+    }
+
     #[test]
     fn krea_2_raw_advertises_the_acceleration_lora_compat_type() {
         // sc-13882: Raw must advertise "acceleration" as a compatible LoRA type so the turbo adapter
