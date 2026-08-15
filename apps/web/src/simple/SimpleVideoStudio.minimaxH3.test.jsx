@@ -149,6 +149,18 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     expect(labels).toHaveLength(MINIMAX.limits.durations.length);
   });
 
+  it("renders the model's declared duration hint, not just the chips (sc-17162)", async () => {
+    // `ui.durationHint` had ONE reader (Advanced's helper copy), so the refusal it carries — "15s is
+    // refused rather than shortened" — reached no Simple user at all. Read back out of the DOM and
+    // compared against the MANIFEST string rather than a typed literal, so copy edits travel and a
+    // hint that renders empty is red.
+    await openVideo(baseContext());
+    const hint = container.querySelector(".su-duration-hint");
+    expect(hint, "Simple must carry the model's duration copy, not only its chips").toBeTruthy();
+    expect(hint.textContent).toBe(MINIMAX.ui.durationHint);
+    expect(hint.textContent).toContain("15s is refused");
+  });
+
   it("sends the exact declared duration, not the rounded label", async () => {
     const context = baseContext();
     await openVideo(context);
