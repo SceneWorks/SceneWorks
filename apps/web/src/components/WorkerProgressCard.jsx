@@ -15,6 +15,7 @@ import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
+import { ModelAttribution } from "./ModelAttribution.jsx";
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
@@ -728,6 +729,12 @@ export function WorkerProgressCard({
         <h3 className="worker-progress-card__title" title={title}>{title}</h3>
         <code className="worker-progress-card__id" title={job.id}>{idShort}</code>
       </div>
+      {/* Licence-required attribution (sc-17227 §IV.2, sc-17161). The queue is a generation
+          surface — it is what the user watches while the model runs — and `job.payload.model` is
+          only an id, so the string is resolved from the catalog entry rather than stored on the
+          job. `modelForJob` returns null for a job whose model is not in the catalog, and a model
+          that declares no attribution renders nothing. */}
+      <ModelAttribution model={modelForJob(job, models)} />
       <div className="worker-progress-card__hardware">
         <HardwarePills {...hardware} />
         {hardware.device === "GPU" ? (

@@ -32,10 +32,10 @@ the existing `/api/v1/*` surface (no side-door into the engine or DB).
 | Tool | Kind | What it does |
 | --- | --- | --- |
 | `list_projects` | read | Project ids/names — `projectId` for every other call |
-| `list_models` | read | Generation model catalog: id, family, type (image/video), capabilities, `installState`, defaults, resolutions |
+| `list_models` | read | Generation model catalog: id, family, type (image/video), capabilities, `installState`, defaults, the resolution/duration/fps menus, `minSteps`, the reference-media caps, `promptGuide`, and any licence-required `attribution` |
 | `list_loras` | read | LoRA adapter catalog (filter by `modelFamily` / `projectId`) |
 | `generate_image` | **blocking** | Submits an image job, relays progress notifications, returns the images inline as base64 (default `count` 1) |
-| `submit_video_job` | non-blocking | Submits a video job (`generate` / `extend` / `bridge` / `person_replace`) and returns the job id immediately |
+| `submit_video_job` | non-blocking | Submits a video job (`generate` / `reference` / `extend` / `bridge` / `person_replace`) and returns the job id immediately |
 | `get_job_status` | read | Status/stage/progress/eta for any job id (video and image) |
 | `get_job_result` | read | For a completed job: ticketed download links (media bytes are never inlined) |
 
@@ -314,7 +314,16 @@ Expected failure modes: no/wrong token → `401` with
    summary block carries the created asset ids.
 4. `submit_video_job` with `projectId`, `prompt`, and optionally a video
    `model` (type `"video"` in `list_models`), `duration`/`fps`/`width`/
-   `height`/`quality` — returns `jobId`.
+   `height`/`quality`/`steps` — returns `jobId`. Use `mode: "reference"` with
+   `referenceAssetIds` and/or `sourceClipAssetIds` and/or
+   `referenceAudioAssetIds` to render from reference media.
+
+   ⚠️ **The `durations` and `fps` menus from `list_models` are exhaustive, and an
+   off-menu value is refused rather than rounded to the nearest one.** MiniMax-H3
+   is the case that makes this bite: its fourteen legal clip lengths are a `17n+5`
+   frame lattice at 24 fps, so nothing between them renders, and the 15 s its own
+   documentation advertises is between the last rung and the next. `minSteps` is
+   the same shape — below it the request is refused, not raised.
 5. Poll `get_job_status` until `"status": "completed"`, then `get_job_result`
    → download each asset URL within the ticket TTL (300 s; re-call for fresh
    links). If the absolute URL host is not reachable from your machine, apply

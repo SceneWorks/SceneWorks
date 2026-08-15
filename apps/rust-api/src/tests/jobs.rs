@@ -3707,6 +3707,11 @@ async fn existing_video_models_keep_their_pre_sc_17160_reference_budget() {
 /// model that declares them — MiniMax-H3's own manifest entry is sc-17158. That separation is the
 /// point of the design: this test needs no engine and no weights to pin the contract.
 ///
+/// The seeded entry carries a REAL routed id (sc-19504): the enqueue no-lane gate refuses a model
+/// no lane can claim, so the old synthetic `ref2va_probe` would now 400 before reaching the caps.
+/// The entry is still entirely this test's own — its four caps are the fixture's, not the shipped
+/// manifest's — so the assertions are unchanged; only the id is one the routing tables recognise.
+///
 /// The combined budget has NO payload-sanity blanket, only this per-model declaration — see the
 /// note in `validate_video_job`. 12 is MiniMax-H3's number and today's per-list caps already admit
 /// a 16-file request (8 images + 8 clips), so a blanket 12 would have narrowed every existing
@@ -3723,7 +3728,7 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "ref2va_probe",
+              "id": "minimax_h3_ref",
               "name": "Ref2VA Probe",
               "family": "minimax-h3",
               "type": "video",
@@ -3790,16 +3795,16 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
     // 9 + 3 + 3 = 15 > 12. REFUSED, and the message decomposes the total so the caller knows how
     // much to cut without counting three lists themselves. Nothing but the combined budget can
     // decide this one: 9 <= 9, 3 <= 3 and 3 <= 3 all pass their own caps.
-    let (status, over) = submit("ref2va_probe", 9, 3, 3).await;
+    let (status, over) = submit("minimax_h3_ref", 9, 3, 3).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         over["detail"],
-        "ref2va_probe takes up to 12 reference files in total, but this request supplies 15 \
+        "minimax_h3_ref takes up to 12 reference files in total, but this request supplies 15 \
          (9 reference images + 3 source clips + 3 audio references). Remove 3 of them."
     );
 
     // 9 + 2 + 1 = 12. ACCEPTED, at the cap, and every list reaches the enqueued payload.
-    let (status, job) = submit("ref2va_probe", 9, 2, 1).await;
+    let (status, job) = submit("minimax_h3_ref", 9, 2, 1).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(job["type"], "video_generate");
     assert_eq!(
@@ -3820,11 +3825,11 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
 
     // A shape that clears the blanket but not what THIS model declares: 4 clips against its
     // declared 3, only 8 files in total. Refused by the per-model gate, naming the model.
-    let (status, per_model) = submit("ref2va_probe", 4, 4, 0).await;
+    let (status, per_model) = submit("minimax_h3_ref", 4, 4, 0).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         per_model["detail"],
-        "ref2va_probe takes up to 3 source clips, but this request supplies 4. Reduce \
+        "minimax_h3_ref takes up to 3 source clips, but this request supplies 4. Reduce \
          sourceClipAssetIds to 3 or fewer, or choose a model that takes more."
     );
 
@@ -4614,6 +4619,10 @@ async fn generation_job_routes_reject_incompatible_loras() {
         .contains("is not compatible with model z_image_turbo"));
 }
 
+/// The seeded video model carries a REAL routed id (`wan_2_2`, sc-19504) rather than the old
+/// synthetic `vid-model`: the enqueue no-lane gate refuses a model no lane can claim, so a
+/// synthetic id now 400s before preset expansion can be observed. The entry is still the fixture's
+/// own — its defaults, limits and repo are written here — so nothing this test pins has changed.
 #[tokio::test]
 async fn video_jobs_expand_recipe_presets_server_side() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -4627,7 +4636,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "vid-model",
+              "id": "wan_2_2",
               "name": "Vid Model",
               "family": "wan-video",
               "type": "video",
@@ -4686,7 +4695,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
               "id": "dream_motion",
               "name": "Dream Motion",
               "workflow": "text_to_video",
-              "model": "vid-model",
+              "model": "wan_2_2",
               "defaults": { "duration": 8, "fps": 30, "resolution": "1280x720", "quality": "best", "negativePrompt": "jitter" },
               "prompt": { "prefix": "cinematic", "suffix": "smooth camera motion" },
               "loras": [{ "id": "motion-lora", "weight": 0.5 }]
@@ -4723,7 +4732,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
             "projectId": project_id,
             "mode": "text_to_video",
             "prompt": "a fox runs",
-            "model": "vid-model",
+            "model": "wan_2_2",
             // Client render settings that DIFFER from the preset's declared
             // defaults — the studio seeds the form from the preset but the user
             // is free to override, so these submitted values must win.
@@ -4814,7 +4823,10 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     // quietly stop modelling *the default's* entry if the default ever changed: the pre-fix
     // failure would degrade from "carries the DEFAULT's entry" to "carries {}" — still red,
     // but no longer demonstrating the documented defect. Its 32 / owner/default mirror the
-    // real default video manifest; `preset-vid` mirrors mochi_1's 16 / distinct repo.
+    // real default video manifest; the override entry mirrors the real mochi_1's 16 / distinct
+    // repo. Both fixture ids are REAL routed video models (sc-19504): the enqueue no-lane gate
+    // refuses a model no lane can claim, so a synthetic id would now 400 before this assertion.
+    // Each keeps its own seeded limits, so what the test pins is unchanged.
     let default_video_model = crate::defaults::default_video_model();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
@@ -4838,14 +4850,14 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "preset-vid",
+              "id": "mochi_1",
               "name": "Preset Vid",
               "family": "mochi",
               "type": "video",
               "adapter": "mochi_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": {},
@@ -4873,7 +4885,7 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "preset-vid",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -4914,15 +4926,15 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     // The preset's model won over the omitted-model default...
-    assert_eq!(video_job["payload"]["model"], "preset-vid");
+    assert_eq!(video_job["payload"]["model"], "mochi_1");
     // ...and the entry travelling with it must describe THAT model, not the default's.
     let entry = &video_job["payload"]["modelManifestEntry"];
     assert_eq!(
-        entry["id"], "preset-vid",
+        entry["id"], "mochi_1",
         "manifest entry should be resolved from the post-override model"
     );
     assert_eq!(
-        entry["downloads"][0]["repo"], "owner/preset-vid",
+        entry["downloads"][0]["repo"], "owner/mochi_1",
         "wrong repo => the worker fetches the wrong model's weights (loud failure)"
     );
     assert_eq!(
@@ -5987,7 +5999,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
 ///
 /// The fixture is built so the two plausible homes for this check disagree:
 ///   * default video model — cap 15 (generous)
-///   * `preset-vid`        — cap  5 (strict)
+///   * `mochi_1`             — cap  5 (strict)
 ///
 /// The request omits `model` (so the preset's model wins, per sc-12300) and asks for 10s. Gating
 /// on the DTO's `payload.model` — i.e. inside `validate_video_job`, the intuitive home, which runs
@@ -6024,14 +6036,14 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "preset-vid",
+              "id": "mochi_1",
               "name": "Preset Vid",
               "family": "mochi",
               "type": "video",
               "adapter": "mochi_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": {},
@@ -6059,7 +6071,7 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "preset-vid",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -6102,11 +6114,11 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "10s past preset-vid's 5s cap must be refused at enqueue, not silently clamped: {body}"
+        "10s past mochi_1's 5s cap must be refused at enqueue, not silently clamped: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("preset-vid"),
+        detail.contains("mochi_1"),
         "names the model whose cap applied — NOT the default's: {detail}"
     );
     assert!(detail.contains("5s"), "states the cap: {detail}");
@@ -6128,7 +6140,7 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "5s is at the cap: {body}");
-    assert_eq!(body["payload"]["model"], "preset-vid");
+    assert_eq!(body["payload"]["model"], "mochi_1");
 
     // ...and the SAME 10s request against the default model (cap 15) is admitted, proving the
     // rejection above came from the per-model cap rather than a blanket duration bound.
@@ -6157,9 +6169,9 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
 ///
 /// The fixture makes both halves load-bearing by having the two models' menus disagree:
 ///   * default video model — `[24, 25, 30]`, default 25 (permissive)
-///   * `preset-vid`        — `[30]`, default 30 (strict, the mochi_1 shape)
+///   * `mochi_1`             — `[30]`, default 30 (strict)
 ///
-/// `fps: 25` is the discriminator. It is on the default's menu and off `preset-vid`'s, so a gate
+/// `fps: 25` is the discriminator. It is on the default's menu and off `mochi_1`'s, so a gate
 /// reading the DTO's stale `payload.model` — i.e. inside `validate_video_job`, before
 /// `apply_recipe_preset_to_video_payload` — admits it and enqueues a job the strict model does not
 /// advertise. 25 is also the blanket the DTO used to default to, which is why the omitted-fps case
@@ -6193,14 +6205,14 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "preset-vid",
+              "id": "mochi_1",
               "name": "Preset Vid",
               "family": "mochi",
               "type": "video",
               "adapter": "mochi_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": { "fps": 30 },
@@ -6228,7 +6240,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "preset-vid",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -6271,11 +6283,11 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "25fps is off preset-vid's [30] menu and must be refused at enqueue, not snapped: {body}"
+        "25fps is off mochi_1's [30] menu and must be refused at enqueue, not snapped: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("preset-vid"),
+        detail.contains("mochi_1"),
         "names the model whose menu applied — NOT the default's: {detail}"
     );
     assert!(
@@ -6305,7 +6317,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         StatusCode::CREATED,
         "a request naming no fps must not be refused by the menu: {body}"
     );
-    assert_eq!(body["payload"]["model"], "preset-vid");
+    assert_eq!(body["payload"]["model"], "mochi_1");
     assert_eq!(
         body["payload"]["fps"], 30,
         "the enqueued payload records the model's declared rate, not the blanket 25: {body}"
@@ -6329,7 +6341,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "30 is what preset-vid advertises: {body}"
+        "30 is what mochi_1 advertises: {body}"
     );
     assert_eq!(body["payload"]["fps"], 30);
 
@@ -6388,7 +6400,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
 /// The fixture makes the two plausible homes disagree, exactly as the duration and fps tests above
 /// do:
 ///   * default video model — no floor at all (1 step is fine)
-///   * `preset-vid`        — floor 2, the MiniMax-H3 shape
+///   * `mochi_1`             — floor 2, the MiniMax-H3 shape
 ///
 /// `advanced.steps: 1` is the discriminator. A gate reading the DTO's stale `payload.model` — i.e.
 /// inside `validate_video_job`, which runs BEFORE `apply_recipe_preset_to_video_payload` — sees the
@@ -6423,14 +6435,14 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "preset-vid",
+              "id": "mochi_1",
               "name": "Preset Vid",
               "family": "minimax-h3",
               "type": "video",
               "adapter": "minimax_h3",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": { "steps": 50 },
@@ -6458,7 +6470,7 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "preset-vid",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -6501,11 +6513,11 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "1 step under preset-vid's 2-step floor must be refused at enqueue, not raised: {body}"
+        "1 step under mochi_1's 2-step floor must be refused at enqueue, not raised: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("preset-vid"),
+        detail.contains("mochi_1"),
         "names the model whose floor applied — NOT the default's: {detail}"
     );
     assert!(
@@ -6533,7 +6545,7 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "2 is at the floor: {body}");
-    assert_eq!(body["payload"]["model"], "preset-vid");
+    assert_eq!(body["payload"]["model"], "mochi_1");
     assert_eq!(
         body["payload"]["advanced"]["steps"], 2,
         "the admitted count travels VERBATIM — the gate refuses, it never rewrites"
@@ -6851,27 +6863,58 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
     // regression bricked — plus ltx_2_3, whose cap of 15 admitted 6.0 and which therefore stayed
     // green throughout. Listing the survivor alongside the victims is what makes this a per-model
     // assertion rather than "the route works".
-    for (model, want_duration) in [
-        ("bernini", 5.0),
-        ("scail2_14b", 5.0),
-        ("wan_2_2_t2v_14b", 5.0),
-        ("wan_2_2_i2v_14b", 5.0),
-        ("wan_2_2_vace_fun_14b", 5.0),
-        ("svd", 4.0),
-        ("ltx_2_3", 6.0),
-    ] {
-        let (status, body) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/video/jobs",
+    //
+    // Each row now carries a mode the model actually SERVES, plus that mode's required media
+    // (sc-19504). It used to submit `text_to_video` for all seven, which three of them do not do at
+    // all — `scail2_14b` is animate/replace only, `wan_2_2_vace_fun_14b` is replace only, `svd` is
+    // image-conditioned only — so those three rows were asserting a 201 on a job NO lane would have
+    // claimed, i.e. one that would have sat queued forever. The enqueue no-lane gate refuses that
+    // shape now, and the fix is to drive each model where it lives: the duration default this test
+    // is about is resolved from the manifest entry and is mode-independent, so nothing is weakened.
+    for (model, mode, media, want_duration) in [
+        ("bernini", "text_to_video", json!({}), 5.0),
+        (
+            "scail2_14b",
+            "animate_character",
+            json!({ "sourceClipAssetId": "clip-1", "referenceAssetIds": ["img-1"] }),
+            5.0,
+        ),
+        ("wan_2_2_t2v_14b", "text_to_video", json!({}), 5.0),
+        (
+            "wan_2_2_i2v_14b",
+            "image_to_video",
+            json!({ "sourceAssetId": "img-1" }),
+            5.0,
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "replace_person",
             json!({
-                "projectId": project_id,
-                "mode": "text_to_video",
-                "prompt": "a fox runs",
-                "model": model
+                "sourceClipAssetId": "clip-1",
+                "personTrackId": "track-1",
+                "characterId": "character-1"
             }),
-        )
-        .await;
+            5.0,
+        ),
+        (
+            "svd",
+            "image_to_video",
+            json!({ "sourceAssetId": "img-1" }),
+            4.0,
+        ),
+        ("ltx_2_3", "text_to_video", json!({}), 6.0),
+    ] {
+        let mut request_body = json!({
+            "projectId": project_id,
+            "mode": mode,
+            "prompt": "a fox runs",
+            "model": model
+        });
+        request_body
+            .as_object_mut()
+            .expect("body object")
+            .extend(media.as_object().expect("media object").clone());
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", request_body).await;
         assert_eq!(
             status,
             StatusCode::CREATED,
@@ -7883,6 +7926,180 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
     assert_eq!(
         bernini_bare["detail"],
         "Reference to Video requires at least one reference image, video clip or audio clip."
+    );
+}
+
+/// **THE ENFORCEMENT GUARD (sc-19504).** A video mode NO lane will claim is refused at submission,
+/// with a real request, rather than enqueued to wait forever.
+///
+/// This is the half `every_declared_video_capability_is_claimable_by_some_lane` and
+/// `every_declared_video_capability_is_submittable` structurally cannot cover. Both read the
+/// manifest, so both only see what a model ADVERTISES — and `VIDEO_JOB_MODES` is global: any
+/// caller may name any admitted mode against any model, and the studio is not the only caller
+/// (`sceneworks-mcp`'s `submit_video_job` picks `first_last_frame` on its own the moment a
+/// `lastFrameAssetId` is present, then POSTs here). Withdrawing `first_last_frame` from
+/// `wan_2_2_i2v_14b` removes the TAB; only the enqueue gate removes the HANG.
+///
+/// Driven against the SHIPPED manifest through the REAL route, because "the mode is in a list" is
+/// what GH #2074 already passed. A `queued` job here is the defect: no worker claims it, no sweep
+/// fails it (both enforce sweeps default to warn), and the user sees "Waiting for an available
+/// worker." forever next to an idle worker (sc-15328).
+#[tokio::test]
+async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+
+    let submit = |body: Value| {
+        let app = app.clone();
+        let project_id = project_id.clone();
+        async move {
+            let mut full = json!({ "projectId": project_id, "prompt": "a fox runs" });
+            full.as_object_mut()
+                .expect("body object")
+                .extend(body.as_object().expect("case object").clone());
+            request(app, "POST", "/api/v1/video/jobs", full).await
+        }
+    };
+
+    // THE REPORTED DEFECT. Legal in every other respect — the mode is in `VIDEO_JOB_MODES`, both
+    // required frames are present, the model exists, the geometry is default — and claimable by
+    // nobody: the MLX I2V-A14B descriptor declares `conditioning: [Reference]` with no `Keyframe`,
+    // and the candle i2v gate requires `mode == "image_to_video"`.
+    let (status, flf) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "first_last_frame",
+        "sourceAssetId": "img-first",
+        "lastFrameAssetId": "img-last"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a first_last_frame request on the 14B I2V must be REFUSED, not enqueued to wait for a \
+         worker that will never claim it: {flf}"
+    );
+    assert_eq!(
+        flf["detail"],
+        "wan_2_2_i2v_14b cannot render the \"first_last_frame\" mode — no backend implements it, \
+         so this job would wait for a worker that will never claim it. Choose a mode this model \
+         lists in its capabilities, or a model that supports this one."
+    );
+
+    // …and the same shape on the 5B, which DOES have the mask-blend keyframe path, is accepted.
+    // Without this the assertion above would be satisfied by a gate that refused every FLF request.
+    let (status, five_b) = submit(json!({
+        "model": "wan_2_2",
+        "mode": "first_last_frame",
+        "sourceAssetId": "img-first",
+        "lastFrameAssetId": "img-last"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "wan_2_2 (TI2V-5B) serves first_last_frame on MLX and must still be accepted: {five_b}"
+    );
+
+    // The gate is NOT a platform gate. `extend_clip` on this same model is served only by the
+    // candle Wan-VACE lane — no MLX path at all — and must still enqueue, on a Mac included: the
+    // two shipped topologies share one queue and a job waits for ITS lane's worker.
+    let (status, extend) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "extend_clip",
+        "sourceClipAssetId": "clip-1"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "extend_clip is candle-VACE-served on this model and must still enqueue: {extend}"
+    );
+    assert_eq!(extend["type"], "video_extend");
+
+    // The gate is NOT a capability gate either, and this case is why it must not become one:
+    // `wan_2_2_t2v_14b` does not ADVERTISE `extend_clip`, but the candle VACE lane genuinely
+    // renders it. A capabilities-shaped gate would 400 a working shape — a real regression for
+    // every non-studio caller — while fixing nothing this gate does not already fix.
+    let (status, undeclared) = submit(json!({
+        "model": "wan_2_2_t2v_14b",
+        "mode": "extend_clip",
+        "sourceClipAssetId": "clip-1"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an undeclared but genuinely-served mode must not be refused: {undeclared}"
+    );
+
+    // The mode's own required-asset arm still runs FIRST, so a malformed request keeps its own
+    // precise message instead of being flattened into "no backend implements it".
+    let (status, missing) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "first_last_frame",
+        "sourceAssetId": "img-first"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        missing["detail"],
+        "First/Last Frame requires first and last image assets."
+    );
+
+    // Every mode `wan_2_2_i2v_14b` still advertises survives the gate, so the withdrawal narrowed
+    // exactly one capability and not the model.
+    let (status, i2v) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "image_to_video",
+        "sourceAssetId": "img-first"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{i2v}");
+    let (status, bridge) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "video_bridge",
+        "sourceClipAssetId": "clip-1",
+        "bridgeRightClipAssetId": "clip-2"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{bridge}");
+}
+
+/// The withdrawal itself (sc-19504), read off the SHIPPED manifest bytes rather than restated: the
+/// `wan_2_2_i2v_14b` entry must not advertise `first_last_frame` in `capabilities` OR in
+/// `ui.recommendedFor` — the Video Studio builds its mode tabs from the first and highlights from
+/// the second, and off-Mac (where the Mac gate is inactive) `capabilities` is the ONLY thing
+/// standing between a user and the tab that hangs.
+///
+/// Its siblings assert the CLASS; this asserts the specific advertisement stays withdrawn, so
+/// re-adding the string is red here as well as in the class guard.
+#[test]
+fn the_14b_i2v_no_longer_advertises_first_last_frame() {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == "wan_2_2_i2v_14b")
+        .expect("wan_2_2_i2v_14b is a shipped model");
+
+    assert_eq!(
+        entry["capabilities"],
+        json!(["image_to_video", "extend_clip", "video_bridge"]),
+        "the three modes a lane genuinely serves — `extend_clip` / `video_bridge` via the candle \
+         Wan-VACE engine, `image_to_video` on both lanes. `first_last_frame` is not one of them."
+    );
+    assert_eq!(
+        entry["ui"]["recommendedFor"],
+        json!(["image_to_video", "extend_clip", "video_bridge"]),
+        "`recommendedFor` must track `capabilities`: it is the second array the studio reads, so a \
+         mode left here re-surfaces the withdrawn advertisement"
     );
 }
 

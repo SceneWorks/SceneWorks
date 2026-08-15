@@ -33,9 +33,10 @@ use sceneworks_core::image_request::{
     default_count as image_default_count, default_resolution as image_default_resolution,
 };
 use sceneworks_core::jobs_store::{
-    candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
-    DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
-    RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    candle_supported, mac_capabilities, mac_rust_supported, model_mac_support,
+    video_request_is_claimable_by_any_lane, CreateJob, DuplicateJob, JobsStore, JobsStoreError,
+    MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision, StaleSweep,
+    UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,
