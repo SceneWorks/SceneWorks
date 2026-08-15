@@ -301,24 +301,51 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     }
   });
 
-  it("marks the 21:9 pair as pending its engine change, and cites it in the repo it lives in", () => {
+  it("ties the 21:9 caveat to the PIN BUMP, not to the already-merged engine PR", () => {
     // The 21:9 pair is ADVERTISED in `limits.resolutions` and satisfies the area budget, but the
     // engine bounds each EDGE independently and that ceiling currently sits below 1536, so the
-    // bucket is offered and refused. The unblocking change is `inference` PR #640
-    // (`story/sc-17152-h3-max-size-1536`), which raises the per-edge ceiling to the widest canvas
-    // `resolve_canvas_size` itself emits.
+    // bucket is offered and refused.
     //
-    // Cite the INFERENCE PR, not a SceneWorks branch. I looked for `story/sc-17152-h3-max-size-1536`
-    // on the SceneWorks origin, found nothing, and concluded the dependency did not exist — it lives
-    // in the engine repo, correctly, because it is an engine change. A bare `sc-17152` would have
-    // repeated that error for the next reader: the story's own title is about dense-attention cost
-    // at long duration, and the branch borrows its number for the geometry-gate lineage rather than
-    // being that story's deliverable. The PR number is the unambiguous handle.
-    expect(/inference PR\s*\n?>?\s*#640/.test(guide), "guide must cite inference PR #640 by number").toBe(true);
+    // This assertion previously demanded the guide cite `inference` PR #640 as PENDING. **#640 is
+    // now MERGED** — `75d66db5`, the head merge commit on the engine's `feature/sc-17137-minimax-h3`
+    // — so that framing became a live trap rather than a citation. A reader following it finds a
+    // closed PR, concludes the caveat is discharged, deletes it, and SceneWorks goes back to
+    // advertising a canvas the engine refuses.
+    //
+    // The refusal did NOT end when #640 merged, because SceneWorks does not run the engine's branch
+    // head; it runs a PINNED revision. `Cargo.toml` pins `014134e3`, and `75d66db5` is not an
+    // ancestor of it (`git merge-base --is-ancestor 75d66db5 014134e3` exits 1). So the caveat is
+    // still substantively correct, for a DIFFERENT reason, and the citation has to name the event
+    // that actually ends it: **sc-18650's inference pin bump**.
+    //
+    // The three assertions below are the three ways this can go wrong: the discharging event goes
+    // unnamed; #640 gets named without saying it is already merged (re-arming the trap); or someone
+    // re-points the caveat back at #640 as the thing being waited on.
     expect(
-      /must not be separated at\s*\n?>?\s*merge/.test(guide),
-      "guide must say the row and the engine change ship together — this table alone re-advertises a refused canvas",
+      /\bsc-18650\b/.test(guide),
+      "guide must cite the inference pin bump (sc-18650) as what discharges the caveat",
     ).toBe(true);
+    // MEASURED, not assumed: the first form of this assertion was
+    // `/#640[^.]{0,120}\bmerged\b|\bmerged\b[^.]{0,120}#640/`, and deleting "already merged" from
+    // the sentence that actually makes the claim left it GREEN — because the guide says "#640" and
+    // "merged" a second time in the NEGATED clause below ("not #640 being merged"), and the regex
+    // matched those leftovers. Same defect the duration-range assertion had twice on this story.
+    // So it is sentence-scoped and the negated clause is excluded explicitly: what must exist is a
+    // sentence that names #640 and asserts its merged status AFFIRMATIVELY.
+    const sentences = guide.split(/(?<=[.!?])\s+/);
+    expect(
+      sentences.some(
+        (sentence) =>
+          /#640/.test(sentence) &&
+          /\bmerged\b/i.test(sentence) &&
+          !/\bnot\b[^.]{0,40}\bmerged\b/i.test(sentence),
+      ),
+      "guide names #640, so some sentence must affirmatively say it is already merged — a bare citation sends the reader to a closed PR",
+    ).toBe(true);
+    expect(
+      /\b(?:pending|awaiting|until|once|when|blocked (?:on|by))\b[^.]{0,120}#640/is.test(guide),
+      "guide must not frame #640 as the thing still being waited on — it is merged; the PIN is what is outstanding",
+    ).toBe(false);
     // NO NUMERIC PER-EDGE CEILING IN CATALOG COPY. The resolver's widest output is an engine
     // internal a user never sees, and writing it down dates the page the moment the resolver moves.
     // 1536 was also the plausible-but-wrong value — a 1536 ceiling would still refuse a canvas the

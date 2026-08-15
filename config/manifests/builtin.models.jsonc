@@ -13387,12 +13387,21 @@
         //      BELOW this entry's advertised 21:9 pair. So `1536x672` / `672x1536` are ADVERTISED
         //      BUT NOT YET RENDERABLE: the area check passes and the edge check refuses.
         //
-        //      ⚠️ THE UNBLOCKING CHANGE IS IN THE ENGINE REPO, NOT THIS ONE — inference PR #640
-        //      (`story/sc-17152-h3-max-size-1536`), which raises the per-edge ceiling to the widest
-        //      canvas `resolve_canvas_size` itself emits. **This entry's 21:9 buckets and #640 must
-        //      not be separated at merge**: shipping these two `resolutions` values without that
-        //      engine change advertises a canvas the engine refuses. The prompt guide's *Sizes*
-        //      section carries the same caveat for the user and is pinned by
+        //      ⚠️ #640 IS MERGED, AND THIS CAVEAT STILL STANDS — DO NOT DELETE IT ON THAT NEWS.
+        //      inference PR #640 (`story/sc-17152-h3-max-size-1536`) raised the per-edge ceiling to
+        //      the widest canvas `resolve_canvas_size` itself emits, and merged into the engine's
+        //      `feature/sc-17137-minimax-h3` as `75d66db5`. That is not the same as SceneWorks
+        //      HAVING it: `Cargo.toml` pins inference at `014134e3`, and `75d66db5` is not an
+        //      ancestor of that pin (`git merge-base --is-ancestor 75d66db5 014134e3` exits 1), so
+        //      the engine this app actually runs still refuses the pair.
+        //
+        //      **WHAT DISCHARGES THIS CAVEAT IS THE PIN BUMP (sc-18650), NOT #640 BEING MERGED.**
+        //      This note previously read "pending inference PR #640", which is now a trap: a reader
+        //      who checks that PR finds it closed, concludes the caveat is obsolete, deletes it, and
+        //      SceneWorks re-advertises a canvas the pinned engine refuses — the exact failure the
+        //      note exists to prevent. It is re-pointed at the pin bump so the citation ends when
+        //      the refusal does. The prompt guide's *Sizes* section carries the same caveat for the
+        //      user, names the same discharging event, and is pinned by
         //      `minimaxH3CatalogCopy.test.jsx`.
         //
         //      Do NOT write the new ceiling's VALUE here or in the copy. It is an engine internal
