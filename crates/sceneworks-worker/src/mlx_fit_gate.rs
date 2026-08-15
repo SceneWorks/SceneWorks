@@ -464,6 +464,28 @@ pub(crate) struct MlxRequestPlan {
 }
 
 impl MlxRequestPlan {
+    /// Bind the already-resolved artifact tier without reinterpreting `LoadSpec::quantize`.
+    /// Prepacked Krea q4/q8 artifacts intentionally load with `quantize=None`; this explicit axis is
+    /// therefore required for request/evidence identity even when no calibration provenance exists.
+    pub(crate) fn with_resolved_artifact_tier(
+        mut self,
+        resolved_tier: Option<&str>,
+    ) -> WorkerResult<Self> {
+        let Some(resolved_tier) = resolved_tier else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} has no resolved MLX artifact tier",
+                self.model_id
+            )));
+        };
+        self.tier = numeric_tier_for_resolved(
+            resolved_tier,
+            self.tier,
+            declared_component_floors(self.engine_id),
+        )
+        .map_err(|reason| WorkerError::InvalidPayload(format!("{}: {reason}", self.model_id)))?;
+        Ok(self)
+    }
+
     pub(crate) fn for_spec_and_manifest(
         engine_id: &'static str,
         model_id: &str,
@@ -1306,28 +1328,35 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
 /// image-to-image entrypoint. Keep that internal contract identity exact without inventing a new
 /// public route or a generic CFG axis.
 fn provider_request_mode(engine_id: &str, inputs: &MlxRequestInputs) -> (MemoryMode, &'static str) {
-    if is_krea_raw_reference_route(engine_id, inputs) {
+    if is_krea_base_dit_reference_route(engine_id, inputs) {
         (MemoryMode::ImageToImage, "image_to_image")
     } else {
         request_mode(&inputs.mode)
     }
 }
 
-fn is_krea_raw_reference_route(engine_id: &str, inputs: &MlxRequestInputs) -> bool {
-    engine_id == "krea_2_raw"
+fn is_krea_base_dit_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+    )
+}
+
+fn is_krea_base_dit_reference_route(engine_id: &str, inputs: &MlxRequestInputs) -> bool {
+    matches!(engine_id, "krea_2_raw" | "krea_2_turbo")
         && matches!(inputs.mode.as_str(), "image_generation" | "text_to_image")
         && inputs.has_reference
         && inputs.reference_count == 1
 }
 
-/// Remove the generic UI-reference label from Krea Raw's provider identity. The exact provider
-/// contract keys this route by `ImageToImage + reference_count=1`; carrying `references:1` as an
-/// overlay would invent a second evidence/decode-policy coordinate which Krea does not declare.
+/// Krea's base-DiT providers carry reference count, PiD, adapters, and phases as typed request axes.
+/// None of those are a provider evidence overlay, so erase the UI/cache label before every contract,
+/// evidence, selector, and request-scope lookup. Control uses a different provider and is untouched.
 fn provider_request_inputs<'a>(
     engine_id: &str,
     inputs: &'a MlxRequestInputs,
 ) -> Cow<'a, MlxRequestInputs> {
-    if is_krea_raw_reference_route(engine_id, inputs) && inputs.overlay.is_some() {
+    if is_krea_base_dit_provider(engine_id) && inputs.overlay.is_some() {
         let mut normalized = inputs.clone();
         normalized.overlay = None;
         Cow::Owned(normalized)
@@ -6690,8 +6719,8 @@ mod tests {
         );
         assert_eq!(
             provider_request_mode("krea_2_turbo", &reference),
-            (MemoryMode::TextToImage, "text_to_image"),
-            "Raw routing must not change Turbo's request identity"
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "Turbo's one-reference latent-init route has the same provider-owned identity"
         );
         assert_eq!(
             provider_request_inputs("krea_2_raw", &reference)
@@ -6706,8 +6735,8 @@ mod tests {
                 .as_ref()
                 .overlay
                 .as_deref(),
-            Some("references:1"),
-            "normalizing Raw must not change Turbo's preexisting evidence identity"
+            None,
+            "Krea base-DiT reference cardinality is typed and never duplicated as an overlay"
         );
         assert_eq!(request_geometry(&reference).batch, 1);
         assert_eq!(request_geometry(&reference).reference_count, 1);
@@ -6734,6 +6763,35 @@ mod tests {
         );
         assert_eq!(request_geometry(&pid).batch, 1);
         assert!(pid.use_pid);
+
+        let edit = MlxRequestInputs {
+            mode: "edit_image".to_owned(),
+            overlay: Some("adapters:1+pid".to_owned()),
+            adapter_count: 1,
+            has_reference: true,
+            reference_count: 2,
+            use_pid: true,
+            ..reference
+        };
+        for provider in ["krea_2_edit", "krea_2_turbo_edit"] {
+            assert_eq!(
+                provider_request_mode(provider, &edit),
+                (MemoryMode::Edit, "edit")
+            );
+            let normalized = provider_request_inputs(provider, &edit);
+            assert_eq!(normalized.as_ref().overlay, None, "{provider}");
+            assert_eq!(normalized.as_ref().adapter_count, 1, "{provider}");
+            assert!(normalized.as_ref().use_pid, "{provider}");
+            assert_eq!(normalized.as_ref().reference_count, 2, "{provider}");
+        }
+        assert_eq!(
+            provider_request_inputs("krea_2_turbo_control", &edit)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            Some("adapters:1+pid"),
+            "the independently keyed Krea control provider keeps its established overlay"
+        );
     }
 
     /// The fixture record carries its own synthetic revision and [`FIXTURE_CLOSURE_DIGEST`].
@@ -7954,6 +8012,119 @@ mod tests {
             assert_eq!(evaluation.context.use_pid, use_pid);
             assert_eq!(evaluation.context.overlay, None);
         }
+    }
+
+    #[test]
+    fn krea_turbo_and_edit_routes_use_provider_exact_estimated_authority() {
+        for (provider, model_id, mode, references) in [
+            ("krea_2_turbo", "krea_2_turbo", "image_generation", 0),
+            ("krea_2_edit", "krea_2_raw", "edit_image", 2),
+            ("krea_2_turbo_edit", "krea_2_turbo", "edit_image", 1),
+        ] {
+            let mut generator = full_ladder_generator();
+            generator.descriptor.id = provider;
+            generator.contract.as_mut().unwrap().provider_id = provider.to_owned();
+            let mut plan = fixture_plan();
+            plan.engine_id = provider;
+            plan.model_id = model_id.to_owned();
+            plan.calibration = MlxCalibrationConfig::Absent;
+            let mut inputs = fixture_inputs(1024, 1024);
+            inputs.mode = mode.to_owned();
+            inputs.overlay = Some("adapters:1".to_owned());
+            inputs.adapter_count = 1;
+            inputs.has_reference = references > 0;
+            inputs.reference_count = references;
+            inputs.use_pid = false;
+            let evaluation = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                fixture_budget(8.0),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("the provider-exact estimate ladder must admit the deep rung");
+            assert_eq!(
+                evaluation.context.selection.strategy,
+                MemoryStrategy::BoundedTransformerResidency,
+                "{provider}"
+            );
+            assert_eq!(
+                evaluation.context.optimization_authority,
+                MemoryOptimizationAuthority::Estimated,
+                "{provider} must not inherit a catalog sibling's measured authority"
+            );
+            assert_eq!(evaluation.context.overlay, None, "{provider}");
+            assert_eq!(evaluation.context.geometry.reference_count, references);
+            assert!(!evaluation.context.use_pid);
+        }
+    }
+
+    #[test]
+    fn krea_prepacked_tier_is_explicit_and_not_load_time_quantization() {
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_edit";
+        plan.model_id = "krea_2_raw".to_owned();
+        plan.tier.quant = None;
+        let q4 = plan
+            .clone()
+            .with_resolved_artifact_tier(Some("q4"))
+            .unwrap();
+        let q8 = plan.with_resolved_artifact_tier(Some("q8")).unwrap();
+        assert_eq!(q4.tier.quant, Some(gen_core::Quant::Q4));
+        assert_eq!(q8.tier.quant, Some(gen_core::Quant::Q8));
+        assert!(q8.with_resolved_artifact_tier(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn krea_eager_provider_refusal_runs_only_when_the_resident_path_fits() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "krea_2_turbo";
+        let contract = generator.contract.as_mut().unwrap();
+        contract.provider_id = "krea_2_turbo".to_owned();
+        for capability in &mut contract.strategies {
+            if capability.strategy != MemoryStrategy::Resident {
+                capability.support = gen_core::MemoryStrategySupport::Missing;
+            }
+        }
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_turbo";
+        plan.model_id = "krea_2_turbo".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        let admitted = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(16.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect("the safe eager fallback remains executable when the resident path fits");
+        assert_eq!(
+            admitted.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        let error = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect_err("a safe eager fallback cannot exceed the live host budget")
+        .to_string();
+        assert!(error.contains("needs"), "{error}");
+        assert!(error.contains("safely available"), "{error}");
     }
 
     #[test]

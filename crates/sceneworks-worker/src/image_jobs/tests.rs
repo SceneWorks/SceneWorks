@@ -441,6 +441,55 @@ struct HiresProbeGenerator {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+struct ProbeMemoryRequestScope;
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
+    fn configure_request(&mut self, _request: &mut GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn enter_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn leave_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn configure_decode(
+        &mut self,
+        _tile_edge: u32,
+        _overlap: u32,
+        _geometry: gen_core::MemoryGeometry,
+    ) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn configure_attention(&mut self, _chunk_size: u32) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn materialize_transformer_window(
+        &mut self,
+        _first_block: u32,
+        _block_count: u32,
+    ) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn finish(&mut self, _outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 impl HiresProbeGenerator {
     fn new() -> Self {
         Self {
@@ -474,12 +523,19 @@ impl Generator for HiresProbeGenerator {
         Ok(())
     }
 
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::MemorySafetyDecision::Accept
+    }
+
     fn begin_memory_strategy_request(
         &self,
         context: &gen_core::MemoryRunContext,
     ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
         self.contexts.lock().unwrap().push(context.clone());
-        Ok(None)
+        Ok(Some(Box::new(ProbeMemoryRequestScope)))
     }
 
     fn generate(
@@ -1124,6 +1180,122 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             );
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope() {
+    let selection = gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+        parameters: gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            transformer_window_component: Some(gen_core::TransformerComponent::Dit),
+            ..Default::default()
+        },
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Q4),
+            component_precision_floors: &[],
+        },
+    };
+    let evaluation = |mode, reference_count, use_pid, has_phases| {
+        let mut context = hires_memory_context(selection);
+        context.mode = mode;
+        context.has_reference = reference_count > 0;
+        context.geometry.width = 4;
+        context.geometry.height = 4;
+        context.geometry.reference_count = reference_count;
+        context.use_pid = use_pid;
+        context.has_phases = has_phases;
+        context.optimization_authority = gen_core::MemoryOptimizationAuthority::Estimated;
+        crate::mlx_fit_gate::MlxRequestEvaluation {
+            memory: gen_core::GenerationMemory {
+                stream_transformer_blocks: true,
+                ..Default::default()
+            },
+            context,
+            decode_quality_decisions: vec![],
+            process_limit_bytes: None,
+        }
+    };
+
+    let edit_generator = HiresProbeGenerator::new();
+    let edit = evaluation(gen_core::MemoryMode::Edit, 2, true, false);
+    krea_edit_generate_one(
+        &edit_generator,
+        "edit",
+        None,
+        4,
+        4,
+        7,
+        2,
+        None,
+        true,
+        vec![Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 4,
+                    height: 4,
+                    pixels: vec![1; 48],
+                },
+                Image {
+                    width: 4,
+                    height: 4,
+                    pixels: vec![2; 48],
+                },
+            ],
+        }],
+        None,
+        &edit,
+        gen_core::PreviewSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        edit_generator.contexts.lock().unwrap().as_slice(),
+        &[edit.context]
+    );
+    let edit_request = edit_generator.requests.lock().unwrap();
+    assert!(edit_request[0].use_pid);
+    assert_eq!(edit_request[0].image_reference_count(), 2);
+    assert!(edit_request[0]
+        .memory
+        .is_some_and(|memory| memory.stream_transformer_blocks));
+    drop(edit_request);
+
+    let phase_generator = HiresProbeGenerator::new();
+    let phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
+    krea_multiphase_generate_one(
+        &phase_generator,
+        "phases",
+        None,
+        4,
+        4,
+        9,
+        None,
+        None,
+        vec![gen_core::GenerationPhase {
+            steps: 2,
+            guidance: None,
+            adapters: vec![],
+        }],
+        Some(phase.memory),
+        Some(&phase.context),
+        gen_core::PreviewSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        phase_generator.contexts.lock().unwrap().as_slice(),
+        &[phase.context]
+    );
+    let phase_request = phase_generator.requests.lock().unwrap();
+    assert!(phase_request[0].phases.is_some());
+    assert!(phase_request[0]
+        .memory
+        .is_some_and(|memory| memory.stream_transformer_blocks));
 }
 
 #[cfg(target_os = "macos")]

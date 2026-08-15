@@ -250,6 +250,31 @@ pub enum DeclaredCandleStrategyContract {
     Refused,
 }
 
+/// Typed, non-authorizing diagnostic for a valid Krea dense-diff load which cannot use the
+/// reopenable deferred DiT. The load remains `Refused + Eager`; request admission still decides
+/// whether that conservative resident path fits the live host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MlxLoadShapeDeclarationWarning {
+    DenseDiffRequiresEager,
+}
+
+pub fn mlx_load_shape_declaration_warning(
+    spec: &LoadSpec,
+) -> Option<MlxLoadShapeDeclarationWarning> {
+    (spec.load_shape_declaration_result == LoadShapeDeclarationResult::Refused
+        && spec.load_shape == LoadShape::EagerMaterialization
+        && spec.adapters.iter().any(|adapter| {
+            gen_core::safetensors_path_tensor_headers(&adapter.path)
+                .ok()
+                .is_some_and(|headers| {
+                    headers.iter().any(|header| {
+                        header.name.ends_with(".diff") || header.name.ends_with(".diff_b")
+                    })
+                })
+        }))
+    .then_some(MlxLoadShapeDeclarationWarning::DenseDiffRequiresEager)
+}
+
 #[derive(Clone, Copy)]
 struct MemoryRouteRule {
     backend: MemoryRouteBackend,
@@ -360,15 +385,33 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "krea_2_turbo",
         tiers: ALL_TIERS,
         modes: TEXT_ONLY,
-        load_profiles: PLAIN,
+        load_profiles: PLAIN_LORA_PID,
         requires_sequential_selection: false,
-        legacy_shaping: true,
+        legacy_shaping: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "krea_2_raw",
         tiers: ALL_TIERS,
         modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "krea_2_edit",
+        tiers: ALL_TIERS,
+        modes: EDIT_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "krea_2_turbo_edit",
+        tiers: ALL_TIERS,
+        modes: EDIT_MODES,
         load_profiles: PLAIN_LORA_PID,
         requires_sequential_selection: false,
         legacy_shaping: false,
@@ -710,6 +753,80 @@ fn implementation_declares_selector(
                     .iter()
                     .any(|overlay| overlay.as_str() == Some(selector.overlay.as_str()))
             })
+}
+
+fn mlx_request_implementation_matches(
+    implementation: &Value,
+    contract_provider: &str,
+    selector: MemoryRouteSelector,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+    requires_request_context: bool,
+) -> Result<bool, ()> {
+    if !implementation_declares_selector(implementation, contract_provider, selector) {
+        return Ok(false);
+    }
+    let implementation = implementation.as_object().ok_or(())?;
+    let Some(request_contexts) = implementation.get("requestContexts") else {
+        if requires_request_context {
+            return Err(());
+        }
+        // Existing declaration-owned routes predate the request-context schema. Their exact
+        // provider/tier/mode/overlay/source predicate remains authoritative and unchanged.
+        return Ok(true);
+    };
+    let runtime_provider = implementation
+        .get("runtimeProvider")
+        .and_then(Value::as_str)
+        .unwrap_or(contract_provider);
+    if runtime_provider != selector.provider {
+        return Ok(false);
+    }
+    let includes = |field: &str, expected: &str| -> Result<bool, ()> {
+        Ok(implementation
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or(())?
+            .iter()
+            .any(|value| value.as_str() == Some(expected)))
+    };
+    let Some(load_profile) = MemoryRouteLoadProfile::from_spec(spec) else {
+        return Ok(false);
+    };
+    let source_kind = match spec.weights {
+        WeightsSource::Dir(_) => "dir",
+        WeightsSource::File(_) => "file",
+    };
+    if !includes("loadProfiles", load_profile.as_str())? || !includes("sourceKinds", source_kind)? {
+        return Ok(false);
+    }
+    if implementation
+        .get("providerOverlay")
+        .and_then(Value::as_str)
+        != Some("none")
+    {
+        return Err(());
+    }
+    let request_contexts = request_contexts.as_array().ok_or(())?;
+    let matches = request_contexts
+        .iter()
+        .map(|request_context| request_strategy_context_matches(request_context, context))
+        .collect::<Result<Vec<_>, _>>()?;
+    let matching = request_contexts
+        .iter()
+        .zip(matches)
+        .filter_map(|(request_context, matched)| matched.then_some(request_context))
+        .collect::<Vec<_>>();
+    let [matching] = matching.as_slice() else {
+        return Ok(false);
+    };
+    let expected_provider_mode = match context.mode {
+        MemoryRouteMode::EditImage => "edit_image",
+        MemoryRouteMode::TextToImage if context.reference_count == 1 => "image_to_image",
+        MemoryRouteMode::TextToImage => "text_to_image",
+        other => other.as_str(),
+    };
+    Ok(matching.get("providerMode").and_then(Value::as_str) == Some(expected_provider_mode))
 }
 
 fn manifest_contract(
@@ -1073,12 +1190,40 @@ pub fn evaluate_declared_mlx_load_shape(
     manifest: &JsonObject<String, Value>,
     spec: LoadSpec,
 ) -> LoadSpec {
-    evaluate_declared_mlx_load_shape_with(
+    let context = MemoryRouteRequestContext {
+        mode: mode.unwrap_or(MemoryRouteMode::TextToImage),
+        reference_count: 0,
+        use_pid: spec.pid.is_some(),
+        has_phases: false,
+    };
+    evaluate_declared_mlx_load_shape_for_request(
         provider,
         resolved_tier,
         mode,
         manifest,
         spec,
+        context,
+    )
+}
+
+/// Request-exact MLX declaration intersection. Krea routes use the public request coordinate plus
+/// the provider-owned reference/PiD/phase axes; older declarations without `requestContexts` keep
+/// their established behavior through [`evaluate_declared_mlx_load_shape`].
+pub fn evaluate_declared_mlx_load_shape_for_request(
+    provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> LoadSpec {
+    evaluate_declared_mlx_load_shape_for_request_with(
+        provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        context,
         |candidate| {
             crate::inference_runtime::media()
                 .memory_strategy_contract(provider, candidate)
@@ -1095,12 +1240,39 @@ pub fn evaluate_declared_mlx_load_shape(
     )
 }
 
+#[cfg(test)]
 fn evaluate_declared_mlx_load_shape_with(
     provider: &str,
     resolved_tier: Option<&str>,
     mode: Option<MemoryRouteMode>,
     manifest: &JsonObject<String, Value>,
     spec: LoadSpec,
+    provider_implements: impl FnOnce(&LoadSpec) -> bool,
+) -> LoadSpec {
+    let context = MemoryRouteRequestContext {
+        mode: mode.unwrap_or(MemoryRouteMode::TextToImage),
+        reference_count: 0,
+        use_pid: spec.pid.is_some(),
+        has_phases: false,
+    };
+    evaluate_declared_mlx_load_shape_for_request_with(
+        provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        context,
+        provider_implements,
+    )
+}
+
+fn evaluate_declared_mlx_load_shape_for_request_with(
+    provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+    context: MemoryRouteRequestContext,
     provider_implements: impl FnOnce(&LoadSpec) -> bool,
 ) -> LoadSpec {
     match has_relevant_btr_declaration(manifest, MemoryRouteBackend::Mlx) {
@@ -1123,6 +1295,12 @@ fn evaluate_declared_mlx_load_shape_with(
     ) else {
         return spec.with_refused_load_shape_declaration();
     };
+    if context.mode != mode {
+        return spec.with_refused_load_shape_declaration();
+    }
+    if context.use_pid != spec.pid.is_some() {
+        return spec.with_refused_load_shape_declaration();
+    }
     let Some(registered_provider) = RULES
         .iter()
         .find(|rule| rule.backend == MemoryRouteBackend::Mlx && rule.provider == provider)
@@ -1138,7 +1316,43 @@ fn evaluate_declared_mlx_load_shape_with(
         overlay: load_profile.overlay(),
         load_profile,
     };
-    if !manifest_declares_selector(manifest, selector) {
+    // A typed rule with no legacy shaper is request-context-owned. The manifest cannot turn that
+    // exact authority back into an older context-free declaration by deleting requestContexts.
+    let requires_request_context = matching_rules(selector).any(|rule| !rule.legacy_shaping);
+    let Some(contract) = manifest_contract(manifest, MemoryRouteBackend::Mlx) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let Some(contract_provider) = contract.get("provider").and_then(Value::as_str) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let Some(implementations) = contract.get("implementations").and_then(Value::as_array) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    if requires_request_context {
+        let Some(manifest_route) = manifest.get("id").and_then(Value::as_str) else {
+            return spec.with_refused_load_shape_declaration();
+        };
+        if spec.resolved_route.as_deref() != Some(manifest_route) {
+            return spec.with_refused_load_shape_declaration();
+        }
+    }
+    let matches = implementations
+        .iter()
+        .map(|implementation| {
+            mlx_request_implementation_matches(
+                implementation,
+                contract_provider,
+                selector,
+                &spec,
+                context,
+                requires_request_context,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(matches) = matches else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    if matches.into_iter().filter(|matched| *matched).count() != 1 {
         return spec.with_refused_load_shape_declaration();
     }
     let mut matching = matching_rules(selector).peekable();
@@ -1870,8 +2084,9 @@ mod tests {
         let implementations = contract["implementations"]
             .as_array()
             .expect("Raw implementation rows");
-        assert_eq!(implementations.len(), 3);
-        for implementation in implementations {
+        assert_eq!(implementations.len(), 6);
+        let (native, edit) = implementations.split_at(3);
+        for implementation in native {
             assert_eq!(
                 implementation["fingerprint"],
                 "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3"
@@ -1888,6 +2103,19 @@ mod tests {
                 implementation["overlays"],
                 serde_json::json!(["none", "lora"])
             );
+        }
+        for implementation in edit {
+            assert_eq!(implementation["runtimeProvider"], "krea_2_edit");
+            assert_eq!(
+                implementation["fingerprint"],
+                "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3"
+            );
+            assert_eq!(
+                implementation["tiers"],
+                serde_json::json!(["bf16", "q4", "q8"])
+            );
+            assert_eq!(implementation["modes"], serde_json::json!(["edit_image"]));
+            assert_eq!(implementation["overlays"], serde_json::json!(["lora"]));
         }
         assert_eq!(
             implementations[2]["engagedRungs"],
@@ -2284,35 +2512,327 @@ mod tests {
     }
 
     #[test]
-    fn krea_turbo_legacy_probe_and_shape_path_are_unchanged() {
+    fn krea_turbo_and_edit_request_contexts_are_declaration_owned_and_fail_closed() {
         let manifest = shipped_model("krea_2_turbo");
-        let input = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain)
-            .with_resolved_route("krea_2_turbo");
-        let declared = evaluate_declared_mlx_load_shape_with(
+        let evaluate = |provider: &str,
+                        profile: MemoryRouteLoadProfile,
+                        context: MemoryRouteRequestContext| {
+            evaluate_declared_mlx_load_shape_for_request_with(
+                provider,
+                Some("q4"),
+                Some(context.mode),
+                &manifest,
+                spec(MemoryRouteTier::Q4, profile).with_resolved_route("krea_2_turbo"),
+                context,
+                |candidate| {
+                    candidate.offload_policy == OffloadPolicy::Sequential
+                        && candidate.load_shape == LoadShape::DeferredMaterialization
+                },
+            )
+        };
+        for profile in PLAIN_LORA_PID {
+            let applied = evaluate(
+                "krea_2_turbo",
+                *profile,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: matches!(
+                        *profile,
+                        MemoryRouteLoadProfile::Pid | MemoryRouteLoadProfile::LoraPid
+                    ),
+                    has_phases: false,
+                },
+            );
+            assert_eq!(
+                applied.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied,
+                "Turbo {profile:?}"
+            );
+        }
+        for (profile, crossed_use_pid) in [
+            (MemoryRouteLoadProfile::Plain, true),
+            (MemoryRouteLoadProfile::Pid, false),
+            (MemoryRouteLoadProfile::Lora, true),
+            (MemoryRouteLoadProfile::LoraPid, false),
+        ] {
+            let refused = evaluate(
+                "krea_2_turbo",
+                profile,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: crossed_use_pid,
+                    has_phases: false,
+                },
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "Turbo {profile:?} must bind request PiD identity to the loaded PiD components"
+            );
+            assert_eq!(refused.load_shape, LoadShape::EagerMaterialization);
+        }
+        let reference = evaluate(
+            "krea_2_turbo",
+            MemoryRouteLoadProfile::LoraPid,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 1,
+                use_pid: true,
+                has_phases: false,
+            },
+        );
+        assert_eq!(
+            reference.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Applied
+        );
+        for reference_count in [1, 2] {
+            let edit = evaluate(
+                "krea_2_turbo_edit",
+                MemoryRouteLoadProfile::LoraPid,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    reference_count,
+                    use_pid: true,
+                    has_phases: false,
+                },
+            );
+            assert_eq!(
+                edit.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied,
+                "Turbo edit references={reference_count}"
+            );
+        }
+        for crossed in [
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 2,
+                use_pid: false,
+                has_phases: false,
+            },
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: true,
+            },
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::EditImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
+            },
+        ] {
+            assert_eq!(
+                evaluate("krea_2_turbo", MemoryRouteLoadProfile::Plain, crossed)
+                    .load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "crossed context {crossed:?}"
+            );
+        }
+
+        let plain_context = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::TextToImage,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        let route_unbound = evaluate_declared_mlx_load_shape_for_request_with(
             "krea_2_turbo",
             Some("q4"),
             Some(MemoryRouteMode::TextToImage),
             &manifest,
-            input.clone(),
-            |candidate| {
-                assert_eq!(
-                    candidate.offload_policy,
-                    OffloadPolicy::Resident,
-                    "SC-18452's staged provider probe is declaration-owned and must not alter Turbo"
-                );
-                candidate.load_shape == LoadShape::DeferredMaterialization
+            spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
+            plain_context,
+            |_| true,
+        );
+        assert_eq!(
+            route_unbound.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "an exact request-context declaration cannot authorize a route-unbound load"
+        );
+        let evaluate_mutated = |mutated: &JsonObject<String, Value>| {
+            evaluate_declared_mlx_load_shape_for_request_with(
+                "krea_2_turbo",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                mutated,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain)
+                    .with_resolved_route("krea_2_turbo"),
+                plain_context,
+                |_| true,
+            )
+        };
+        let mut crossed_provider_mode = manifest.clone();
+        crossed_provider_mode["mlx"]["memoryStrategyContract"]["implementations"][2]
+            ["requestContexts"][0]["providerMode"] = Value::String("image_to_image".to_owned());
+        assert_eq!(
+            evaluate_mutated(&crossed_provider_mode).load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "the public coordinate cannot authorize a crossed provider-facing mode"
+        );
+
+        let mut ambiguous = manifest.clone();
+        let contexts = ambiguous["mlx"]["memoryStrategyContract"]["implementations"][2]
+            ["requestContexts"]
+            .as_array_mut()
+            .expect("Turbo BTR request contexts");
+        let duplicate = contexts[0].clone();
+        contexts.push(duplicate);
+        assert_eq!(
+            evaluate_mutated(&ambiguous).load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "duplicate matching request identities fail closed"
+        );
+
+        let mut missing_matching_contexts = manifest.clone();
+        missing_matching_contexts["mlx"]["memoryStrategyContract"]["implementations"][2]
+            .as_object_mut()
+            .expect("Turbo BTR implementation")
+            .remove("requestContexts");
+        assert_eq!(
+            evaluate_mutated(&missing_matching_contexts).load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "a declaration-owned BTR row cannot become context-free"
+        );
+
+        let mut missing_all_contexts = manifest.clone();
+        for implementation in missing_all_contexts["mlx"]["memoryStrategyContract"]
+            ["implementations"]
+            .as_array_mut()
+            .expect("Turbo implementations")
+        {
+            implementation
+                .as_object_mut()
+                .expect("Turbo implementation")
+                .remove("requestContexts");
+        }
+        assert_eq!(
+            evaluate_mutated(&missing_all_contexts).load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "removing every request context cannot reactivate legacy declaration semantics"
+        );
+        assert!(manifest["mlx"].get("supportsSequentialOffload").is_none());
+    }
+
+    #[test]
+    fn krea_raw_multiphase_and_edit_rows_bind_exact_request_identity() {
+        let manifest = shipped_model("krea_2_raw");
+        let evaluate = |provider: &str,
+                        profile: MemoryRouteLoadProfile,
+                        context: MemoryRouteRequestContext| {
+            evaluate_declared_mlx_load_shape_for_request_with(
+                provider,
+                Some("q8"),
+                Some(context.mode),
+                &manifest,
+                spec(MemoryRouteTier::Q8, profile).with_resolved_route("krea_2_raw"),
+                context,
+                |_| true,
+            )
+        };
+        let multiphase = evaluate(
+            "krea_2_raw",
+            MemoryRouteLoadProfile::Lora,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: true,
             },
         );
-        let legacy = apply_registered_load_shape(
-            MemoryRouteBackend::Mlx,
-            "krea_2_turbo",
-            MemoryRouteMode::TextToImage,
-            input,
-            false,
+        assert_eq!(
+            multiphase.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Applied
         );
-        assert_eq!(declared.load_shape, legacy.load_shape);
-        assert_eq!(declared.offload_policy, legacy.offload_policy);
-        assert_eq!(declared.load_shape, LoadShape::DeferredMaterialization);
+        for crossed in [
+            MemoryRouteRequestContext {
+                use_pid: true,
+                ..MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: false,
+                    has_phases: true,
+                }
+            },
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 1,
+                use_pid: false,
+                has_phases: true,
+            },
+        ] {
+            assert_eq!(
+                evaluate("krea_2_raw", MemoryRouteLoadProfile::Lora, crossed)
+                    .load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+        for reference_count in [1, 2] {
+            assert_eq!(
+                evaluate(
+                    "krea_2_edit",
+                    MemoryRouteLoadProfile::Lora,
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::EditImage,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                )
+                .load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied
+            );
+        }
+        assert_eq!(
+            evaluate(
+                "krea_2_edit",
+                MemoryRouteLoadProfile::Lora,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    reference_count: 3,
+                    use_pid: false,
+                    has_phases: false,
+                },
+            )
+            .load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused
+        );
+    }
+
+    #[test]
+    fn dense_diff_refusal_emits_typed_eager_warning_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let adapter = temp.path().join("dense-diff.safetensors");
+        let header = br#"{"transformer_blocks.0.attn.to_q.diff":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&0_f32.to_le_bytes());
+        std::fs::write(&adapter, bytes).unwrap();
+        let refused = LoadSpec::new(WeightsSource::Dir("fixture".into()))
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                adapter,
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )])
+            .with_refused_load_shape_declaration();
+        assert_eq!(
+            mlx_load_shape_declaration_warning(&refused),
+            Some(MlxLoadShapeDeclarationWarning::DenseDiffRequiresEager)
+        );
+        assert_eq!(
+            mlx_load_shape_declaration_warning(
+                &refused.clone().with_applied_load_shape_declaration()
+            ),
+            None
+        );
+        assert_eq!(
+            mlx_load_shape_declaration_warning(&LoadSpec::new(WeightsSource::Dir(
+                "fixture".into()
+            ))),
+            None
+        );
     }
 
     #[test]
@@ -3166,13 +3686,6 @@ mod tests {
                 "q4",
                 MemoryRouteTier::Q4,
                 MemoryRouteMode::EditImage,
-            ),
-            (
-                "krea_2_turbo",
-                "krea_2_turbo",
-                "q4",
-                MemoryRouteTier::Q4,
-                MemoryRouteMode::TextToImage,
             ),
             (
                 "sdxl",

@@ -3864,6 +3864,26 @@ fn load_spec(
     spec
 }
 
+/// Krea's MLX base-DiT turnkeys are already packed in the resolved `bf16/q4/q8`
+/// artifact directory. `LoadSpec::quantize` is a load-time transform request, not
+/// that artifact-tier identity, so forwarding the UI tier as a quant transform
+/// would make the provider predicate reject the otherwise exact production spec.
+/// Keep the resolved tier on the request plan/declaration axes instead.
+#[cfg(target_os = "macos")]
+pub(super) fn mlx_load_quant_for_resolved_artifact(
+    engine_id: &str,
+    quant: Option<Quant>,
+) -> Option<Quant> {
+    if matches!(
+        engine_id,
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+    ) {
+        None
+    } else {
+        quant
+    }
+}
+
 /// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
 /// the exact prepared source receipt before any planner, fit gate, or provider loader sees the spec.
 /// Default/absent selection is an exact no-op.
@@ -4541,23 +4561,48 @@ mod measured_mlx_load_shape_tests {
     }
 
     #[test]
-    fn worker_plain_krea_specs_reach_the_full_ladder_without_admitting_other_surfaces() {
-        for (tier, quant_bits, quant) in [
-            ("bf16", None, None),
-            ("q4", Some(4), Some(Quant::Q4)),
-            ("q8", Some(8), Some(Quant::Q8)),
-        ] {
+    fn worker_krea_declarations_reach_the_full_ladder_without_legacy_shaping() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin model manifest")
+            .1;
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            source,
+        ))
+        .expect("builtin model manifest parses");
+        let turbo_manifest = manifest["models"]
+            .as_array()
+            .expect("model rows")
+            .iter()
+            .find(|model| model["id"] == "krea_2_turbo")
+            .and_then(Value::as_object)
+            .expect("Krea Turbo row");
+        let context = crate::memory_route_registry::MemoryRouteRequestContext {
+            mode: crate::memory_route_registry::MemoryRouteMode::TextToImage,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+
+        for (tier, quant_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
             let root = tempfile::tempdir().unwrap();
-            let mut spec = fixture_spec(
+            let spec = fixture_spec(
                 root.path(),
                 quant_bits,
                 Some(("krea_2_turbo", quant_bits.map(i32::from))),
-            );
-            if let Some(quant) = quant {
-                spec = spec.with_quant(quant);
-            }
+            )
+            .with_resolved_route("krea_2_turbo");
+            assert_eq!(spec.quantize, None, "{tier} is a prepacked artifact tier");
             let shaped =
-                apply_measured_mlx_load_shape_for_request("krea_2_turbo", spec, true);
+                crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+                    "krea_2_turbo",
+                    Some(tier),
+                    Some(context.mode),
+                    turbo_manifest,
+                    spec,
+                    context,
+                );
             assert_eq!(
                 shaped.load_shape,
                 gen_core::LoadShape::DeferredMaterialization,
@@ -4603,34 +4648,40 @@ mod measured_mlx_load_shape_tests {
             Some(4),
             Some(("krea_2_turbo", Some(4))),
         )
-        .with_quant(Quant::Q4);
+        .with_resolved_route("krea_2_turbo");
         assert_eq!(
-            apply_measured_mlx_load_shape_for_request("krea_2_turbo", base.clone(), false)
-                .load_shape,
-            gen_core::LoadShape::EagerMaterialization,
-            "a reference/edit/hires request is outside the plain Krea T2I apparatus even when its \
-             weight spec is otherwise clean"
-        );
-        let adapter = AdapterSpec::new(
-            root.path().join("adapter.safetensors"),
-            1.0,
-            AdapterKind::Lora,
-        );
-        for (engine, spec) in [
-            ("krea_2_turbo_edit", base.clone()),
-            ("krea_2_turbo_control", base.clone()),
-            ("krea_2_turbo", base.clone().with_adapters(vec![adapter])),
-            (
+            crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
                 "krea_2_turbo",
-                base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
-            ),
-        ] {
-            assert_eq!(
-                apply_measured_mlx_load_shape_for_request(engine, spec, true).load_shape,
-                gen_core::LoadShape::EagerMaterialization,
-                "{engine} overlay/edit/control surface is outside the base calibration identity"
-            );
-        }
+                Some("q4"),
+                Some(crate::memory_route_registry::MemoryRouteMode::EditImage),
+                turbo_manifest,
+                base.clone(),
+                crate::memory_route_registry::MemoryRouteRequestContext {
+                    mode: crate::memory_route_registry::MemoryRouteMode::EditImage,
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+            )
+            .load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "native Turbo cannot consume the route-local edit declaration"
+        );
+        let control = base.with_control(WeightsSource::File(root.path().join("control.safetensors")));
+        let refused = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            "krea_2_turbo",
+            Some("q4"),
+            Some(context.mode),
+            turbo_manifest,
+            control,
+            context,
+        );
+        assert_eq!(refused.load_shape, gen_core::LoadShape::EagerMaterialization);
+        assert_eq!(
+            refused.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::Refused,
+            "control cannot fall through to the former Turbo legacy shaper"
+        );
     }
 
     #[test]
@@ -7141,7 +7192,11 @@ async fn generate_stream(
     } else {
         None
     };
-    let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
+    #[cfg(target_os = "macos")]
+    let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
+    #[cfg(not(target_os = "macos"))]
+    let load_quant = quant;
+    let mut spec = load_spec(weights_dir, load_quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
@@ -7172,13 +7227,40 @@ async fn generate_stream(
     // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
     // through to legacy shaping; only a manifest with no relevant BTR entry uses that unchanged
     // path. The tier is the resolved artifact tier, not the load-time quant field on the spec.
-    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape(
+    let declaration_reference_count = if hires_fix.is_some() {
+        hires_fix_reference_count()
+    } else {
+        lane_reference_count(
+            identity_init.is_some(),
+            edit_refs.len(),
+            ideogram_edit_mask.is_some(),
+        )
+    };
+    let declaration_mode = crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode);
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         engine_id,
         effective_tier,
-        crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode),
+        declaration_mode,
         &request.model_manifest_entry,
         spec,
+        crate::memory_route_registry::MemoryRouteRequestContext {
+            mode: declaration_mode
+                .unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
+            reference_count: declaration_reference_count,
+            use_pid,
+            has_phases: false,
+        },
     );
+    if let Some(warning) =
+        crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
+    {
+        tracing::warn!(
+            event = "mlx_load_shape_declaration_warning",
+            provider = engine_id,
+            ?warning,
+            "provider refused deferred materialization; retaining the safe eager load path"
+        );
+    }
     if spec.load_shape_declaration_result
         == gen_core::LoadShapeDeclarationResult::NotEvaluated
     {
@@ -7201,21 +7283,21 @@ async fn generate_stream(
         Some(&request.model_manifest_entry),
         resolved_artifact,
     );
+    let mlx_request_plan = if matches!(
+        engine_id,
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+    ) {
+        mlx_request_plan.with_resolved_artifact_tier(effective_tier)?
+    } else {
+        mlx_request_plan
+    };
     let has_request_reference =
         identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
     // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
     // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
     // first hires pass renders at the base size with the caller's own conditioning and gets its own
     // request-scope identity inside `generate_one_with_hires`.
-    let reference_count = if hires_fix.is_some() {
-        hires_fix_reference_count()
-    } else {
-        lane_reference_count(
-            identity_init.is_some(),
-            edit_refs.len(),
-            ideogram_edit_mask.is_some(),
-        )
-    };
+    let reference_count = declaration_reference_count;
     let mut memory_overlays = Vec::new();
     if has_request_reference {
         memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
@@ -12942,6 +13024,32 @@ mod quant_tier_reconcile_tests {
                 "mlx",
             ),
             (Some(Quant::Q8), Some(8)),
+        );
+    }
+
+    #[test]
+    fn krea_base_dit_turnkeys_keep_packed_tier_out_of_load_quantization() {
+        for engine_id in [
+            "krea_2_raw",
+            "krea_2_turbo",
+            "krea_2_edit",
+            "krea_2_turbo_edit",
+        ] {
+            assert_eq!(
+                mlx_load_quant_for_resolved_artifact(engine_id, Some(Quant::Q4)),
+                None,
+                "{engine_id} q4 is an already-packed artifact tier"
+            );
+            assert_eq!(
+                mlx_load_quant_for_resolved_artifact(engine_id, Some(Quant::Q8)),
+                None,
+                "{engine_id} q8 is an already-packed artifact tier"
+            );
+        }
+        assert_eq!(
+            mlx_load_quant_for_resolved_artifact("qwen_image", Some(Quant::Q4)),
+            Some(Quant::Q4),
+            "unrelated loaders retain their existing load-time quantization contract"
         );
     }
 
