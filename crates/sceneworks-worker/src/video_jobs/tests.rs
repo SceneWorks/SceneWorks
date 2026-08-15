@@ -12318,6 +12318,26 @@ fn drive_minimax_h3_arm(
     probe: &ArmProbe,
     request: &VideoRequest,
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    // The t2va/fl2va arms resolve no media, so the project root is never read and a placeholder is
+    // honest. The Ref2VA arms DO read it — they take `drive_minimax_h3_arm_in_project`.
+    let project_path = tier_root.join("unused-project");
+    drive_minimax_h3_arm_in_project(tier_root, base_root, probe, request, &project_path)
+}
+
+/// [`drive_minimax_h3_arm`] with the project root supplied — the Ref2VA form.
+///
+/// A reference asset id resolves through `ProjectStore::get_asset` to a PROJECT-RELATIVE
+/// `file.path`, which `safe_project_path` joins under this root. So an arm carrying references only
+/// reaches the engine when the root is the staged project's own
+/// ([`stage_minimax_h3_reference_project`]).
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm_in_project(
+    tier_root: &Path,
+    base_root: &Path,
+    probe: &ArmProbe,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<(DecodedVideo, Value)> {
     let settings = Settings {
         data_dir: minimax_h3_data_dir(tier_root),
         ..offline_settings()
@@ -12325,7 +12345,7 @@ fn drive_minimax_h3_arm(
     let job = minimax_h3_job_snapshot();
     let loader = probe.loader();
     let hf_cache = tier_root.join("unused-hf-cache");
-    let project_path = tier_root.join("unused-project");
+    let project_path = project_path.to_path_buf();
     crate::test_env::temp_env_vars(
         &[
             ("HF_HUB_CACHE", hf_cache.to_str().expect("utf-8 hub")),
@@ -13195,6 +13215,53 @@ fn minimax_h3_turbo_lora(tier_root: &Path, lora_id: &str) -> Value {
     json!({ "id": lora_id, "path": file.to_string_lossy(), "weight": 1.0 })
 }
 
+/// Stage a real image reference for the Ref2VA arms: a project in the arm's own `ProjectStore`, a
+/// decodable PNG under it, and the indexed asset record `load_reference_image` resolves.
+///
+/// Returns `(project_id, project_path, asset_id)`. Both are needed by the caller: the id goes in the
+/// request (`minimax_h3_request`'s default `projectId` is a placeholder no store has heard of) and
+/// the path goes to [`drive_minimax_h3_arm_in_project`].
+///
+/// Registered through `persist_generated_asset` — the same door the image lane writes its own
+/// outputs with — rather than by hand-writing a sidecar, so this proves the resolution against the
+/// asset shape references actually have.
+#[cfg(target_os = "macos")]
+fn stage_minimax_h3_reference_project(data_dir: &Path) -> (String, PathBuf, String) {
+    let store = ProjectStore::new(data_dir.to_path_buf(), "worker");
+    let project = store
+        .create_project("sc18726_ref")
+        .expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+    let asset_id = "mm_h3_ref_1";
+    let media_rel = "assets/images/reference.png";
+    let media_path = project_path.join(media_rel);
+    std::fs::create_dir_all(media_path.parent().expect("image dir")).expect("image dir creates");
+    // A real decodable PNG, not a touched file: `load_reference_image` runs `decode_image_any` and
+    // an empty file would fail there — which would leave this arm stopping one frame later than the
+    // fallback it replaces rather than reaching the engine.
+    image::RgbImage::from_pixel(64, 64, image::Rgb([32u8, 96, 200]))
+        .save(&media_path)
+        .expect("reference png writes");
+    store
+        .persist_generated_asset(
+            &project.id,
+            "job-sc18726",
+            "genset-sc18726",
+            &json!({
+                "type": "image",
+                "assetId": asset_id,
+                "mediaPath": media_rel,
+                "mimeType": "image/png",
+                "width": 64,
+                "height": 64,
+                "displayName": "reference.png",
+                "createdAt": "2026-08-15T00:00:00Z",
+            }),
+        )
+        .expect("reference asset persists");
+    (project.id, project_path, asset_id.to_owned())
+}
+
 /// 🔴 **THE CHAIN.** A selected turbo variant reaches the engine as its own `(steps, video shift)`
 /// AND as a loaded adapter, and the base regime is byte-identical to what shipped before.
 ///
@@ -13301,6 +13368,13 @@ fn a_selected_turbo_variant_changes_the_job_that_reaches_the_engine() {
 fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
     let tiers = minimax_h3_tier_root("mm_variants_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_variants_base_");
+    // The ref2v arm is driven at the ENGINE SEAM like the other three, not through the pure sampling
+    // function: the ref2v adapter is the one variant paired with the OTHER DiT partition, so the
+    // partition it is unique to is exactly the one a function-level assertion would leave unproved.
+    // That takes a real reference on disk, because `resolve_minimax_h3_conditioning` decodes one
+    // before the arm ever builds a `GenerationRequest`.
+    let (project_id, project_path, reference_id) =
+        stage_minimax_h3_reference_project(&minimax_h3_data_dir(tiers.path()));
     for (model, lora_id, steps, shift) in [
         ("minimax_h3", "minimax_h3_turbo_4step_768p", 4u32, 6.0f32),
         ("minimax_h3", "minimax_h3_turbo_8step", 8, 12.0),
@@ -13311,28 +13385,17 @@ fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
         // The reference partition needs a reference, or the SHAPE validator refuses before the
         // recipe is ever consulted.
         let extra = if model == "minimax_h3_ref" {
-            json!({ "loras": [lora], "referenceAssetIds": ["r1"] })
+            json!({
+                "loras": [lora],
+                "projectId": project_id,
+                "referenceAssetIds": [reference_id],
+            })
         } else {
             json!({ "loras": [lora] })
         };
         let request = minimax_h3_request(model, extra);
-        if model == "minimax_h3_ref" {
-            // Ref2VA resolves a real reference image off disk, which these fixtures have none of,
-            // so the arm legitimately stops in the media resolve. Assert on the pure sampling
-            // function the arm calls — the same code path, one frame earlier.
-            let (steps_out, shift_out, recipe) =
-                crate::video_jobs::minimax_h3::minimax_h3_sampling(&request)
-                    .expect("one accelerator resolves");
-            assert_eq!(
-                (steps_out, shift_out),
-                (Some(steps), Some(shift)),
-                "{lora_id}"
-            );
-            assert_eq!(recipe.expect("a recipe").lora_id, lora_id);
-            continue;
-        }
         let probe = ArmProbe::default();
-        drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        drive_minimax_h3_arm_in_project(tiers.path(), base.path(), &probe, &request, &project_path)
             .unwrap_or_else(|error| panic!("{lora_id} renders: {error}"));
         let engine = probe
             .request
@@ -13345,6 +13408,20 @@ fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
             (Some(steps), Some(shift)),
             "{lora_id} must drive its OWN (steps, video shift) to the engine"
         );
+        // The ref2v arm additionally has to have gone through the REFERENCE path to get here, or
+        // the partition this variant is distilled for is still unproved at the seam. The
+        // conditioning the arm built is what discriminates.
+        if model == "minimax_h3_ref" {
+            assert!(
+                engine
+                    .conditioning
+                    .iter()
+                    .any(|item| matches!(item, gen_core::Conditioning::Reference { .. })),
+                "the ref2v arm must reach the engine carrying its reference, not as a bare t2va \
+                 request that happened to resolve the same recipe: {:?}",
+                engine.conditioning
+            );
+        }
     }
 }
 
