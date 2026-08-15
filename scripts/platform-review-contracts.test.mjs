@@ -1964,6 +1964,57 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
   );
 });
 
+test("the LTX real-weight safety canary cannot relax or masquerade as campaign evidence", async () => {
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+  const historical = JSON.parse(await source("docs/generated/ltx-mlx-video-sc-18808.json"));
+  const costaged = historical.records[0].diagnostics.measurements.find(
+    (entry) => entry.name === "costagedGiantsBytes",
+  )?.value;
+  assert.equal(costaged, 53_347_146_863, "SC-18808 historical co-staged bound changed");
+  assert.match(
+    adapter,
+    /const LTX_CANARY_MAX_FOOTPRINT_BYTES: u64 = 53_347_146_863;/,
+    "the conservative canary stop must remain byte-bound to SC-18808 co-staged arithmetic",
+  );
+
+  const campaign = adapter.slice(
+    adapter.indexOf("fn run_ltx(request:"),
+    adapter.indexOf("fn run(request:"),
+  );
+  assert.ok(campaign.indexOf("refuse_unsafe_ltx_capture(") >= 0);
+  assert.ok(
+    campaign.indexOf("refuse_unsafe_ltx_capture(") < campaign.indexOf("ltx_load_spec("),
+    "the campaign must still refuse before model-path/provider/weights access",
+  );
+  assert.doesNotMatch(campaign, /LTX_CANARY_FIXTURE|diagnostic_canary_complete/);
+
+  const canary = adapter.slice(
+    adapter.indexOf("fn validate_ltx_canary_plan("),
+    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
+  );
+  for (const required of [
+    "_diagnosticOnly",
+    'Some("fixture")',
+    "LTX_CANARY_WIDTH",
+    "LTX_CANARY_HEIGHT",
+    "LTX_CANARY_FRAMES",
+    "LTX_CANARY_TILE_EDGE",
+    "LTX_CANARY_OVERLAP",
+    'Some("no_audio")',
+    '"status": "diagnostic_canary_complete"',
+    '"promotable": false',
+    '"ingestible": false',
+  ]) assert.ok(canary.includes(required), `canary must retain ${required}`);
+
+  const limitsLifecycle = adapter.slice(
+    adapter.indexOf("impl LtxCanaryLimits"),
+    adapter.indexOf("impl LtxDecodePlan"),
+  );
+  assert.match(limitsLifecycle, /set_wired_limit\(self\.previous_wired\);/);
+  assert.match(limitsLifecycle, /set_memory_limit\(self\.previous_memory\);/);
+  assert.match(limitsLifecycle, /impl Drop for LtxCanaryLimits[\s\S]*self\.restore\(\);/);
+});
+
 test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T2I contract", async () => {
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
   const context = adapter.slice(

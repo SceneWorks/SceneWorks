@@ -38,3 +38,14 @@ test("artifact inventory verifies symlink bytes instead of trusting a 64-hex blo
   const mutated = await hashArtifactInventory(root);
   assert.notEqual(mutated.sha256, first.sha256);
 });
+
+test("artifact inventory honors controller cancellation before reading model bytes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "artifact-inventory-abort-"));
+  await writeFile(path.join(root, "weights.safetensors"), "weights");
+  const controller = new AbortController();
+  controller.abort(new Error("operator interrupt"));
+  await assert.rejects(
+    () => hashArtifactInventory(root, { signal: controller.signal }),
+    /operator interrupt/,
+  );
+});

@@ -29,6 +29,17 @@ const stubClosureDigest = async (provider) =>
 
 const execFileAsync = promisify(execFile);
 
+test("diagnostic LTX safety canary output is structurally non-ingestible", () => {
+  assert.throws(
+    () => validateRecord({
+      id: "ltx-safety-canary",
+      logicalCaseId: "ltx-safety-canary",
+      status: "diagnostic_canary_complete",
+    }),
+    /invalid status/,
+  );
+});
+
 async function cleanFixtureRepo() {
   const root = await mkdtemp(path.join(tmpdir(), "memory-harness-repo-"));
   await mkdir(path.join(root, "docs/generated"), { recursive: true });
