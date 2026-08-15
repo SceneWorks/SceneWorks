@@ -50,6 +50,16 @@ function backendFacts(backend) {
       overlay: "none",
       loadProfile: "plain",
     }],
+    ...(backend === "candle" ? {
+      bespokeMemoryRouteWaivers: [{
+        providerId: "bespoke_identity",
+        crateName: "identity",
+        owner: "candle-gen-identity",
+        reason: "Worker-owned path-shaped identity route with no Generator registration.",
+        contractPath: "crates/media/candle-gen/candle-gen-identity/src/memory_strategy.rs",
+        verificationPath: "crates/media/candle-gen/candle-gen-identity/src/identity.rs",
+      }],
+    } : {}),
   };
 }
 
@@ -77,17 +87,35 @@ function fixture() {
   const input = {
     pin: PIN,
     engineFacts: [backendFacts("mlx"), backendFacts("candle")],
-    manifest: { models: [manifestModel("mlx"), manifestModel("candle")] },
-    cells: ["mlx", "candle"].map((backend) => ({
-      backend,
-      provider: `${backend}_alpha`,
-      modelId: `${backend}_model`,
-      mode: "text_to_image",
-      tier: "q4",
-      overlay: "none",
-      rung: "bounded_transformer_residency",
-      owningFamilyStory: 100,
-    })),
+    manifest: {
+      models: [
+        manifestModel("mlx"),
+        manifestModel("candle"),
+        { id: "bespoke_model", type: "image", candle: { memoryStrategyCapabilities: {} } },
+      ],
+    },
+    cells: [
+      ...["mlx", "candle"].map((backend) => ({
+        backend,
+        provider: `${backend}_alpha`,
+        modelId: `${backend}_model`,
+        mode: "text_to_image",
+        tier: "q4",
+        overlay: "none",
+        rung: "bounded_transformer_residency",
+        owningFamilyStory: 100,
+      })),
+      {
+        backend: "candle",
+        provider: "bespoke_identity",
+        modelId: "bespoke_model",
+        mode: "character_image",
+        tier: "q4",
+        overlay: "identity",
+        rung: "resident",
+        owningFamilyStory: 200,
+      },
+    ],
     calibrationPlan: {
       providers: ["mlx", "candle"].map((backend) => ({
         name: `${backend}-alpha`,
@@ -156,6 +184,44 @@ test("engine to manifest is mutation-proven green-red-green", () => {
   greenRedGreen(
     (input) => input.manifest.models[0].mlx.memoryStrategyContract.implementations[0].tiers = ["q8"],
     /unwaived mismatch/,
+  );
+});
+
+test("typed bespoke Candle route waivers are exact, reachable, and cannot mask registrations", () => {
+  const clean = fixture();
+  assert.equal(reconcileMemoryContracts(clean).bespokeWaivers, 1);
+
+  for (const mutate of [
+    (input) => input.engineFacts[1].bespokeMemoryRouteWaivers.push(
+      structuredClone(input.engineFacts[1].bespokeMemoryRouteWaivers[0]),
+    ),
+    (input) => input.engineFacts[1].bespokeMemoryRouteWaivers[0].providerId = "*",
+    (input) => input.engineFacts[1].bespokeMemoryRouteWaivers[0].contractPath =
+      "crates/media/candle-gen/other/src/memory_strategy.rs",
+    (input) => input.cells.splice(input.cells.findIndex((cell) => cell.provider === "bespoke_identity"), 1),
+    (input) => input.engineFacts[1].memoryContracts.push(contract("bespoke_identity")),
+    (input) => input.engineFacts[1].memoryRouteWitnesses.push({
+      provider: "bespoke_identity",
+      tier: "q4",
+      mode: "character_image",
+      overlay: "identity",
+      loadProfile: "identity",
+    }),
+  ]) {
+    const mutated = structuredClone(clean);
+    mutate(mutated);
+    assert.throws(
+      () => reconcileMemoryContracts(mutated),
+      /duplicate bespoke|wildcard|invalid contractPath|stale bespoke|masks an ordinary/,
+    );
+  }
+
+  const wrongBackend = structuredClone(clean);
+  wrongBackend.engineFacts[0].bespokeMemoryRouteWaivers =
+    wrongBackend.engineFacts[1].bespokeMemoryRouteWaivers;
+  assert.throws(
+    () => reconcileMemoryContracts(wrongBackend),
+    /cannot publish Candle bespoke-memory waivers/,
   );
 });
 

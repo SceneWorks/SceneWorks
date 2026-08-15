@@ -390,11 +390,13 @@ fn krea_multiphase_generate_one(
     guidance: Option<f32>,
     text_style_gain: Option<f32>,
     phases: Vec<gen_core::GenerationPhase>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         // Raw supports a negative prompt for the true-CFG phases; forwarded when the job carries one.
         negative_prompt,
@@ -409,11 +411,18 @@ fn krea_multiphase_generate_one(
         guidance,
         text_style_gain,
         phases: Some(phases),
+        memory,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_strategy_context,
+        on_progress,
+    )
+    .map_err(|error| {
         WorkerError::Engine(format!("Krea multi-phase generation failed: {error}"))
     })?;
     match output {
@@ -503,15 +512,86 @@ async fn generate_krea_multiphase_stream(
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let spec = attach_selected_decoder(
-        load_spec(weights_dir, quant, adapters, None),
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let load_quant = None;
+    #[cfg(target_os = "macos")]
+    let load_quant = quant;
+    let mut spec = attach_selected_decoder(
+        load_spec(weights_dir.clone(), load_quant, adapters, None)
+            .with_resolved_route(request.model.clone()),
         engine_id,
         request,
         settings,
     )?;
-    let spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    spec = attach_required_components(
+        spec,
+        engine_id,
+        &request.model_manifest_entry,
+        settings,
+    )?;
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (generation_memory, memory_strategy_context) = {
+        let tier = candle_resolved_tier_key(request, &weights_dir, false);
+        let raw_budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
+        let budget = raw_budget
+            .map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
+        let predicted_peak_gb = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            adapter_resident_bytes,
+        );
+        let evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+            engine_id,
+            &request.model,
+            &spec,
+            candle_certified_load_spec(
+                engine_id,
+                settings,
+                &spec,
+                &request.model_manifest_entry,
+                tier,
+            ),
+            &request.model_manifest_entry,
+            tier,
+            "text_to_image",
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            false,
+            false,
+            true,
+            budget,
+            predicted_peak_gb,
+            adapter_resident_bytes,
+            if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+        )?;
+        (
+            evaluation
+                .as_ref()
+                .and_then(|evaluation| evaluation.memory.clone()),
+            evaluation.and_then(|evaluation| optimized_shared_memory_context(evaluation.context)),
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let (generation_memory, memory_strategy_context) = (None, None);
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -534,6 +614,8 @@ async fn generate_krea_multiphase_stream(
                     guidance,
                     text_style_gain,
                     phases.clone(),
+                    generation_memory,
+                    memory_strategy_context.as_ref(),
                     preview,
                     &cancel,
                     on_progress,

@@ -227,6 +227,29 @@ pub struct MemoryRouteSelector {
     pub load_profile: MemoryRouteLoadProfile,
 }
 
+/// Exact public request axes which are not part of a [`LoadSpec`]. Declaration-owned request
+/// strategies must bind these before the provider contract is allowed into the shared selector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryRouteRequestContext {
+    pub mode: MemoryRouteMode,
+    pub reference_count: u32,
+    pub use_pid: bool,
+    pub has_phases: bool,
+}
+
+/// Tri-state manifest authority for request-scoped strategy selection. This is deliberately
+/// independent of `LoadShapeDeclarationResult`: staged component residency does not imply deferred
+/// materialization.
+pub enum DeclaredCandleStrategyContract {
+    NoRelevantDeclaration,
+    Applied {
+        contract: Box<gen_core::MemoryProviderContract>,
+        provider_overlay: Option<String>,
+        provider_mode: String,
+    },
+    Refused,
+}
+
 #[derive(Clone, Copy)]
 struct MemoryRouteRule {
     backend: MemoryRouteBackend,
@@ -698,6 +721,268 @@ fn manifest_contract(
         .and_then(Value::as_object)?
         .get("memoryStrategyContract")
         .and_then(Value::as_object)
+}
+
+fn request_strategy_implementation_matches(
+    implementation: &Value,
+    contract_provider: &str,
+    runtime_provider: &str,
+    tier: MemoryRouteTier,
+    load_profile: MemoryRouteLoadProfile,
+    source_kind: &str,
+    context: MemoryRouteRequestContext,
+) -> Result<bool, ()> {
+    let implementation = implementation.as_object().ok_or(())?;
+    if implementation.get("rung").and_then(Value::as_str) != Some("staged_residency") {
+        return Ok(false);
+    }
+    // `requestContexts` is the declaration-driven ownership marker. Older staged rows which only
+    // describe calibration inventory remain on their unchanged legacy paths.
+    let Some(request_contexts) = implementation.get("requestContexts") else {
+        return Ok(false);
+    };
+    let request_contexts = request_contexts.as_array().ok_or(())?;
+    let provider = implementation
+        .get("runtimeProvider")
+        .and_then(Value::as_str)
+        .unwrap_or(contract_provider);
+    if provider != runtime_provider {
+        return Ok(false);
+    }
+    let includes = |field: &str, expected: &str| -> Result<bool, ()> {
+        Ok(implementation
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or(())?
+            .iter()
+            .any(|value| value.as_str() == Some(expected)))
+    };
+    if !includes("tiers", tier.as_str())?
+        || !includes("modes", context.mode.as_str())?
+        || !includes("overlays", load_profile.overlay().as_str())?
+        || !includes("loadProfiles", load_profile.as_str())?
+        || !includes("sourceKinds", source_kind)?
+    {
+        return Ok(false);
+    }
+    for request_context in request_contexts {
+        if request_strategy_context_matches(request_context, context)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn request_strategy_context_matches(
+    request_context: &Value,
+    context: MemoryRouteRequestContext,
+) -> Result<bool, ()> {
+    let request_context = request_context.as_object().ok_or(())?;
+    let mode = request_context
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or(())?;
+    let provider_mode = request_context
+        .get("providerMode")
+        .and_then(Value::as_str)
+        .ok_or(())?;
+    if !matches!(
+        provider_mode,
+        "text_to_image" | "image_to_image" | "edit_image"
+    ) {
+        return Err(());
+    }
+    let reference_counts = request_context
+        .get("referenceCounts")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    let pid = request_context
+        .get("pid")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    let has_phases = request_context
+        .get("hasPhases")
+        .and_then(Value::as_bool)
+        .ok_or(())?;
+    Ok(mode == context.mode.as_str()
+        && reference_counts
+            .iter()
+            .any(|value| value.as_u64() == Some(u64::from(context.reference_count)))
+        && pid
+            .iter()
+            .any(|value| value.as_bool() == Some(context.use_pid))
+        && has_phases == context.has_phases)
+}
+
+/// Intersect an exact manifest request-strategy declaration with the real pinned provider
+/// predicate. A relevant but malformed, ambiguous, or unsupported declaration is terminally
+/// refused; only complete absence preserves the pre-declaration selector path.
+pub fn declared_candle_request_strategy_contract(
+    runtime_provider: &str,
+    resolved_tier: Option<&str>,
+    manifest: &JsonObject<String, Value>,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> DeclaredCandleStrategyContract {
+    declared_candle_request_strategy_contract_with(
+        runtime_provider,
+        resolved_tier,
+        manifest,
+        spec,
+        context,
+        |candidate| {
+            crate::inference_runtime::media()
+                .memory_strategy_contract(runtime_provider, candidate)
+                .ok()
+                .flatten()
+        },
+    )
+}
+
+fn declared_candle_request_strategy_contract_with(
+    runtime_provider: &str,
+    resolved_tier: Option<&str>,
+    manifest: &JsonObject<String, Value>,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+    provider_contract: impl FnOnce(&LoadSpec) -> Option<gen_core::MemoryProviderContract>,
+) -> DeclaredCandleStrategyContract {
+    let Some(contract) = manifest_contract(manifest, MemoryRouteBackend::Candle) else {
+        return DeclaredCandleStrategyContract::NoRelevantDeclaration;
+    };
+    let Some(contract_provider) = contract.get("provider").and_then(Value::as_str) else {
+        return DeclaredCandleStrategyContract::Refused;
+    };
+    let Some(implementations) = contract.get("implementations").and_then(Value::as_array) else {
+        return DeclaredCandleStrategyContract::Refused;
+    };
+    let relevant = implementations.iter().any(|implementation| {
+        implementation.get("rung").and_then(Value::as_str) == Some("staged_residency")
+            && implementation.get("requestContexts").is_some()
+    });
+    if !relevant {
+        return DeclaredCandleStrategyContract::NoRelevantDeclaration;
+    }
+    if spec.resolved_route.as_deref() != manifest.get("id").and_then(Value::as_str) {
+        return DeclaredCandleStrategyContract::Refused;
+    }
+    let (Some(tier), Some(load_profile)) = (
+        resolved_tier.and_then(MemoryRouteTier::from_resolved_tier),
+        MemoryRouteLoadProfile::from_spec(spec),
+    ) else {
+        return DeclaredCandleStrategyContract::Refused;
+    };
+    let source_kind = match &spec.weights {
+        WeightsSource::Dir(_) => "dir",
+        WeightsSource::File(_) => "file",
+    };
+    let matches = implementations
+        .iter()
+        .map(|implementation| {
+            request_strategy_implementation_matches(
+                implementation,
+                contract_provider,
+                runtime_provider,
+                tier,
+                load_profile,
+                source_kind,
+                context,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(matches) = matches else {
+        return DeclaredCandleStrategyContract::Refused;
+    };
+    if matches.into_iter().filter(|matched| *matched).count() != 1 {
+        return DeclaredCandleStrategyContract::Refused;
+    }
+    let provider_contract = provider_contract(spec);
+    let matching_implementation = implementations.iter().find(|implementation| {
+        request_strategy_implementation_matches(
+            implementation,
+            contract_provider,
+            runtime_provider,
+            tier,
+            load_profile,
+            source_kind,
+            context,
+        ) == Ok(true)
+    });
+    let provider_overlay = match matching_implementation
+        .and_then(|implementation| implementation.get("providerOverlay"))
+        .and_then(Value::as_str)
+    {
+        Some("none") => None,
+        Some(value @ ("lora" | "identity" | "control")) => Some(value.to_owned()),
+        _ => return DeclaredCandleStrategyContract::Refused,
+    };
+    let Some(request_contexts) = matching_implementation
+        .and_then(|implementation| implementation.get("requestContexts"))
+        .and_then(Value::as_array)
+    else {
+        return DeclaredCandleStrategyContract::Refused;
+    };
+    let matching_request_contexts = request_contexts
+        .iter()
+        .filter(|request_context| {
+            request_strategy_context_matches(request_context, context) == Ok(true)
+        })
+        .collect::<Vec<_>>();
+    let [matching_request_context] = matching_request_contexts.as_slice() else {
+        return DeclaredCandleStrategyContract::Refused;
+    };
+    let Some(provider_mode) = matching_request_context
+        .get("providerMode")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return DeclaredCandleStrategyContract::Refused;
+    };
+    match provider_contract {
+        Some(contract)
+            if contract
+                .capability(MemoryStrategy::StagedResidency)
+                .is_some_and(|capability| {
+                    capability.support == MemoryStrategySupport::Implemented
+                }) =>
+        {
+            DeclaredCandleStrategyContract::Applied {
+                contract: Box::new(contract),
+                provider_overlay,
+                provider_mode,
+            }
+        }
+        _ => DeclaredCandleStrategyContract::Refused,
+    }
+}
+
+/// Whether this route-local manifest owns request-strategy reachability for `runtime_provider`.
+/// Used by artifact certification to choose the same exact manifest-backed identity path as the
+/// declaration evaluator, without a provider allow-list.
+pub fn candle_manifest_declares_request_strategy_provider(
+    manifest: &JsonObject<String, Value>,
+    runtime_provider: &str,
+) -> bool {
+    let Some(contract) = manifest_contract(manifest, MemoryRouteBackend::Candle) else {
+        return false;
+    };
+    let Some(contract_provider) = contract.get("provider").and_then(Value::as_str) else {
+        return false;
+    };
+    contract
+        .get("implementations")
+        .and_then(Value::as_array)
+        .is_some_and(|implementations| {
+            implementations.iter().any(|implementation| {
+                implementation.get("rung").and_then(Value::as_str) == Some("staged_residency")
+                    && implementation.get("requestContexts").is_some()
+                    && implementation
+                        .get("runtimeProvider")
+                        .and_then(Value::as_str)
+                        .unwrap_or(contract_provider)
+                        == runtime_provider
+            })
+        })
 }
 
 fn manifest_declares_selector(
@@ -1243,9 +1528,171 @@ pub fn deferred_route_witnesses() -> Vec<MemoryRouteSelector> {
     out
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeclaredRequestStrategyRouteWitness {
+    pub provider: String,
+    pub tier: MemoryRouteTier,
+    pub mode: MemoryRouteMode,
+    pub overlay: MemoryRouteOverlay,
+    pub load_profile: MemoryRouteLoadProfile,
+}
+
+/// Typed manifest-derived Candle request-strategy population. Only rows carrying the exact
+/// `requestContexts` ownership marker participate; malformed axes fail the facts dump instead of
+/// silently broadening or disappearing.
+pub fn declared_candle_request_strategy_route_witnesses(
+    models: &[Value],
+) -> Result<Vec<DeclaredRequestStrategyRouteWitness>, String> {
+    let mut witnesses = Vec::new();
+    for model in models {
+        let Some(model) = model.as_object() else {
+            return Err("builtin model entry is not an object".to_owned());
+        };
+        let Some(contract) = manifest_contract(model, MemoryRouteBackend::Candle) else {
+            continue;
+        };
+        let contract_provider = contract
+            .get("provider")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Candle memoryStrategyContract has no provider".to_owned())?;
+        let implementations = contract
+            .get("implementations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{contract_provider} has no implementations array"))?;
+        for implementation in implementations {
+            if implementation.get("rung").and_then(Value::as_str) != Some("staged_residency")
+                || implementation.get("requestContexts").is_none()
+            {
+                continue;
+            }
+            let provider = implementation
+                .get("runtimeProvider")
+                .and_then(Value::as_str)
+                .unwrap_or(contract_provider);
+            let strings = |field: &str| -> Result<Vec<&str>, String> {
+                implementation
+                    .get(field)
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("{provider} staged declaration has no {field}"))?
+                    .iter()
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            format!("{provider} staged declaration has non-string {field}")
+                        })
+                    })
+                    .collect()
+            };
+            let tiers = strings("tiers")?
+                .into_iter()
+                .map(|tier| {
+                    MemoryRouteTier::from_resolved_tier(tier)
+                        .ok_or_else(|| format!("{provider} has unknown staged tier {tier}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let modes = strings("modes")?
+                .into_iter()
+                .map(|mode| {
+                    MemoryRouteMode::from_request(mode)
+                        .ok_or_else(|| format!("{provider} has unknown staged mode {mode}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let overlays = strings("overlays")?
+                .into_iter()
+                .map(|overlay| match overlay {
+                    "none" => Ok(MemoryRouteOverlay::None),
+                    "lora" => Ok(MemoryRouteOverlay::Lora),
+                    "control" => Ok(MemoryRouteOverlay::Control),
+                    "identity" => Ok(MemoryRouteOverlay::Identity),
+                    _ => Err(format!("{provider} has unknown staged overlay {overlay}")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let load_profiles = strings("loadProfiles")?
+                .into_iter()
+                .map(|profile| {
+                    MemoryRouteLoadProfile::ALL
+                        .into_iter()
+                        .find(|candidate| candidate.as_str() == profile)
+                        .ok_or_else(|| format!("{provider} has unknown load profile {profile}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for tier in &tiers {
+                for mode in &modes {
+                    for load_profile in &load_profiles {
+                        if overlays.contains(&load_profile.overlay()) {
+                            witnesses.push(DeclaredRequestStrategyRouteWitness {
+                                provider: provider.to_owned(),
+                                tier: *tier,
+                                mode: *mode,
+                                overlay: load_profile.overlay(),
+                                load_profile: *load_profile,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    witnesses.sort_unstable();
+    witnesses.dedup();
+    Ok(witnesses)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn staged_contract(provider: &str) -> gen_core::MemoryProviderContract {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            provider,
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        for capability in &mut contract.strategies {
+            capability.support = if matches!(
+                capability.strategy,
+                MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+            ) {
+                MemoryStrategySupport::Implemented
+            } else {
+                MemoryStrategySupport::Missing
+            };
+        }
+        contract
+    }
+
+    fn request_strategy_declaration() -> JsonObject<String, Value> {
+        serde_json::json!({
+            "id": "krea_2_raw",
+            "candle": { "memoryStrategyContract": {
+                "abi": 1,
+                "provider": "krea_2_raw",
+                "implementations": [{
+                    "rung": "staged_residency",
+                    "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
+                    "tiers": ["bf16", "q4", "q8"],
+                    "modes": ["text_to_image"],
+                    "overlays": ["none", "lora"],
+                    "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+                    "sourceKinds": ["dir"],
+                    "providerOverlay": "none",
+                    "requestContexts": [
+                        { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                        { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                        { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+                    ],
+                    "engagedRungs": ["resident", "staged_residency"],
+                    "parameters": {}, "parameterRanges": {}, "source": "fixture"
+                }]
+            }}
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
 
     fn declaration(
         provider: &str,
@@ -2988,5 +3435,260 @@ mod tests {
                 "{provider} must retain one ControlNet",
             );
         }
+    }
+
+    #[test]
+    fn candle_request_strategy_declaration_is_exact_and_does_not_change_load_shape() {
+        let manifest = request_strategy_declaration();
+        let plain =
+            LoadSpec::new(WeightsSource::Dir("q4".into())).with_resolved_route("krea_2_raw");
+        let context = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::TextToImage,
+            reference_count: 1,
+            use_pid: false,
+            has_phases: false,
+        };
+        let applied = declared_candle_request_strategy_contract_with(
+            "krea_2_raw",
+            Some("q4"),
+            &manifest,
+            &plain,
+            context,
+            |_| Some(staged_contract("krea_2_raw")),
+        );
+        let DeclaredCandleStrategyContract::Applied {
+            provider_overlay,
+            provider_mode,
+            ..
+        } = applied
+        else {
+            panic!("exact Raw declaration must apply");
+        };
+        assert_eq!(provider_overlay, None);
+        assert_eq!(provider_mode, "image_to_image");
+        assert_eq!(plain.load_shape, LoadShape::EagerMaterialization);
+        assert_eq!(
+            plain.load_shape_declaration_result,
+            LoadShapeDeclarationResult::NotEvaluated
+        );
+
+        let lora_pid = plain
+            .clone()
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                "adapter.safetensors".into(),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )])
+            .with_pid(
+                WeightsSource::File("pid.safetensors".into()),
+                WeightsSource::File("gemma".into()),
+            );
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q8"),
+                &manifest,
+                &lora_pid,
+                MemoryRouteRequestContext {
+                    use_pid: true,
+                    ..context
+                },
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            DeclaredCandleStrategyContract::Applied { .. }
+        ));
+
+        let multiphase = MemoryRouteRequestContext {
+            reference_count: 0,
+            use_pid: false,
+            has_phases: true,
+            ..context
+        };
+        let phases = declared_candle_request_strategy_contract_with(
+            "krea_2_raw",
+            Some("bf16"),
+            &manifest,
+            &plain,
+            multiphase,
+            |_| Some(staged_contract("krea_2_raw")),
+        );
+        let DeclaredCandleStrategyContract::Applied { provider_mode, .. } = phases else {
+            panic!("actual GenerationRequest phases must apply");
+        };
+        assert_eq!(provider_mode, "text_to_image");
+
+        // Hires.fix is a worker multipass, not GenerationRequest::phases. Its declaration context
+        // therefore stays the ordinary reference-bearing Raw route; if both axes were collapsed,
+        // this exact coordinate would incorrectly bind the multi-phase provider witness.
+        let hires_only = declared_candle_request_strategy_contract_with(
+            "krea_2_raw",
+            Some("q4"),
+            &manifest,
+            &plain,
+            context,
+            |_| Some(staged_contract("krea_2_raw")),
+        );
+        assert!(matches!(
+            hires_only,
+            DeclaredCandleStrategyContract::Applied {
+                provider_mode,
+                ..
+            } if provider_mode == "image_to_image"
+        ));
+        let both_present = MemoryRouteRequestContext {
+            has_phases: true,
+            ..context
+        };
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q4"),
+                &manifest,
+                &plain,
+                both_present,
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            DeclaredCandleStrategyContract::Refused
+        ));
+
+        for refused in [
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("nvfp4"),
+                &manifest,
+                &plain,
+                context,
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q4"),
+                &manifest,
+                &plain,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    ..context
+                },
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q4"),
+                &manifest,
+                &plain,
+                MemoryRouteRequestContext {
+                    reference_count: 2,
+                    ..context
+                },
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q4"),
+                &manifest,
+                &plain,
+                MemoryRouteRequestContext {
+                    use_pid: true,
+                    has_phases: true,
+                    reference_count: 0,
+                    ..context
+                },
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q4"),
+                &manifest,
+                &LoadSpec::new(WeightsSource::File("raw.safetensors".into()))
+                    .with_resolved_route("krea_2_raw"),
+                context,
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            declared_candle_request_strategy_contract_with(
+                "krea_2_edit",
+                Some("q4"),
+                &manifest,
+                &plain,
+                context,
+                |_| Some(staged_contract("krea_2_edit")),
+            ),
+        ] {
+            assert!(matches!(refused, DeclaredCandleStrategyContract::Refused));
+        }
+
+        let mut missing_provider_mode = manifest.clone();
+        missing_provider_mode["candle"]["memoryStrategyContract"]["implementations"][0]
+            ["requestContexts"][1]
+            .as_object_mut()
+            .expect("reference context")
+            .remove("providerMode");
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q4"),
+                &missing_provider_mode,
+                &plain,
+                context,
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            DeclaredCandleStrategyContract::Refused
+        ));
+
+        let mut duplicate_context = manifest.clone();
+        let repeated = duplicate_context["candle"]["memoryStrategyContract"]["implementations"][0]
+            ["requestContexts"][1]
+            .clone();
+        duplicate_context["candle"]["memoryStrategyContract"]["implementations"][0]
+            ["requestContexts"]
+            .as_array_mut()
+            .expect("request contexts")
+            .push(repeated);
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "krea_2_raw",
+                Some("q4"),
+                &duplicate_context,
+                &plain,
+                context,
+                |_| Some(staged_contract("krea_2_raw")),
+            ),
+            DeclaredCandleStrategyContract::Refused
+        ));
+    }
+
+    #[test]
+    fn shipped_candle_request_strategy_population_is_manifest_derived_and_complete() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin manifest parses");
+        let witnesses = declared_candle_request_strategy_route_witnesses(
+            manifest["models"].as_array().expect("models array"),
+        )
+        .expect("request-strategy declarations are typed");
+        let providers = witnesses
+            .iter()
+            .map(|witness| witness.provider.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            providers,
+            ["krea_2_edit", "krea_2_raw", "krea_2_turbo_edit"].into()
+        );
+        assert_eq!(witnesses.len(), 24);
+        assert!(witnesses.iter().all(|witness| {
+            matches!(
+                witness.tier,
+                MemoryRouteTier::Bf16 | MemoryRouteTier::Q4 | MemoryRouteTier::Q8
+            ) && matches!(
+                witness.overlay,
+                MemoryRouteOverlay::None | MemoryRouteOverlay::Lora
+            ) && matches!(
+                witness.load_profile,
+                MemoryRouteLoadProfile::Plain
+                    | MemoryRouteLoadProfile::Lora
+                    | MemoryRouteLoadProfile::LoraPid
+                    | MemoryRouteLoadProfile::Pid
+            )
+        }));
     }
 }

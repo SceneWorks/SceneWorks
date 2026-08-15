@@ -395,6 +395,21 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
         .to_string()
         .contains("mutually exclusive"));
 
+    let with_phases = request(json!({
+        "projectId": "p",
+        "model": "krea_2_raw",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "ui": { "img2img": true }
+        },
+        "advanced": { "phases": [{ "steps": 8 }] },
+        "hiresFix": { "enabled": true }
+    }));
+    assert!(validate_hires_fix_request(&with_phases)
+        .unwrap_err()
+        .to_string()
+        .contains("multi-phase"));
+
     let too_large = request(json!({
         "projectId": "p",
         "model": "sdxl",

@@ -371,6 +371,22 @@ pub struct EngineCapabilityFacts {
     /// modes or tier/overlay wildcards for a consumer to broaden.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_route_witnesses: Vec<MemoryRouteWitnessFact>,
+    /// Explicit upstream exceptions for descriptor-less, worker-owned bespoke memory routes. These
+    /// are topology waivers only: they cannot fabricate a provider registration or an optimized
+    /// contract surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bespoke_memory_route_waivers: Vec<BespokeMemoryRouteWaiverFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BespokeMemoryRouteWaiverFact {
+    pub provider_id: String,
+    pub crate_name: String,
+    pub owner: String,
+    pub reason: String,
+    pub contract_path: String,
+    pub verification_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -508,6 +524,7 @@ pub fn facts_from_descriptors(
             imports: Vec::new(),
             memory_contracts: Vec::new(),
             memory_route_witnesses: Vec::new(),
+            bespoke_memory_route_waivers: Vec::new(),
         });
     }
     Ok(out)
@@ -942,6 +959,19 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
         .map_err(|error| error.to_string())?;
     let mut memory_contracts = memory_contract_facts_from_registry(&contract_registry)?;
     let route_witnesses = crate::memory_route_registry::deferred_route_witnesses();
+    let builtin_models = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| sceneworks_core::jsonc::strip_jsonc_comments(contents))
+        .ok_or_else(|| "builtin.models.jsonc is not embedded".to_owned())?;
+    let builtin_manifest: serde_json::Value = serde_json::from_str(&builtin_models)
+        .map_err(|error| format!("builtin.models.jsonc is malformed: {error}"))?;
+    let declared_request_strategy_witnesses =
+        crate::memory_route_registry::declared_candle_request_strategy_route_witnesses(
+            builtin_manifest["models"]
+                .as_array()
+                .ok_or_else(|| "builtin.models.jsonc has no models array".to_owned())?,
+        )?;
     for entry in &mut facts {
         entry.memory_contracts = memory_contracts.remove(&entry.backend).ok_or_else(|| {
             format!(
@@ -960,6 +990,53 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
                 load_profile: row.load_profile.as_str().to_owned(),
             })
             .collect();
+        if entry.backend == "candle" {
+            entry
+                .memory_route_witnesses
+                .extend(declared_request_strategy_witnesses.iter().map(|row| {
+                    MemoryRouteWitnessFact {
+                        provider: row.provider.clone(),
+                        tier: row.tier.as_str().to_owned(),
+                        mode: row.mode.as_str().to_owned(),
+                        overlay: row.overlay.as_str().to_owned(),
+                        load_profile: row.load_profile.as_str().to_owned(),
+                    }
+                }));
+            entry.memory_route_witnesses.sort_by(|left, right| {
+                (
+                    &left.provider,
+                    &left.tier,
+                    &left.mode,
+                    &left.overlay,
+                    &left.load_profile,
+                )
+                    .cmp(&(
+                        &right.provider,
+                        &right.tier,
+                        &right.mode,
+                        &right.overlay,
+                        &right.load_profile,
+                    ))
+            });
+            entry.memory_route_witnesses.dedup();
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                entry.bespoke_memory_route_waivers = runtime_cuda::BESPOKE_MEMORY_ROUTE_WAIVERS
+                    .iter()
+                    .map(|waiver| BespokeMemoryRouteWaiverFact {
+                        provider_id: waiver.provider_id.to_owned(),
+                        crate_name: waiver.crate_name.to_owned(),
+                        owner: waiver.owner.to_owned(),
+                        reason: waiver.reason.to_owned(),
+                        contract_path: waiver.contract_path.to_owned(),
+                        verification_path: waiver.verification_path.to_owned(),
+                    })
+                    .collect();
+                entry
+                    .bespoke_memory_route_waivers
+                    .sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+            }
+        }
         if entry.memory_route_witnesses.is_empty() {
             return Err(format!(
                 "{} descriptor facts have no typed memory-route witnesses",

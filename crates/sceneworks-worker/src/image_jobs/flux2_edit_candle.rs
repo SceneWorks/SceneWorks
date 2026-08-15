@@ -370,6 +370,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         true,
         use_pid,
         false,
+        false,
         raw_budget,
         predicted_peak,
         0,

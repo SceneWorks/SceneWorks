@@ -648,6 +648,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             true,
             false,
             false,
+            false,
             raw_budget,
             needed,
             // `runtime_overlay_bytes` (sc-17054). Calibration records describe the certified overlay

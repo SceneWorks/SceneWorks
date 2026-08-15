@@ -5643,6 +5643,33 @@
       // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom.
       "candle": {
         "minMemoryGb": 32,
+        // SC-18462: Turbo edit is a distinct registered runtime provider. Native Turbo generation
+        // retains its established path; only this exact route-local declaration can authorize the
+        // request-scoped staged-residency contract.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "krea_2_turbo_edit",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            }
+          ]
+        },
         // sc-12425: the INT8-ConvRot tier's RESIDENT VRAM ceiling, now MEASURED (sc-12381) — 42.9 GB
         // overall-peak on an exclusive sm_120 at 1024²/8-step, the same shape used for the standard tiers.
         // This is the TE-CO-RESIDENT peak; the tier's efficient footprint is `sequentialPeakGb` (28.6).
@@ -7011,7 +7038,55 @@
         "minMemoryGb": 32,
         "vramGbByTier": { "q4": 28.8, "q8": 33.4, "bf16": 46.4 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // SC-18462: request-scoped component staging is an exact provider contract, independent of
+        // deferred/BTR load shaping. The ordinary Raw route and its registered Kontext edit sibling
+        // keep their existing LoadSpec shape; the worker intersects these rows with the pinned provider
+        // predicate and only then passes a StagedResidency selection into the request scope.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "krea_2_raw",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            }
+          ]
+        }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {

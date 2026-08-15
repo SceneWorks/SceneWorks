@@ -145,6 +145,122 @@ export function validateMemoryContractFacts(engineFacts, pin) {
   return providers;
 }
 
+const BESPOKE_WAIVER_FIELDS = Object.freeze([
+  "providerId",
+  "crateName",
+  "owner",
+  "reason",
+  "contractPath",
+  "verificationPath",
+]);
+
+/**
+ * Audit upstream's typed disposition for a real, descriptor-less Candle route.
+ *
+ * This is deliberately not an engine-contract waiver. It cannot create a registration, a route
+ * witness, or an optimized contract surface; it only closes the topology question for a bespoke
+ * worker route that is present in the production matrix but cannot truthfully implement
+ * `load(id, LoadSpec)`.
+ */
+function validateBespokeMemoryRouteWaivers(engineFacts, manifest, cells, engine, declarations) {
+  const waivers = [];
+  const seen = new Set();
+  for (const document of engineFacts) {
+    const rows = document.bespokeMemoryRouteWaivers ?? [];
+    if (!Array.isArray(rows)) {
+      throw new Error(`${document.backend ?? "(unset)"} bespokeMemoryRouteWaivers must be an array`);
+    }
+    if (document.backend !== "candle" && rows.length) {
+      throw new Error(`${document.backend} engine facts cannot publish Candle bespoke-memory waivers`);
+    }
+    for (const [index, waiver] of rows.entries()) {
+      requireObject(waiver, `bespoke memory-route waiver ${index}`);
+      for (const field of BESPOKE_WAIVER_FIELDS) {
+        if (!Object.hasOwn(waiver, field)) {
+          throw new Error(`bespoke memory-route waiver ${index} is under-keyed: missing ${field}`);
+        }
+      }
+      for (const field of Object.keys(waiver)) {
+        if (!BESPOKE_WAIVER_FIELDS.includes(field)) {
+          throw new Error(`bespoke memory-route waiver ${index} has unknown field ${field}`);
+        }
+      }
+      if (BESPOKE_WAIVER_FIELDS.some((field) => waiver[field] === "*")) {
+        throw new Error(`bespoke memory-route waiver ${index} contains a wildcard`);
+      }
+      if (!/^[a-z0-9][a-z0-9_]*$/.test(waiver.providerId ?? "")) {
+        throw new Error(`bespoke memory-route waiver ${index} has an invalid providerId`);
+      }
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(waiver.crateName ?? "")) {
+        throw new Error(`bespoke memory-route waiver ${index} has an invalid crateName`);
+      }
+      if (waiver.owner !== `candle-gen-${waiver.crateName}`) {
+        throw new Error(
+          `bespoke memory-route waiver ${waiver.providerId} owner does not match its crateName`,
+        );
+      }
+      if (typeof waiver.reason !== "string" || waiver.reason.trim().length < 24) {
+        throw new Error(`bespoke memory-route waiver ${waiver.providerId} has no actionable reason`);
+      }
+      const expectedPrefix = `crates/media/candle-gen/${waiver.owner}/src/`;
+      for (const field of ["contractPath", "verificationPath"]) {
+        const path = waiver[field];
+        if (
+          typeof path !== "string" ||
+          !path.startsWith(expectedPrefix) ||
+          !path.endsWith(".rs") ||
+          path.includes("..")
+        ) {
+          throw new Error(
+            `bespoke memory-route waiver ${waiver.providerId} has an invalid ${field}`,
+          );
+        }
+      }
+      if (waiver.contractPath === waiver.verificationPath) {
+        throw new Error(
+          `bespoke memory-route waiver ${waiver.providerId} must name distinct contract and verification paths`,
+        );
+      }
+      if (seen.has(waiver.providerId)) {
+        throw new Error(`duplicate bespoke memory-route waiver ${waiver.providerId}`);
+      }
+      seen.add(waiver.providerId);
+
+      if (engine.has(laneKey("candle", waiver.providerId))) {
+        throw new Error(
+          `bespoke memory-route waiver ${waiver.providerId} masks an ordinary Candle provider registration`,
+        );
+      }
+      if (declarations.some((row) => row.backend === "candle" && row.provider === waiver.providerId)) {
+        throw new Error(
+          `bespoke memory-route waiver ${waiver.providerId} masks an ordinary manifest contract declaration`,
+        );
+      }
+      if ((document.memoryRouteWitnesses ?? []).some((row) => row.provider === waiver.providerId)) {
+        throw new Error(
+          `bespoke memory-route waiver ${waiver.providerId} masks an ordinary route witness`,
+        );
+      }
+      const routedCells = cells.filter(
+        (cell) => cell.backend === "candle" && cell.provider === waiver.providerId,
+      );
+      if (routedCells.length === 0) {
+        throw new Error(`stale bespoke memory-route waiver ${waiver.providerId} has no production route`);
+      }
+      for (const cell of routedCells) {
+        const model = (manifest.models ?? []).find((candidate) => candidate.id === cell.modelId);
+        if (model?.type !== "image" || !model.candle) {
+          throw new Error(
+            `bespoke memory-route waiver ${waiver.providerId} reaches unknown Candle model ${cell.modelId}`,
+          );
+        }
+      }
+      waivers.push({ backend: "candle", ...waiver });
+    }
+  }
+  return waivers;
+}
+
 function manifestContracts(manifest) {
   const rows = [];
   for (const model of manifest.models ?? []) {
@@ -174,6 +290,7 @@ function manifestContracts(manifest) {
           tiers: sortedUnique(implementation.tiers),
           modes: sortedUnique(implementation.modes ?? []),
           overlays: sortedUnique(implementation.overlays ?? []),
+          loadProfiles: sortedUnique(implementation.loadProfiles ?? []),
         });
       }
     }
@@ -195,6 +312,7 @@ const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
 const ROUTE_LOAD_PROFILES = new Map([
   ["plain", "none"],
   ["lora", "lora"],
+  ["lora_pid", "lora"],
   ["single_control", "control"],
   ["multi_control", "control"],
   ["ip_adapter", "identity"],
@@ -310,14 +428,16 @@ export function collectMemoryContractMismatches({
     }
   }
 
-  const eligible = (backend, provider, tier, mode, overlay) => routeEligibility.some(
+  const eligible = (backend, provider, tier, mode, overlay, declaredProfiles = []) => routeEligibility.some(
     (row) =>
       row.backend === backend &&
       row.provider === provider &&
       row.tier === tier &&
       row.mode === mode &&
       row.overlay === overlay &&
-      MANIFEST_ROUTE_PROFILES.get(overlay)?.has(row.loadProfile),
+      (declaredProfiles.length
+        ? declaredProfiles.includes(row.loadProfile)
+        : MANIFEST_ROUTE_PROFILES.get(overlay)?.has(row.loadProfile)),
   );
   for (const row of declarations) {
     const contract = engine.get(laneKey(row.backend, row.provider));
@@ -336,7 +456,7 @@ export function collectMemoryContractMismatches({
             candidate.tier === tier &&
             candidate.overlay === overlay,
           );
-          if (!cell || !eligible(row.backend, row.provider, tier, mode, overlay)) {
+          if (!cell || !eligible(row.backend, row.provider, tier, mode, overlay, row.loadProfiles)) {
             out.push(mismatch({
               leg: "manifest_route",
               direction: "manifest_to_route",
@@ -500,10 +620,20 @@ function validateWaivers(ledger, pin, mismatches) {
 }
 
 export function reconcileMemoryContracts(input) {
+  const engine = engineContractIndex(input.engineFacts, input.pin);
+  const declarations = manifestContracts(input.manifest);
+  const bespokeWaivers = validateBespokeMemoryRouteWaivers(
+    input.engineFacts,
+    input.manifest,
+    input.cells,
+    engine,
+    declarations,
+  );
   const mismatches = collectMemoryContractMismatches(input);
   validateWaivers(input.waiverLedger, input.pin, mismatches);
   return {
     providers: input.engineFacts.reduce((count, document) => count + document.memoryContracts.length, 0),
+    bespokeWaivers: bespokeWaivers.length,
     mismatches: mismatches.length,
     byLeg: Object.fromEntries(
       [...new Set(mismatches.map((entry) => entry.leg))].sort().map((leg) => [

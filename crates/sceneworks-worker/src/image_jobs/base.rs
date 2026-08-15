@@ -2822,6 +2822,10 @@ pub(super) fn candle_certified_load_spec(
     };
     if !is_mage_engine(engine_id)
         && !crate::memory_route_registry::candle_declaration_owns_load_shape(engine_id)
+        && !crate::memory_route_registry::candle_manifest_declares_request_strategy_provider(
+            manifest_entry,
+            engine_id,
+        )
     {
         return candle_certified_artifact_path(engine_id, settings, weights_dir, tier);
     }
@@ -8549,6 +8553,7 @@ mod candle_resolved_tier_contract_tests {
                     edit,
                     false,
                     false,
+                    false,
                     Some(crate::vram_gate::VramBudget {
                         free_gb: 64.0,
                         total_gb: 64.0,
@@ -9340,6 +9345,7 @@ async fn generate_candle_stream(
         reference_count > 0,
         use_pid,
         hires_fix.is_some(),
+        false,
         budget,
         needed,
         adapter_resident_bytes,

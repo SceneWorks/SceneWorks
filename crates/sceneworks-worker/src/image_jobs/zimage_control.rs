@@ -633,6 +633,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
             true,
             use_pid,
             false,
+            false,
             budget,
             needed,
             control_bytes,
