@@ -4902,18 +4902,23 @@ mod frame_extract_seek_tests {
                 "fixture built"
             );
 
-            // CONTROL: the pre-fix behaviour — seek at the raw playhead. ffmpeg exits 0 and writes
-            // nothing, which is exactly why this was silent. `try_render_frame_png` reports that as
-            // `false` without erroring, so this asserts the MECHANISM, not an exit code.
+            // CONTROL: the pre-fix behaviour — seek at the raw playhead. ffmpeg EXITS 0 and writes
+            // nothing, which is exactly why this was silent, so the assertion is on the FILE.
+            // `render_frame_png` is the ungated twin of `try_render_frame_png` (which is gated to
+            // macos|candle and so cannot be named from this ungated test module): it runs the same
+            // command and turns "no output" into an error, so its Err IS the missing file.
             let unclamped = dir.join("unclamped.png");
-            let produced = try_render_frame_png("ffmpeg", &src, &unclamped, 0.5, 320, 240, None)
+            let error = render_frame_png("ffmpeg", &src, &unclamped, 0.5, 320, 240, None)
                 .await
-                .expect("ffmpeg ran");
+                .expect_err(
+                    "CONTROL: seeking a still at 0.5s must produce nothing — if this succeeds, \
+                     the defect's mechanism changed and the test below no longer proves anything",
+                );
             assert!(
-                !produced && !unclamped.exists(),
-                "CONTROL: seeking a still at 0.5s must produce nothing — if this fires, the \
-                 defect's mechanism changed and the test below no longer proves anything"
+                error.to_string().contains("did not produce frame output"),
+                "the control must fail for the empty-output reason, not some other error: {error}"
             );
+            assert!(!unclamped.exists(), "ffmpeg wrote no file at all");
 
             // THE FIX: the resolved seek lands on the still's only frame.
             let seek = resolve_frame_seek("ffmpeg", &image_asset(), &src, 0.5)
