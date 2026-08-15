@@ -178,10 +178,17 @@ pub(super) struct MiniMaxH3Load {
     /// The PACKED per-tier text encoder (sc-19120), or `None` at bf16 where the dense upstream
     /// `<root>/text_encoder` is what the provider falls back to.
     ///
-    /// `Some` rides `LoadSpec::text_encoder` — the generic "the text encoder is not under the
-    /// weights root" seam LTX's external Gemma already uses. Without it the 18.7 GB (q4) / 33.7 GB
-    /// (q8) packed encoder sc-19120 added to the manifest is downloaded and never opened, which is
-    /// the declared-but-unreachable shape rather than a saving.
+    /// `Some` rides `LoadSpec::components["text_encoder"]` (via
+    /// [`VideoGenInput::text_encoder_component_dir`]), which is the seam the engine actually reads:
+    /// `mlx-gen-minimax-h3::resolve_text_encoder_dir` matches `spec.components.get("text_encoder")`
+    /// and otherwise falls back to `<weights>/text_encoder`. `LoadSpec::text_encoder` — the LTX
+    /// external-Gemma field — has ZERO references in that engine crate, so staging there would be a
+    /// silent no-op: on q4/q8 the fallback resolves a path those tiers correctly lack and the load
+    /// hard-errors inside the engine on the missing `text_encoder/config.json`.
+    ///
+    /// Without this staging the 18.7 GB (q4) / 33.7 GB (q8) packed encoder sc-19120 added to the
+    /// manifest is downloaded and never opened, and the render loads the 53 GB dense upstream
+    /// conditioner instead — the declared-but-unreachable shape rather than a saving.
     pub(super) text_encoder_dir: Option<PathBuf>,
     /// The tier's baked-in quant, ASSERTED against the staged dir by the provider rather than
     /// applied — nothing quantizes at load. `None` for the dense bf16 tier.
@@ -284,15 +291,28 @@ pub(super) fn resolve_minimax_h3_load(
         &base_root,
         &text_encoder_dir,
     ) {
+        // Still single-sourced from the probe constants (that is what keeps this message honest when
+        // the engine's probe list changes), but JOINED INTO PROSE. Interpolating the arrays with
+        // `{:?}` put Rust debug literals — `["tokenizer", "vae", "audio_vae"]` — in front of a user
+        // in the Model Manager.
+        let shared_dirs = sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS
+            .map(|dir| format!("{dir}/"))
+            .join(", ");
+        let audio_vae_config =
+            sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES
+                .map(|file| {
+                    format!(
+                        "{}/{file}",
+                        sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR
+                    )
+                })
+                .join(", ");
         return Err(WorkerError::InvalidPayload(format!(
             "{}: the shared MiniMax-H3 text encoder / tokenizer / VAEs are incomplete (expected \
-             {:?} and {}/{:?} under {}, plus the {tier} text encoder at {}). These are separate \
-             co-requisite downloads from the quality tiers — re-download MiniMax-H3 in the Model \
-             Manager.",
+             {shared_dirs} and {audio_vae_config} under {}, plus the {tier} text encoder at {}). \
+             These are separate co-requisite downloads from the quality tiers — re-download \
+             MiniMax-H3 in the Model Manager.",
             request.model,
-            sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS,
-            sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR,
-            sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES,
             base_root.display(),
             text_encoder_dir.display(),
         )));
@@ -654,9 +674,14 @@ pub(super) async fn generate_minimax_h3_using(
         // `components["transformer"]`. See fact 4 in the module header.
         model_dir: load.root,
         dit_component_dir: Some(load.dit_dir),
-        // The packed q4/q8 encoder (sc-19120). `None` at bf16 ⇒ the provider's own
-        // `<root>/text_encoder`, which is where the dense upstream component is.
-        text_encoder_dir: load.text_encoder_dir,
+        // The packed q4/q8 encoder (sc-19120), staged as `components["text_encoder"]` — the only
+        // seam `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads. `None` at bf16 ⇒ the engine's
+        // own `<root>/text_encoder` fallback, which is where the dense upstream component is.
+        //
+        // NOT `text_encoder_dir`: that field lands in `LoadSpec::text_encoder`, which this engine
+        // never reads, so a q4/q8 job would fall back to a `<root>/text_encoder` those tiers do not
+        // have and hard-error inside the engine.
+        text_encoder_component_dir: load.text_encoder_dir,
         quant: load.quant,
         adapters: Vec::new(),
         conditioning,

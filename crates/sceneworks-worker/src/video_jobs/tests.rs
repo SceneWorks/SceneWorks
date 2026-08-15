@@ -13086,6 +13086,36 @@ fn minimax_h3_resolves_the_text_encoder_at_the_root_its_tier_actually_ships_it_i
          sc-19120 added is fetched and never opened"
     );
 
+    // 🔴 REACHABILITY, not merely declaration (sc-19573 review). Asserting the SceneWorks-side
+    // struct field alone proves nothing about the engine: `mlx-gen-minimax-h3` resolves its text
+    // encoder ONLY from `spec.components["text_encoder"]` (`resolve_text_encoder_dir`), and
+    // `spec.text_encoder` — the LTX external-Gemma field — has ZERO references anywhere in that
+    // crate. Staged on the wrong field, a q4 job would fall through to `<weights>/text_encoder`,
+    // which a packed-tier install correctly does not have, and hard-error INSIDE the engine on the
+    // missing `text_encoder/config.json`. So assert the field the engine reads, on the built spec.
+    let spec = video_load_spec(&VideoGenInput {
+        engine_id: "minimax_h3",
+        model_dir: q4_base.path().to_path_buf(),
+        dit_component_dir: Some(load.dit_dir.clone()),
+        text_encoder_component_dir: load.text_encoder_dir.clone(),
+        ..VideoGenInput::default()
+    });
+    assert!(
+        matches!(
+            spec.components.get("text_encoder"),
+            Some(WeightsSource::Dir(dir)) if *dir == tiers.path().join("q4").join("text_encoder")
+        ),
+        "the packed encoder must land in components[\"text_encoder\"] — the only seam \
+         mlx-gen-minimax-h3 reads: {:?}",
+        spec.components
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "LoadSpec::text_encoder is the LTX seam and is never read by this engine; staging there \
+         moves the failure from before the engine to inside it: {:?}",
+        spec.text_encoder
+    );
+
     // bf16 reads the dense upstream component and passes nothing on the spec: `None` is what leaves
     // the provider on its own `<root>/text_encoder`, which is exactly where that component is.
     let load = resolve(tiers.path(), base.path(), 0)
@@ -13209,6 +13239,24 @@ fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_t
         Some(tiers.path().join("q4").join("transformer")),
         "the tiered DiT must ride the components map: it lives in a different repo from the \
          shared components, and `weights` can only name one root"
+    );
+    // 🔴 The packed per-tier text encoder (sc-19120), on the seam the ENGINE reads — asserted here,
+    // on the spec the arm actually built, rather than on the SceneWorks-side struct field.
+    // `mlx-gen-minimax-h3::resolve_text_encoder_dir` matches ONLY
+    // `spec.components.get("text_encoder")`; `spec.text_encoder` has zero references in that entire
+    // crate. Staged there instead, a q4 load falls through to `<weights>/text_encoder` — which this
+    // fixture's packed-tier base root does not have — and hard-errors inside the engine.
+    assert_eq!(
+        source_dir(spec.components.get("text_encoder")),
+        Some(tiers.path().join("q4").join("text_encoder")),
+        "the packed q4 text encoder must ride components[\"text_encoder\"], the only seam the \
+         engine resolves it from"
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "`LoadSpec::text_encoder` is LTX's external-Gemma seam and is never read by this engine: \
+         {:?}",
+        spec.text_encoder
     );
     assert_eq!(
         spec.quantize,
