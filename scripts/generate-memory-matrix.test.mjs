@@ -28,6 +28,10 @@ import {
   mlxRequiredHostBytes,
   observedPeakBytes,
   modelStory,
+  providerFor,
+  declarationModelForCoordinate,
+  stagedResidencyIsAvailable,
+  strategyStatus,
 } from "./generate-memory-matrix.mjs";
 import { recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
@@ -41,6 +45,157 @@ async function memoryContractSource(name) {
     await readFile(new URL(`../${SOURCE_PATHS[name]}`, import.meta.url), "utf8"),
   );
 }
+
+test("control provider resolution uses one exact declaration and rejects ambiguity", () => {
+  const route = { engine: "z_image" };
+  const legacy = { id: "z_image", candle: {} };
+  assert.equal(providerFor(legacy, "candle", "control", route), "z_image");
+
+  const declared = {
+    id: "z_image",
+    candle: {
+      memoryStrategyContract: {
+        provider: "z_image",
+        implementations: [{
+          runtimeProvider: "z_image_control",
+          overlays: ["control"],
+        }],
+      },
+    },
+  };
+  assert.equal(
+    providerFor(declared, "candle", "control", route),
+    "z_image_control",
+  );
+
+  declared.candle.memoryStrategyContract.implementations.push({
+    runtimeProvider: "z_image_turbo_control",
+    overlays: ["control"],
+  });
+  assert.throws(
+    () => providerFor(declared, "candle", "control", route),
+    /ambiguous runtime providers: z_image_control, z_image_turbo_control/,
+  );
+});
+
+test("route-local alias declarations win only on their exact coordinate", () => {
+  const target = {
+    id: "z_image_turbo",
+    candle: {
+      memoryStrategyContract: {
+        provider: "z_image_turbo",
+        implementations: [{
+          rung: "bounded_decode",
+          tiers: ["q4"],
+          modes: ["edit_image"],
+          overlays: ["none"],
+        }],
+      },
+    },
+  };
+  const alias = {
+    id: "z_image_edit",
+    candle: {
+      memoryStrategyContract: {
+        provider: "z_image_turbo",
+        implementations: [{
+          rung: "bounded_transformer_residency",
+          tiers: ["q4"],
+          modes: ["edit_image"],
+          overlays: ["none"],
+        }],
+      },
+    },
+  };
+  const input = {
+    backend: "candle",
+    route: { engine: "z_image_turbo" },
+    provider: "z_image_turbo",
+    model: alias,
+    tier: "q4",
+    mode: "edit_image",
+    overlay: "none",
+    manifestById: new Map([[target.id, target], [alias.id, alias]]),
+  };
+  assert.equal(
+    declarationModelForCoordinate({ ...input, rung: "bounded_transformer_residency" }),
+    alias,
+  );
+  assert.equal(
+    declarationModelForCoordinate({ ...input, rung: "bounded_decode" }),
+    target,
+  );
+  assert.equal(
+    declarationModelForCoordinate({ ...input, rung: "bounded_transformer_residency", mode: "text_to_image" }),
+    target,
+  );
+});
+
+test("exact declaration composition supplies staged residency without a legacy flag", () => {
+  const model = {
+    id: "lens",
+    candle: {
+      memoryStrategyContract: {
+        provider: "lens",
+        implementations: [{
+          rung: "bounded_transformer_residency",
+          tiers: ["q4"],
+          modes: ["text_to_image"],
+          overlays: ["none"],
+          engagedRungs: [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+          ],
+        }],
+      },
+    },
+  };
+  assert.equal(model.candle.supportsSequentialOffload, undefined);
+  const input = {
+    backend: "candle",
+    model,
+    route: { engine: "lens" },
+    provider: "lens",
+    tier: "q4",
+    mode: "text_to_image",
+    overlay: "none",
+    sequentialEngines: new Set(),
+    manifestById: new Map([[model.id, model]]),
+  };
+  assert.equal(stagedResidencyIsAvailable(input), true);
+  assert.equal(stagedResidencyIsAvailable({ ...input, provider: "lens_turbo" }), false);
+  assert.equal(stagedResidencyIsAvailable({ ...input, mode: "style_variations" }), false);
+
+  const statusInput = {
+    backend: "candle",
+    rung: "staged_residency",
+    route: { engine: "lens", kind: "registry" },
+    provider: "lens",
+    sequentialEngines: new Set(),
+    model,
+    tier: "q4",
+    mode: "text_to_image",
+    overlay: "none",
+    rung4Survey: new Map(),
+    manifestById: new Map([[model.id, model]]),
+    inferenceClosureDigests: new Map(),
+  };
+  assert.equal(strategyStatus(statusInput).state, "Implemented/unverified");
+
+  const mutated = structuredClone(model);
+  mutated.candle.memoryStrategyContract.implementations[0].engagedRungs = ["resident"];
+  assert.equal(
+    strategyStatus({
+      ...statusInput,
+      model: mutated,
+      manifestById: new Map([[mutated.id, mutated]]),
+    }).state,
+    "Missing",
+  );
+});
 
 async function surveyWaiverFixture(sourceOverrides) {
   const ledger = await memoryContractSource("memoryContractWaivers");

@@ -195,6 +195,33 @@ test("manifest to route is mutation-proven green-red-green", () => {
   );
 });
 
+test("runtimeProvider is the exact composed provider identity", () => {
+  const input = fixture();
+  const candleFacts = input.engineFacts[1];
+  const implementation = input.manifest.models[1].candle.memoryStrategyContract.implementations[0];
+  implementation.runtimeProvider = "candle_control";
+  candleFacts.engines[0].id = "candle_control";
+  candleFacts.memoryContracts[0].id = "candle_control";
+  candleFacts.memoryRouteWitnesses[0].provider = "candle_control";
+  input.cells[1].provider = "candle_control";
+  input.calibrationPlan.providers[1].target.provider = "candle_control";
+  input.closures.providers["candle:candle_control"] = input.closures.providers["candle:candle_alpha"];
+  delete input.closures.providers["candle:candle_alpha"];
+  assert.equal(reconcileMemoryContracts(input).mismatches, 0);
+
+  for (const runtimeProvider of [undefined, "candle_alpha", "crossed_control"]) {
+    const mutated = structuredClone(input);
+    if (runtimeProvider === undefined) {
+      delete mutated.manifest.models[1].candle.memoryStrategyContract.implementations[0]
+        .runtimeProvider;
+    } else {
+      mutated.manifest.models[1].candle.memoryStrategyContract.implementations[0]
+        .runtimeProvider = runtimeProvider;
+    }
+    assert.throws(() => reconcileMemoryContracts(mutated), /unwaived mismatch/);
+  }
+});
+
 test("route facts are independent of syntax-equivalent Rust source", () => {
   const facts = fixture().engineFacts;
   const blockForm = "if eligible { spec.with_load_shape(deferred) } else { spec }";
