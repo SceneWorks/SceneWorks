@@ -13416,12 +13416,14 @@ fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
         );
 
         for probe in &probes {
-            let covered = patterns.iter().any(|pattern| match pattern.strip_suffix('*') {
-                // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
-                // what stops `vae/*` from claiming `audio_vae/config.json`.
-                Some(prefix) => probe.starts_with(prefix),
-                None => pattern == probe,
-            });
+            let covered = patterns
+                .iter()
+                .any(|pattern| match pattern.strip_suffix('*') {
+                    // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
+                    // what stops `vae/*` from claiming `audio_vae/config.json`.
+                    Some(prefix) => probe.starts_with(prefix),
+                    None => pattern == probe,
+                });
             assert!(
                 covered,
                 "{entry_id}: `mlx-gen-minimax-h3::load` probes `{probe}` under the {UPSTREAM_REPO} \

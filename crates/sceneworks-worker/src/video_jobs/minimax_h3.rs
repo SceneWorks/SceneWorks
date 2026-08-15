@@ -222,9 +222,7 @@ pub(super) fn minimax_h3_missing_shared_probes(
     MINIMAX_H3_SHARED_PROBES
         .iter()
         .copied()
-        .chain(
-            (!has_packed_text_encoder).then_some(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE),
-        )
+        .chain((!has_packed_text_encoder).then_some(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE))
         .filter(|probe| !root.join(probe).is_file())
         .collect()
 }
@@ -373,7 +371,9 @@ pub(super) fn resolve_minimax_h3_load(
              dense upstream one — and {} is missing. Re-download MiniMax-H3 in the Model Manager, \
              or install a tier that ships its own text encoder.",
             request.model,
-            base_root.join(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE).display()
+            base_root
+                .join(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE)
+                .display()
         )));
     }
     Ok(MiniMaxH3Load {
