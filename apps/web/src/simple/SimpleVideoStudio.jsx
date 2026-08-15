@@ -16,6 +16,7 @@ import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
   Chips,
+  ModelDescription,
   RefinePanel,
   ReferenceTile,
   SheetSelect,
@@ -308,6 +309,12 @@ export function SimpleVideoStudio() {
               shell, not a subset view, so a licence obligation discharged only in Advanced would
               be undischarged for every Simple user. */}
           <ModelAttribution model={selectedModel} />
+          {/* sc-17162 — the model's own `ui.description`, which until now rendered ONLY on the
+              advanced Models screen. For MiniMax-H3 that string is the withheld-component
+              disclosure (not the hosted Hailuo product, 2K unreachable, dense attention ⇒ a ~2
+              hour render at full canvas), so a Simple user picked the model on its name alone.
+              Below the attribution, which is a licence obligation and outranks it. */}
+          <ModelDescription model={selectedModel} />
           <SheetSelect
             kind="grid"
             label="Resolution"
