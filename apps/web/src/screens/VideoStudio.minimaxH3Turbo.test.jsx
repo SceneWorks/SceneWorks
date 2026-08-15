@@ -315,6 +315,80 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     expect(turboSelect()).toBeNull();
   });
 
+  // ------------------------------------------------------------ the Off that has to survive
+
+  it("does not re-seed turbo when the persisted snapshot already lists the model", async () => {
+    // The DURABLE half of the one-shot marker. `turboSeededModels` is in the studio snapshot
+    // (localStorage cache + the server ui-preferences copy `seedStudioSettingsFromServer` restores),
+    // and dropping it from that object is invisible in-session: the in-memory marker still stops the
+    // re-seed until the studio unmounts. It only bites on the NEXT mount — a nav away and back, or a
+    // desktop relaunch — at which point a deliberate Off silently becomes On again, on a control
+    // whose two states are a 12.6 min render and a 2 h 25 m one.
+    //
+    // `preferencesHydrated` is required, not decoration: `useStudioSettingsWriter`'s `ready` gate is
+    // `preferencesHydrated && videoModels.length > 0`, so a context without it never writes at all
+    // and this test would assert nothing (sc-15425's window).
+    const context = baseContext({ preferencesHydrated: true });
+    await render(context);
+    await openAdvanced();
+    expect(turboSelect().value).toBe(TURBO_768P.id);
+
+    // A deliberate Off.
+    await act(async () => setSelect(turboSelect(), ""));
+    await generate();
+    expect(jobLoraIds(context)).not.toContain(TURBO_768P.id);
+
+    // What the next mount will read back. Both fields matter: the SELECTION alone cannot express
+    // "already seeded", which is why the marker is persisted separately.
+    const stored = JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1"));
+    expect(stored.turboSeededModels, "the marker must reach the persisted snapshot").toContain(
+      MINIMAX.id,
+    );
+    expect(stored.selectedLoraIds ?? []).not.toContain(TURBO_768P.id);
+
+    // Relaunch: a brand-new studio restoring that snapshot, catalog and all.
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    const relaunched = baseContext({ preferencesHydrated: true });
+    await render(relaunched);
+    await openAdvanced();
+    expect(turboSelect().value, "a stored Off must not be re-seeded on the next mount").toBe("");
+    await generate();
+    expect(jobLoraIds(relaunched)).not.toContain(TURBO_768P.id);
+  });
+
+  // ------------------------------------------------------------ turbo × the partition gate
+
+  it("offers each partition only its own adapter once the declared-partition gate applies", async () => {
+    // sc-19563 narrowed `loraMatchesModel` with the LoRAs' declared `modelIds`, and the turbo
+    // control is built on `compatibleLoras` — so the two features compose rather than merely
+    // coexisting: the fl2v variants become unofferable on the reference partition and the ref2v one
+    // unofferable on the base partition, instead of being merely non-default. Asserted because
+    // "the default is right" and "the wrong one cannot be chosen at all" are different claims, and
+    // only the second closes the quality mismatch the ref2v test above describes.
+    const base = baseContext({ videoModels: [MINIMAX], loras: ALL_TURBO });
+    await render(base);
+    await openAdvanced();
+    expect([...turboSelect().querySelectorAll("option")].map((option) => option.value)).toEqual([
+      "",
+      TURBO_768P.id,
+      TURBO_8STEP.id,
+      TURBO_4STEP_V01.id,
+    ]);
+
+    const reference = baseContext({ videoModels: [MINIMAX_REF], loras: ALL_TURBO });
+    await render(reference);
+    await openAdvanced();
+    expect([...turboSelect().querySelectorAll("option")].map((option) => option.value)).toEqual([
+      "",
+      TURBO_REF2V.id,
+    ]);
+    // The declarations these two lists are derived from — retyped here so a manifest edit that
+    // erased `modelIds` (and re-collapsed both lists to all four) can't leave this test green.
+    expect(TURBO_768P.modelIds).toEqual([MINIMAX.id]);
+    expect(TURBO_REF2V.modelIds).toEqual([MINIMAX_REF.id]);
+  });
+
   it("reports the recipe's step count while leaving Steps editable", async () => {
     // Upstream lists the 8-step adapter as "8 / 4", and the worker honours an explicit
     // `advanced.steps` over the variant's own — so the control REPORTS the count rather than
