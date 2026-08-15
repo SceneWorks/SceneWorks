@@ -460,8 +460,13 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
     // because `steps_limit_error` owns both). Bounds the SAMPLING axis, which neither
     // bound above touches: `frames = duration × fps` says nothing about how many denoise steps run
     // over those frames, so a request legal on both can still hand the engine a schedule it cannot
-    // build. MiniMax-H3's sigma grid is `linspace(1, 0, steps)` and one grid point yields zero model
-    // evaluations, so its scheduler raises rather than rendering.
+    // build (LTX-2.3 bakes an 8-step sigma table and refuses anything else) or one that is legal but
+    // useless (MiniMax-H3 at 1 evaluation is a single Euler jump from pure noise — see that entry's
+    // `hardMinSteps` note for why its floor is a product judgement rather than an engine limit).
+    //
+    // The unit read here is MODEL EVALUATIONS, matching `advanced.steps`, `defaults.steps` and each
+    // turbo adapter's declared `sampling.steps`. No ±1 is applied anywhere on this side; the
+    // MiniMax-H3 engine appends its own terminal sigma grid point (sc-18726).
     //
     // The API gate is the one that returns a caller a 400, but it only covers what IT enqueues — a
     // job replayed from a pre-sc-19426 row, or produced by any future non-HTTP path, reaches the

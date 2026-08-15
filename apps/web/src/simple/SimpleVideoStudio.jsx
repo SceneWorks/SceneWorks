@@ -330,6 +330,17 @@ export function SimpleVideoStudio() {
           options={durations.map((value) => ({ value, label: `${formatDurationSeconds(value)}s` }))}
           value={duration}
         />
+        {/* sc-17162 — `ui.durationHint` had exactly ONE reader (`VideoStudio.jsx` helper copy), so
+            every Simple user got the duration chips with none of the copy explaining them. Simple is
+            an alternative shell, not a subset view: the same argument that put the licence
+            attribution here applies to a caveat a user needs BEFORE they pick a length. MiniMax-H3's
+            hint is where "15s is refused rather than shortened" and the canvas-dominated cost story
+            are told, and a Simple user who never opens Advanced would otherwise meet the refusal as
+            a failed submit. `Chips` exposes no hint slot, so this is a sibling paragraph rather than
+            a prop. Read off the selected model, so every model with a hint gets one. */}
+        {selectedModel?.ui?.durationHint ? (
+          <p className="su-duration-hint">{selectedModel.ui.durationHint}</p>
+        ) : null}
         <SimpleLoraField
           atLimit={lora.atLimit}
           availableLoras={lora.availableLoras}
