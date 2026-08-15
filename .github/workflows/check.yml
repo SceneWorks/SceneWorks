@@ -100,7 +100,32 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy,rustfmt
+      # SAVE ONLY ON `main`. This is the canonical note; every other rust-cache step in this repo
+      # carries the same input and points here.
+      #
+      # GitHub scopes an Actions cache to the ref that wrote it: a `refs/pull/N/merge` entry is
+      # readable only from inside PR N, while a `refs/heads/main` entry is readable from every
+      # branch and every PR. Left at the default (`save-if: true`) each PR job writes its own copy,
+      # so the repo accumulates one cache per lane per open PR and almost nothing another PR can
+      # use. Measured 2026-08-15, before this change: 12 of 12 SceneWorks caches were PR-scoped,
+      # ZERO were on main, and the repo sat at 14.3 GB of its 16 GB ceiling. Every PR job started
+      # cold, every time.
+      #
+      # The failure is a RATCHET, not a steady state. Eviction is LRU and fires on the PEAK, so a
+      # burst of concurrent PRs pushes the repo over the ceiling and drops the least-recently-read
+      # entries. A main baseline that PRs still read has its access time refreshed and survives; one
+      # that gets dropped can never come back, because refreshing it requires a read and the entry
+      # is gone. It stays dead until the next successful push to main, which is days apart here.
+      # Demonstrated in the sibling inference repo: main's `candle-cpu` baseline was full-matched at
+      # 2026-08-14T23:33 and gone by the next morning, after which every PR rebuilt the whole candle
+      # dependency graph inside its test step — ~18 minutes of a ~20-minute step, on every run.
+      #
+      # Restricting saves to main keeps exactly one baseline per lane, which is the only kind a PR
+      # can read anyway. A PR whose Cargo.lock differs from main's gets rust-cache's prefix restore
+      # instead of a full match: partial, and far better than cold.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -347,6 +372,8 @@ jobs:
           # A distinct key from `parity`'s: this job compiles the same crates under a different
           # feature set, so sharing one cache would thrash both.
           key: candle
+          # Save only on `main` — see the note on the `parity-rust` cache step above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
