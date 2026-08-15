@@ -67,6 +67,12 @@ pub(super) const MINIMAX_H3_ENGINE_ID: &str = "minimax_h3";
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_DIT_COMPONENT: &str = "transformer";
 
+/// The staged-component key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads the PACKED,
+/// per-tier text encoder from (sc-19120). Absent ⇒ the provider falls back to
+/// `<spec.weights>/text_encoder`, the dense upstream bf16 Qwen3-VL-32B.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_TE_COMPONENT: &str = "text_encoder";
+
 /// The SceneWorks rehost carrying the pre-quantized DiT tiers (both partitions, all three tiers).
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
@@ -178,6 +184,11 @@ pub(super) struct MiniMaxH3Load {
     /// `<tier>/transformer` → the staged [`MINIMAX_H3_DIT_COMPONENT`]. Always the BASE partition,
     /// even for a ref2va job: the provider resolves `transformer_ref/` as this dir's sibling.
     pub(super) dit_dir: PathBuf,
+    /// `<tier>/text_encoder` → the staged [`MINIMAX_H3_TE_COMPONENT`], when the selected tier ships
+    /// a PACKED text encoder. `None` for the dense bf16 tier and for a q4/q8 install that predates
+    /// sc-19120's per-tier text-encoder co-requisite; the provider then falls back to
+    /// `<root>/text_encoder`, the dense upstream Qwen3-VL-32B.
+    pub(super) te_dir: Option<PathBuf>,
     /// The tier's baked-in quant, ASSERTED against the staged dir by the provider rather than
     /// applied — nothing quantizes at load. `None` for the dense bf16 tier.
     pub(super) quant: Option<Quant>,
@@ -277,12 +288,43 @@ pub(super) fn resolve_minimax_h3_load(
             tier_root.display()
         )));
     };
+    // sc-19120 / sc-19506 — STAGE THE PACKED TEXT ENCODER WHEN THE TIER SHIPS ONE.
+    //
+    // `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads `spec.components["text_encoder"]` and
+    // falls back to `<spec.weights>/text_encoder` when the key is absent. `spec.weights` is the
+    // UPSTREAM root, whose `text_encoder/` is the DENSE bf16 Qwen3-VL-32B — 53.07 GB resident,
+    // measured, and the largest single component in the family by a wide margin. sc-19120 published
+    // packed q4/q8 text encoders beside the DiT tiers and declared them as per-tier `coRequisite`
+    // rows, but nothing staged the directory, so a q4 render still loaded the dense conditioner and
+    // the tier bought nothing on the component that dominates the peak.
+    //
+    // PROBED, NOT ASSUMED, and the fallback is deliberate rather than lazy: the bf16 tier genuinely
+    // has no packed text encoder (its conditioner is the upstream one), and a q4/q8 install made
+    // before sc-19120 has the DiT subtree without it. Both must keep loading, so an absent directory
+    // resolves to `None` and the provider's upstream fallback — not to an error.
+    let te_dir = Some(tier_root.join(tier).join(MINIMAX_H3_TE_COMPONENT))
+        .filter(|dir| minimax_h3_packed_te_is_complete(dir));
     Ok(MiniMaxH3Load {
         root: base_root,
         dit_dir: tier_root.join(tier).join(MINIMAX_H3_DIT_COMPONENT),
+        te_dir,
         quant: minimax_h3_tier_quant(tier),
         tier,
     })
+}
+
+/// Whether `dir` is a loadable PACKED MiniMax-H3 text encoder (sc-19120).
+///
+/// `config.json` + a safetensors index is the same shape `minimax_h3_tier_complete` requires of a
+/// DiT partition, and it is the pair `resolve_text_encoder_dir` → `map_shards` actually reads: the
+/// index names every shard, so a directory holding only `config.json` — the sc-19517 failure on the
+/// hosted `bf16/transformer/` — is rejected here rather than half-loaded at the provider.
+///
+/// A bare `is_dir()` would be the false green: an interrupted download leaves the directory present
+/// and empty, and staging it would replace a working dense fallback with a load error.
+#[cfg(target_os = "macos")]
+fn minimax_h3_packed_te_is_complete(dir: &Path) -> bool {
+    dir.join("config.json").is_file() && dir.join("model.safetensors.index.json").is_file()
 }
 
 /// Refuse a request whose CONDITIONING SHAPE does not match the catalog entry it was submitted
@@ -630,6 +672,11 @@ pub(super) async fn generate_minimax_h3_using(
         // `components["transformer"]`. See fact 4 in the module header.
         model_dir: load.root,
         dit_component_dir: Some(load.dit_dir),
+        // sc-19120 / sc-19506: the tier's PACKED text encoder when it ships one. `None` leaves the
+        // provider on its `<weights>/text_encoder` fallback — the dense upstream conditioner — which
+        // is correct for bf16 and for a pre-sc-19120 install, and wrong for a q4/q8 install that has
+        // one, because a q4 tier whose 53 GB conditioner stays dense is not a q4 render.
+        text_encoder_component_dir: load.te_dir,
         quant: load.quant,
         adapters: Vec::new(),
         conditioning,

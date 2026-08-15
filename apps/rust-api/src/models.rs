@@ -544,10 +544,13 @@ fn huggingface_repo_from_url(url: &str) -> Option<String> {
 /// bypass named, and a primary-only index would have missed it.
 ///
 /// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
-/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is `platforms:
-/// ["macos"]` — so an index built from the snapshot would be EMPTY on Linux/Windows and the gate
-/// would evaporate on exactly the hosts where the LAN-exposed jobs API (epic 4484) is most likely
-/// to be reachable. A licence requirement is not a platform capability.
+/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is platform-scoped: the
+/// MLX tiers and their co-requisites are `platforms: ["macos"]` and sc-19558's raw-snapshot set is
+/// `platforms: ["windows", "linux"]`. An index built from the snapshot would therefore see only the
+/// subset that survived the filter on the running host, and the gate would be keyed on a partial
+/// view of the repos an entry can actually fetch — on exactly the hosts where the LAN-exposed jobs
+/// API (epic 4484) is most likely to be reachable. A licence requirement is not a platform
+/// capability.
 async fn license_acknowledgment_repo_index(
     state: &AppState,
 ) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
@@ -4932,13 +4935,21 @@ mod model_size_concurrency_tests {
         // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
         // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
         // `(repo, files)` still separates them and macOS gains exactly two: 87 → 89. Windows/Linux
-        // gain NOTHING and stay at 84: every MiniMax-H3 download row is `platforms: ["macos"]`
-        // (the candle lane has no H3 provider yet — sc-19008 → sc-17156), so
-        // `retain_downloads_for_os` empties both entries there and `model_download_context`
-        // yields `None`. That asymmetry is the point of running this loop per OS.
+        // gained NOTHING at the time and stayed at 84: every MiniMax-H3 download row was
+        // `platforms: ["macos"]`, so `retain_downloads_for_os` emptied both entries there and
+        // `model_download_context` yielded `None`. That asymmetry is the point of running this loop
+        // per OS.
+        //
+        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
+        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
+        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
+        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
+        // windows/linux gain exactly one: 84 → 85. macOS is untouched at 89 — the new rows are
+        // filtered out there, and the macOS rows are unchanged. `minimax_h3_ref` deliberately gained
+        // no off-Mac row (candle default-denies `ref2va`), which is why this is +1 and not +2.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 89_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 89_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

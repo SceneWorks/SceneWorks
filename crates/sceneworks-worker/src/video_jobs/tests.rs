@@ -9241,6 +9241,32 @@ fn video_load_spec_threads_text_encoder_dir() {
         matches!(video_load_spec(&with_te).text_encoder, Some(WeightsSource::Dir(ref p)) if *p == gemma),
         "text_encoder_dir rides LoadSpec::text_encoder as a Dir source"
     );
+    assert!(
+        video_load_spec(&with_te).components.is_empty(),
+        "`text_encoder_dir` is the LoadSpec::text_encoder field — it must NOT also land in the \
+         components map, which is where MiniMax-H3's packed per-tier encoder goes (sc-19120)"
+    );
+
+    // sc-19120 / sc-19506: MiniMax-H3's packed per-tier text encoder is a COMPONENT, not the
+    // `text_encoder` field. `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads
+    // `spec.components["text_encoder"]` and falls back to `<weights>/text_encoder` when it is
+    // absent, so an unstaged packed encoder is a silent dense load rather than an error.
+    let packed_te = PathBuf::from("/models/minimax-h3-mlx/q4/text_encoder");
+    let with_component_te = VideoGenInput {
+        engine_id: "minimax_h3",
+        model_dir: PathBuf::from("/models/minimax-h3"),
+        text_encoder_component_dir: Some(packed_te.clone()),
+        ..VideoGenInput::default()
+    };
+    let spec = video_load_spec(&with_component_te);
+    assert!(
+        spec.text_encoder.is_none(),
+        "the packed encoder must not leak onto LoadSpec::text_encoder — that field is LTX's seam"
+    );
+    assert!(
+        matches!(spec.components.get("text_encoder"), Some(WeightsSource::Dir(p)) if *p == packed_te),
+        "text_encoder_component_dir rides LoadSpec::components[\"text_encoder\"]"
+    );
 
     // sc-13664: a resolved amoral-enhancer dir is staged as the `uncensored_enhancer` component so
     // the MLX LTX provider loads it on demand (the provider's `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache
@@ -12883,6 +12909,87 @@ fn minimax_h3_tier_resolution_requires_both_dit_partitions() {
     );
 }
 
+/// sc-19120 / sc-19506 — a q4/q8 tier's PACKED text encoder is STAGED, and the dense upstream one
+/// is the fallback rather than the default.
+///
+/// This closes a silent half-landing. sc-19120 published packed q4/q8 text encoders beside the DiT
+/// tiers and declared them in the manifest as per-tier `coRequisite` rows, so the bytes downloaded —
+/// but nothing put the directory on the `LoadSpec`, and `mlx-gen-minimax-h3::resolve_text_encoder_dir`
+/// falls back to `<spec.weights>/text_encoder`, the UPSTREAM DENSE bf16 Qwen3-VL-32B. A q4 render
+/// therefore still loaded the 53.07 GB dense conditioner: the largest component in the family, at
+/// full width, on the tier a user picked precisely because bf16 does not fit.
+///
+/// Three cases, because the fallback has to survive: a tier WITH a packed TE stages it, a tier
+/// WITHOUT one (bf16, and any pre-sc-19120 install) resolves `None`, and a TORN one — the directory
+/// present but the index missing, which is what an interrupted download leaves behind and what
+/// sc-19517 found on the hosted `bf16/transformer/` — also resolves `None` rather than staging a
+/// directory the provider would fail to load.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let base = minimax_h3_base_root("mm_te_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let resolve = |tier_root: &Path| {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // No packed TE in the tier subtree — a pre-sc-19120 install, and the bf16 tier permanently.
+    let bare = minimax_h3_tier_root("mm_te_bare_", &["q4"], &["transformer", "transformer_ref"]);
+    let load = resolve(bare.path()).expect("a complete q4 tier resolves");
+    assert_eq!(
+        load.te_dir, None,
+        "a tier with no packed text encoder must leave the provider on its upstream dense \
+         fallback, not stage a directory that is not there"
+    );
+
+    // The shipped shape: `config.json` + the shard index `convert.rs` writes for the component.
+    let packed = minimax_h3_tier_root(
+        "mm_te_packed_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let te = packed.path().join("q4").join("text_encoder");
+    std::fs::create_dir_all(&te).expect("packed te dir");
+    std::fs::write(te.join("config.json"), "{}").expect("te config");
+    std::fs::write(te.join("model.safetensors.index.json"), "{}").expect("te index");
+    let load = resolve(packed.path()).expect("a complete q4 tier resolves");
+    assert_eq!(
+        load.te_dir,
+        Some(te.clone()),
+        "a q4 tier that ships a packed text encoder must stage it — an unstaged one means the q4 \
+         render loads the 53 GB dense conditioner and the tier buys nothing on it"
+    );
+
+    // Torn: the directory exists, the index does not. Staging it would replace a working dense
+    // fallback with a load error, so completeness is probed rather than assumed from `is_dir()`.
+    std::fs::remove_file(te.join("model.safetensors.index.json")).expect("remove te index");
+    let load = resolve(packed.path()).expect("a complete q4 tier still resolves");
+    assert_eq!(
+        load.te_dir, None,
+        "an interrupted packed-text-encoder download must fall back to the dense upstream copy \
+         rather than stage an unloadable directory"
+    );
+}
+
 /// The shared components are a SEPARATE download from the tiers, and their absence says so.
 #[cfg(target_os = "macos")]
 #[test]
@@ -13059,6 +13166,80 @@ fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_t
          structurally-identical DiT partitions ran"
     );
     assert_eq!(raw_settings["realModelInference"], json!(true));
+}
+
+/// sc-19120 / sc-19506 — the ARM puts the packed text encoder on the `LoadSpec`, and leaves the key
+/// ABSENT when the tier has none.
+///
+/// `minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one` pins the
+/// RESOLVER, and `video_load_spec_threads_text_encoder_dir` pins the `VideoGenInput` → `LoadSpec`
+/// mapping. Neither covers the ONE line between them — `text_encoder_component_dir: load.te_dir` in
+/// `generate_minimax_h3_using` — and dropping that line was measured to leave both of those tests
+/// green while every q4 render silently went back to the 53 GB dense conditioner. This is the seam
+/// test that makes it red.
+///
+/// Both directions, because only the positive one is a claim about the fix and only the negative one
+/// keeps the fallback honest: an absent key is what sends the provider to `<weights>/text_encoder`,
+/// which is CORRECT for the dense bf16 tier and for a pre-sc-19120 install.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_stages_the_packed_text_encoder_onto_the_load_spec() {
+    let source_dir = |source: Option<&WeightsSource>| match source {
+        Some(WeightsSource::Dir(dir)) => Some(dir.clone()),
+        _ => None,
+    };
+    let base = minimax_h3_base_root("mm_te_arm_base_");
+    let request = minimax_h3_request("minimax_h3", json!({}));
+
+    // A tier that ships NO packed text encoder — the key must be absent so the provider falls back
+    // to the dense upstream copy under `spec.weights`.
+    let bare = minimax_h3_tier_root(
+        "mm_te_arm_bare_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let probe = ArmProbe::default();
+    drive_minimax_h3_arm(bare.path(), base.path(), &probe, &request)
+        .expect("a t2va job with a complete q4 tier and shared components runs");
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert!(
+        spec.components.get("text_encoder").is_none(),
+        "a tier with no packed text encoder must leave the key ABSENT — that absence is what \
+         selects the provider's `<weights>/text_encoder` fallback"
+    );
+
+    // The same tier plus the packed component: `config.json` + the shard index `convert.rs` writes.
+    let packed = minimax_h3_tier_root(
+        "mm_te_arm_packed_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let te = packed.path().join("q4").join("text_encoder");
+    std::fs::create_dir_all(&te).expect("packed te dir");
+    std::fs::write(te.join("config.json"), "{}").expect("te config");
+    std::fs::write(te.join("model.safetensors.index.json"), "{}").expect("te index");
+    // A SECOND base root, not a reuse of the first: the shared video funnel caches the loaded
+    // generator, and a second drive against the same `spec.weights` is served from that cache
+    // without calling the loader at all — which would leave `probe.spec` empty and the assertion
+    // below reading a load that never happened.
+    let base = minimax_h3_base_root("mm_te_arm_base2_");
+    let probe = ArmProbe::default();
+    drive_minimax_h3_arm(packed.path(), base.path(), &probe, &request)
+        .expect("a t2va job with a complete q4 tier and shared components runs");
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        source_dir(spec.components.get("text_encoder")),
+        Some(te),
+        "the packed per-tier text encoder must ride `LoadSpec::components[\"text_encoder\"]` — that \
+         is the key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads, and without it a q4 \
+         render loads the dense 53 GB conditioner and the tier buys nothing on it"
+    );
+    assert_eq!(
+        source_dir(Some(&spec.weights)),
+        Some(base.path().to_path_buf()),
+        "and it must NOT displace `spec.weights`, which stays the upstream root carrying the VAEs, \
+         the tokenizer and the dense text encoder the fallback needs"
+    );
 }
 
 /// The engine's synchronized soundtrack reaches the asset instead of being dropped (sc-19508).
