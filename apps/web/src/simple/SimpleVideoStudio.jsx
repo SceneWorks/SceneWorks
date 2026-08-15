@@ -7,6 +7,8 @@ import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredDuration, preferredVideoResolution } from "./modelDefaults.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
+import { formatDurationSeconds } from "../videoModelLimits.js";
+import { ModelAttribution } from "../components/ModelAttribution.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
@@ -302,6 +304,10 @@ export function SimpleVideoStudio() {
             }))}
             value={selectedModel?.name ?? selectedModel?.id ?? "No video model installed"}
           />
+          {/* Licence-required attribution (sc-17227 §IV.2, sc-17161). Simple is an alternative
+              shell, not a subset view, so a licence obligation discharged only in Advanced would
+              be undischarged for every Simple user. */}
+          <ModelAttribution model={selectedModel} />
           <SheetSelect
             kind="grid"
             label="Resolution"
@@ -315,10 +321,13 @@ export function SimpleVideoStudio() {
             value={resolutionText}
           />
         </div>
+        {/* Labels are rounded to 2dp; the VALUE stays the model's exact declared number, which
+            the enqueue gate matches against `limits.durations`. MiniMax-H3's rungs are frame
+            counts over 24 and render raw as "5.1667s" / "10.8333s" on a chip. */}
         <Chips
           label="Duration"
           onChange={setDuration}
-          options={durations.map((value) => ({ value, label: `${value}s` }))}
+          options={durations.map((value) => ({ value, label: `${formatDurationSeconds(value)}s` }))}
           value={duration}
         />
         <SimpleLoraField

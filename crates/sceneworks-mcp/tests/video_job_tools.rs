@@ -242,6 +242,121 @@ async fn submit_video_job_rejects_incomplete_mode_inputs_before_submitting() {
     let _ = harness.client.cancel().await;
 }
 
+/// sc-17161 — `reference` mode round-trips through the real MCP client to the wire body.
+///
+/// The unit tests pin `video_job_body`; this pins the whole path an agent actually takes —
+/// `tools/call` → `Parameters<SubmitVideoJobArgs>` deserialization → the mapper → `POST
+/// /api/v1/video/jobs`. That middle step is not covered by the unit tests and is where a schema
+/// field that exists on the struct but is not reachable over the wire would hide: `submitted[0]`
+/// is the body the API would have received.
+///
+/// All three reference kinds together is the MiniMax-H3 Ref2VA shape (`<Picture n>` / `<Video n>`
+/// / `<Audio n>` labelled in the order given), and `advanced.steps` is the draft-cost lever.
+#[tokio::test]
+async fn submit_video_job_round_trips_reference_mode_with_every_reference_kind() {
+    let harness = harness(vec![]).await;
+
+    let result = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("submit_video_job").with_arguments(
+                json!({
+                    "projectId": "p1",
+                    "prompt": "the woman from <Picture 1> in the alley from <Picture 2>",
+                    "mode": "reference",
+                    "model": "minimax_h3_ref",
+                    "referenceAssetIds": ["img_1", "img_2"],
+                    "sourceClipAssetIds": ["clip_1"],
+                    "referenceAudioAssetIds": ["aud_1"],
+                    "duration": 5.1667,
+                    "fps": 24,
+                    "width": 576,
+                    "height": 320,
+                    "steps": 4
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("submit_video_job succeeds");
+    assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
+    assert_eq!(result_json(&result)["jobId"], "job_v1");
+
+    let submitted = harness.submitted.lock().unwrap().clone();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0]["mode"], "reference_to_video");
+    assert_eq!(submitted[0]["model"], "minimax_h3_ref");
+    assert_eq!(submitted[0]["referenceAssetIds"], json!(["img_1", "img_2"]));
+    assert_eq!(submitted[0]["sourceClipAssetIds"], json!(["clip_1"]));
+    assert_eq!(submitted[0]["referenceAudioAssetIds"], json!(["aud_1"]));
+    // The exact lattice rung, not a rounded label: the enqueue gate matches `limits.durations`.
+    assert_eq!(submitted[0]["duration"], 5.1667);
+    assert_eq!(submitted[0]["advanced"], json!({ "steps": 4 }));
+
+    let _ = harness.client.cancel().await;
+}
+
+/// The audio-only leg, over the wire. sc-17159 fixed the image-only spelling of this rule in
+/// `validate_video_job` precisely because Ref2VA serves an audio-only reference set; a tool that
+/// refused it would put the old bug back one layer up, where the API can no longer see it.
+#[tokio::test]
+async fn submit_video_job_reference_mode_accepts_an_audio_only_set_and_refuses_an_empty_one() {
+    let harness = harness(vec![]).await;
+
+    let result = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("submit_video_job").with_arguments(
+                json!({
+                    "projectId": "p1",
+                    "prompt": "a voice in an empty warehouse",
+                    "mode": "reference",
+                    "referenceAudioAssetIds": ["aud_1"]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("an audio-only reference set is a shape the model serves");
+    assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
+    assert_eq!(
+        harness.submitted.lock().unwrap()[0]["referenceAudioAssetIds"],
+        json!(["aud_1"])
+    );
+
+    // …and a reference call with nothing to condition on never reaches the API.
+    let outcome = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("submit_video_job").with_arguments(
+                json!({ "projectId": "p1", "prompt": "x", "mode": "reference" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    match outcome {
+        Err(_) => {}
+        Ok(result) => assert_eq!(
+            result.is_error,
+            Some(true),
+            "a referenceless reference call must not look like success: {result:?}"
+        ),
+    }
+    assert_eq!(
+        harness.submitted.lock().unwrap().len(),
+        1,
+        "only the valid call may reach the API"
+    );
+
+    let _ = harness.client.cancel().await;
+}
+
 #[tokio::test]
 async fn get_job_status_reports_progress_stage_and_eta() {
     let harness = harness(vec![snapshot(

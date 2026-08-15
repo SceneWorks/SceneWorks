@@ -11800,7 +11800,18 @@
       "family": "wan-video",
       "type": "video",
       "adapter": "wan_video",
-      "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+      // NO `first_last_frame` (sc-19504). It was advertised here and NO lane served it: the MLX
+      // I2V-A14B descriptor declares `conditioning: vec![ConditioningKind::Reference]` with no
+      // `Keyframe` (mlx-gen-wan/src/model.rs, pinned by its own registration test), and the candle
+      // I2V-A14B descriptor is the same single `Reference` — so gen-core's default-deny
+      // `validate_request` makes a keyframe a hard `Unsupported` on BOTH lanes. The 5B (`wan_2_2`)
+      // serves FLF because TI2V is a mask-blend/replace-latent architecture whose pinned-frame set
+      // is just a list of latent indices; the A14B is channel-concat (`in_dim` 36 = noise 16 +
+      // mask 4 + z_video 16) whose mask is hard-pinned to latent frame 0 and whose patch_embedding
+      // was trained on "frame 0 image, rest zeros" — a second pinned frame is out-of-distribution
+      // for the checkpoint, not a flag flip. Upstream ships no Wan2.2 FLF2V variant of this family
+      // either. `extend_clip` / `video_bridge` stay: the candle Wan-VACE lane genuinely serves them.
+      "capabilities": ["image_to_video", "extend_clip", "video_bridge"],
       // Per-platform source: macOS downloads the turnkey pre-converted dual-expert MLX snapshot
       // from the SceneWorks HF org (sc-5600, epic 5594); Windows/Linux load the diffusers/GGUF
       // layout via the torch wan_video adapter. The API serves only the entry matching the OS.
@@ -12015,7 +12026,8 @@
       "ui": {
         "label": "Wan2.2 14B (I2V)",
         "description": "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
-        "recommendedFor": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+        // Tracks `capabilities` — `first_last_frame` withdrawn in sc-19504 (see the note there).
+        "recommendedFor": ["image_to_video", "extend_clip", "video_bridge"],
         "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
         "promptGuide": {
           "title": "Wan2.2 14B Image-to-Video Prompt Guide",

@@ -206,3 +206,13 @@ lands, memory:
 
 The text encoder and both autoencoders are shared across every tier and across both entries, so they
 download once no matter how many tiers you install.
+
+## Sources
+
+- [MiniMax-H3 model card](https://huggingface.co/MiniMaxAI/MiniMax-H3)
+- [Hailuo 3.0 prompting guide](https://hailuoai.video/)
+- [MiniMax platform video generation docs](https://platform.minimax.io/docs/api-reference/video-generation)
+
+Written for SceneWorks against the open-weights checkpoints. The cost table, the fourteen clip
+lengths, the size buckets and the structured-schema A/B are measured on this build rather than
+quoted, so they describe what these weights do — which is not always what the hosted product does.

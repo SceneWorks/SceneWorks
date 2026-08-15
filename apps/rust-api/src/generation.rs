@@ -698,6 +698,37 @@ pub(crate) async fn create_video_job(
         Some(&catalogs),
     )
     .await?;
+    // **THE NO-LANE GATE (sc-19504).** Last, on the payload actually about to be enqueued, so it
+    // judges the post-preset model + the resolved geometry rather than the DTO (sc-12300) — and
+    // after the LoRA validation, because a rejected adapter is a better error than "no backend".
+    //
+    // Every gate above this one asks "is this request well-formed?". This one asks the different
+    // question that GH #2074, sc-15328 and sc-19504 all turned on: **will anything ever run it?**
+    // A video job no lane claims is not rejected and not failed — it sits `queued` /
+    // "Waiting for an available worker." forever, next to an idle worker, with no error and no
+    // terminal state. `wan_2_2_i2v_14b` + `first_last_frame` was exactly that: admitted by the
+    // `VIDEO_JOB_MODES` allow-list, advertised by the manifest, offered as a Video Studio tab
+    // off-Mac, and claimable by neither the MLX engine (the I2V-A14B descriptor declares
+    // `conditioning: [Reference]` — no `Keyframe`) nor the candle i2v gate (which requires
+    // `mode == "image_to_video"`). Withdrawing the capability stops the TAB; only this stops the
+    // HANG, because `VIDEO_JOB_MODES` is global and an MCP / raw-REST / recipe-replay caller can
+    // still name any admitted mode against any model.
+    //
+    // Derived from the real claim predicates `worker_supports_job` consults, never a restated list,
+    // so a routing change moves this gate with it — see
+    // `video_request_is_claimable_by_any_lane`, which also documents why this is neither a
+    // capability gate nor a platform gate.
+    if !video_request_is_claimable_by_any_lane(&job_type, &job_payload) {
+        let mode = job_payload
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or(payload.mode.as_str());
+        return Err(ApiError::bad_request(format!(
+            "{model_id} cannot render the \"{mode}\" mode — no backend implements it, so this job \
+             would wait for a worker that will never claim it. Choose a mode this model lists in \
+             its capabilities, or a model that supports this one."
+        )));
+    }
     let job = create_generation_job(
         state,
         job_type,

@@ -71,8 +71,9 @@ Closed set — `TimelineTransitionType` is `Crossfade | FadeFromBlack | FadeToBl
 
 - **Advanced audio mixing** 📄 — segments are rendered with `-an` (`media_jobs.rs:2247, 2273`); there
   is no multi-track audio bed, ducking, level automation, or per-item gain in the export. (The
-  generation encode path can mux a single AAC track via `-shortest`, `video_jobs.rs:769-783`, but
-  that is single-source, not a timeline mix.)
+  generation encode path can mux a single AAC track, bounded at the picture's length —
+  `video_jobs/mod.rs::audio_mux_args`; it passed `-shortest` until sc-19425 measured that flag
+  discarding video frames — but that is single-source, not a timeline mix.)
 - **Browser / canvas recording** 📄 — export is a backend FFmpeg render, not `MediaRecorder`/canvas
   capture. The browser editor is preview-only; the authoritative pixels come from the worker.
 - **Deferred (post-v1):** rich multi-track compositing/overlays, transition types beyond

@@ -789,7 +789,10 @@ const seededFallbackModels = [
     id: "wan_2_2_i2v_14b",
     name: "Wan2.2 14B (I2V)",
     type: "video",
-    capabilities: ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+    // No `first_last_frame` (sc-19504): neither engine has a keyframe path on the A14B. This mirror
+    // is what the picker reads BEFORE the catalog loads, so a stale capability here re-offers the
+    // dead tab for that whole window — `declared video capabilities are all offerable` pins it.
+    capabilities: ["image_to_video", "extend_clip", "video_bridge"],
     defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
     limits: {
       durations: [3, 4, 5],
@@ -867,6 +870,11 @@ const seededFallbackModels = [
       resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
     },
     ui: {
+      // Licence-required attribution (MiniMax H3 Community License §IV.2, sc-17227). It must be in
+      // the MIRROR too: the generation surfaces render whichever catalog is in hand, and the
+      // fallback one is what they get before /api/v1/models lands — a licence obligation that is
+      // discharged only once the network answers is not discharged (sc-17161).
+      attribution: "Powered by MiniMax H3",
       description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt.",
       durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
@@ -893,6 +901,8 @@ const seededFallbackModels = [
       maxCombinedReferenceAssets: 12,
     },
     ui: {
+      // §IV.2 attribution, same as `minimax_h3` — see that entry (sc-17227 / sc-17161).
+      attribution: "Powered by MiniMax H3",
       description: "MiniMax-H3 reference-driven video: up to 9 images, 3 clips and 3 audio references (12 files total), with synchronized stereo audio.",
       durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, and the same canvas-driven cost.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
