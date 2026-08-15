@@ -13135,6 +13135,24 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
       },
+      // sc-18725. `families` is the LOAD gate, and it is genuinely read on both sides: the API's
+      // `model_lora_families` -> `accepted_model_lora_families` -> `validate_lora_specs_for_model`
+      // rejects a submitted LoRA whose family is not in this set, and the web's `loraMatchesModel`
+      // (presetUtils.js) filters the picker on the same list. Declared explicitly rather than left to
+      // `families_from_value_chain`'s top-level-`family` fallback because `loraCompatibility` is one
+      // of the six NESTED_KEYS `merge_model_manifest_entry` merges key-by-key — an absent block here
+      // makes a user-manifest override replace rather than merge.
+      //
+      // `types` is the DESCRIPTIVE vocabulary; it has exactly one reader today —
+      // `modelSupportsMultiPhase` (imageMultiPhase.js), which keys on the single token
+      // "acceleration". That token is deliberately ABSENT: it opens Image Studio's multi-phase
+      // denoise editor, whose worker gate is `request.model == KREA_RAW_MODEL_ID`, so advertising it
+      // from a video model would be a promise nothing keeps. The turbo adapters still surface
+      // normally — the picker gates on `families`, not on `types`.
+      "loraCompatibility": {
+        "families": ["minimax-h3"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
       "defaults": {
         // The shortest rung (124 frames) rather than the middle of the menu, because the cost table
         // above makes the default canvas a 2-hour render at 5.1667 s and worse at every longer one.
@@ -13397,6 +13415,16 @@
       ],
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
+      },
+      // sc-18725 — see `minimax_h3` for what each key is read by. Declared HERE too and identically:
+      // the two partitions are one DiT architecture with one geometry, and the gate is per-model-id,
+      // so omitting it would leave Ref2VA unable to take the very adapter distilled for it
+      // (`minimax_h3_ref2v_turbo_4step`). The values match `minimax_h3` exactly on purpose — family
+      // membership cannot express the fl2v-vs-ref2v pairing, which is a labelling convention today
+      // rather than an enforced constraint (tracked on sc-19563).
+      "loraCompatibility": {
+        "families": ["minimax-h3"],
+        "types": ["style", "motion", "character", "enhance"]
       },
       "defaults": {
         "duration": 5.1667,
