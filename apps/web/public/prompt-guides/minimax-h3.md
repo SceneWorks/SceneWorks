@@ -79,11 +79,20 @@ budget. Ratios between 1:4 and 4:1 are accepted.
 | 1024x768 / 768x1024 | 4:3 and 3:4. |
 | 768x768 | Square. |
 | 1344x768 / 768x1344 | Full size, 16:9 and 9:16. The default, and the expensive one. |
-| 1536x672 / 672x1536 | 21:9 and its transpose. Same pixel budget as full size, same cost. |
+| 1536x672 / 672x1536 | 21:9 and its transpose. Same pixel budget as full size, same cost. **Pending an engine change — see below.** |
 
 Every bucket in the table is the same fixed area budget or less — the 21:9 pair is 1,032,192 px,
 byte for byte what 1344x768 is. **The bound is the area, not the long edge**, which is why a wider
 canvas is not automatically a bigger one.
+
+> **The 21:9 pair is not renderable yet.** The area budget already accommodates it, but the engine
+> *also* caps each edge independently, and that per-edge ceiling currently sits below this pair's
+> long edge — so a 21:9 request is refused today even though the menu offers it. **inference PR
+> #640** raises the per-edge ceiling to the widest canvas the resolver can itself produce, which is
+> what makes this pair reachable. Until it lands, treat **1344x768** as the widest canvas that
+> actually renders; every other bucket above works now. **This row and #640 must not be separated at
+> merge** — shipping this table without that engine change re-advertises a canvas the engine
+> refuses.
 
 A keyframe is **stretched** onto the canvas, not letterboxed — crop your reference to the target
 shape first or the subject will distort.

@@ -13373,17 +13373,30 @@
         //      budget is the argument that actually carries the 2K claim and is not in tension with
         //      anything, so it is the one stated above.
         //
-        //      What the per-edge value IS for this family is NOT decidable from this repository and
-        //      is deliberately not asserted here in either direction. `pinned_engine_geometry.rs`
-        //      classifies both partitions `PinnedAreaCap::NotInThePinnedBundle` — the inference pin
-        //      (014134e3) carries no importable `providers::minimax_h3`, so
+        //      The per-edge cap is a SEPARATE, independently-applied bound, and it currently sits
+        //      BELOW this entry's advertised 21:9 pair. So `1536x672` / `672x1536` are ADVERTISED
+        //      BUT NOT YET RENDERABLE: the area check passes and the edge check refuses.
+        //
+        //      ⚠️ THE UNBLOCKING CHANGE IS IN THE ENGINE REPO, NOT THIS ONE — inference PR #640
+        //      (`story/sc-17152-h3-max-size-1536`), which raises the per-edge ceiling to the widest
+        //      canvas `resolve_canvas_size` itself emits. **This entry's 21:9 buckets and #640 must
+        //      not be separated at merge**: shipping these two `resolutions` values without that
+        //      engine change advertises a canvas the engine refuses. The prompt guide's *Sizes*
+        //      section carries the same caveat for the user and is pinned by
+        //      `minimaxH3CatalogCopy.test.jsx`.
+        //
+        //      Do NOT write the new ceiling's VALUE here or in the copy. It is an engine internal
+        //      that dates this comment the moment the resolver moves, and 1536 — the intuitive
+        //      guess, being this pair's own long edge — is WRONG: the resolver emits wider still at
+        //      the 4:1 aspect ceiling, so a 1536 cap would keep refusing a canvas the engine
+        //      produces on its own. #640 carries a guard that reds specifically on that value.
+        //
+        //      Note this repo CANNOT check any of it: `pinned_engine_geometry.rs` classifies both
+        //      partitions `PinnedAreaCap::NotInThePinnedBundle` — the pin (014134e3) exposes no
+        //      importable `providers::minimax_h3`, so
         //      `shipped_manifest_matches_each_engines_real_geometry` cannot compare this entry's
-        //      geometry against the engine's at all. The only in-repo evidence about the 21:9 pair
-        //      is the `resolutions` note above, which records `1536x672` as a MEASURED
-        //      `resolve_canvas_size` output — i.e. a value the engine's own resolver produced, which
-        //      is evidence FOR reachability, not against it. sc-18650's pin bump makes the guard
-        //      importable and is what will settle it; until then neither the copy nor this comment
-        //      should claim the pair is refused.
+        //      geometry against the engine's at all. sc-18650's pin bump is what makes the guard
+        //      able to catch a regression here automatically.
         //   2. Dense attention, because the sparse-attention inference path is unreleased — which
         //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
         //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`

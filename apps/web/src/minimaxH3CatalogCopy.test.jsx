@@ -301,6 +301,34 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     }
   });
 
+  it("marks the 21:9 pair as pending its engine change, and cites it in the repo it lives in", () => {
+    // The 21:9 pair is ADVERTISED in `limits.resolutions` and satisfies the area budget, but the
+    // engine bounds each EDGE independently and that ceiling currently sits below 1536, so the
+    // bucket is offered and refused. The unblocking change is `inference` PR #640
+    // (`story/sc-17152-h3-max-size-1536`), which raises the per-edge ceiling to the widest canvas
+    // `resolve_canvas_size` itself emits.
+    //
+    // Cite the INFERENCE PR, not a SceneWorks branch. I looked for `story/sc-17152-h3-max-size-1536`
+    // on the SceneWorks origin, found nothing, and concluded the dependency did not exist — it lives
+    // in the engine repo, correctly, because it is an engine change. A bare `sc-17152` would have
+    // repeated that error for the next reader: the story's own title is about dense-attention cost
+    // at long duration, and the branch borrows its number for the geometry-gate lineage rather than
+    // being that story's deliverable. The PR number is the unambiguous handle.
+    expect(/inference PR\s*\n?>?\s*#640/.test(guide), "guide must cite inference PR #640 by number").toBe(true);
+    expect(
+      /must not be separated at\s*\n?>?\s*merge/.test(guide),
+      "guide must say the row and the engine change ship together — this table alone re-advertises a refused canvas",
+    ).toBe(true);
+    // NO NUMERIC PER-EDGE CEILING IN CATALOG COPY. The resolver's widest output is an engine
+    // internal a user never sees, and writing it down dates the page the moment the resolver moves.
+    // 1536 was also the plausible-but-wrong value — a 1536 ceiling would still refuse a canvas the
+    // resolver produces on its own — so a number here would very likely have been the wrong one.
+    expect(
+      /per-edge (?:ceiling|cap)[^.]{0,60}\b\d{3,4}\b/i.test(guide),
+      "guide must describe the per-edge ceiling relatively, never as a number",
+    ).toBe(false);
+  });
+
   it("does not attribute the 14.38s ceiling to the withheld sparse attention", () => {
     // A live trap on this epic: the ceiling is the checkpoint's own 5-15 s clamp meeting the
     // `17n + 5` lattice (`MINIMAX_H3_LEGAL_FRAME_COUNTS`), and the lattice comes from the VAE's
