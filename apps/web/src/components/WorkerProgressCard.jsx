@@ -15,6 +15,7 @@ import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
+import { AudioTrackBadge } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
@@ -319,6 +320,7 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
           <>
             <AssetThumbnail asset={asset} className="worker-progress-card__thumb-media" />
             <LikenessBadge asset={asset} />
+            <AudioTrackBadge asset={asset} />
           </>
         );
         const label = asset.displayName && variant === "image-grid" ? (
@@ -412,7 +414,12 @@ function VideoThumbnail({ assets, onThumbnailClick }) {
       onContextMenu={suppressThumbnailContextMenu}
     >
       {src ? (
-        <AssetMedia asset={asset} className="worker-progress-card__video" />
+        <>
+          <AssetMedia asset={asset} className="worker-progress-card__video" />
+          {/* sc-19577 — the queue card is where a just-finished render is first seen, and for the
+              joint audio+video family it is where "did this one come out with sound?" is asked. */}
+          <AudioTrackBadge asset={asset} />
+        </>
       ) : poster ? (
         <img alt="" className="worker-progress-card__video" src={poster} />
       ) : (

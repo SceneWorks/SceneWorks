@@ -1273,6 +1273,221 @@ mod tests {
         }
     }
 
+    /// Every path a MiniMax-H3 load OPENS, expressed as a snapshot-relative path prefix, for `tier`.
+    ///
+    /// Read entirely from `mlx_tier_completeness` — the same constants
+    /// `minimax_h3_shared_is_complete` and `resolve_minimax_h3_load` gate on at job time. A second
+    /// hand-copied list here would drift from the runtime check exactly the way the catalog drifted
+    /// from it before sc-19573, which is the whole defect this guard exists to prevent.
+    fn minimax_h3_probed_paths(tier: &str) -> Vec<String> {
+        use crate::mlx_tier_completeness as tc;
+        let mut paths = Vec::new();
+        // Both DiT partitions, under the TIER root. Not one of them — the engine opens
+        // `transformer/config.json` and `transformer_ref/config.json` on every load.
+        for (_, partition) in tc::MINIMAX_H3_PARTITIONS {
+            paths.push(format!("{tier}/{partition}"));
+        }
+        // The text encoder, at the root this tier actually reads it from (sc-19120). Both roots are
+        // EMPTY here so the resolver yields the snapshot-relative remainder — `q4/text_encoder` for a
+        // packed tier, plain `text_encoder` for bf16 — which is the form a manifest `files` pattern
+        // is written in. Passing a real root would produce an absolute path no pattern can match, and
+        // passing the tier as the root would double it.
+        paths.push(
+            tc::minimax_h3_text_encoder_dir(
+                std::path::Path::new(""),
+                std::path::Path::new(""),
+                tier,
+            )
+            .to_string_lossy()
+            .into_owned(),
+        );
+        for component in tc::MINIMAX_H3_SHARED_PROBED_DIRS {
+            paths.push(component.to_owned());
+        }
+        for file in tc::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
+            paths.push(format!("{}/{file}", tc::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR));
+        }
+        paths
+    }
+
+    /// The snapshot-relative paths `entry`'s downloads FETCH for `tier` — every non-co-requisite row
+    /// whose `variant` matches, plus every co-requisite row that applies (tier-agnostic ones always
+    /// apply; `variant`-scoped ones only for their own tier), exactly as
+    /// `model_co_requisite_downloads_for_variant` selects them at install time.
+    fn minimax_h3_declared_files(entry: &serde_json::Value, tier: &str) -> Vec<String> {
+        entry["downloads"]
+            .as_array()
+            .expect("downloads array")
+            .iter()
+            .filter(|download| {
+                match download["variant"].as_str() {
+                    Some(variant) => variant.eq_ignore_ascii_case(tier),
+                    // A tier-agnostic row applies to every tier — but only co-requisites are ever
+                    // tier-agnostic here; a primary without a variant would be a different shape.
+                    None => download["coRequisite"].as_bool() == Some(true),
+                }
+            })
+            .flat_map(|download| {
+                download["files"]
+                    .as_array()
+                    .expect("files array")
+                    .iter()
+                    .map(|file| file.as_str().expect("file pattern is a string").to_owned())
+            })
+            .collect()
+    }
+
+    /// The probed paths `entry` does NOT fetch for `tier`. Empty ⇒ the install this entry produces
+    /// carries every path the loader opens.
+    fn minimax_h3_unfetched_paths(entry: &serde_json::Value, tier: &str) -> Vec<String> {
+        let declared = minimax_h3_declared_files(entry, tier);
+        minimax_h3_probed_paths(tier)
+            .into_iter()
+            .filter(|probed| {
+                // A pattern covers a probed path when it names the path itself (`FL2VA/audio_vae/…`)
+                // or fetches into it (`q4/transformer/*`). Prefix-matched on a trailing `/` so
+                // `q4/transformer/*` cannot be read as covering `q4/transformer_ref` — the exact
+                // confusion `minimax_h3_ref` being a PREFIX EXTENSION of `minimax_h3` invites.
+                !declared
+                    .iter()
+                    .any(|pattern| pattern == probed || pattern.starts_with(&format!("{probed}/")))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn minimax_h3_downloads_cover_every_path_the_loader_probes() {
+        // sc-19573. A `coRequisite` is a PRE-DOWNLOAD WEIGHTS FLOOR, so an entry that omits a path
+        // the loader opens is declaring an install that cannot load. Before this guard the catalog
+        // omitted four: the sibling DiT partition (at every tier — the engine opens both), the
+        // `tokenizer/` directory, and the three `FL2VA/audio_vae/` constructor documents.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"].as_array().expect("models array");
+        let entry = |id: &str| {
+            models
+                .iter()
+                .find(|model| model["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is present"))
+                .clone()
+        };
+
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let model = entry(id);
+            for tier in ["q4", "q8", "bf16"] {
+                assert!(
+                    minimax_h3_unfetched_paths(&model, tier).is_empty(),
+                    "{id} @ {tier}: installing this entry does not fetch {:?}, which \
+                     mlx-gen-minimax-h3::load opens — the install would fail at load",
+                    minimax_h3_unfetched_paths(&model, tier)
+                );
+            }
+        }
+
+        // MUTATION, one probed path at a time: removing the file PATTERNS that fetch a single path
+        // must make THAT path — and only that path — the reported gap. Per pattern rather than per
+        // row, because the three `FL2VA/audio_vae/` documents share one row: deleting the row would
+        // move three paths at once and prove only that the guard notices a big hole. Deleting
+        // everything at once would prove even less.
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            for tier in ["q4", "q8", "bf16"] {
+                for probed in minimax_h3_probed_paths(tier) {
+                    let mut mutated = entry(id);
+                    let mut removed = 0usize;
+                    for download in mutated["downloads"]
+                        .as_array_mut()
+                        .expect("downloads array")
+                    {
+                        let files = download["files"].as_array_mut().expect("files array");
+                        let before = files.len();
+                        files.retain(|file| {
+                            let file = file.as_str().expect("file pattern");
+                            !(file == probed || file.starts_with(&format!("{probed}/")))
+                        });
+                        removed += before - files.len();
+                    }
+                    assert!(
+                        removed > 0,
+                        "{id} @ {tier}: nothing fetched {probed}, so the mutation is vacuous"
+                    );
+                    assert_eq!(
+                        minimax_h3_unfetched_paths(&mutated, tier),
+                        vec![probed.clone()],
+                        "{id} @ {tier}: removing the patterns that fetch {probed} must report \
+                         exactly that path as unfetched"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn minimax_h3_sibling_partition_is_a_per_tier_co_requisite_of_both_entries() {
+        // The half of sc-19573 a path-coverage check alone cannot express: the sibling partition must
+        // arrive as a `coRequisite` (which `install_state_for` GATES on and the download job queues
+        // alongside the primary), not merely as some row that happens to match. A `variant` is
+        // required on each so a q4 user is not handed the 66 GB bf16 sibling, and so
+        // `install_state_for`'s tier-scoped aggregate can judge one tier's pair at a time.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"].as_array().expect("models array");
+        let partitions = crate::mlx_tier_completeness::MINIMAX_H3_PARTITIONS;
+
+        for (id, own) in partitions {
+            let sibling = partitions
+                .iter()
+                .find(|(other, _)| *other != id)
+                .map(|(_, partition)| *partition)
+                .expect("the pair has two members");
+            assert_ne!(
+                own, sibling,
+                "{id}: the sibling must be the OTHER partition"
+            );
+            let model = models
+                .iter()
+                .find(|model| model["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is present"));
+            let downloads = model["downloads"].as_array().expect("downloads array");
+
+            for tier in ["q4", "q8", "bf16"] {
+                let row = downloads
+                    .iter()
+                    .find(|download| {
+                        download["files"] == serde_json::json!([format!("{tier}/{sibling}/*")])
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{id} @ {tier}: no row fetches the sibling {sibling} partition")
+                    });
+                assert_eq!(
+                    row["coRequisite"].as_bool(),
+                    Some(true),
+                    "{id} @ {tier}: the sibling partition must be a coRequisite — a plain row is \
+                     neither queued alongside the primary nor gated on by install state"
+                );
+                assert!(
+                    row["variant"]
+                        .as_str()
+                        .is_some_and(|variant| variant.eq_ignore_ascii_case(tier)),
+                    "{id} @ {tier}: the sibling co-requisite must be variant-scoped to its tier"
+                );
+                assert!(
+                    row["required"].as_str() != Some("soft"),
+                    "{id} @ {tier}: the sibling partition is a HARD dependency — the engine opens \
+                     both partitions on every load, so there is no usable-without-it state for a \
+                     soft co-requisite to preserve"
+                );
+                // A co-requisite must NOT also be the entry's own primary — that would make the
+                // pair's install state depend on a row the download job never queues as a tier.
+                assert!(
+                    row["default"].as_bool() != Some(true),
+                    "{id} @ {tier}: the sibling co-requisite must never be the default tier"
+                );
+            }
+        }
+    }
+
     #[test]
     fn both_minimax_h3_partitions_advertise_the_minimax_h3_lora_family() {
         // sc-18725. `loraCompatibility.families` is the LOAD gate the API

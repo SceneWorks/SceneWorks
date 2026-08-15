@@ -1411,6 +1411,16 @@ fn model_repo_file_scopes(model: &Value, repo: &str) -> Option<Vec<String>> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        // Co-requisites are EXCLUDED, and that is what makes this "owned" rather than "referenced".
+        // A co-requisite may be shared by several models and is never removed by a model delete
+        // (the `coRequisite` schema note says so outright). sc-19573 made this load-bearing: both
+        // MiniMax-H3 entries now co-require the OTHER's DiT partition from the shared repo, so
+        // counting co-requisite rows here would make an entry claim its sibling's subtree as its own
+        // — and, symmetrically in `other_entries_repo_file_scopes`, retain its own. The two sets
+        // would cover everything, `selected && !retained` would never hold, and a whole-model delete
+        // would silently reclaim nothing. `delete_model_variant`'s `retained_files` already applies
+        // exactly this filter for exactly this reason.
+        .filter(|entry| !is_co_requisite_download(entry))
         .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
     {
         let files = string_array_field(download, "files");
@@ -1498,9 +1508,25 @@ async fn remove_whole_model_artifacts(
             let own = model_repo_file_scopes(cleanup_source, &repo)?;
             (!siblings.is_empty()).then_some((repo, own, siblings))
         });
-    let Some((repo, own_files, sibling_files)) = shared else {
+    let Some((repo, own_files, mut sibling_files)) = shared else {
         return remove_owned_artifacts(all_paths, allowed_roots, permanent).await;
     };
+    // sc-19573 — a sibling may co-require THIS entry's own subtree, and then the retained set would
+    // cover everything the delete selected: `selected && !retained` would never hold and the user's
+    // explicit "delete this model" would silently reclaim zero bytes.
+    //
+    // Both MiniMax-H3 entries are in that shape now — each co-requires the other's DiT partition,
+    // because the engine opens both on every load. Removing the overlap resolves it in the honest
+    // direction: the delete does what it says, and the sibling entry's install state drops to
+    // incomplete + `repairAvailable`, which is the truth (it can no longer load) and is re-fetchable
+    // in one click. Retaining instead would leave a user who asked to free 56 GB with a no-op and no
+    // explanation.
+    //
+    // Subtracted AFTER the `is_empty` gate above, so an entry whose only sibling claim is an overlap
+    // still takes the SCOPED path rather than falling back to the blanket whole-repo removal that
+    // sc-19078 exists to prevent. Co-requisite rows that do NOT overlap — a genuinely shared subtree
+    // in the same repo — are still retained.
+    sibling_files.retain(|file| !own_files.contains(file));
 
     let managed_dir = data_dir.join("models").join(safe_download_dir(&repo));
     let repo_cache = huggingface_repo_cache_path(data_dir, &repo);

@@ -13181,6 +13181,95 @@
           "platforms": ["macos"],
           // 32 kHz stereo, 40 Hz token rate. Also dense in every tier.
           "estimatedSizeBytes": 605431611
+        },
+        // --- sc-19573: the two remaining paths `mlx-gen-minimax-h3::load` OPENS and the catalog did
+        // not declare. Both are tier-agnostic, both come from the same pinned upstream snapshot as
+        // the VAEs, and both are tiny — a `coRequisite` is a PRE-DOWNLOAD WEIGHTS FLOOR, so an entry
+        // that omits a probed path is declaring an install that cannot load. Their names are pinned
+        // against the runtime probe list by `minimax_h3_downloads_cover_every_path_the_loader_probes`
+        // in crates/sceneworks-core/src/builtin_manifests.rs, which reads
+        // `mlx_tier_completeness::MINIMAX_H3_*` rather than a second hand-copied list.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "tokenizer",
+          "subdir": "tokenizer",
+          "files": ["tokenizer/*"],
+          "platforms": ["macos"],
+          // 4 files: tokenizer.json, tokenizer_config.json, vocab.json, merges.txt. Measured
+          // directory bytes at the pinned revision. NOT the same directory as the seven tokenizer
+          // sidecars inside `text_encoder/` — the loader opens this one by its own path.
+          "estimatedSizeBytes": 11492078
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "platforms": ["macos"],
+          // ⚠️ THREE FILES, NOT `FL2VA/audio_vae/*`. The directory also holds a 605,429,308 B
+          // `model.safetensors` that is the SAME audio VAE already fetched by the `audio_vae` row
+          // above, plus nine `.py` modules no Rust engine can execute — globbing it would double the
+          // audio VAE for 2,504 B of constructor arguments. No `componentId`: the engine opens these
+          // by path under `spec.weights`, the way the PiD-gemma / Wan-Lightning shared weights are
+          // fetched, rather than as a staged named component.
+          "files": [
+            "FL2VA/audio_vae/config.json",
+            "FL2VA/audio_vae/config.yaml",
+            "FL2VA/audio_vae/metadata.json"
+          ],
+          // 1,973 + 91 + 440, measured at the pinned revision.
+          "estimatedSizeBytes": 2504
+        },
+        // --- sc-19573: THE SIBLING DiT PARTITION. The engine's `load` opens `transformer/config.json`
+        // AND `transformer_ref/config.json` on EVERY load regardless of task, because ref2va is a
+        // first-class task of the one registered engine rather than an optional extra. Shipping the
+        // two partitions as the primaries of two separate entries therefore meant installing either
+        // entry alone produced an install that could not render anything at all — not a reduced
+        // capability, a hard load failure.
+        //
+        // ⚠️ THE COMMENT BELOW `minimax_h3_ref` USED TO SAY a hard co-requisite "would force
+        // +18.78 GB on every q4 text-to-video user". That was reasoning from a premise the engine has
+        // never honoured: those bytes are not an optional Ref2VA extra, they are part of the minimum
+        // loadable set. Declaring them is what makes the advertised install size true.
+        //
+        // Per-tier (`variant` SCOPES a co-requisite, sc-14980) so a q4 user fetches the q4 sibling and
+        // not the 66 GB bf16 one, and so `install_state_for`'s tier-scoped aggregate can report a
+        // complete q4 pair as installed while a bf16 half-pair reads incomplete. Sizes are the exact
+        // hosted directory bytes and are IDENTICAL to `minimax_h3_ref`'s primary rows — same repo,
+        // same revision, same 16 files — so the pair downloads once and a shared cache is not
+        // fetched twice.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "files": ["q4/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18780109783
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "files": ["q8/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35302064357
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "bf16",
+          "coRequisite": true,
+          "files": ["bf16/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250
         }
       ],
       "paths": {
@@ -13371,10 +13460,18 @@
     },
     // The Ref2VA partition. Same architecture, same geometry, same shared floor — a DIFFERENT
     // checkpoint (`transformer_ref`), which is the only one that conditions on multi-modal
-    // references. A second ENTRY rather than a co-requisite of the first (sc-17139 AC4): a hard
-    // co-requisite would force +18.78 GB on every q4 text-to-video user, a soft one would pin
-    // `update_available: true` forever, and `variant` is a closed quant enum with no
-    // "which checkpoint" axis. Same shape as the wan_2_2_t2v_14b / wan_2_2_i2v_14b pair.
+    // references. A second ENTRY rather than a co-requisite of the first (sc-17139 AC4), because
+    // `variant` is a closed quant enum with no "which checkpoint" axis and the two are separately
+    // pickable in the Studios. Same shape as the wan_2_2_t2v_14b / wan_2_2_i2v_14b pair.
+    //
+    // ⚠️ AMENDED BY sc-19573. sc-17139 AC4 additionally argued that a hard co-requisite "would force
+    // +18.78 GB on every q4 text-to-video user". That premise was wrong: `mlx-gen-minimax-h3::load`
+    // opens BOTH partitions on every load, so those bytes were always part of the minimum loadable
+    // set and withholding them produced an install that rendered nothing. Each entry now declares
+    // the OTHER partition as a per-tier co-requisite (see the rows in both `downloads` arrays); the
+    // entries stay separate, the bytes stop being optional. `required: "soft"` was the other option
+    // and is wrong here for the reason sc-17139 gave — a soft co-requisite keeps the primary usable,
+    // which is precisely the state that does not exist for this pair.
     //
     // The two entries share the primary repo `SceneWorks/minimax-h3-mlx` and differ only in the
     // per-tier `files` predicate, so a per-tier delete on one reclaims exactly its own subtree.
@@ -13526,6 +13623,65 @@
           "files": ["audio_vae/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 605431611
+        },
+        // sc-19573 — see `minimax_h3` for the derivations. These rows are byte-identical to that
+        // entry's, which is what keeps the shared floor a single download for the pair.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "tokenizer",
+          "subdir": "tokenizer",
+          "files": ["tokenizer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 11492078
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "platforms": ["macos"],
+          "files": [
+            "FL2VA/audio_vae/config.json",
+            "FL2VA/audio_vae/config.yaml",
+            "FL2VA/audio_vae/metadata.json"
+          ],
+          "estimatedSizeBytes": 2504
+        },
+        // sc-19573 — THE SIBLING DiT PARTITION, mirrored. This entry's primary is `transformer_ref/`,
+        // so the base `transformer/` is the half it must additionally pull: the engine opens both on
+        // every load, so a Ref2VA-only install was as unloadable as a text-to-video-only one.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "files": ["q4/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18780109783
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "files": ["q8/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35302064357
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "bf16",
+          "coRequisite": true,
+          "files": ["bf16/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250
         }
       ],
       "paths": {

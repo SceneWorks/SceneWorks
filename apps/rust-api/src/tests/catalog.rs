@@ -2997,28 +2997,53 @@ async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
     }
 }
 
-/// The two MiniMax-H3 catalog entries (sc-17158) as the shipped manifest declares them: ONE repo,
-/// three tiers each, disjoint per-partition `files`, and the same three shared co-requisites. Written
-/// without `platforms` so the fixture is not stripped by `retain_downloads_for_os` on the candle CI
-/// lanes — the download/delete logic under test is OS-independent.
+/// The two MiniMax-H3 catalog entries as the shipped manifest declares them: ONE repo, three tiers
+/// each, disjoint per-partition `files`, the per-tier text encoder (sc-19120), the tier-agnostic
+/// floor, and — since sc-19573 — the SIBLING DiT partition as a per-tier co-requisite of each entry,
+/// because the engine's `load` opens both partitions on every load. Written without `platforms` so
+/// the fixture is not stripped by `retain_downloads_for_os` on the candle CI lanes — the
+/// download/delete logic under test is OS-independent.
 #[cfg(test)]
 fn minimax_h3_manifest() -> String {
+    let tier_row = |partition: &str, tier: &str, co_requisite: bool| {
+        format!(
+            r#"{{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "{tier}"{}, "files": ["{tier}/{partition}/*"] }}"#,
+            if co_requisite {
+                ", \"coRequisite\": true"
+            } else if tier == "q4" {
+                ", \"default\": true"
+            } else {
+                ""
+            }
+        )
+    };
     let tiers = |partition: &str| {
         ["q4", "q8", "bf16"]
             .iter()
-            .map(|tier| {
-                format!(
-                    r#"{{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "{tier}"{}, "files": ["{tier}/{partition}/*"] }}"#,
-                    if *tier == "q4" { ", \"default\": true" } else { "" }
-                )
-            })
+            .map(|tier| tier_row(partition, tier, false))
             .collect::<Vec<_>>()
             .join(",\n")
     };
+    // sc-19573: the other half of the pair. `minimax_h3` co-requires `transformer_ref` and vice
+    // versa, per tier.
+    let sibling = |partition: &str| {
+        ["q4", "q8", "bf16"]
+            .iter()
+            .map(|tier| tier_row(partition, tier, true))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    };
+    // sc-19120: the text encoder is TIER-SCOPED — packed beside the DiT tiers at q4/q8, dense
+    // upstream at bf16. sc-19573 adds `tokenizer/` and the `FL2VA/audio_vae/` constructor documents
+    // to the tier-agnostic floor.
     let co_requisites = r#"
-        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "text_encoder", "subdir": "text_encoder", "files": ["text_encoder/config.json", "text_encoder/model.safetensors.index.json"] },
+        { "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "q4", "coRequisite": true, "componentId": "text_encoder", "subdir": "q4/text_encoder", "files": ["q4/text_encoder/*"] },
+        { "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "q8", "coRequisite": true, "componentId": "text_encoder", "subdir": "q8/text_encoder", "files": ["q8/text_encoder/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "variant": "bf16", "coRequisite": true, "componentId": "text_encoder", "subdir": "text_encoder", "files": ["text_encoder/config.json", "text_encoder/model.safetensors.index.json"] },
         { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "video_vae", "subdir": "vae", "files": ["vae/*"] },
-        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "audio_vae", "subdir": "audio_vae", "files": ["audio_vae/*"] }"#;
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "audio_vae", "subdir": "audio_vae", "files": ["audio_vae/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "tokenizer", "subdir": "tokenizer", "files": ["tokenizer/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "files": ["FL2VA/audio_vae/config.json", "FL2VA/audio_vae/config.yaml", "FL2VA/audio_vae/metadata.json"] }"#;
     format!(
         r#"
         {{
@@ -3031,6 +3056,7 @@ fn minimax_h3_manifest() -> String {
               "family": "minimax-h3",
               "downloads": [
 {},
+{},
 {}
               ]
             }},
@@ -3041,6 +3067,7 @@ fn minimax_h3_manifest() -> String {
               "family": "minimax-h3",
               "downloads": [
 {},
+{},
 {}
               ]
             }}
@@ -3048,8 +3075,10 @@ fn minimax_h3_manifest() -> String {
         }}
         "#,
         tiers("transformer"),
+        sibling("transformer_ref"),
         co_requisites,
         tiers("transformer_ref"),
+        sibling("transformer"),
         co_requisites
     )
 }
@@ -3102,6 +3131,12 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
         ),
         ("vae", vec!["config.json"]),
         ("audio_vae", vec!["config.json"]),
+        // sc-19573 — the two paths the loader opens that the catalog used to omit.
+        ("tokenizer", vec!["tokenizer.json"]),
+        (
+            "FL2VA/audio_vae",
+            vec!["config.json", "config.yaml", "metadata.json"],
+        ),
     ] {
         let component = snapshot.join(dir);
         std::fs::create_dir_all(&component).expect("component dir creates");
@@ -3111,13 +3146,31 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
     }
 }
 
+/// Seed the PACKED per-tier text encoder (sc-19120) into the rehost snapshot. Tier-scoped, so a q4
+/// install's co-requisite set is only satisfied by the q4 copy.
+#[cfg(test)]
+fn seed_minimax_packed_text_encoder(data_dir: &std::path::Path, tier: &str) {
+    let component = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294")
+        .join(tier)
+        .join("text_encoder");
+    std::fs::create_dir_all(&component).expect("packed text encoder dir creates");
+    std::fs::write(component.join("config.json"), "{}").expect("te config writes");
+}
+
 #[tokio::test]
 async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_floor() {
     // sc-19078 — the on-demand tier fetch, per entry and per tier. `SceneWorks/minimax-h3-mlx` is
-    // 240.7 GB in total, so a tier install must pull exactly ONE partition of ONE tier: q8 here is
-    // 35.3 GB against 240.7 GB for the repo. The three co-requisites are the tier-agnostic weights
-    // FLOOR — dense in every tier — and must be queued alongside it, at their own pinned revision;
-    // without them the entry installs as a model that cannot render.
+    // 240.7 GB in total, so a tier install must pull exactly ONE TIER: q8 here is 70.6 GB of DiT
+    // against 240.7 GB for the repo. The co-requisites are the weights FLOOR and must be queued
+    // alongside it, at their own pinned revisions; without them the entry installs as a model that
+    // cannot render.
+    //
+    // ⚠️ AMENDED BY sc-19573. This test used to assert that a `minimax_h3` install must NOT pull
+    // `transformer_ref`. That was the bug: the engine's `load` opens BOTH partitions on every load,
+    // so the install it was protecting could not render anything. The sibling partition is now a
+    // per-tier co-requisite and IS pulled — what stays forbidden is pulling another TIER, which is
+    // the per-tier-fetch property sc-19078 actually established.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -3155,16 +3208,44 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
         .iter()
         .filter(|job| job["type"] == "model_download")
         .collect::<Vec<_>>();
+    // The primary, the q8 sibling partition, the q8 packed text encoder, and the four tier-agnostic
+    // floor rows (both VAEs, the tokenizer, the FL2VA constructor documents). The bf16 text encoder
+    // and the other tiers' rows are `variant`-scoped away.
+    let queued = download_jobs
+        .iter()
+        .map(|job| job["payload"]["files"].to_string())
+        .collect::<Vec<_>>();
     assert_eq!(
         download_jobs.len(),
-        4,
-        "one partition job plus all three shared co-requisites: {download_jobs:?}"
+        7,
+        "primary + sibling partition + packed TE + four tier-agnostic floor rows: {queued:?}"
     );
+    assert!(
+        queued
+            .iter()
+            .any(|files| files.contains("q8/transformer_ref")),
+        "sc-19573: the sibling DiT partition is part of the minimum loadable set and must be \
+         queued alongside the primary: {queued:?}"
+    );
+    assert!(
+        queued.iter().any(|files| files.contains("q8/text_encoder")),
+        "sc-19120: the packed text encoder for THIS tier: {queued:?}"
+    );
+    for probed in ["tokenizer/", "FL2VA/audio_vae/", "vae/", "audio_vae/"] {
+        assert!(
+            queued.iter().any(|files| files.contains(probed)),
+            "{probed} is opened by the loader and must be fetched: {queued:?}"
+        );
+    }
     let floor = download_jobs
         .iter()
         .filter(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3")
         .collect::<Vec<_>>();
-    assert_eq!(floor.len(), 3, "text encoder + both VAEs");
+    assert_eq!(
+        floor.len(),
+        4,
+        "both VAEs, the tokenizer and the FL2VA constructor documents"
+    );
     for component in floor {
         // A DIFFERENT pin than the tier row's: the shared floor comes from MiniMax's own upstream
         // snapshot, so asserting the tier's SHA here would have passed on a plain copy-through.
@@ -3179,13 +3260,9 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
             "a shared component is a different artifact than the DiT and must not carry its family"
         );
     }
-    // NOTHING pulls the sibling entry's partition or another tier — the whole point of per-tier fetch.
-    for job in download_jobs {
-        let files = job["payload"]["files"].to_string();
-        assert!(
-            !files.contains("transformer_ref"),
-            "a minimax_h3 install must not pull the reference checkpoint: {files}"
-        );
+    // NOTHING pulls another TIER — the whole point of per-tier fetch, and the property the sibling
+    // co-requisite must not have quietly destroyed by being declared tier-agnostic.
+    for files in &queued {
         assert!(
             !files.contains("q4/") && !files.contains("bf16/"),
             "a q8 install must not pull another tier: {files}"
@@ -3219,6 +3296,7 @@ async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() 
     seed_minimax_partition(&snapshot, "q4", "transformer", &MINIMAX_SHARDS);
     seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS[..1]);
     seed_minimax_shared_floor(&data_dir);
+    seed_minimax_packed_text_encoder(&data_dir, "q4");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
@@ -3346,8 +3424,14 @@ async fn minimax_h3_is_not_installed_without_its_shared_component_floor() {
 async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
     // sc-19078 — the shared-repo trap. Both entries live in ONE repo cache dir, and a whole-model
     // delete resolves that dir, so the blanket `remove_dir_all` took `transformer_ref/` (a different
-    // checkpoint, up to 66.3 GB per tier) with it. After the delete `minimax_h3_ref` must still read
-    // installed at every tier it had.
+    // checkpoint, up to 66.3 GB per tier) with it.
+    //
+    // sc-19573 gave this test a SECOND job. Once each entry co-requires the other's partition from
+    // the same repo, `model_repo_file_scopes` / `other_entries_repo_file_scopes` would — if they
+    // counted co-requisite rows — have each entry claiming and retaining the whole repo, so
+    // `selected && !retained` never held and the delete reclaimed NOTHING. This test is the guard on
+    // that filter: it fails with a 400 ("read-only unless local files are installed") the moment
+    // either helper stops excluding co-requisites.
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -3369,6 +3453,7 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
     }
     seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS);
     seed_minimax_shared_floor(&data_dir);
+    seed_minimax_packed_text_encoder(&data_dir, "q4");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     // permanent=true keeps the assertions deterministic (the OS-trash path depends on the host).
@@ -3379,7 +3464,7 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
         Value::Null,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "delete body: {deleted}");
     assert_eq!(deleted["removedLocalArtifacts"], true);
     // A built-in entry stays catalogued; only its files go.
     assert_eq!(deleted["removedManifestEntry"], false);
@@ -3414,8 +3499,26 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
             .unwrap_or_else(|| panic!("{id} present"))["installState"]
             .clone()
     };
-    assert_eq!(state_of("minimax_h3_ref"), "installed");
     assert_eq!(state_of("minimax_h3"), "missing");
+    // ⚠️ AMENDED BY sc-19573. The sibling's own FILES survive — that is this test's subject and is
+    // asserted above, file for file. Its catalog verdict does NOT, and must not: the engine opens
+    // both partitions on every load, so deleting `minimax_h3` really does take `minimax_h3_ref` out
+    // of service, and the pair is now declared that way (`transformer/` is a per-tier co-requisite of
+    // the reference entry). Reporting it `installed` here would be the exact green-badge-over-an-
+    // unloadable-install shape sc-19573 was filed for. `repairAvailable` is what re-fetches the half
+    // that went with the delete.
+    assert_eq!(state_of("minimax_h3_ref"), "missing");
+    let reference = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "minimax_h3_ref")
+        .expect("minimax_h3_ref present")
+        .clone();
+    assert_eq!(
+        reference["repairAvailable"], true,
+        "the user must be offered the re-fetch rather than a dead entry: {reference}"
+    );
 }
 
 #[tokio::test]
