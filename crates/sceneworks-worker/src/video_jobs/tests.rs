@@ -10694,6 +10694,24 @@ fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
     assert_eq!(args[t + 1], "5.166667");
     assert!(args.iter().any(|a| a == "-map_metadata"), "sc-15956 tag");
 
+    // INPUT IDENTITY (sc-19549, same gap as the SeedVR2 sibling below). `-map_metadata 0` names its
+    // input by INDEX, so "the sc-15956 tag comes from the VIDEO, never from the WAV" holds only
+    // while the encoded picture is the FIRST `-i`. Swapping the two leaves the assertion above
+    // green — `-map_metadata 0` is still present — while the tag is taken off the WAV instead, and
+    // the unmapped default stream selection changes under it. Pinned here because this half runs on
+    // every host and the measured half skips wherever ffmpeg is absent.
+    let inputs: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| arg.as_str() == "-i" && index + 1 < args.len())
+        .map(|(index, _)| args[index + 1].as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        ["/tmp/e.mp4", "/tmp/a.wav"],
+        "input 0 must be the encoded picture and input 1 the soundtrack: {args:?}"
+    );
+
     // Every legal MiniMax-H3 duration bounds at its own frame count. The NINE inexact rungs are
     // where that has content: at those the soundtrack's own grid length
     // (`round(frames / 24 · 40) · 800 / 32000`) is ±8.33 ms away, so a bound taken off the audio
@@ -10976,6 +10994,28 @@ fn the_seedvr2_upscale_mux_bounds_the_clip_at_the_picture_not_the_source_audio()
         "9.000000"
     );
 
+    // INPUT IDENTITY, which every other claim here rests on and which nothing else here pins.
+    // `-map 0:v:0`, `-map 1:a:0?` and `-map_metadata 0` all name inputs by INDEX, so the bound
+    // being "read off the picture" is true only while the picture is the FIRST `-i` and the user's
+    // source is the SECOND. Swapping the two leaves every assertion above and below GREEN — the
+    // flag multiset is byte-identical — while ffmpeg maps the SOURCE's video, the PICTURE's audio,
+    // and takes the sc-15956 workflow tag off the user's own container. MEASURED with the bundled
+    // ffmpeg 7.1 on the exact fixture the sibling measured test builds: the swapped vector yields
+    // **50 frames at an advertised 2.08 s** where the correct one yields 48 at 2.00 s. Only a
+    // decoded frame count sees that, and that half skips wherever ffmpeg is absent — so input order
+    // is pinned HERE too, on the half that runs everywhere.
+    let inputs: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| arg.as_str() == "-i" && index + 1 < args.len())
+        .map(|(index, _)| args[index + 1].as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        ["/tmp/upscaled.mp4", "/tmp/source.mp4"],
+        "input 0 must be the upscaled picture and input 1 the user's source clip: {args:?}"
+    );
+
     // The rest of the vector this story must not disturb: audio stays OPTIONAL (a silent source is
     // not an error), the picture stays a straight copy, and the sc-15956 workflow tag keeps coming
     // from input 0 rather than from the user's source container.
@@ -11216,19 +11256,60 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
     assert!(!media_path.exists());
 }
 
+/// Is a real ffmpeg reachable — `SCENEWORKS_FFMPEG`, or `ffmpeg` on PATH?
+///
+/// **The soft skip is for developer hosts and must never stay soft on a lane that means to run
+/// these tests (sc-19549).** A measured test that returns early prints one line and reports `ok` in
+/// 0.03 s, which is indistinguishable from a real green at a glance — so a CI lane with no ffmpeg
+/// silently guards nothing while looking exactly like a lane that guards everything. The convention
+/// was inherited from sc-19425, whose `the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration`
+/// carried a doc comment asserting "CI with ffmpeg runs it for real" that nothing enforced: MEASURED
+/// at the time of this change, no file under `.github/workflows/` installed ffmpeg or set
+/// `SCENEWORKS_FFMPEG`, and the bundled binary is gitignored (`.gitignore`, `apps/desktop/ffmpeg/`),
+/// so whether any of these tests ever ran rested entirely on the runner image.
+///
+/// The arg-shape halves do not substitute for the measured ones. MEASURED with the bundled ffmpeg
+/// 7.1 on the fixture the sibling tests build: swapping the two `-i` inputs produces **50 frames at
+/// an advertised 2.08 s** instead of 48 at 2.00 s, and every arg-shape assertion stays green across
+/// that swap because the flag multiset is identical. Only a decoded frame count sees it.
+///
+/// So a lane that declares a real ffmpeg sets `SCENEWORKS_REQUIRE_FFMPEG=1` (`.github/workflows/
+/// check.yml`, the `checks` job, which installs ffmpeg immediately before `npm run rust:check` —
+/// the job whose `cargo test` covers `sceneworks-worker` as a workspace default member). With it
+/// set, "no ffmpeg" is a FAILURE rather than a skip, so the install step being dropped, the binary
+/// being renamed, or the variable going missing turns the lane red instead of quiet. Hosts that
+/// never set it — a developer's laptop with no ffmpeg — skip exactly as before.
 fn ffmpeg_reachable() -> bool {
-    if let Ok(path) = std::env::var("SCENEWORKS_FFMPEG") {
-        if !path.trim().is_empty() && Path::new(&path).exists() {
-            return true;
-        }
-    }
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    let reachable = if std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .is_some_and(|path| !path.trim().is_empty() && Path::new(&path).exists())
+    {
+        true
+    } else {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    };
+
+    assert!(
+        reachable || !ffmpeg_is_required(),
+        "SCENEWORKS_REQUIRE_FFMPEG is set, so this lane declares a real ffmpeg, but neither \
+         SCENEWORKS_FFMPEG nor `ffmpeg` on PATH resolves to one. The measured AV-mux tests would \
+         otherwise have skipped and reported `ok` (sc-19549)."
+    );
+    reachable
+}
+
+/// Does this lane promise a real ffmpeg? Set (to anything but empty or `0`) by the CI lanes that
+/// install one, which is what turns [`ffmpeg_reachable`]'s skip into a failure.
+fn ffmpeg_is_required() -> bool {
+    std::env::var("SCENEWORKS_REQUIRE_FFMPEG")
+        .ok()
+        .is_some_and(|flag| !matches!(flag.trim(), "" | "0"))
 }
 
 /// F-118: video upscale accepts only 2x and 4x. Any other factor is rejected with a clear error
