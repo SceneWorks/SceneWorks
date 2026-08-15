@@ -13203,7 +13203,7 @@ fn generate_minimax_h3_using_stages_the_packed_text_encoder_onto_the_load_spec()
         .expect("a t2va job with a complete q4 tier and shared components runs");
     let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
     assert!(
-        spec.components.get("text_encoder").is_none(),
+        !spec.components.contains_key("text_encoder"),
         "a tier with no packed text encoder must leave the key ABSENT — that absence is what \
          selects the provider's `<weights>/text_encoder` fallback"
     );

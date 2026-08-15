@@ -172,6 +172,7 @@ pub(super) fn minimax_h3_tier_dir_is_complete(dir: &Path) -> bool {
 /// Mirrors the engine's own loop verbatim (`mlx-gen-minimax-h3/src/model.rs`, the
 /// `for (partition, probe) in [...]` block). `text_encoder/config.json` is deliberately NOT here —
 /// see [`MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`], which is conditional.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) const MINIMAX_H3_SHARED_PROBES: &[&str] = &[
     "vae/config.json",
     "audio_vae/config.json",
@@ -190,6 +191,7 @@ pub(super) const MINIMAX_H3_SHARED_PROBES: &[&str] = &[
 /// `model_co_requisite_downloads_for_variant` both pick exactly ONE row per `componentId`, and the
 /// upstream `text_encoder` row is `variant: "bf16"`-scoped — so a q4 or q8 install never fetches it
 /// and `<root>/text_encoder` does not exist there at all.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) const MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE: &str = "text_encoder/config.json";
 
 /// Whether `root` carries the SHARED components the loader probes under `spec.weights`. Every one
