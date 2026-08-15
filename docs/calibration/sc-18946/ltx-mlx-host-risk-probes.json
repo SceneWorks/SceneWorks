@@ -2,7 +2,7 @@
   "_comment": "SC-18946 predeclared single-pass host-risk probes. Their coverage state must distinguish captured, attempted/aborted, arithmetic-unmeasurable, and never planned. This unscored bundle is not a curve source.",
   "story": "sc-18946",
   "campaignIdentity": {
-    "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
+    "inferenceRevision": "6f3a84ef4ad4f858c6fe199e14925a01a7943f97",
     "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
     "seed": 18946
   },
