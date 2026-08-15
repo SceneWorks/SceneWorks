@@ -740,30 +740,24 @@ pub(crate) async fn create_video_job(
              its capabilities, or a model that supports this one."
         )));
     }
-    // **THE PLATFORM HALF OF THE SAME GATE (sc-19570).** The gate above is deliberately
-    // platform-independent, so it passes a request some OTHER host's lane would claim — and off-Mac
-    // that is still a job that hangs forever, because no `mlx` worker can register on Windows or
-    // Linux. `ltx_2_3` + `image_to_video`, `wan_2_2` + `first_last_frame` and the rest of the
-    // measured MLX-only set were all admitted here, offered as Video Studio tabs off-Mac, and then
-    // claimed by nothing.
+    // **THE PLATFORM HALF OF THE SAME DEFECT IS NOT DECIDED HERE (sc-19570).** The gate above is
+    // platform-independent and stays that way, so it admits a request some OTHER host's lane would
+    // claim — `ltx_2_3` + `image_to_video`, `wan_2_2` + `first_last_frame` and the rest of the
+    // measured MLX-only set. Off-Mac nothing can claim those, and the job used to hang forever.
     //
-    // Runs SECOND so the platform-independent message wins whenever it applies: "no backend
-    // implements it" is the more useful sentence than "not on this platform" for a pair that works
-    // nowhere. On macOS this is inert by construction, so every Mac-served pair is untouched.
-    if !video_request_is_claimable_on_platform(&job_type, &job_payload, &state.settings.host_os) {
-        let mode = job_payload
-            .get("mode")
-            .and_then(Value::as_str)
-            .unwrap_or(payload.mode.as_str());
-        return Err(ApiError::bad_request(format!(
-            "{model_id} cannot render the \"{mode}\" mode on this platform — that combination runs \
-             only on the macOS MLX backend, and this host has no worker that will ever claim it, so \
-             the job would wait forever. Choose a mode this model serves here, or a model that \
-             serves this mode on Windows/Linux."
-        )));
-    }
+    // sc-19570 first refused them right here with a `400`, which made `POST /api/v1/video/jobs`
+    // answer differently on Windows than on macOS for byte-identical bodies. That was ruled out:
+    // **an HTTP contract is not platform-dependent.** The status code, response shape and error
+    // envelope are the same on every host; what a given machine can actually RENDER is an execution
+    // outcome, and it is reported as one.
+    //
+    // So the platform verdict moved into the job lifecycle —
+    // `JobsStore::fail_platform_unreachable_jobs`, run below and again on every claim — and the job
+    // reaches a terminal `failed` with a `platform_unreachable:` reason instead of sitting queued.
+    // Nothing about the two gates' ORDER or wording is coupled: this one still 400s a mode no lane
+    // serves anywhere, on every platform alike.
     let job = create_generation_job(
-        state,
+        state.clone(),
         job_type,
         project_id,
         project_name,
@@ -771,7 +765,42 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
+    // Terminate an unreachable job NOW rather than leaving it for the claim-time sweep. The sweep
+    // runs when a worker polls, and the deployments that most need this answer are exactly the ones
+    // where no worker ever will (an API-only container, a Windows host whose GPU worker is not
+    // installed). Waiting for a poll would reintroduce the hang this story exists to remove, so the
+    // response the caller already holds carries the terminal state.
+    let job = fail_job_if_platform_unreachable(&state, job).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Run the sc-19570 platform-reachability sweep and return `job` as it now stands: unchanged on a
+/// Mac and for any pair this host's lane serves, terminal `failed` when nothing here can ever claim
+/// it.
+///
+/// The status code does NOT depend on the verdict — the caller returns `201` either way, on every
+/// platform. Only the snapshot's `status` / `error` differ, which is what an execution outcome is.
+///
+/// It calls the same store method the claim path calls rather than duplicating the decision, so the
+/// two entry points can never disagree about which pairs are unreachable.
+async fn fail_job_if_platform_unreachable(
+    state: &AppState,
+    job: JobSnapshot,
+) -> Result<JobSnapshot, ApiError> {
+    let host_os = state.settings.host_os.clone();
+    let failed = store_call(state.clone(), move |store, _timeout| {
+        store.fail_platform_unreachable_jobs(&host_os)
+    })
+    .await?;
+    let mut result = job;
+    for failed_job in failed {
+        crate::jobs::emit_platform_unreachable(&failed_job);
+        publish(state, "job.updated", &failed_job);
+        if failed_job.id == result.id {
+            result = failed_job;
+        }
+    }
+    Ok(result)
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the

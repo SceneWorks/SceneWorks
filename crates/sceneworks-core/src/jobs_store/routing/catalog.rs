@@ -2720,11 +2720,18 @@ mod tests {
     /// produced a job that sat `queued` / "Waiting for an available worker." with no terminal state.
     ///
     /// The inventory is EXACT, like `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`: it is not a suppression
-    /// list, it is the measured set, and every member must now be BOTH hidden (a `false` in the
-    /// model's `candleSupport.features.videoModes`, which `candleVideoModeBlock` reads) AND refused
-    /// at enqueue on both off-Mac platforms (`video_request_is_claimable_on_platform`). Hiding
+    /// list, it is the measured set, and every member must be BOTH hidden (a `false` in the model's
+    /// `candleSupport.features.videoModes`, which `candleVideoModeBlock` reads) AND judged
+    /// unreachable on both off-Mac platforms (`video_request_is_claimable_on_platform`). Hiding
     /// alone would not do: `VIDEO_JOB_MODES` is global and the MCP tool, a raw REST caller or a
     /// recipe replay can still name any admitted mode against any model.
+    ///
+    /// **The unreachability verdict is an EXECUTION outcome, never a status code.** A client may be
+    /// platform-aware — hiding a tab off-Mac is fine, and is half of sc-19570's value — but the
+    /// HTTP surface may not be: `POST /api/v1/video/jobs` answers `201` for these pairs on every
+    /// host, and `JobsStore::fail_platform_unreachable_jobs` then fails the JOB terminal with a
+    /// legible reason. sc-19570 shipped this as a platform-conditional `400` first and that was
+    /// ruled out. Do not re-read this predicate at an HTTP boundary.
     ///
     /// It asserts the Mac side too, in the same loop and on the same pairs, because "fix the other
     /// platform" is one edit away from "break this one".
@@ -2732,7 +2739,7 @@ mod tests {
     /// Derived on both sides: the ADVERTISEMENT is read from the shipped `builtin.models.jsonc`
     /// bytes, and the verdicts come from the real predicates. Nothing here restates a mode list.
     #[test]
-    fn every_declared_video_mode_with_no_off_mac_lane_is_hidden_and_refused() {
+    fn every_declared_video_mode_with_no_off_mac_lane_is_hidden_and_unreachable() {
         /// The measured MLX-only, candle-unclaimable pairs a shipped model ADVERTISES (sc-19570).
         /// A pair leaving this set has gained an off-Mac lane; a pair joining it is a new tab that
         /// hangs on Windows and Linux.
@@ -2762,8 +2769,8 @@ mod tests {
             // uninstallable off-Mac, which is why sc-19570's measured list (scoped to
             // Windows/Linux-INSTALLABLE models) did not name them. They are covered rather than
             // exempted: install state is not a reachability gate, a mac-only download list is one
-            // manifest edit from changing, and the enqueue gate must refuse a raw REST call for a
-            // pair no worker on this host can claim regardless of what is on disk.
+            // manifest edit from changing, and a raw REST call for a pair no worker on this host
+            // can claim must still terminate regardless of what is on disk.
             ("krea_realtime_14b", "text_to_video"),
             ("krea_realtime_14b", "image_to_video"),
             ("krea_realtime_14b", "video_to_video"),
@@ -2833,13 +2840,13 @@ mod tests {
                     "{id} + {mode} has no off-Mac lane but candleSupport still offers it — the \
                      Video Studio would show the tab on Windows/Linux"
                 );
-                // 2. REFUSED at enqueue on BOTH off-Mac platforms, for the callers that never see
-                //    a tab at all.
+                // 2. UNREACHABLE on BOTH off-Mac platforms, for the callers that never see a tab at
+                //    all — so the sweep terminates the job instead of letting it queue forever.
                 for os in ["windows", "linux"] {
                     assert!(
                         !video_request_is_claimable_on_platform(&job_type, &payload, os),
-                        "{id} + {mode} would still be ENQUEUED on {os}, where nothing can claim \
-                         it — that is the job that queues forever"
+                        "{id} + {mode} would still be judged CLAIMABLE on {os}, where nothing can \
+                         claim it — the sweep would leave it queued forever"
                     );
                 }
                 // 3. UNCHANGED on the Mac, where the pair genuinely renders.
@@ -2868,17 +2875,17 @@ mod tests {
         );
     }
 
-    /// The other half of the same gate: a pair the candle lane DOES claim must stay enqueueable
-    /// off-Mac. sc-19570's gate is the first platform-shaped refusal in `create_video_job`, and the
-    /// cheapest way to get it wrong is to refuse too much — a `wan_2_2` `extend_clip` on Windows
-    /// renders through candle Wan-VACE today, and an over-broad gate would 400 it.
+    /// The other half of the same mechanism: a pair the candle lane DOES claim must stay claimable
+    /// off-Mac. The cheapest way to get a platform verdict wrong is to condemn too much — a
+    /// `wan_2_2` `extend_clip` on Windows renders through candle Wan-VACE today, and an over-broad
+    /// predicate would have the sweep fail it terminal on the host that serves it.
     ///
     /// Includes two pairs no model ADVERTISES but candle serves anyway (`wan_2_2_t2v_14b` +
     /// `extend_clip`, `wan_2_2_i2v_14b` + `replace_person`), for the reason sc-19504 gave the
     /// platform-independent gate: this is not a capability gate, and a capability-shaped one would
-    /// refuse working shapes.
+    /// condemn working shapes.
     #[test]
-    fn a_candle_served_video_mode_is_still_enqueueable_off_mac() {
+    fn a_candle_served_video_mode_is_still_claimable_off_mac() {
         let served = [
             ("wan_2_2", "text_to_video"),
             ("wan_2_2", "extend_clip"),
@@ -2913,7 +2920,7 @@ mod tests {
             for os in ["windows", "linux", "macos"] {
                 assert!(
                     video_request_is_claimable_on_platform(&job_type, &payload, os),
-                    "{model} + {mode} must stay enqueueable on {os}"
+                    "{model} + {mode} must stay claimable on {os}"
                 );
             }
         }

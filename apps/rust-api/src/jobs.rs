@@ -125,6 +125,7 @@ pub(crate) async fn claim_job(
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
     let candle_enforce = state.settings.candle_enforce_unsupported;
+    let host_os = state.settings.host_os.clone();
     let (stale_sweep, claim_result) = store_call(state.clone(), move |store, timeout| {
         let stale_sweep = store.mark_stale_workers_interrupted(timeout)?;
         let claim_result = (|| {
@@ -142,6 +143,15 @@ pub(crate) async fn claim_job(
             let candle_stranded = store.fail_stranded_candle_jobs(candle_required, timeout)?;
             let candle_unsupported =
                 store.fail_unsupported_candle_jobs(candle_required, candle_enforce)?;
+            // Platform reachability (sc-19570): fail any queued video job whose mode no lane on
+            // THIS host can ever claim. Unlike the four sweeps above it takes no flag and no grace
+            // window — the gap is structural, not transient, and every one of those four declines
+            // to touch this job (the stranded sweeps bail the moment a live worker of their own
+            // kind exists; both unsupported sweeps default to warn), which is why it hung.
+            // `POST /api/v1/video/jobs` runs the same sweep inline so the hang closes even where no
+            // worker ever polls; this arm covers the raw `POST /api/v1/jobs`, retry and duplicate
+            // paths that never pass through that route.
+            let platform_unreachable = store.fail_platform_unreachable_jobs(&host_os)?;
             let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
             Ok::<_, JobsStoreError>((
                 job,
@@ -150,14 +160,22 @@ pub(crate) async fn claim_job(
                 unsupported,
                 candle_stranded,
                 candle_unsupported,
+                platform_unreachable,
             ))
         })();
         Ok((stale_sweep, claim_result))
     })
     .await?;
     handle_stale_sweep(&state, &stale_sweep);
-    let (response, decision, stranded, unsupported, candle_stranded, candle_unsupported) =
-        claim_result?;
+    let (
+        response,
+        decision,
+        stranded,
+        unsupported,
+        candle_stranded,
+        candle_unsupported,
+        platform_unreachable,
+    ) = claim_result?;
     for job in &stranded {
         emit_mlx_unavailable(job);
         publish(&state, "job.updated", job);
@@ -172,6 +190,10 @@ pub(crate) async fn claim_job(
     }
     for (job, reason) in &candle_unsupported {
         emit_candle_unsupported(job, reason, "enforce");
+        publish(&state, "job.updated", job);
+    }
+    for job in &platform_unreachable {
+        emit_platform_unreachable(job);
         publish(&state, "job.updated", job);
     }
     if let Some(decision) = &decision {
@@ -203,6 +225,7 @@ pub(crate) async fn claim_job(
         || !unsupported.is_empty()
         || !candle_stranded.is_empty()
         || !candle_unsupported.is_empty()
+        || !platform_unreachable.is_empty()
     {
         // claim_job already ran mark_stale_workers_interrupted above (its own
         // transaction), so refresh the queue WITHOUT sweeping a second time
@@ -296,6 +319,33 @@ fn emit_candle_unavailable(job: &JobSnapshot) {
             "jobId": job.id,
             "jobType": job.job_type.as_str(),
             "model": model,
+            "reason": job.error,
+        }),
+    );
+}
+
+/// Emit the `platform_unreachable` terminal-routing event (sc-19570) — the System → Logs surface
+/// for a video job whose mode has no lane on this host at all.
+///
+/// A SEPARATE event from `mlx_unavailable` / `candle_unavailable` on purpose, not a fifth `mode` on
+/// one of them: those two say a worker of the right kind failed to check in, which is transient and
+/// operational ("confirm the worker is running"). This one says no such worker can exist here, and
+/// the only remedy is a different model or a different mode. Collapsing them would send an operator
+/// looking for a process that is not missing.
+///
+/// `pub(crate)` because the video enqueue route emits it too — `POST /api/v1/video/jobs` runs the
+/// same sweep inline so the terminal state does not wait on a worker poll.
+pub(crate) fn emit_platform_unreachable(job: &JobSnapshot) {
+    let model = job.payload.get("model").and_then(Value::as_str);
+    let mode = job.payload.get("mode").and_then(Value::as_str);
+    sceneworks_core::observability::emit_event(
+        tracing::Level::INFO,
+        json!({
+            "event": "platform_unreachable",
+            "jobId": job.id,
+            "jobType": job.job_type.as_str(),
+            "model": model,
+            "mode": mode,
             "reason": job.error,
         }),
     );

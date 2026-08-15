@@ -16,6 +16,15 @@
 // is not a Mac) and `GET /api/v1/models` carries a per-model `candleSupport` block built from the
 // real candle claim predicate. On a Mac — and before the capabilities endpoint responds — every
 // helper here is a no-op, so Mac behaviour is untouched.
+//
+// THIS FILE IS THE PLATFORM-AWARE HALF, AND IT IS THE ONLY ONE THAT MAY BE. A client is free to
+// know what host it is talking to and hide a tab accordingly; the HTTP API is not. `POST
+// /api/v1/video/jobs` answers `201` for these pairs on every platform — the server reports the gap
+// as an EXECUTION outcome instead, failing the job terminal with a `platform_unreachable:` reason
+// (`JobsStore::fail_platform_unreachable_jobs`). So the two layers are complementary rather than
+// duplicated: hiding spares the user a dead end, and the terminal failure catches the MCP tool, a
+// raw REST caller and a recipe replay, none of which see a tab. Do not "improve" this by expecting
+// a platform-conditional status code — that shape was ruled out.
 
 export const CANDLE_NOT_AVAILABLE_LABEL = "Not available on this platform (macOS/MLX only)";
 

@@ -114,10 +114,16 @@ pub struct Settings {
     pub trust_loopback: bool,
     /// sc-19570 — the API host's OS (`std::env::consts::OS` in production), threaded through
     /// `Settings` rather than read at each use site so the OFF-MAC branch of the per-mode
-    /// reachability gate can be exercised on a Mac. macOS structurally cannot detect that class of
-    /// defect by running on itself: the gate refuses only what no Windows/Linux lane will claim,
-    /// and on a Mac that branch never executes, so an untestable `std::env::consts::OS` call inside
-    /// `create_video_job` would ship a guard whose only proof is its own doc comment.
+    /// reachability sweep can be exercised on a Mac. macOS structurally cannot detect that class of
+    /// defect by running on itself: the sweep fails only what no Windows/Linux lane will claim, and
+    /// on a Mac that branch never executes, so an untestable `std::env::consts::OS` call inside
+    /// `JobsStore::fail_platform_unreachable_jobs`'s callers would ship a guard whose only proof is
+    /// its own doc comment.
+    ///
+    /// It decides a job's EXECUTION outcome, never an HTTP status code: `POST /api/v1/video/jobs`
+    /// answers `201` for the same body on every platform, and this field only determines whether
+    /// the job it creates is `queued` or terminal `failed`. A read of this field that changes a
+    /// response code is a bug — that shape was ruled out.
     ///
     /// Values are the `std::env::consts::OS` vocabulary (`"macos"` / `"windows"` / `"linux"`).
     pub host_os: String,
