@@ -15,12 +15,12 @@
     "apiGeneration": "e32eb306ae16eedaf20922d8ee845673b23a2a5b23eb588b9390b7cef73139ef",
     "apiValidation": "39ccf7e260f7389ff2e5107f3afd45129a40202ce46a257f4c1611cc27f7aadb",
     "baseWeightImports": "18f12c8747eb2d8a35d71f53773a824c19d658c1f99a5d7b9975ec53e497465a",
-    "descriptorAudioFacts": "f5fab26a3612598317687f6f94ba137f030e3c6d8e1105c6539f2edb376391ca",
-    "descriptorCandleFacts": "c450df775a4f25f0f5803df933e6dc358445a0372312ddf03db5f11b66dc1d48",
-    "descriptorCandleRuntime": "52389e6ebddc13090b654a785607e35d9f81a261c92124e10a28b866760ffdde",
-    "descriptorMlxFacts": "4a187198b57f521ab814d7131d9deb4f8c10e4a604b41bf13e3b7ddfa7501c54",
-    "descriptorMlxRuntime": "742fb1df7a02eef3f38682bb1ed3c13c040387bd28fa6319fa2303ecf7753760",
-    "descriptorPreviewFacts": "89a1fca6193bc9e61457e7e20c72da2c7f190e4fb4b6c24dd951d01b7c08bdef",
+    "descriptorAudioFacts": "dfc7c3dca324c45739d9186e67cc28785000f403d8cf31c44a4cd54a8dadedd5",
+    "descriptorCandleFacts": "c93cfee4f03f90e84be7274f36a61eb831c15007bd0746ab410102c019ac4055",
+    "descriptorCandleRuntime": "0e63f5ff92a561c4c5f513e4ed1f9d59ebf590efaa37f54c01e7dc74683b95a9",
+    "descriptorMlxFacts": "ab6d78683a4e8e059cd967e399abb9135c00d9c679b68d531e5dd6497a90960e",
+    "descriptorMlxRuntime": "7b493fe044566b4d4895e2432e2d88f9aec3c11a37298f51b861c139e1555d86",
+    "descriptorPreviewFacts": "6f069d7ce971cc53383d4323a0d2870d9c6dc3857f54acd446effd55b1654010",
     "exceptionRegister": "1c89d8c3dad1025e119d9faed44c3f44173b3f316c1b70faccfed4f44157f704",
     "manifest": "1ac28517a47bdd5a133b9075340d223b73058034c4b1fa8e8b7c7528bbc61f60",
     "modelImportDefaults": "be25b4d008912a83668bf9faf3af4c02bafa9b9cb6003bf161fef1901247a6a9",
@@ -59,7 +59,7 @@
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "352991ae26c8d842c9af1c37e9c6d3261ae6554debe5089744ef8e7972fd15ed",
     "workerVideoCandle": "4527f7c7f42bac9d65daa2004f993657391ec3cdc872bac0bc9e2c012c93e949",
-    "workerVideoDispatch": "1eaac28c89c93feb6540f3e916ef8b25139a0edb039cb7e81ad8c52c45cbafff",
+    "workerVideoDispatch": "f29a1c62603f4556397c5fddb6672be445e458520784bc849215d2e951ce86bd",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
     "workerVideoLtx": "35c4f69f9bb82aeb065dbcbab5ebc1386dc4d8b061c5567c8656e1d7257c7030",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
@@ -2958,7 +2958,7 @@
       "preview": {
         "capability": "live_preview",
         "mlx": false,
-        "candle": false
+        "candle": null
       }
     },
     {

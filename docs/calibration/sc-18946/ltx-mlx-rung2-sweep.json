@@ -2,7 +2,7 @@
   "_comment": "SC-18946 rung-2-first matrix. Every q4/q8/bf16 row explicitly selects decodeTileEdge=384 and decodeOverlap=64 at 1280x704 f305/f449. These records are ingested as canonical evidence but never pooled into the single-pass temporal fit.",
   "story": "sc-18946",
   "campaignIdentity": {
-    "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
+    "inferenceRevision": "6f3a84ef4ad4f858c6fe199e14925a01a7943f97",
     "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
     "seed": 18946
   },

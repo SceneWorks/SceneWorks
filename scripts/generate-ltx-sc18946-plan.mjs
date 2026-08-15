@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const STORY = "sc-18946";
 export const FINGERPRINT = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
-export const INFERENCE_REVISION = "0e4adc6f05884e6891e29dfecd32ee695efe8b18";
+export const INFERENCE_REVISION = "6f3a84ef4ad4f858c6fe199e14925a01a7943f97";
 export const SEED = 18946;
 // Frozen serialized order: establish the smallest tier first at each rung-2 boundary, then advance
 // q4 -> q8 -> bf16 before moving from f305 to f449. The runbook still selects one provider by name
