@@ -1116,6 +1116,10 @@
                           "enum": ["none", "lora", "identity", "control"],
                           "description": "Exact MemoryRunContext overlay sent to the provider. This may differ from the public matrix overlay when adapters are load identity rather than provider evidence identity."
                         },
+                        "requiredOffloadPolicy": {
+                          "enum": ["resident", "sequential"],
+                          "description": "Optional exact load-policy prerequisite for this implementation row. This is distinct from engagedRungs: request-scoped staged residency can be implemented under a Resident load default, while providers such as FLUX.2 Klein expose BTR only for Sequential+Deferred."
+                        },
                         "engagedRungs": {
                           "type": "array",
                           "minItems": 1,

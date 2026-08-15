@@ -298,12 +298,20 @@ fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxReque
     }
 }
 
-fn pulid_declared_load_policy(spec: LoadSpec) -> LoadSpec {
-    if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::Applied {
-        spec.with_offload_policy(gen_core::OffloadPolicy::Sequential)
-    } else {
-        spec
-    }
+fn pulid_declared_load_policy(
+    resolved_tier: Option<&str>,
+    manifest: &serde_json::Map<String, Value>,
+    spec: LoadSpec,
+    context: crate::memory_route_registry::MemoryRouteRequestContext,
+) -> LoadSpec {
+    crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        PULID_ENGINE_ID,
+        resolved_tier,
+        Some(context.mode),
+        manifest,
+        spec,
+        context,
+    )
 }
 
 /// Real PuLID-FLUX generation: resolve the reference + weights on the async side, feed the engine's
@@ -452,7 +460,12 @@ async fn generate_pulid_flux_stream(
     // Deferred independently; this dedicated route then binds the matching load policy before the
     // cache loads the generator. A refusal remains Resident+Eager and can only take the safe dense
     // path (or fail fit) through the terminal authority carried by the request plan.
-    let spec = pulid_declared_load_policy(spec);
+    let spec = pulid_declared_load_policy(
+        resolved_tier,
+        &request.model_manifest_entry,
+        spec,
+        route_context,
+    );
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         PULID_ENGINE_ID,
         PULID_MODEL,
@@ -615,15 +628,42 @@ mod pulid_tests {
         assert!(!inputs.use_pid);
         assert!(!inputs.has_phases);
 
+        let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+            .expect("builtin manifest parses");
+        let manifest = manifest["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["id"] == PULID_MODEL))
+            .and_then(Value::as_object)
+            .expect("shipped PuLID manifest");
+        let identity_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))
+                .with_quant(gen_core::Quant::Q4)
+                .with_resolved_route(PULID_MODEL);
+            spec.identity = Some(gen_core::IdentityWeights {
+                encoder: Some(WeightsSource::File("identity.safetensors".into())),
+                eva: Some(WeightsSource::File("vision.safetensors".into())),
+                face_dir: Some(WeightsSource::Dir("face-analysis".into())),
+            });
+            spec
+        };
         let applied = pulid_declared_load_policy(
-            LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))
-                .with_applied_load_shape_declaration(),
+            Some("q4"),
+            manifest,
+            identity_spec().with_applied_load_shape_declaration(),
+            context,
+        );
+        assert_eq!(
+            applied.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::Applied
         );
         assert_eq!(applied.offload_policy, gen_core::OffloadPolicy::Sequential);
         assert_eq!(applied.load_shape, gen_core::LoadShape::DeferredMaterialization);
         let refused = pulid_declared_load_policy(
-            LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))
-                .with_refused_load_shape_declaration(),
+            Some("q4"),
+            manifest,
+            identity_spec().with_refused_load_shape_declaration(),
+            context,
         );
         assert_eq!(refused.offload_policy, gen_core::OffloadPolicy::Resident);
         assert_eq!(refused.load_shape, gen_core::LoadShape::EagerMaterialization);

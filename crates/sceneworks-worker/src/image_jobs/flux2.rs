@@ -156,15 +156,62 @@ pub(crate) fn flux2_edit_uses_provider_memory_safety(engine_id: &str) -> bool {
     engine_id == "flux2_dev_edit"
 }
 
+const MAX_KLEIN_EDIT_REFERENCES: usize = 8;
+
+fn flux2_edit_reference_ids(request: &ImageRequest, engine_id: &str) -> WorkerResult<Vec<String>> {
+    if engine_id == "flux2_dev_edit" {
+        return Ok(edit_reference_ids(request));
+    }
+    let ids = if !request.reference_asset_ids.is_empty() {
+        request.reference_asset_ids.clone()
+    } else if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        vec![id.to_owned()]
+    } else if request.mode == "edit_image" {
+        request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| vec![id.to_owned()])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if engine_id != "flux2_dev_edit" && !(1..=MAX_KLEIN_EDIT_REFERENCES).contains(&ids.len()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "FLUX.2 Klein edit requires between 1 and {MAX_KLEIN_EDIT_REFERENCES} reference images."
+        )));
+    }
+    Ok(ids)
+}
+
 // `MAX_EDIT_REFERENCES` / `edit_reference_ids` moved to base.rs (sc-8946, F-144): shared by the
 // FLUX.2 / SenseNova-via-grouping edit lanes, so they live with the other shared edit helpers.
 
-/// True when this is a FLUX.2 edit job (a flux2 edit-capable model + ≥1 reference)
-/// whose base weights resolve — routed to the edit variant rather than txt2img.
+/// True when this is a FLUX.2 edit job whose base weights resolve. Klein edit modes always belong
+/// to the bespoke route, including malformed 0/9+ reference requests: the stream preflight rejects
+/// their exact cardinality instead of letting the generic MLX lane silently discard conditioning.
+/// FLUX.2 Dev preserves its established reference-gated routing.
 fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
-    flux2_edit_engine_id(&request.model).is_some()
-        && !edit_reference_ids(request).is_empty()
+    let Some(engine_id) = flux2_edit_engine_id(&request.model) else {
+        return false;
+    };
+    let edit_mode = flux2_edit_route_mode(engine_id, &request.mode);
+    let references_available = engine_id != "flux2_dev_edit"
+        || flux2_edit_reference_ids(request, engine_id).is_ok_and(|ids| !ids.is_empty());
+    edit_mode
+        && references_available
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+fn flux2_edit_route_mode(engine_id: &str, mode: &str) -> bool {
+    engine_id == "flux2_dev_edit"
+        || matches!(mode, "edit_image" | "character_image" | "style_variations")
 }
 
 /// One `Reference` (single) or one `MultiReference` (N) edit conditioning from the
@@ -182,6 +229,11 @@ fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
     }
 }
 
+fn flux2_edit_conditioning_reference_count(user_references: usize, has_pose: bool) -> u32 {
+    let references = if has_pose { 2 } else { user_references };
+    u32::try_from(references).unwrap_or(u32::MAX)
+}
+
 /// Realism-safe default image-guidance scale for the klein/dev edit identity lever (sc-8273 A/B:
 /// ≥2.0 over-smooths skin / "clay"; 1.5 holds identity with natural texture).
 const DEFAULT_EDIT_IMAGE_GUIDANCE: f32 = 1.5;
@@ -195,7 +247,10 @@ const DEFAULT_EDIT_IMAGE_GUIDANCE: f32 = 1.5;
 /// 1.5). `≤1.0` = off. Defaults to the realism-safe validated value 1.5 (sc-8273) when a character
 /// reference is present and the knob is unspecified; `None` outside `character_image` mode or with
 /// no reference (off = byte-identical render).
-fn flux2_edit_image_guidance(request: &ImageRequest) -> Option<f32> {
+fn flux2_edit_image_guidance(engine_id: &str, request: &ImageRequest) -> Option<f32> {
+    if engine_id == "flux2_klein_9b_kv_edit" {
+        return None;
+    }
     if request.mode != "character_image" {
         return None;
     }
@@ -233,6 +288,12 @@ fn flux2_edit_resolved_quant(
     job_id: &str,
     backend: &str,
 ) -> (Option<Quant>, Option<i64>) {
+    if let Some(fixed) = fixed_mlx_artifact_quant(model_id) {
+        // The converted artifact is a single dense BF16 transformer. Ignore stale/crafted tier
+        // preferences so declaration, fit, recipe, and provider identities all name the bytes that
+        // actually load.
+        return fixed;
+    }
     let requested = resolve_quant(request, Some(weights_dir));
     let dense_text_encoder = is_dense_te_tier(request);
     let requested_for_reconcile = if dense_text_encoder {
@@ -330,6 +391,8 @@ fn flux2_dev_edit_memory_context(
 fn flux2_edit_generate_one(
     generator: &dyn Generator,
     use_provider_memory_safety: bool,
+    use_pid: bool,
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     total_unified_memory_gb: Option<f64>,
     quant: Option<gen_core::Quant>,
     prompt: &str,
@@ -362,13 +425,15 @@ fn flux2_edit_generate_one(
         steps: Some(steps),
         guidance,
         image_guidance,
+        use_pid,
         conditioning,
+        memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
     enhance.apply(&mut request);
-    let memory_context = if use_provider_memory_safety {
+    let provider_memory_context = if use_provider_memory_safety {
         let contract = generator.memory_strategy_contract().ok_or_else(|| {
             WorkerError::Engine(
                 "FLUX.2-dev edit provider did not expose its memory-safety contract".to_owned(),
@@ -385,10 +450,13 @@ fn flux2_edit_generate_one(
     } else {
         None
     };
+    let memory_context = memory_evaluation
+        .map(|evaluation| &evaluation.context)
+        .or(provider_memory_context.as_ref());
     let output = crate::memory_strategy::generate_with_scope(
         generator,
         &mut request,
-        memory_context.as_ref(),
+        memory_context,
         on_progress,
     )
     .map_err(|error| match error {
@@ -453,26 +521,36 @@ async fn generate_flux2_edit_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = flux2_edit_engine_id(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not a FLUX.2 edit model".to_owned()))?;
+    // Claiming the bespoke route is independent of cardinality so malformed Klein edit requests
+    // cannot fall through to generic MLX. Reject the exact 1..=8 contract before resolving weights,
+    // adapters, PiD, or any reference bytes.
+    let reference_ids = flux2_edit_reference_ids(request, engine_id)?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 weights not found".to_owned()))?;
-    let (quant, quant_bits) = flux2_edit_resolved_quant(
-        request,
-        &weights_dir,
-        &request.model,
-        &job.id,
-        backend,
-    );
+    let (quant, quant_bits) =
+        flux2_edit_resolved_quant(request, &weights_dir, &request.model, &job.id, backend);
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
     // Identity strength (sc-8278): map the UI `referenceStrength` slider onto the engine's
     // image-guidance CFG so a strong prompt doesn't drop the reference identity (sc-8234).
-    let image_guidance = flux2_edit_image_guidance(request);
+    let image_guidance = flux2_edit_image_guidance(engine_id, request);
     let adapters = resolve_adapters(request, settings)?;
+    let pid_weights = if engine_id == "flux2_dev_edit" {
+        None
+    } else {
+        resolve_pid_weights(request, &settings.data_dir, &request.model)?
+    };
+    let use_pid = pid_weights.is_some();
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
 
     // Resolve the reference image(s) on the async side (decode → Send Image moved in).
-    let reference_ids = edit_reference_ids(request);
     let mut references = Vec::with_capacity(reference_ids.len());
     for id in &reference_ids {
         references.push(load_reference_image(
@@ -490,7 +568,7 @@ async fn generate_flux2_edit_stream(
     // sc-3030 / sc-8253 fit_image: pre-fit every reference (the Image-Edit source AND the
     // Character-Studio character reference) to the output W×H (crop / pad / outpaint→pad) so an
     // off-aspect reference isn't squished into the square latent. `stretch` keeps the legacy resize.
-    references = fit_edit_references(references, request, request.width, request.height)?;
+    references = fit_edit_references(references, request, width, height)?;
 
     // The provider owns the final multi-reference memory-safety decision. Resolve the worker-owned
     // live total once on the async side; each concrete conditioning set below supplies its actual
@@ -548,28 +626,114 @@ async fn generate_flux2_edit_stream(
         "character_image face-stack staging failed; likeness scores omitted",
     )
     .await;
-    let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
+    let likeness_source =
+        (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
-    let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
     let enhance = PromptEnhance::from_advanced(&request.advanced);
-    let spec = attach_manifest_text_encoder(
-        load_spec(weights_dir, quant, adapters, None),
+    #[cfg(target_os = "macos")]
+    let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
+    #[cfg(not(target_os = "macos"))]
+    let load_quant = quant;
+    let mut spec = load_spec(weights_dir.clone(), load_quant, adapters, None);
+    if engine_id != "flux2_dev_edit" {
+        spec = spec.with_resolved_route(request.model.clone());
+        if let Some(pid) = pid_weights {
+            spec = spec.with_pid(pid.checkpoint, pid.gemma);
+        }
+        spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+        spec = attach_selected_decoder(spec, engine_id, request, settings)?;
+    }
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let resolved_tier =
+        resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
+    let route_mode = crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode)
+        .ok_or_else(|| WorkerError::InvalidPayload("unsupported FLUX.2 edit mode".to_owned()))?;
+    // Pose rendering replaces the public reference set with the exact provider conditioning pair
+    // `[skeleton, primary reference]`. Bind declaration, fit, and request scope to that concrete
+    // pair rather than the number of user references that happened to select the pose lane.
+    let provider_reference_count =
+        flux2_edit_conditioning_reference_count(references.len(), pose_inputs.is_some());
+    let declaration_context = crate::memory_route_registry::MemoryRouteRequestContext {
+        mode: route_mode,
+        reference_count: provider_reference_count,
+        use_pid,
+        has_phases: false,
+    };
+    if engine_id != "flux2_dev_edit" {
+        spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            engine_id,
+            resolved_tier,
+            Some(route_mode),
+            &request.model_manifest_entry,
+            spec,
+            declaration_context,
+        );
+        spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+            engine_id,
+            resolved_tier,
+            Some(route_mode),
+            &request.model_manifest_entry,
+            spec,
+            declaration_context,
+        );
+        if let Some(warning) =
+            crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
+        {
+            tracing::warn!(
+                event = "mlx_load_shape_declaration_warning",
+                provider = engine_id,
+                ?warning,
+                "provider refused deferred materialization; retaining the safe eager FLUX.2 edit load path"
+            );
+        }
+    }
+    let memory_plan = (engine_id != "flux2_dev_edit")
+        .then(|| {
+            crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+                engine_id,
+                &request.model,
+                &spec,
+                Some(&request.model_manifest_entry),
+                None,
+            )
+            .with_resolved_artifact_tier(resolved_tier)
+        })
+        .transpose()?;
+    let provider_overlay = crate::mlx_fit_gate::provider_overlay_for_load_spec(
         engine_id,
-        request,
-        settings,
-    )?;
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+        &spec,
+        (adapter_count > 0).then(|| format!("adapters:{adapter_count}")),
+    );
+    let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: 1,
+        mode: request.mode.clone(),
+        overlay: provider_overlay,
+        adapter_count,
+        has_reference: true,
+        reference_count: provider_reference_count,
+        use_pid,
+        has_phases: false,
+    };
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
-        move |generator, tx, cancel| {
+        move |generator,
+              cache_state,
+              loaded_policy,
+              _requested_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
             // Build the per-job identity-likeness scorer ONCE here (on the generator-worker thread
             // where the `!Send` face stack is allowed), embedding the source identity face a single
             // time and reusing it across every angle / pose (sc-4409/sc-4410 caching AC). `None` ⇒ not
@@ -580,6 +744,7 @@ async fn generate_flux2_edit_stream(
                 }
                 _ => None,
             };
+            let mut request_cache_state = cache_state;
             drive_gen_items_scored(
                 tx,
                 seeds.into_iter().zip(prompts),
@@ -615,9 +780,29 @@ async fn generate_flux2_edit_stream(
                         }
                         None => build_edit_conditioning(&references),
                     };
+                    let memory_evaluation = memory_plan
+                        .as_ref()
+                        .map(|memory_plan| {
+                            crate::mlx_fit_gate::evaluate_request(
+                                generator,
+                                memory_plan,
+                                &memory_inputs,
+                                request_cache_state,
+                                loaded_policy.offload_policy,
+                                external_committed_bytes,
+                            )
+                        })
+                        .transpose()?;
+                    request_cache_state = gen_core::MemoryCacheState::Warm;
+                    let _request_memory_limit = memory_evaluation
+                        .as_ref()
+                        .and_then(|evaluation| evaluation.process_limit_bytes)
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let (out_w, out_h, pixels) = flux2_edit_generate_one(
                         generator,
                         use_provider_memory_safety,
+                        use_pid,
+                        memory_evaluation.as_ref(),
                         total_unified_memory_gb,
                         quant,
                         &prompt,

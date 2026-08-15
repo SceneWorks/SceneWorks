@@ -6877,6 +6877,105 @@ fn flux2_edit_engine_id_maps_variants() {
     ));
     assert_eq!(flux2_edit_engine_id("z_image_turbo"), None);
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
+    assert!(!flux2_edit_route_mode(
+        "flux2_klein_9b_edit",
+        "image_generation"
+    ));
+    assert!(!flux2_edit_route_mode(
+        "flux2_klein_9b_edit",
+        "image_to_image"
+    ));
+    assert!(!flux2_edit_route_mode("flux2_klein_9b_edit", "reference"));
+    assert!(flux2_edit_route_mode(
+        "flux2_klein_9b_edit",
+        "character_image"
+    ));
+    assert!(flux2_edit_route_mode(
+        "flux2_klein_9b_kv_edit",
+        "style_variations"
+    ));
+
+    let eight = request(json!({
+        "mode": "edit_image",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"]
+    }));
+    assert_eq!(
+        flux2_edit_reference_ids(&eight, "flux2_klein_9b_edit")
+            .expect("eight Klein references")
+            .len(),
+        8
+    );
+    let nine = request(json!({
+        "mode": "edit_image",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+    }));
+    assert!(flux2_edit_reference_ids(&nine, "flux2_klein_9b_edit").is_err());
+    assert_eq!(
+        edit_reference_ids(&nine).len(),
+        MAX_EDIT_REFERENCES,
+        "the broader Klein limit must not widen the calibrated FLUX.2-dev/shared edit cap"
+    );
+    assert_eq!(flux2_edit_conditioning_reference_count(1, false), 1);
+    assert_eq!(flux2_edit_conditioning_reference_count(8, false), 8);
+    assert_eq!(
+        flux2_edit_conditioning_reference_count(1, true),
+        2,
+        "a pose request executes as skeleton plus primary reference"
+    );
+    assert_eq!(
+        flux2_edit_conditioning_reference_count(8, true),
+        2,
+        "declaration and request scope must describe the concrete pose conditioning, not discarded public references"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_klein_edit_route_owns_invalid_cardinality_and_preflight_refuses_it() {
+    let weights = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = weights.path().to_path_buf();
+    let model_path = weights.path().to_string_lossy().to_string();
+    let references = |count: usize| {
+        (0..count)
+            .map(|index| format!("reference-{index}"))
+            .collect::<Vec<_>>()
+    };
+    for count in [0, 1, 8, 9] {
+        let request = request(json!({
+            "projectId": "p",
+            "model": "flux2_klein_9b",
+            "mode": "edit_image",
+            "referenceAssetIds": references(count),
+            "advanced": { "modelPath": model_path.clone() }
+        }));
+        assert_eq!(
+            resolve_image_route(&request, &settings),
+            Some(ImageRoute::Flux2Edit),
+            "Klein edit refs={count} must never fall through to generic MLX"
+        );
+        let preflight = flux2_edit_reference_ids(&request, "flux2_klein_9b_edit");
+        if (1..=MAX_KLEIN_EDIT_REFERENCES).contains(&count) {
+            assert_eq!(preflight.expect("valid Klein reference count").len(), count);
+        } else {
+            assert!(
+                matches!(preflight, Err(WorkerError::InvalidPayload(_))),
+                "Klein edit refs={count} must fail before load or generation"
+            );
+        }
+    }
+
+    let dev_without_reference = request(json!({
+        "projectId": "p",
+        "model": "flux2_dev",
+        "mode": "edit_image",
+        "advanced": { "modelPath": model_path }
+    }));
+    assert_ne!(
+        resolve_image_route(&dev_without_reference, &settings),
+        Some(ImageRoute::Flux2Edit),
+        "FLUX.2 Dev keeps its established reference-gated route"
+    );
 }
 
 // ---- sc-6124 / sc-6211: FLUX.2-dev provider memory admission context --------------------------
@@ -6954,6 +7053,22 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
     );
     assert_eq!(quant, Some(gen_core::Quant::Q8));
     assert_eq!(bits, Some(8));
+
+    let true_v2 = request(json!({
+        "model": "flux2_klein_9b_true_v2",
+        "advanced": { "mlxQuantize": 4 }
+    }));
+    assert_eq!(
+        flux2_edit_resolved_quant(
+            &true_v2,
+            Path::new("/models/mlx/flux2_klein_9b_true_v2"),
+            "flux2_klein_9b_true_v2",
+            "job-true-v2",
+            "mlx",
+        ),
+        (None, None),
+        "True-V2 is one fixed dense BF16 artifact, not a user-selectable packed tier"
+    );
 }
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
@@ -7837,38 +7952,63 @@ fn edit_reference_ids_takes_plural_multi_reference_set() {
 fn flux2_edit_image_guidance_lever() {
     // Off outside character_image mode (a plain image edit), even with the knob set.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "edit_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 1.5 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "edit_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 1.5 }
+            }))
+        ),
         None
     );
     // Off when no character reference is attached.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "advanced": { "ipAdapterScale": 1.5 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "advanced": { "ipAdapterScale": 1.5 }
+            }))
+        ),
         None
     );
     // Default 1.5 (realism-safe) when a reference is present and the knob is unspecified.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "referenceAssetId": "a"
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a"
+            }))
+        ),
         Some(1.5)
     );
     // Slider value honored, clamped to the 2.5 ceiling.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 3.0 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 3.0 }
+            }))
+        ),
         Some(2.5)
     );
     // A slider value at/below 1.0 reads as OFF (the engine's ≤1 = off).
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 0.8 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 0.8 }
+            }))
+        ),
         None
+    );
+    assert_eq!(
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_kv_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 2.0 }
+            }))
+        ),
+        None,
+        "KV edit rejects image_guidance instead of silently inheriting ordinary edit semantics"
     );
 }
 
@@ -8032,6 +8172,8 @@ fn flux2_edit_real_weights_generates_one_image() {
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
         false,
+        false,
+        None,
         None,
         None,
         "make it a watercolor painting",
@@ -11155,6 +11297,8 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
         false,
+        false,
+        None,
         None,
         None,
         &augment_prompt_for_pose("a knight standing in a courtyard"),
@@ -11290,6 +11434,8 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
             let (w, h, pixels) = flux2_edit_generate_one(
                 generator.as_ref(),
                 false,
+                false,
+                None,
                 None,
                 None,
                 &prompt,
@@ -17455,6 +17601,8 @@ fn sc_8253_8278_identity_angle_ab() {
                 let (w, h, pixels) = flux2_edit_generate_one(
                     generator.as_ref(),
                     false,
+                    false,
+                    None,
                     None,
                     None,
                     &prompt,

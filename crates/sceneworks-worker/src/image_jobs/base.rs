@@ -1506,6 +1506,16 @@ pub(super) fn resolved_mlx_artifact_tier(
 }
 
 #[cfg(target_os = "macos")]
+pub(super) fn resolved_mlx_artifact_tier_for_model(
+    model_id: &str,
+    weights_dir: &Path,
+    quant_bits: Option<i64>,
+) -> Option<&'static str> {
+    fixed_mlx_artifact_tier(model_id)
+        .or_else(|| resolved_mlx_artifact_tier(weights_dir, quant_bits))
+}
+
+#[cfg(target_os = "macos")]
 fn fixed_artifact_tier_matches(
     fixed_artifact_tier: Option<&str>,
     effective_tier: Option<&str>,
@@ -3876,12 +3886,33 @@ pub(super) fn mlx_load_quant_for_resolved_artifact(
 ) -> Option<Quant> {
     if matches!(
         engine_id,
-        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+        "krea_2_raw"
+            | "krea_2_turbo"
+            | "krea_2_edit"
+            | "krea_2_turbo_edit"
+            | "flux2_klein_9b"
+            | "flux2_klein_9b_edit"
+            | "flux2_klein_9b_kv_edit"
     ) {
         None
     } else {
         quant
     }
+}
+
+/// Fixed converted artifacts whose resolved precision is independent of a request preference.
+/// Returning `Some` lets callers skip tier reconciliation entirely, avoiding both a false recipe
+/// identity and a false downgrade event before the provider sees the load.
+#[cfg(target_os = "macos")]
+pub(super) fn fixed_mlx_artifact_quant(
+    model_id: &str,
+) -> Option<(Option<Quant>, Option<i64>)> {
+    (model_id == "flux2_klein_9b_true_v2").then_some((None, None))
+}
+
+#[cfg(target_os = "macos")]
+fn fixed_mlx_artifact_tier(model_id: &str) -> Option<&'static str> {
+    (model_id == "flux2_klein_9b_true_v2").then_some("bf16")
 }
 
 /// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
@@ -6994,7 +7025,14 @@ async fn generate_stream(
     // packed-detected from disk, #653), so it flows through the normal resolve_quant path like every
     // other matrix model. The `else` arm stays for any future engine that genuinely advertises no
     // quant — such a model loads dense.
-    let (quant, quant_bits) = if model.supports_quant() {
+    // True-V2's converter consumes the sole BF16 source and writes a dense BF16 transformer. It
+    // has no packed tier matrix: fixing the pair before reconciliation means neither the historical
+    // catalog default nor a crafted advanced preference can emit a false tier-change event or
+    // relabel the declaration, fit, recipe, and provider identities.
+    let fixed_artifact_quant = fixed_mlx_artifact_quant(&request.model);
+    let (quant, quant_bits) = if let Some(fixed) = fixed_artifact_quant {
+        fixed
+    } else if model.supports_quant() {
         // `weights_dir` is the resolved tier subdir (sc-11042). NVFP4 is unreachable on this lane
         // regardless (`nvfp4_host_eligible()` is hard-`false` on macOS — Metal has no FP4 hardware), so
         // this is the same `(quant, bits)` it has always produced; passing the dir keeps the resolver's
@@ -7019,7 +7057,9 @@ async fn generate_stream(
     // asked for ([`dense_te_requested_tier_bits`], mirroring the `standard_tier_subdir` mapping) so it
     // records the resolved transformer precision on EVERY job and only warns/emits on a genuine
     // fallback. `allow_quant_change=false` keeps the load quant `None` (TE stays dense bf16).
-    let (quant, quant_bits) = if model.supports_quant() {
+    let (quant, quant_bits) = if fixed_artifact_quant.is_some() {
+        (quant, quant_bits)
+    } else if model.supports_quant() {
         let requested_for_reconcile = if is_dense_te_tier(request) {
             (None, dense_te_requested_tier_bits(request))
         } else {
@@ -7180,7 +7220,8 @@ async fn generate_stream(
     let quality_opt_in = crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
         &request.model_manifest_entry,
     );
-    let effective_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
+    let effective_tier =
+        resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
     let resolved_artifact = if calibration_opt_in || quality_opt_in {
         resolved_mlx_artifact_provenance(
             request,
@@ -7236,20 +7277,32 @@ async fn generate_stream(
             ideogram_edit_mask.is_some(),
         )
     };
-    let declaration_mode = crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode);
+    let declaration_mode = crate::memory_route_registry::MemoryRouteMode::from_mlx_request(
+        engine_id,
+        &request.mode,
+    );
+    let declaration_context = crate::memory_route_registry::MemoryRouteRequestContext {
+        mode: declaration_mode
+            .unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
+        reference_count: declaration_reference_count,
+        use_pid,
+        has_phases: false,
+    };
     spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         engine_id,
         effective_tier,
         declaration_mode,
         &request.model_manifest_entry,
         spec,
-        crate::memory_route_registry::MemoryRouteRequestContext {
-            mode: declaration_mode
-                .unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
-            reference_count: declaration_reference_count,
-            use_pid,
-            has_phases: false,
-        },
+        declaration_context,
+    );
+    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        engine_id,
+        effective_tier,
+        declaration_mode,
+        &request.model_manifest_entry,
+        spec,
+        declaration_context,
     );
     if let Some(warning) =
         crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
@@ -7285,7 +7338,11 @@ async fn generate_stream(
     );
     let mlx_request_plan = if matches!(
         engine_id,
-        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+        "krea_2_raw"
+            | "krea_2_turbo"
+            | "krea_2_edit"
+            | "krea_2_turbo_edit"
+            | "flux2_klein_9b"
     ) {
         mlx_request_plan.with_resolved_artifact_tier(effective_tier)?
     } else {
@@ -7320,12 +7377,17 @@ async fn generate_stream(
     if use_pid {
         memory_overlays.push("pid".to_owned());
     }
+    let provider_overlay = crate::mlx_fit_gate::provider_overlay_for_load_spec(
+        engine_id,
+        &spec,
+        (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
+    );
     let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
         width: memory_width,
         height: memory_height,
         count: request.count,
         mode: request.mode.clone(),
-        overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
+        overlay: provider_overlay,
         adapter_count,
         has_reference: reference_count > 0,
         reference_count,
@@ -13028,12 +13090,15 @@ mod quant_tier_reconcile_tests {
     }
 
     #[test]
-    fn krea_base_dit_turnkeys_keep_packed_tier_out_of_load_quantization() {
+    fn krea_and_flux2_klein_turnkeys_keep_packed_tier_out_of_load_quantization() {
         for engine_id in [
             "krea_2_raw",
             "krea_2_turbo",
             "krea_2_edit",
             "krea_2_turbo_edit",
+            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
         ] {
             assert_eq!(
                 mlx_load_quant_for_resolved_artifact(engine_id, Some(Quant::Q4)),
@@ -13050,6 +13115,25 @@ mod quant_tier_reconcile_tests {
             mlx_load_quant_for_resolved_artifact("qwen_image", Some(Quant::Q4)),
             Some(Quant::Q4),
             "unrelated loaders retain their existing load-time quantization contract"
+        );
+        assert_eq!(
+            fixed_mlx_artifact_quant("flux2_klein_9b_true_v2"),
+            Some((None, None)),
+            "True-V2's converted artifact is fixed dense BF16"
+        );
+        assert_eq!(
+            resolved_mlx_artifact_tier_for_model(
+                "flux2_klein_9b_true_v2",
+                Path::new("/models/mlx/flux2_klein_9b_true_v2"),
+                None,
+            ),
+            Some("bf16"),
+            "the converted root is not a tier subdirectory, so its fixed BF16 tier must be explicit"
+        );
+        assert_eq!(
+            fixed_mlx_artifact_quant("flux2_klein_9b"),
+            None,
+            "the selectable base tier matrix remains request/resolution-derived"
         );
     }
 

@@ -66,6 +66,10 @@ impl MemoryRouteTier {
             _ => None,
         }
     }
+
+    fn from_str(tier: &str) -> Option<Self> {
+        Self::from_resolved_tier(tier)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,6 +118,23 @@ impl MemoryRouteMode {
             _ => None,
         }
     }
+
+    fn from_manifest(mode: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == mode)
+    }
+
+    /// Preserve the public FLUX.2 Klein `reference` compatibility spelling while keeping the
+    /// normalization route-local. Other providers must opt into their own public mode aliases
+    /// instead of silently inheriting this image-to-image coordinate.
+    pub fn from_mlx_request(provider: &str, mode: &str) -> Option<Self> {
+        if provider == "flux2_klein_9b" && mode == "reference" {
+            Some(Self::ImageToImage)
+        } else {
+            Self::from_request(mode)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,6 +154,16 @@ impl MemoryRouteOverlay {
             Self::Lora => "lora",
             Self::Control => "control",
             Self::Identity => "identity",
+        }
+    }
+
+    fn from_str(overlay: &str) -> Option<Self> {
+        match overlay {
+            "none" => Some(Self::None),
+            "lora" => Some(Self::Lora),
+            "control" => Some(Self::Control),
+            "identity" => Some(Self::Identity),
+            _ => None,
         }
     }
 }
@@ -186,6 +217,20 @@ impl MemoryRouteLoadProfile {
             Self::Lora | Self::LoraPid => MemoryRouteOverlay::Lora,
             Self::SingleControl | Self::MultiControl => MemoryRouteOverlay::Control,
             Self::IpAdapter | Self::Identity => MemoryRouteOverlay::Identity,
+        }
+    }
+
+    fn from_str(profile: &str) -> Option<Self> {
+        match profile {
+            "plain" => Some(Self::Plain),
+            "lora" => Some(Self::Lora),
+            "lora_pid" => Some(Self::LoraPid),
+            "single_control" => Some(Self::SingleControl),
+            "multi_control" => Some(Self::MultiControl),
+            "ip_adapter" => Some(Self::IpAdapter),
+            "pid" => Some(Self::Pid),
+            "identity" => Some(Self::Identity),
+            _ => None,
         }
     }
 
@@ -326,6 +371,13 @@ const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
     MemoryRouteMode::StyleVariations,
 ];
 const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
+const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::EditImage,
+    MemoryRouteMode::CharacterImage,
+    MemoryRouteMode::StyleVariations,
+];
+const FLUX2_KLEIN_BASE_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage];
 const KOLORS_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::TextToImage,
     MemoryRouteMode::StyleVariations,
@@ -424,6 +476,33 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: ALL_TIERS,
         modes: CHARACTER_ONLY,
         load_profiles: IDENTITY_ONLY,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux2_klein_9b",
+        tiers: ALL_TIERS,
+        modes: FLUX2_KLEIN_BASE_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux2_klein_9b_edit",
+        tiers: ALL_TIERS,
+        modes: FLUX2_KLEIN_EDIT_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux2_klein_9b_kv_edit",
+        tiers: ALL_TIERS,
+        modes: FLUX2_KLEIN_EDIT_MODES,
+        load_profiles: PLAIN_LORA_PID,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -728,42 +807,112 @@ fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> boo
     matching_rules(selector).any(|rule| !rule.requires_sequential_selection || sequential_selected)
 }
 
+fn closed_array_contains<T: Copy + PartialEq>(
+    implementation: &JsonObject<String, Value>,
+    field: &str,
+    expected: T,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<bool, ()> {
+    let values = implementation
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    if values.is_empty() {
+        return Err(());
+    }
+    let parsed = values
+        .iter()
+        .map(|value| value.as_str().and_then(&parse).ok_or(()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(parsed.contains(&expected))
+}
+
+fn closed_source_kind_array_contains(
+    implementation: &JsonObject<String, Value>,
+    expected: &str,
+) -> Result<bool, ()> {
+    let values = implementation
+        .get("sourceKinds")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    if values.is_empty() {
+        return Err(());
+    }
+    let parsed = values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|source| matches!(*source, "dir" | "file"))
+                .ok_or(())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(parsed.contains(&expected))
+}
+
+fn implementation_rung(implementation: &JsonObject<String, Value>) -> Result<&str, ()> {
+    implementation
+        .get("rung")
+        .and_then(Value::as_str)
+        .filter(|rung| {
+            matches!(
+                *rung,
+                "resident"
+                    | "staged_residency"
+                    | "bounded_decode"
+                    | "bounded_attention"
+                    | "bounded_transformer_residency"
+            )
+        })
+        .ok_or(())
+}
+
+fn implementation_runtime_provider<'a>(
+    implementation: &'a JsonObject<String, Value>,
+    contract_provider: &'a str,
+) -> Result<&'a str, ()> {
+    match implementation.get("runtimeProvider") {
+        None => Ok(contract_provider),
+        Some(Value::String(provider)) if !provider.is_empty() => Ok(provider),
+        Some(_) => Err(()),
+    }
+}
+
 fn implementation_declares_selector(
     implementation: &Value,
     contract_provider: &str,
     selector: MemoryRouteSelector,
-) -> bool {
-    implementation
-        .get("runtimeProvider")
-        .and_then(Value::as_str)
-        .unwrap_or(contract_provider)
-        == selector.provider
-        && implementation.get("rung").and_then(Value::as_str)
-            == Some("bounded_transformer_residency")
-        && implementation
-            .get("tiers")
-            .and_then(Value::as_array)
-            .is_some_and(|tiers| {
-                tiers
-                    .iter()
-                    .any(|tier| tier.as_str() == Some(selector.tier.as_str()))
-            })
-        && implementation
-            .get("modes")
-            .and_then(Value::as_array)
-            .is_some_and(|modes| {
-                modes
-                    .iter()
-                    .any(|mode| mode.as_str() == Some(selector.mode.as_str()))
-            })
-        && implementation
-            .get("overlays")
-            .and_then(Value::as_array)
-            .is_some_and(|overlays| {
-                overlays
-                    .iter()
-                    .any(|overlay| overlay.as_str() == Some(selector.overlay.as_str()))
-            })
+) -> Result<bool, ()> {
+    let implementation = implementation.as_object().ok_or(())?;
+    let rung = implementation_rung(implementation)?;
+    let runtime_provider = implementation_runtime_provider(implementation, contract_provider)?;
+    if rung != "bounded_transformer_residency" {
+        return Ok(false);
+    }
+    if runtime_provider != selector.provider {
+        return Ok(false);
+    }
+    // Parse every closed coordinate before combining membership. A same-provider candidate with a
+    // nonmatching tier must not hide a malformed later field behind boolean short-circuiting.
+    let tier_matches = closed_array_contains(
+        implementation,
+        "tiers",
+        selector.tier,
+        MemoryRouteTier::from_str,
+    )?;
+    let mode_matches = closed_array_contains(
+        implementation,
+        "modes",
+        selector.mode,
+        MemoryRouteMode::from_manifest,
+    )?;
+    let overlay_matches = closed_array_contains(
+        implementation,
+        "overlays",
+        selector.overlay,
+        MemoryRouteOverlay::from_str,
+    )?;
+    Ok(tier_matches && mode_matches && overlay_matches)
 }
 
 fn mlx_request_implementation_matches(
@@ -774,9 +923,8 @@ fn mlx_request_implementation_matches(
     context: MemoryRouteRequestContext,
     requires_request_context: bool,
 ) -> Result<bool, ()> {
-    if !implementation_declares_selector(implementation, contract_provider, selector) {
-        return Ok(false);
-    }
+    let selector_matches =
+        implementation_declares_selector(implementation, contract_provider, selector)?;
     let implementation = implementation.as_object().ok_or(())?;
     let Some(request_contexts) = implementation.get("requestContexts") else {
         if requires_request_context {
@@ -784,23 +932,12 @@ fn mlx_request_implementation_matches(
         }
         // Existing declaration-owned routes predate the request-context schema. Their exact
         // provider/tier/mode/overlay/source predicate remains authoritative and unchanged.
-        return Ok(true);
+        return Ok(selector_matches);
     };
-    let runtime_provider = implementation
-        .get("runtimeProvider")
-        .and_then(Value::as_str)
-        .unwrap_or(contract_provider);
+    let runtime_provider = implementation_runtime_provider(implementation, contract_provider)?;
     if runtime_provider != selector.provider {
         return Ok(false);
     }
-    let includes = |field: &str, expected: &str| -> Result<bool, ()> {
-        Ok(implementation
-            .get(field)
-            .and_then(Value::as_array)
-            .ok_or(())?
-            .iter()
-            .any(|value| value.as_str() == Some(expected)))
-    };
     let Some(load_profile) = MemoryRouteLoadProfile::from_spec(spec) else {
         return Ok(false);
     };
@@ -808,9 +945,13 @@ fn mlx_request_implementation_matches(
         WeightsSource::Dir(_) => "dir",
         WeightsSource::File(_) => "file",
     };
-    if !includes("loadProfiles", load_profile.as_str())? || !includes("sourceKinds", source_kind)? {
-        return Ok(false);
-    }
+    let load_profile_matches = closed_array_contains(
+        implementation,
+        "loadProfiles",
+        load_profile,
+        MemoryRouteLoadProfile::from_str,
+    )?;
+    let source_kind_matches = closed_source_kind_array_contains(implementation, source_kind)?;
     let expected_provider_overlay = match load_profile {
         MemoryRouteLoadProfile::Identity | MemoryRouteLoadProfile::IpAdapter => "identity",
         MemoryRouteLoadProfile::SingleControl | MemoryRouteLoadProfile::MultiControl => "control",
@@ -829,8 +970,14 @@ fn mlx_request_implementation_matches(
     let request_contexts = request_contexts.as_array().ok_or(())?;
     let matches = request_contexts
         .iter()
-        .map(|request_context| request_strategy_context_matches(request_context, context))
+        .map(|request_context| {
+            request_strategy_provider_mode_is_exact(request_context, runtime_provider)?;
+            request_strategy_context_matches(request_context, context)
+        })
         .collect::<Result<Vec<_>, _>>()?;
+    if !selector_matches || !load_profile_matches || !source_kind_matches {
+        return Ok(false);
+    }
     let matching = request_contexts
         .iter()
         .zip(matches)
@@ -839,14 +986,27 @@ fn mlx_request_implementation_matches(
     let [matching] = matching.as_slice() else {
         return Ok(false);
     };
-    let expected_provider_mode = match context.mode {
-        MemoryRouteMode::EditImage => "edit_image",
-        MemoryRouteMode::CharacterImage if context.reference_count == 1 => "image_to_image",
-        MemoryRouteMode::TextToImage if context.reference_count == 1 => "image_to_image",
-        MemoryRouteMode::TextToImage => "text_to_image",
-        other => other.as_str(),
-    };
+    let expected_provider_mode = expected_provider_mode(runtime_provider, context);
     Ok(matching.get("providerMode").and_then(Value::as_str) == Some(expected_provider_mode))
+}
+
+fn expected_provider_mode(
+    runtime_provider: &str,
+    context: MemoryRouteRequestContext,
+) -> &'static str {
+    match (runtime_provider, context.mode) {
+        (
+            "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit",
+            MemoryRouteMode::StyleVariations
+            | MemoryRouteMode::EditImage
+            | MemoryRouteMode::CharacterImage,
+        ) if (1..=8).contains(&context.reference_count) => "edit_image",
+        (_, MemoryRouteMode::EditImage) => "edit_image",
+        (_, MemoryRouteMode::CharacterImage) if context.reference_count == 1 => "image_to_image",
+        (_, MemoryRouteMode::TextToImage) if context.reference_count == 1 => "image_to_image",
+        (_, MemoryRouteMode::TextToImage) => "text_to_image",
+        (_, other) => other.as_str(),
+    }
 }
 
 fn manifest_contract(
@@ -870,7 +1030,9 @@ fn request_strategy_implementation_matches(
     context: MemoryRouteRequestContext,
 ) -> Result<bool, ()> {
     let implementation = implementation.as_object().ok_or(())?;
-    if implementation.get("rung").and_then(Value::as_str) != Some("staged_residency") {
+    let rung = implementation_rung(implementation)?;
+    let provider = implementation_runtime_provider(implementation, contract_provider)?;
+    if rung != "staged_residency" {
         return Ok(false);
     }
     // `requestContexts` is the declaration-driven ownership marker. Older staged rows which only
@@ -879,35 +1041,111 @@ fn request_strategy_implementation_matches(
         return Ok(false);
     };
     let request_contexts = request_contexts.as_array().ok_or(())?;
-    let provider = implementation
-        .get("runtimeProvider")
-        .and_then(Value::as_str)
-        .unwrap_or(contract_provider);
     if provider != runtime_provider {
         return Ok(false);
     }
-    let includes = |field: &str, expected: &str| -> Result<bool, ()> {
-        Ok(implementation
-            .get(field)
-            .and_then(Value::as_array)
-            .ok_or(())?
-            .iter()
-            .any(|value| value.as_str() == Some(expected)))
-    };
-    if !includes("tiers", tier.as_str())?
-        || !includes("modes", context.mode.as_str())?
-        || !includes("overlays", load_profile.overlay().as_str())?
-        || !includes("loadProfiles", load_profile.as_str())?
-        || !includes("sourceKinds", source_kind)?
+    let tier_matches =
+        closed_array_contains(implementation, "tiers", tier, MemoryRouteTier::from_str)?;
+    let mode_matches = closed_array_contains(
+        implementation,
+        "modes",
+        context.mode,
+        MemoryRouteMode::from_manifest,
+    )?;
+    let overlay_matches = closed_array_contains(
+        implementation,
+        "overlays",
+        load_profile.overlay(),
+        MemoryRouteOverlay::from_str,
+    )?;
+    let load_profile_matches = closed_array_contains(
+        implementation,
+        "loadProfiles",
+        load_profile,
+        MemoryRouteLoadProfile::from_str,
+    )?;
+    let source_kind_matches = closed_source_kind_array_contains(implementation, source_kind)?;
+    let matches = request_contexts
+        .iter()
+        .map(|request_context| {
+            request_strategy_provider_mode_is_exact(request_context, runtime_provider)?;
+            request_strategy_context_matches(request_context, context)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !(tier_matches
+        && mode_matches
+        && overlay_matches
+        && load_profile_matches
+        && source_kind_matches)
     {
         return Ok(false);
     }
-    for request_context in request_contexts {
-        if request_strategy_context_matches(request_context, context)? {
-            return Ok(true);
-        }
+    let matching = request_contexts
+        .iter()
+        .zip(matches)
+        .filter_map(|(request_context, matched)| matched.then_some(request_context))
+        .collect::<Vec<_>>();
+    let [matching] = matching.as_slice() else {
+        return Ok(false);
+    };
+    Ok(matching.get("providerMode").and_then(Value::as_str)
+        == Some(expected_provider_mode(runtime_provider, context)))
+}
+
+fn request_strategy_provider_mode_is_exact(
+    request_context: &Value,
+    runtime_provider: &str,
+) -> Result<(), ()> {
+    let request_context = request_context.as_object().ok_or(())?;
+    let mode = request_context
+        .get("mode")
+        .and_then(Value::as_str)
+        .and_then(MemoryRouteMode::from_manifest)
+        .ok_or(())?;
+    let provider_mode = request_context
+        .get("providerMode")
+        .and_then(Value::as_str)
+        .ok_or(())?;
+    let reference_counts = request_context
+        .get("referenceCounts")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    if reference_counts.is_empty() {
+        return Err(());
     }
-    Ok(false)
+    let pid = request_context
+        .get("pid")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    if pid.is_empty() {
+        return Err(());
+    }
+    pid.iter()
+        .map(Value::as_bool)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(())?;
+    request_context
+        .get("hasPhases")
+        .and_then(Value::as_bool)
+        .ok_or(())?;
+    reference_counts.iter().try_for_each(|reference_count| {
+        let reference_count = reference_count
+            .as_u64()
+            .and_then(|count| u32::try_from(count).ok())
+            .ok_or(())?;
+        (provider_mode
+            == expected_provider_mode(
+                runtime_provider,
+                MemoryRouteRequestContext {
+                    mode,
+                    reference_count,
+                    use_pid: false,
+                    has_phases: false,
+                },
+            ))
+        .then_some(())
+        .ok_or(())
+    })
 }
 
 fn request_strategy_context_matches(
@@ -933,21 +1171,36 @@ fn request_strategy_context_matches(
         .get("referenceCounts")
         .and_then(Value::as_array)
         .ok_or(())?;
+    if reference_counts.is_empty() {
+        return Err(());
+    }
+    let reference_counts = reference_counts
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|count| u32::try_from(count).ok())
+                .ok_or(())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let pid = request_context
         .get("pid")
         .and_then(Value::as_array)
         .ok_or(())?;
+    if pid.is_empty() {
+        return Err(());
+    }
+    let pid = pid
+        .iter()
+        .map(|value| value.as_bool().ok_or(()))
+        .collect::<Result<Vec<_>, _>>()?;
     let has_phases = request_context
         .get("hasPhases")
         .and_then(Value::as_bool)
         .ok_or(())?;
     Ok(mode == context.mode.as_str()
-        && reference_counts
-            .iter()
-            .any(|value| value.as_u64() == Some(u64::from(context.reference_count)))
-        && pid
-            .iter()
-            .any(|value| value.as_bool() == Some(context.use_pid))
+        && reference_counts.contains(&context.reference_count)
+        && pid.contains(&context.use_pid)
         && has_phases == context.has_phases)
 }
 
@@ -1138,6 +1391,7 @@ fn manifest_declares_selector(
         .is_some_and(|implementations| {
             implementations.iter().any(|implementation| {
                 implementation_declares_selector(implementation, contract_provider, selector)
+                    == Ok(true)
             })
         })
 }
@@ -1156,18 +1410,22 @@ fn manifest_selector_requires_staged_residency(
         .get("implementations")
         .and_then(Value::as_array)
         .ok_or(())?;
-    let mut requirements = implementations
-        .iter()
-        .filter(|implementation| {
-            implementation_declares_selector(implementation, contract_provider, selector)
-        })
-        .map(|implementation| match implementation.get("engagedRungs") {
-            None => Ok(false),
-            Some(Value::Array(rungs)) => Ok(rungs
-                .iter()
-                .any(|rung| rung.as_str() == Some("staged_residency"))),
-            Some(_) => Err(()),
-        });
+    let mut matching = Vec::new();
+    for implementation in implementations {
+        if implementation_declares_selector(implementation, contract_provider, selector)? {
+            matching.push(implementation);
+        }
+    }
+    let mut requirements =
+        matching
+            .into_iter()
+            .map(|implementation| match implementation.get("engagedRungs") {
+                None => Ok(false),
+                Some(Value::Array(rungs)) => Ok(rungs
+                    .iter()
+                    .any(|rung| rung.as_str() == Some("staged_residency"))),
+                Some(_) => Err(()),
+            });
     let required = requirements.next().transpose()?.ok_or(())?;
     requirements.try_fold(required, |expected, next| {
         let next = next?;
@@ -1258,6 +1516,157 @@ pub fn evaluate_declared_mlx_load_shape_for_request(
                 })
         },
     )
+}
+
+/// Bind the load policy required by the exact declaration row which just authorized an MLX
+/// deferred load. This is intentionally manifest-derived: an Applied marker alone is not provider,
+/// tier, mode, or profile authority, and some providers truthfully implement Deferred under a
+/// Resident load policy. A single exact row may request Sequential through its staged-residency
+/// prerequisite; malformed or crossed coordinates atomically become Refused + Eager rather than
+/// being promoted by a provider-id allow-list or a later residency gate. The optional
+/// `requiredOffloadPolicy` field is deliberately separate from `engagedRungs`: request-scoped
+/// staging may be implemented under a Resident load default. When the declaration evaluator had
+/// to prove BTR against a synthetic Sequential candidate, however, the exact BTR row must retain
+/// that policy authority here; removing it is a terminal refusal rather than permission for a later
+/// generic residency gate to rediscover Sequential independently.
+pub fn apply_declared_mlx_load_policy_for_request(
+    provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> LoadSpec {
+    if spec.load_shape_declaration_result != LoadShapeDeclarationResult::Applied {
+        return spec;
+    }
+    let (Some(tier), Some(mode), Some(load_profile)) = (
+        resolved_tier.and_then(MemoryRouteTier::from_resolved_tier),
+        mode,
+        MemoryRouteLoadProfile::from_spec(&spec),
+    ) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    if context.mode != mode
+        || context.use_pid != spec.pid.is_some()
+        || spec.resolved_route.as_deref() != manifest.get("id").and_then(Value::as_str)
+    {
+        return spec.with_refused_load_shape_declaration();
+    }
+    let selector = MemoryRouteSelector {
+        backend: MemoryRouteBackend::Mlx,
+        provider: RULES
+            .iter()
+            .find(|rule| rule.backend == MemoryRouteBackend::Mlx && rule.provider == provider)
+            .map(|rule| rule.provider)
+            .unwrap_or(""),
+        tier,
+        mode,
+        overlay: load_profile.overlay(),
+        load_profile,
+    };
+    let Some(contract) = manifest_contract(manifest, MemoryRouteBackend::Mlx) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let exhaustive = match contract.get("exhaustive") {
+        None => false,
+        Some(Value::Bool(exhaustive)) => *exhaustive,
+        Some(_) => return spec.with_refused_load_shape_declaration(),
+    };
+    let Some(contract_provider) = contract.get("provider").and_then(Value::as_str) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let Some(implementations) = contract.get("implementations").and_then(Value::as_array) else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let requires_request_context = matching_rules(selector).any(|rule| !rule.legacy_shaping);
+    let matches = implementations
+        .iter()
+        .map(|implementation| {
+            mlx_request_implementation_matches(
+                implementation,
+                contract_provider,
+                selector,
+                &spec,
+                context,
+                requires_request_context,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(matches) = matches else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let matching = implementations
+        .iter()
+        .zip(matches)
+        .filter_map(|(implementation, matched)| matched.then_some(implementation))
+        .collect::<Vec<_>>();
+    let [implementation] = matching.as_slice() else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let source_kind = match spec.weights {
+        WeightsSource::Dir(_) => "dir",
+        WeightsSource::File(_) => "file",
+    };
+    let staged_matches = implementations
+        .iter()
+        .map(|candidate| {
+            request_strategy_implementation_matches(
+                candidate,
+                contract_provider,
+                selector.provider,
+                tier,
+                load_profile,
+                source_kind,
+                context,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(staged_matches) = staged_matches else {
+        return spec.with_refused_load_shape_declaration();
+    };
+    let staged = implementations
+        .iter()
+        .zip(staged_matches)
+        .filter_map(|(candidate, matched)| matched.then_some(candidate))
+        .collect::<Vec<_>>();
+    let declared_policy = |implementation: &Value| match implementation.get("requiredOffloadPolicy")
+    {
+        None => Ok(None),
+        Some(Value::String(policy)) if policy == "resident" => Ok(Some(OffloadPolicy::Resident)),
+        Some(Value::String(policy)) if policy == "sequential" => {
+            Ok(Some(OffloadPolicy::Sequential))
+        }
+        Some(_) => Err(()),
+    };
+    let staged_policy = match staged.as_slice() {
+        [] => None,
+        [staged] => match declared_policy(staged) {
+            Ok(Some(policy)) => Some(policy),
+            Ok(None) | Err(()) => return spec.with_refused_load_shape_declaration(),
+        },
+        _ => return spec.with_refused_load_shape_declaration(),
+    };
+    let btr_policy = match declared_policy(implementation) {
+        Ok(policy) => policy,
+        Err(()) => return spec.with_refused_load_shape_declaration(),
+    };
+    let declaration_owned = matching_rules(selector).all(|rule| !rule.legacy_shaping);
+    let predicate_policy = match manifest_selector_requires_staged_residency(manifest, selector) {
+        Ok(true) if declaration_owned => Some(OffloadPolicy::Sequential),
+        Ok(_) => None,
+        Err(()) => return spec.with_refused_load_shape_declaration(),
+    };
+    if btr_policy != predicate_policy
+        || (staged_policy.is_some() && staged_policy != predicate_policy)
+        || (exhaustive && predicate_policy.is_some() && staged_policy != predicate_policy)
+    {
+        return spec.with_refused_load_shape_declaration();
+    }
+    match btr_policy {
+        Some(policy) => spec.with_offload_policy(policy),
+        None => spec,
+    }
 }
 
 #[cfg(test)]
@@ -2658,6 +3067,21 @@ mod tests {
             use_pid: false,
             has_phases: false,
         };
+        let applied = evaluate("krea_2_turbo", MemoryRouteLoadProfile::Plain, plain_context);
+        let policy = apply_declared_mlx_load_policy_for_request(
+            "krea_2_turbo",
+            Some("q4"),
+            Some(plain_context.mode),
+            &manifest,
+            applied,
+            plain_context,
+        );
+        assert_eq!(policy.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            policy.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Applied,
+            "the generic terminal policy binder must preserve the prior Krea declaration path"
+        );
         let route_unbound = evaluate_declared_mlx_load_shape_for_request_with(
             "krea_2_turbo",
             Some("q4"),
@@ -2867,6 +3291,15 @@ mod tests {
             );
             assert_eq!(implementation["sourceKinds"], serde_json::json!(["dir"]));
             assert_eq!(implementation["providerOverlay"], "identity");
+            if matches!(
+                implementation["rung"].as_str(),
+                Some("staged_residency" | "bounded_transformer_residency")
+            ) {
+                assert_eq!(
+                    implementation["requiredOffloadPolicy"], "sequential",
+                    "PuLID's staged and BTR declarations carry exact policy authority"
+                );
+            }
             assert_eq!(
                 implementation["requestContexts"],
                 serde_json::json!([{
@@ -2936,6 +3369,21 @@ mod tests {
             );
             assert_eq!(applied.load_shape, LoadShape::DeferredMaterialization);
             assert_eq!(applied.offload_policy, OffloadPolicy::Resident);
+            let bound = apply_declared_mlx_load_policy_for_request(
+                "pulid_flux",
+                Some(tier.as_str()),
+                Some(MemoryRouteMode::CharacterImage),
+                &manifest,
+                applied,
+                context,
+            );
+            assert_eq!(
+                bound.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied,
+                "PuLID {tier:?} policy binding preserves declaration authority"
+            );
+            assert_eq!(bound.load_shape, LoadShape::DeferredMaterialization);
+            assert_eq!(bound.offload_policy, OffloadPolicy::Sequential);
         }
 
         let evaluate_refused = |candidate: LoadSpec, request_context: MemoryRouteRequestContext| {
@@ -3117,6 +3565,1100 @@ mod tests {
         );
         assert!(manifest["mlx"].get("supportsSequentialOffload").is_none());
         assert!(manifest["candle"].get("memoryStrategyContract").is_none());
+    }
+
+    #[test]
+    fn flux2_klein_aliases_bind_exact_plain_pid_routes_and_refuse_crossed_shapes() {
+        let aliases = [
+            (
+                "flux2_klein_9b",
+                &["bf16", "q4", "q8"][..],
+                "flux2_klein_9b_edit",
+            ),
+            (
+                "flux2_klein_9b_kv",
+                &["bf16", "q4", "q8"][..],
+                "flux2_klein_9b_kv_edit",
+            ),
+            (
+                "flux2_klein_9b_true_v2",
+                &["bf16"][..],
+                "flux2_klein_9b_edit",
+            ),
+        ];
+        let klein_spec = |route: &str, profile: MemoryRouteLoadProfile| {
+            let mut candidate = spec(MemoryRouteTier::Bf16, profile);
+            // Packed artifact tier is explicit at the declaration/planner seam. Production must not
+            // reinterpret it as a load-time transform, including q4/q8.
+            candidate.quantize = None;
+            candidate.with_resolved_route(route)
+        };
+        for (route, tiers, edit_provider) in aliases {
+            let manifest = shipped_model(route);
+            let contract = &manifest["mlx"]["memoryStrategyContract"];
+            assert_eq!(contract["provider"], "flux2_klein_9b");
+            assert_eq!(contract["exhaustive"], true);
+            if route == "flux2_klein_9b_true_v2" {
+                assert_eq!(
+                    manifest["mlx"]["quantize"], 0,
+                    "True-V2's converted transformer is a fixed dense BF16 artifact"
+                );
+            }
+            assert!(manifest["mlx"].get("supportsSequentialOffload").is_none());
+            let implementations = contract["implementations"]
+                .as_array()
+                .expect("Klein implementations");
+            assert_eq!(
+                implementations.len(),
+                10,
+                "all five exact strategy rungs are declared per provider"
+            );
+            for provider in ["flux2_klein_9b", edit_provider] {
+                let rungs = implementations
+                    .iter()
+                    .filter(|implementation| {
+                        implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == provider
+                    })
+                    .map(|implementation| implementation["rung"].as_str().expect("Klein rung"))
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    rungs,
+                    [
+                        "resident",
+                        "staged_residency",
+                        "bounded_decode",
+                        "bounded_attention",
+                        "bounded_transformer_residency",
+                    ]
+                    .into_iter()
+                    .collect(),
+                    "{route}: {provider} must reconcile the complete provider strategy surface"
+                );
+            }
+            for implementation in implementations {
+                assert_eq!(implementation["tiers"], serde_json::json!(tiers));
+                assert_eq!(implementation["sourceKinds"], serde_json::json!(["dir"]));
+                assert_eq!(implementation["providerOverlay"], "none");
+                assert_eq!(implementation["overlays"], serde_json::json!(["none"]));
+                assert_eq!(
+                    implementation["loadProfiles"],
+                    serde_json::json!(["plain", "pid"])
+                );
+                assert!(implementation["requestContexts"]
+                    .as_array()
+                    .is_some_and(|contexts| !contexts.is_empty()));
+                if matches!(
+                    implementation["rung"].as_str(),
+                    Some("staged_residency" | "bounded_transformer_residency")
+                ) {
+                    assert_eq!(implementation["requiredOffloadPolicy"], "sequential");
+                } else {
+                    assert!(implementation.get("requiredOffloadPolicy").is_none());
+                }
+            }
+
+            let provider_accepts = |candidate: &LoadSpec| {
+                candidate.load_shape == LoadShape::DeferredMaterialization
+                    && candidate.offload_policy == OffloadPolicy::Sequential
+                    && candidate.quantize.is_none()
+                    && matches!(candidate.weights, WeightsSource::Dir(_))
+                    && candidate.adapters.is_empty()
+                    && candidate.control.is_none()
+                    && candidate.extra_controls.is_empty()
+                    && candidate.ip_adapter.is_none()
+                    && candidate.identity.is_none()
+                    && candidate.text_encoder.is_none()
+                    && candidate.components.is_empty()
+            };
+            let evaluate = |provider: &str,
+                            tier: &str,
+                            mode: MemoryRouteMode,
+                            _profile: MemoryRouteLoadProfile,
+                            context: MemoryRouteRequestContext,
+                            candidate: LoadSpec| {
+                evaluate_declared_mlx_load_shape_for_request_with(
+                    provider,
+                    Some(tier),
+                    Some(mode),
+                    &manifest,
+                    candidate,
+                    context,
+                    provider_accepts,
+                )
+            };
+            for tier in tiers {
+                for use_pid in [false, true] {
+                    let profile = if use_pid {
+                        MemoryRouteLoadProfile::Pid
+                    } else {
+                        MemoryRouteLoadProfile::Plain
+                    };
+                    for reference_count in [0, 1] {
+                        let context = MemoryRouteRequestContext {
+                            mode: MemoryRouteMode::TextToImage,
+                            reference_count,
+                            use_pid,
+                            has_phases: false,
+                        };
+                        let applied = evaluate(
+                            "flux2_klein_9b",
+                            tier,
+                            context.mode,
+                            profile,
+                            context,
+                            klein_spec(route, profile),
+                        );
+                        assert_eq!(
+                            applied.load_shape_declaration_result,
+                            LoadShapeDeclarationResult::Applied,
+                            "{route} {tier} base refs={reference_count} pid={use_pid}"
+                        );
+                        let policy = apply_declared_mlx_load_policy_for_request(
+                            "flux2_klein_9b",
+                            Some(tier),
+                            Some(context.mode),
+                            &manifest,
+                            applied.clone(),
+                            context,
+                        );
+                        assert_eq!(policy.offload_policy, OffloadPolicy::Sequential);
+                        let crossed_context = MemoryRouteRequestContext {
+                            use_pid: !use_pid,
+                            ..context
+                        };
+                        let crossed_policy = apply_declared_mlx_load_policy_for_request(
+                            "flux2_klein_9b",
+                            Some(tier),
+                            Some(context.mode),
+                            &manifest,
+                            applied.clone(),
+                            crossed_context,
+                        );
+                        assert_eq!(
+                            crossed_policy.load_shape_declaration_result,
+                            LoadShapeDeclarationResult::Refused,
+                            "an unbound Applied marker cannot authorize crossed PiD coordinates"
+                        );
+                        assert_eq!(crossed_policy.load_shape, LoadShape::EagerMaterialization);
+                        let mut missing_policy = manifest.clone();
+                        missing_policy["mlx"]["memoryStrategyContract"]["implementations"]
+                            .as_array_mut()
+                            .expect("implementation rows")
+                            .iter_mut()
+                            .filter(|implementation| {
+                                implementation["rung"] == "bounded_transformer_residency"
+                                    && implementation
+                                        .get("runtimeProvider")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("flux2_klein_9b")
+                                        == "flux2_klein_9b"
+                            })
+                            .for_each(|implementation| {
+                                implementation
+                                    .as_object_mut()
+                                    .expect("implementation object")
+                                    .remove("requiredOffloadPolicy");
+                            });
+                        let missing_policy = apply_declared_mlx_load_policy_for_request(
+                            "flux2_klein_9b",
+                            Some(tier),
+                            Some(context.mode),
+                            &missing_policy,
+                            applied.clone(),
+                            context,
+                        );
+                        assert_eq!(
+                            missing_policy.load_shape_declaration_result,
+                            LoadShapeDeclarationResult::Refused,
+                            "an exact staged policy cannot be stripped from its BTR composition"
+                        );
+                        assert_eq!(missing_policy.load_shape, LoadShape::EagerMaterialization);
+                    }
+                    let image_to_image = MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::ImageToImage,
+                        reference_count: 1,
+                        use_pid,
+                        has_phases: false,
+                    };
+                    let applied = evaluate(
+                        "flux2_klein_9b",
+                        tier,
+                        image_to_image.mode,
+                        profile,
+                        image_to_image,
+                        klein_spec(route, profile),
+                    );
+                    assert_eq!(
+                        applied.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Applied,
+                        "{route} {tier} explicit img2img pid={use_pid}"
+                    );
+                    assert_eq!(
+                        apply_declared_mlx_load_policy_for_request(
+                            "flux2_klein_9b",
+                            Some(tier),
+                            Some(image_to_image.mode),
+                            &manifest,
+                            applied,
+                            image_to_image,
+                        )
+                        .offload_policy,
+                        OffloadPolicy::Sequential
+                    );
+                    for mode in [
+                        MemoryRouteMode::EditImage,
+                        MemoryRouteMode::CharacterImage,
+                        MemoryRouteMode::StyleVariations,
+                    ] {
+                        for reference_count in 1..=8 {
+                            let context = MemoryRouteRequestContext {
+                                mode,
+                                reference_count,
+                                use_pid,
+                                has_phases: false,
+                            };
+                            assert_eq!(
+                                evaluate(
+                                    edit_provider,
+                                    tier,
+                                    mode,
+                                    profile,
+                                    context,
+                                    klein_spec(route, profile),
+                                )
+                                .load_shape_declaration_result,
+                                LoadShapeDeclarationResult::Applied,
+                                "{route} {tier} edit {mode:?} refs={reference_count} pid={use_pid}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            let base_context = MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
+            };
+            let applied_for_policy = evaluate(
+                "flux2_klein_9b",
+                tiers[0],
+                base_context.mode,
+                MemoryRouteLoadProfile::Plain,
+                base_context,
+                klein_spec(route, MemoryRouteLoadProfile::Plain),
+            );
+            let assert_terminal_refusal =
+                |label: &str,
+                 provider: &str,
+                 tier: Option<&str>,
+                 mode: Option<MemoryRouteMode>,
+                 changed_manifest: &JsonObject<String, Value>,
+                 candidate: LoadSpec,
+                 context: MemoryRouteRequestContext| {
+                    let refused = apply_declared_mlx_load_policy_for_request(
+                        provider,
+                        tier,
+                        mode,
+                        changed_manifest,
+                        candidate,
+                        context,
+                    );
+                    assert_eq!(
+                        refused.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Refused,
+                        "{route}: {label}"
+                    );
+                    assert_eq!(
+                        refused.load_shape,
+                        LoadShape::EagerMaterialization,
+                        "{route}: {label} must atomically clear deferred authority"
+                    );
+                    let later = apply_registered_load_shape(
+                        MemoryRouteBackend::Mlx,
+                        provider,
+                        context.mode,
+                        refused.clone(),
+                        true,
+                    );
+                    assert_eq!(
+                        later.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Refused,
+                        "{route}: {label} cannot fall through later shaping"
+                    );
+                    assert_eq!(later.load_shape, LoadShape::EagerMaterialization);
+                    assert_eq!(later.offload_policy, refused.offload_policy);
+                };
+
+            let mut invalid_policy = manifest.clone();
+            let btr = invalid_policy["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .iter_mut()
+                .find(|implementation| {
+                    implementation["rung"] == "bounded_transformer_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == "flux2_klein_9b"
+                })
+                .expect("base BTR row");
+            btr["requiredOffloadPolicy"] = Value::String("invalid".to_owned());
+            assert_terminal_refusal(
+                "invalid required policy",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &invalid_policy,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut stripped_policies = manifest.clone();
+            stripped_policies["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .iter_mut()
+                .filter(|implementation| {
+                    matches!(
+                        implementation["rung"].as_str(),
+                        Some("staged_residency" | "bounded_transformer_residency")
+                    ) && implementation
+                        .get("runtimeProvider")
+                        .and_then(Value::as_str)
+                        .unwrap_or("flux2_klein_9b")
+                        == "flux2_klein_9b"
+                })
+                .for_each(|implementation| {
+                    implementation
+                        .as_object_mut()
+                        .expect("implementation object")
+                        .remove("requiredOffloadPolicy");
+                });
+            assert_terminal_refusal(
+                "all required policies removed",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &stripped_policies,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut stripped_staged_policy = manifest.clone();
+            stripped_staged_policy["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .iter_mut()
+                .find(|implementation| {
+                    implementation["rung"] == "staged_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == "flux2_klein_9b"
+                })
+                .expect("base staged row")
+                .as_object_mut()
+                .expect("staged implementation object")
+                .remove("requiredOffloadPolicy");
+            assert_terminal_refusal(
+                "staged required policy removed",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &stripped_staged_policy,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut missing_staged = manifest.clone();
+            missing_staged["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .retain(|implementation| {
+                    implementation["rung"] != "staged_residency"
+                        || implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            != "flux2_klein_9b"
+                });
+            assert_terminal_refusal(
+                "exact staged row removed",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &missing_staged,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut duplicate_staged_context = manifest.clone();
+            let contexts = duplicate_staged_context["mlx"]["memoryStrategyContract"]
+                ["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .iter_mut()
+                .find(|implementation| {
+                    implementation["rung"] == "staged_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == "flux2_klein_9b"
+                })
+                .expect("base staged row")["requestContexts"]
+                .as_array_mut()
+                .expect("base staged contexts");
+            contexts.push(contexts[0].clone());
+            assert_terminal_refusal(
+                "duplicate exact staged request context",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &duplicate_staged_context,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut malformed_staged_context = manifest.clone();
+            malformed_staged_context["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .iter_mut()
+                .find(|implementation| {
+                    implementation["rung"] == "staged_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == "flux2_klein_9b"
+                })
+                .expect("base staged row")["requestContexts"]
+                .as_array_mut()
+                .expect("base staged contexts")
+                .push(serde_json::json!({ "mode": "text_to_image" }));
+            assert_terminal_refusal(
+                "malformed later staged request context",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &malformed_staged_context,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            for field in ["tiers", "modes", "overlays", "loadProfiles", "sourceKinds"] {
+                let mut malformed_array = manifest.clone();
+                malformed_array["mlx"]["memoryStrategyContract"]["implementations"]
+                    .as_array_mut()
+                    .expect("implementation rows")
+                    .iter_mut()
+                    .find(|implementation| {
+                        implementation["rung"] == "bounded_transformer_residency"
+                            && implementation
+                                .get("runtimeProvider")
+                                .and_then(Value::as_str)
+                                .unwrap_or("flux2_klein_9b")
+                                == "flux2_klein_9b"
+                    })
+                    .expect("base BTR row")[field]
+                    .as_array_mut()
+                    .unwrap_or_else(|| panic!("{field} array"))
+                    .push(Value::String("malformed".to_owned()));
+                assert_terminal_refusal(
+                    &format!("malformed trailing {field} member"),
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    &malformed_array,
+                    applied_for_policy.clone(),
+                    base_context,
+                );
+            }
+
+            for (rung, malformed_field) in [
+                ("bounded_transformer_residency", "sourceKinds"),
+                ("staged_residency", "modes"),
+            ] {
+                let mut nonmatching_duplicate = manifest.clone();
+                let implementations = nonmatching_duplicate["mlx"]["memoryStrategyContract"]
+                    ["implementations"]
+                    .as_array_mut()
+                    .expect("implementation rows");
+                let mut duplicate = implementations
+                    .iter()
+                    .find(|implementation| {
+                        implementation["rung"] == rung
+                            && implementation
+                                .get("runtimeProvider")
+                                .and_then(Value::as_str)
+                                .unwrap_or("flux2_klein_9b")
+                                == "flux2_klein_9b"
+                    })
+                    .unwrap_or_else(|| panic!("base {rung} row"))
+                    .clone();
+                duplicate["tiers"] = serde_json::json!(["nvfp4"]);
+                duplicate[malformed_field]
+                    .as_array_mut()
+                    .unwrap_or_else(|| panic!("{rung} {malformed_field} array"))
+                    .push(Value::String("malformed".to_owned()));
+                implementations.push(duplicate);
+                assert_terminal_refusal(
+                    &format!(
+                        "nonmatching {rung} duplicate cannot hide malformed {malformed_field}"
+                    ),
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    &nonmatching_duplicate,
+                    applied_for_policy.clone(),
+                    base_context,
+                );
+            }
+
+            for rung in ["bounded_transformer_residency", "staged_residency"] {
+                let mut nonmatching_duplicate = manifest.clone();
+                let implementations = nonmatching_duplicate["mlx"]["memoryStrategyContract"]
+                    ["implementations"]
+                    .as_array_mut()
+                    .expect("implementation rows");
+                let mut duplicate = implementations
+                    .iter()
+                    .find(|implementation| {
+                        implementation["rung"] == rung
+                            && implementation
+                                .get("runtimeProvider")
+                                .and_then(Value::as_str)
+                                .unwrap_or("flux2_klein_9b")
+                                == "flux2_klein_9b"
+                    })
+                    .unwrap_or_else(|| panic!("base {rung} row"))
+                    .clone();
+                duplicate["tiers"] = serde_json::json!(["nvfp4"]);
+                duplicate["requestContexts"]
+                    .as_array_mut()
+                    .unwrap_or_else(|| panic!("{rung} request contexts"))
+                    .push(serde_json::json!({ "mode": "text_to_image" }));
+                implementations.push(duplicate);
+                assert_terminal_refusal(
+                    &format!(
+                        "nonmatching {rung} duplicate cannot hide a malformed request context"
+                    ),
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    &nonmatching_duplicate,
+                    applied_for_policy.clone(),
+                    base_context,
+                );
+            }
+
+            for (rung, field) in [
+                ("bounded_transformer_residency", "pid"),
+                ("staged_residency", "pid"),
+                ("bounded_transformer_residency", "referenceCounts"),
+            ] {
+                let mut malformed_context_axis = manifest.clone();
+                malformed_context_axis["mlx"]["memoryStrategyContract"]["implementations"]
+                    .as_array_mut()
+                    .expect("implementation rows")
+                    .iter_mut()
+                    .find(|implementation| {
+                        implementation["rung"] == rung
+                            && implementation
+                                .get("runtimeProvider")
+                                .and_then(Value::as_str)
+                                .unwrap_or("flux2_klein_9b")
+                                == "flux2_klein_9b"
+                    })
+                    .unwrap_or_else(|| panic!("base {rung} row"))["requestContexts"][0][field]
+                    .as_array_mut()
+                    .unwrap_or_else(|| panic!("{rung} {field} array"))
+                    .push(Value::String("malformed".to_owned()));
+                assert_terminal_refusal(
+                    &format!("malformed trailing {rung} {field} member"),
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    &malformed_context_axis,
+                    applied_for_policy.clone(),
+                    base_context,
+                );
+            }
+
+            for rung in ["bounded_transformer_residency", "staged_residency"] {
+                let mut malformed_later_pid = manifest.clone();
+                malformed_later_pid["mlx"]["memoryStrategyContract"]["implementations"]
+                    .as_array_mut()
+                    .expect("implementation rows")
+                    .iter_mut()
+                    .find(|implementation| {
+                        implementation["rung"] == rung
+                            && implementation
+                                .get("runtimeProvider")
+                                .and_then(Value::as_str)
+                                .unwrap_or("flux2_klein_9b")
+                                == "flux2_klein_9b"
+                    })
+                    .unwrap_or_else(|| panic!("base {rung} row"))["requestContexts"]
+                    .as_array_mut()
+                    .expect("request contexts")
+                    .push(serde_json::json!({
+                        "mode": "image_to_image",
+                        "providerMode": "image_to_image",
+                        "referenceCounts": [1],
+                        "pid": ["malformed"],
+                        "hasPhases": false
+                    }));
+                assert_terminal_refusal(
+                    &format!("malformed later {rung} pid context"),
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    &malformed_later_pid,
+                    applied_for_policy.clone(),
+                    base_context,
+                );
+            }
+
+            let mut crossed_staged_provider_mode = manifest.clone();
+            crossed_staged_provider_mode["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows")
+                .iter_mut()
+                .find(|implementation| {
+                    implementation["rung"] == "staged_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == "flux2_klein_9b"
+                })
+                .expect("base staged row")["requestContexts"][0]["providerMode"] =
+                Value::String("edit_image".to_owned());
+            assert_terminal_refusal(
+                "crossed staged provider mode",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &crossed_staged_provider_mode,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut duplicate = manifest.clone();
+            let implementations = duplicate["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .expect("implementation rows");
+            let duplicated = implementations
+                .iter()
+                .find(|implementation| {
+                    implementation["rung"] == "bounded_transformer_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == "flux2_klein_9b"
+                })
+                .expect("base BTR row")
+                .clone();
+            implementations.push(duplicated);
+            assert_terminal_refusal(
+                "ambiguous duplicate policy row",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &duplicate,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut malformed_duplicate = manifest.clone();
+            let implementations = malformed_duplicate["mlx"]["memoryStrategyContract"]
+                ["implementations"]
+                .as_array_mut()
+                .expect("implementation rows");
+            let mut malformed = implementations
+                .iter()
+                .find(|implementation| {
+                    implementation["rung"] == "bounded_transformer_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == "flux2_klein_9b"
+                })
+                .expect("base BTR row")
+                .clone();
+            malformed["requestContexts"] = Value::String("malformed".to_owned());
+            implementations.push(malformed);
+            assert_terminal_refusal(
+                "malformed duplicate policy row",
+                "flux2_klein_9b",
+                Some(tiers[0]),
+                Some(base_context.mode),
+                &malformed_duplicate,
+                applied_for_policy.clone(),
+                base_context,
+            );
+
+            let mut crossed_profile = applied_for_policy.clone();
+            crossed_profile.adapters.push(gen_core::AdapterSpec::new(
+                "adapter.safetensors".into(),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            ));
+            let mut crossed_source = applied_for_policy.clone();
+            crossed_source.weights = WeightsSource::File("klein.safetensors".into());
+            let mut crossed_route = applied_for_policy.clone();
+            crossed_route.resolved_route = Some("crossed-route".to_owned());
+            for (label, provider, tier, mode, candidate, context) in [
+                (
+                    "provider",
+                    "flux2_klein_9b_edit",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    applied_for_policy.clone(),
+                    base_context,
+                ),
+                (
+                    "tier",
+                    "flux2_klein_9b",
+                    Some("nvfp4"),
+                    Some(base_context.mode),
+                    applied_for_policy.clone(),
+                    base_context,
+                ),
+                (
+                    "mode",
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(MemoryRouteMode::ImageToImage),
+                    applied_for_policy.clone(),
+                    base_context,
+                ),
+                (
+                    "profile",
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    crossed_profile,
+                    base_context,
+                ),
+                (
+                    "source",
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    crossed_source,
+                    base_context,
+                ),
+                (
+                    "route",
+                    "flux2_klein_9b",
+                    Some(tiers[0]),
+                    Some(base_context.mode),
+                    crossed_route,
+                    base_context,
+                ),
+            ] {
+                assert_terminal_refusal(
+                    &format!("crossed {label}"),
+                    provider,
+                    tier,
+                    mode,
+                    &manifest,
+                    candidate,
+                    context,
+                );
+            }
+            for crossed in [
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::ImageToImage,
+                    reference_count: 0,
+                    ..base_context
+                },
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::ImageToImage,
+                    reference_count: 2,
+                    ..base_context
+                },
+            ] {
+                assert_eq!(
+                    evaluate(
+                        "flux2_klein_9b",
+                        tiers[0],
+                        crossed.mode,
+                        MemoryRouteLoadProfile::Plain,
+                        crossed,
+                        klein_spec(route, MemoryRouteLoadProfile::Plain),
+                    )
+                    .load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "{route}: explicit img2img must bind exactly one reference"
+                );
+            }
+            let lokr = LoadSpec::new(WeightsSource::Dir("fixture".into()))
+                .with_resolved_route(route)
+                .with_adapters(vec![gen_core::AdapterSpec::new(
+                    "adapter.safetensors".into(),
+                    1.0,
+                    gen_core::AdapterKind::Lokr,
+                )]);
+            for (label, candidate, context) in [
+                (
+                    "LoRA",
+                    klein_spec(route, MemoryRouteLoadProfile::Lora),
+                    base_context,
+                ),
+                ("LoKr", lokr, base_context),
+                (
+                    "low-rank plus PiD",
+                    klein_spec(route, MemoryRouteLoadProfile::LoraPid),
+                    MemoryRouteRequestContext {
+                        use_pid: true,
+                        ..base_context
+                    },
+                ),
+                (
+                    "crossed PiD",
+                    klein_spec(route, MemoryRouteLoadProfile::Plain),
+                    MemoryRouteRequestContext {
+                        use_pid: true,
+                        ..base_context
+                    },
+                ),
+                (
+                    "multi-phase",
+                    klein_spec(route, MemoryRouteLoadProfile::Plain),
+                    MemoryRouteRequestContext {
+                        has_phases: true,
+                        ..base_context
+                    },
+                ),
+                (
+                    "base reference overflow",
+                    klein_spec(route, MemoryRouteLoadProfile::Plain),
+                    MemoryRouteRequestContext {
+                        reference_count: 2,
+                        ..base_context
+                    },
+                ),
+            ] {
+                let refused = evaluate(
+                    "flux2_klein_9b",
+                    tiers[0],
+                    base_context.mode,
+                    MemoryRouteLoadProfile::from_spec(&candidate).expect("profile"),
+                    context,
+                    candidate,
+                );
+                assert_eq!(
+                    refused.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "{route}: {label}"
+                );
+                assert_eq!(refused.load_shape, LoadShape::EagerMaterialization);
+            }
+            let mut file = klein_spec(route, MemoryRouteLoadProfile::Plain);
+            file.weights = WeightsSource::File("klein.safetensors".into());
+            assert_eq!(
+                evaluate(
+                    "flux2_klein_9b",
+                    tiers[0],
+                    base_context.mode,
+                    MemoryRouteLoadProfile::Plain,
+                    base_context,
+                    file,
+                )
+                .load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+            let load_time_quant =
+                klein_spec(route, MemoryRouteLoadProfile::Plain).with_quant(Quant::Q4);
+            assert_eq!(
+                evaluate(
+                    "flux2_klein_9b",
+                    tiers[0],
+                    base_context.mode,
+                    MemoryRouteLoadProfile::Plain,
+                    base_context,
+                    load_time_quant,
+                )
+                .load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "the provider predicate refuses load-time quantization even when the artifact tier is packed"
+            );
+
+            let crossed_shapes = [
+                (
+                    "external text encoder",
+                    klein_spec(route, MemoryRouteLoadProfile::Plain)
+                        .with_text_encoder(WeightsSource::Dir("external-te".into())),
+                ),
+                (
+                    "low-rank plus external text encoder",
+                    klein_spec(route, MemoryRouteLoadProfile::Lora)
+                        .with_text_encoder(WeightsSource::Dir("external-te".into())),
+                ),
+                (
+                    "control",
+                    klein_spec(route, MemoryRouteLoadProfile::Plain)
+                        .with_control(WeightsSource::File("control.safetensors".into())),
+                ),
+                (
+                    "multiple controls",
+                    klein_spec(route, MemoryRouteLoadProfile::MultiControl),
+                ),
+                (
+                    "IP adapter",
+                    klein_spec(route, MemoryRouteLoadProfile::Plain)
+                        .with_ip_adapter(WeightsSource::Dir("ip-adapter".into())),
+                ),
+                (
+                    "identity",
+                    klein_spec(route, MemoryRouteLoadProfile::Identity),
+                ),
+                (
+                    "unknown component",
+                    klein_spec(route, MemoryRouteLoadProfile::Plain).with_component(
+                        "unknown",
+                        WeightsSource::File("unknown.safetensors".into()),
+                    ),
+                ),
+            ];
+            for (label, candidate) in crossed_shapes {
+                assert_eq!(
+                    evaluate(
+                        "flux2_klein_9b",
+                        tiers[0],
+                        base_context.mode,
+                        MemoryRouteLoadProfile::from_spec(&candidate).expect("profile"),
+                        base_context,
+                        candidate,
+                    )
+                    .load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "{route}: {label}"
+                );
+            }
+
+            let mut unbound = klein_spec(route, MemoryRouteLoadProfile::Plain);
+            unbound.resolved_route = None;
+            assert_eq!(
+                evaluate(
+                    "flux2_klein_9b",
+                    tiers[0],
+                    base_context.mode,
+                    MemoryRouteLoadProfile::Plain,
+                    base_context,
+                    unbound,
+                )
+                .load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "request-context-owned declarations require the exact public route"
+            );
+            assert_eq!(
+                evaluate(
+                    "flux2_klein_9b",
+                    if tiers[0] == "q8" { "q4" } else { "nvfp4" },
+                    base_context.mode,
+                    MemoryRouteLoadProfile::Plain,
+                    base_context,
+                    klein_spec(route, MemoryRouteLoadProfile::Plain),
+                )
+                .load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "an undeclared resolved artifact tier cannot be reconstructed from LoadSpec"
+            );
+
+            for invalid_references in [0, 9] {
+                let context = MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    reference_count: invalid_references,
+                    use_pid: false,
+                    has_phases: false,
+                };
+                assert_eq!(
+                    evaluate(
+                        edit_provider,
+                        tiers[0],
+                        context.mode,
+                        MemoryRouteLoadProfile::Plain,
+                        context,
+                        klein_spec(route, MemoryRouteLoadProfile::Plain),
+                    )
+                    .load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "{route}: edit refs={invalid_references}"
+                );
+            }
+
+            let mut missing_context = manifest.clone();
+            let contract = missing_context["mlx"]["memoryStrategyContract"]
+                .as_object_mut()
+                .expect("MLX contract");
+            let implementations = contract["implementations"]
+                .as_array_mut()
+                .expect("implementation rows");
+            let exact_btr = implementations
+                .iter_mut()
+                .find(|implementation| {
+                    implementation["rung"] == "bounded_transformer_residency"
+                        && implementation
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("flux2_klein_9b")
+                            == edit_provider
+                })
+                .expect("exact edit BTR row");
+            exact_btr
+                .as_object_mut()
+                .expect("BTR object")
+                .remove("requestContexts");
+            let invalid_context = MemoryRouteRequestContext {
+                mode: MemoryRouteMode::EditImage,
+                reference_count: 1,
+                use_pid: false,
+                has_phases: false,
+            };
+            let refused = evaluate_declared_mlx_load_shape_for_request_with(
+                edit_provider,
+                Some(tiers[0]),
+                Some(invalid_context.mode),
+                &missing_context,
+                klein_spec(route, MemoryRouteLoadProfile::Plain),
+                invalid_context,
+                |_| panic!("missing request authority cannot call the provider"),
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+
+        assert_eq!(
+            MemoryRouteMode::from_mlx_request("flux2_klein_9b", "reference"),
+            Some(MemoryRouteMode::ImageToImage),
+            "the legacy public reference spelling is a route-local image-to-image alias"
+        );
+        assert_eq!(
+            MemoryRouteMode::from_mlx_request("flux2_klein_9b", "image_to_image"),
+            Some(MemoryRouteMode::ImageToImage)
+        );
+        assert_eq!(
+            MemoryRouteMode::from_mlx_request("flux2_dev", "reference"),
+            None,
+            "unrelated providers cannot inherit the Klein compatibility alias"
+        );
     }
 
     #[test]

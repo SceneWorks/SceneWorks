@@ -1699,6 +1699,75 @@ mod tests {
     }
 
     #[test]
+    fn flux2_klein_cache_identity_binds_alias_packed_tier_edit_provider_pid_and_adapter() {
+        let root = tempfile::tempdir().expect("Klein cache fixture");
+        let tier = |route: &str, name: &str| {
+            let path = root.path().join(route).join(name);
+            std::fs::create_dir_all(&path).expect("tier dir");
+            path
+        };
+        let base_q4 = LoadSpec::new(WeightsSource::Dir(tier("base", "q4")))
+            .with_resolved_route("flux2_klein_9b");
+        let base_q8 = LoadSpec::new(WeightsSource::Dir(tier("base", "q8")))
+            .with_resolved_route("flux2_klein_9b");
+        let kv_q4 = LoadSpec::new(WeightsSource::Dir(tier("kv", "q4")))
+            .with_resolved_route("flux2_klein_9b_kv");
+        let true_v2 = LoadSpec::new(WeightsSource::Dir(tier("true-v2", "bf16")))
+            .with_resolved_route("flux2_klein_9b_true_v2");
+        for spec in [&base_q4, &base_q8, &kv_q4, &true_v2] {
+            assert_eq!(
+                spec.quantize, None,
+                "packed artifact tier is a path/route identity, never load-time quantization"
+            );
+        }
+        let identities = [&base_q4, &base_q8, &kv_q4, &true_v2]
+            .map(|spec| LoadIdentity::from_load_spec("flux2_klein_9b", spec));
+        for left in 0..identities.len() {
+            for right in left + 1..identities.len() {
+                assert_ne!(identities[left], identities[right]);
+            }
+        }
+
+        let edit = LoadIdentity::from_load_spec("flux2_klein_9b_edit", &base_q4);
+        let kv_edit = LoadIdentity::from_load_spec("flux2_klein_9b_kv_edit", &kv_q4);
+        assert_ne!(
+            edit, kv_edit,
+            "ordinary and KV edit providers cannot share a cache entry"
+        );
+
+        let pid_checkpoint = root.path().join("pid.safetensors");
+        let adapter = root.path().join("style.safetensors");
+        std::fs::write(&pid_checkpoint, b"pid").expect("PiD fixture");
+        std::fs::write(&adapter, b"adapter").expect("adapter fixture");
+        let with_pid = base_q4.clone().with_pid(
+            WeightsSource::File(pid_checkpoint),
+            WeightsSource::Dir(tier("pid", "gemma")),
+        );
+        let with_adapter = base_q4.clone().with_adapters(vec![AdapterSpec::new(
+            adapter.clone(),
+            0.8,
+            AdapterKind::Lora,
+        )]);
+        let with_lokr =
+            base_q4
+                .clone()
+                .with_adapters(vec![AdapterSpec::new(adapter, 0.8, AdapterKind::Lokr)]);
+        assert_ne!(
+            LoadIdentity::from_load_spec("flux2_klein_9b", &base_q4),
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_pid)
+        );
+        assert_ne!(
+            LoadIdentity::from_load_spec("flux2_klein_9b", &base_q4),
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_adapter)
+        );
+        assert_ne!(
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_adapter),
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_lokr),
+            "LoRA and LoKr remain distinct executable eager cache compositions"
+        );
+    }
+
+    #[test]
     fn cache_key_includes_control_and_ip_components() {
         let mut control = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
         control.control = Some(WeightsSource::File(PathBuf::from(
