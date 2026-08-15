@@ -3522,6 +3522,109 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
 }
 
 #[tokio::test]
+async fn deleting_a_model_keeps_a_sibling_that_names_the_identical_primary_files() {
+    // sc-19573 review — the flux_dev ↔ pulid_flux_dev shape, and the regression guard on the
+    // co-requisite subtraction added for MiniMax-H3.
+    //
+    // Six catalog groups pair TWO entries on ONE repo with the IDENTICAL primary `files`:
+    // flux_dev/pulid_flux_dev, z_image_turbo/z_image_edit, bernini/bernini_image,
+    // realvisxl/instantid_realvisxl, qwen_image_edit_2511/_lightning, ideogram_4/ideogram_4_turbo
+    // (plus the anima_* trio, which shares a text encoder and VAE the same way). Both entries in a
+    // pair are `coRequisite: false` PRIMARIES — they really do load the same checkpoint.
+    //
+    // Subtracting the deleted entry's own scopes from the UNION of the sibling's scopes empties the
+    // retained set for every one of them, and `remove_tier_artifacts`'s `selected && !retained` then
+    // unlinks the snapshot entries AND the blobs with `permanent=true`. That is the sc-19078 data
+    // loss, re-introduced: `DELETE /models/flux_dev` destroying an installed `pulid_flux_dev`.
+    //
+    // The subtraction must therefore apply to the sibling's CO-REQUISITE scopes only. This test
+    // fails — every `q4/*` assertion below goes red, the files having been unlinked — against a
+    // `sibling_files.retain(|file| !own_files.contains(file))` over the whole sibling set.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // Verbatim from the shipped `builtin.models.jsonc`: identical `files` on both entries, no
+    // co-requisite rows anywhere. NOTHING here may be subtracted.
+    let tiers = r#"[
+        { "provider": "huggingface", "repo": "SceneWorks/flux1-dev-mlx", "variant": "q4", "default": true, "files": ["q4/*"] },
+        { "provider": "huggingface", "repo": "SceneWorks/flux1-dev-mlx", "variant": "q8", "files": ["q8/*"] },
+        { "provider": "huggingface", "repo": "SceneWorks/flux1-dev-mlx", "variant": "bf16", "files": ["bf16/*"] }
+    ]"#;
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{
+              "schemaVersion": 1,
+              "models": [
+                {{ "id": "flux_dev", "name": "FLUX.1 dev", "type": "image", "family": "flux", "downloads": {tiers} }},
+                {{ "id": "pulid_flux_dev", "name": "PuLID FLUX.1 dev", "type": "image", "family": "flux", "downloads": {tiers} }}
+              ]
+            }}"#
+        ),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot =
+        data_dir.join("cache/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/a1b2c3d4");
+    // One installed tier, shared by both entries — the single copy on disk that BOTH rows name.
+    let q4 = snapshot.join("q4");
+    std::fs::create_dir_all(&q4).expect("tier dir creates");
+    std::fs::write(q4.join("config.json"), "{}").expect("config writes");
+    std::fs::write(q4.join("flux1-dev.safetensors"), b"weights").expect("weights write");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/flux_dev?permanent=true",
+        Value::Null,
+    )
+    .await;
+
+    // 🔴 THE GUARD. `pulid_flux_dev` names `q4/*` as its OWN primary download. Those bytes ARE the
+    // sibling's install — one copy on disk, claimed by both rows — and a delete of the other entry
+    // must not touch them. Asserted before the status so a regression reports the data loss, not the
+    // status code.
+    assert!(
+        q4.join("flux1-dev.safetensors").is_file(),
+        "the sibling's weights must survive `DELETE /models/flux_dev`: {deleted}"
+    );
+    assert!(
+        q4.join("config.json").is_file(),
+        "the sibling's config must survive too: {deleted}"
+    );
+
+    // Nothing is exclusively `flux_dev`'s, so the delete honestly reclaims nothing and the existing
+    // built-in gate refuses rather than destroying a shared install. Asserted by MESSAGE, not a bare
+    // status: this is the only 400 the handler can return on this path.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "delete body: {deleted}");
+    assert_eq!(
+        deleted["detail"],
+        "Built-in model catalog entries are read-only unless local files are installed",
+        "delete body: {deleted}"
+    );
+
+    // …and the catalog still reports the sibling installed, because it genuinely is.
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let sibling = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "pulid_flux_dev")
+        .expect("pulid_flux_dev present")
+        .clone();
+    assert_eq!(
+        sibling["installState"], "installed",
+        "the sibling is untouched and must still read installed: {sibling}"
+    );
+}
+
+#[tokio::test]
 async fn quant_matrix_empty_cache_skeleton_reads_missing_not_incomplete() {
     // sc-9909: a tier that isn't published upstream resolves ZERO files, leaving an empty HF cache
     // skeleton (bare blobs/, no snapshots) PLUS a stale repo-level completion marker. That must read
