@@ -594,9 +594,15 @@ pub(crate) async fn create_video_job(
     // three gates around it bound how long the clip is and how much conditioning media it carries,
     // never how it is SAMPLED — so a MiniMax-H3 request at exactly its 5.1667s floor and its one
     // advertised 24 fps, with no references at all, clears every one of them carrying
-    // `advanced.steps = 1`, and then fails in the scheduler, which needs at least two sigma grid
-    // points to have a single model evaluation between them. Until this key existed the constraint
-    // could only be written as a manifest comment, and a comment enforces nothing.
+    // `advanced.steps = 1` — a single Euler jump from pure noise, which is not a fast draft. Until
+    // this key existed the constraint could only be written as a manifest comment, and a comment
+    // enforces nothing.
+    //
+    // The unit is MODEL EVALUATIONS everywhere on this seam — `advanced.steps`, `defaults.steps`,
+    // `limits.hardMinSteps`, `limits.steps`, and each turbo adapter's declared `sampling.steps`. The
+    // MiniMax-H3 engine appends its own terminal sigma grid point (`evaluations + 1`), so no ±1 is
+    // applied on this side of the boundary (sc-18726). A gate that read grid points while the worker
+    // passed evaluations would be off by one on every model in the family.
     //
     // Rejected, never clamped, for the duration cap's reason: raising the step count for the caller
     // doubles the compute they asked for with no error and no signal.

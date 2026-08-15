@@ -118,6 +118,35 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel(sdxlLora, { ...sdxlModel, loraCompatibility: { families: ["sdxl"], supported: true } })).toBe(true);
   });
 
+  it("gates a LoRA to the partitions it DECLARES, within one family (sc-19563)", () => {
+    // MiniMax-H3 publishes `minimax_h3` (t2va/fl2va) and `minimax_h3_ref` (ref2va) as ONE DiT
+    // architecture with ONE geometry, so both declare `family: minimax-h3` and the family test
+    // above passes BOTH WAYS. lightx2v distils the fl2v and ref2v turbo adapters for one partition
+    // each; cross-selecting folds cleanly at the wrong quality, and the API now 400s on it — so
+    // without this the picker keeps offering a dead-end selection.
+    const h3 = { id: "minimax_h3", family: "minimax-h3", loraCompatibility: { families: ["minimax-h3"] } };
+    const h3Ref = { id: "minimax_h3_ref", family: "minimax-h3", loraCompatibility: { families: ["minimax-h3"] } };
+    const fl2v = { id: "minimax_h3_turbo_8step", family: "minimax-h3", modelIds: ["minimax_h3"] };
+    const ref2v = { id: "minimax_h3_ref2v_turbo_4step", family: "minimax-h3", modelIds: ["minimax_h3_ref"] };
+
+    // Each on its OWN partition — the controls, without which a gate that hid everything passes.
+    expect(loraMatchesModel(fl2v, h3)).toBe(true);
+    expect(loraMatchesModel(ref2v, h3Ref)).toBe(true);
+    // ...and each cross-selected.
+    expect(loraMatchesModel(fl2v, h3Ref)).toBe(false);
+    expect(loraMatchesModel(ref2v, h3)).toBe(false);
+
+    // A LoRA declaring NO modelIds is untouched — the key is optional, so no existing entry is
+    // tightened. This is the arm that proves the gate is not "hide every minimax-h3 LoRA".
+    const undeclared = { id: "legacy_h3_style", family: "minimax-h3" };
+    expect(loraMatchesModel(undeclared, h3)).toBe(true);
+    expect(loraMatchesModel(undeclared, h3Ref)).toBe(true);
+
+    // Multiple declared partitions, and the snake_case alias an inline spec may carry.
+    expect(loraMatchesModel({ ...fl2v, modelIds: ["minimax_h3", "minimax_h3_ref"] }, h3Ref)).toBe(true);
+    expect(loraMatchesModel({ id: "l", family: "minimax-h3", model_ids: ["minimax_h3_ref"] }, h3)).toBe(false);
+  });
+
   it("normalizes separators/underscores on both sides before comparing", () => {
     expect(loraMatchesModel({ id: "l", family: "Z_Image" }, { id: "z", loraCompatibility: { families: ["z-image"] } })).toBe(true);
   });

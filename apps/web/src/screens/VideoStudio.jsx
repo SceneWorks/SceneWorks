@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField, ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
@@ -69,6 +69,13 @@ import {
   videoModelServesMode,
   videoModelUsable,
 } from "../modelEligibility.js";
+import {
+  defaultTurboVariant,
+  modelIsMinimaxH3,
+  selectedTurboVariant,
+  turboRecipeSummary,
+  turboVariantsForModel,
+} from "../minimaxH3Turbo.js";
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -349,6 +356,19 @@ export function VideoStudio() {
   // native multi-step CFG default). Only the two A14B engines honor it (see showLightning),
   // so the dense 5B and non-Wan models never see the control. Persisted per-workspace.
   const [lightning, setLightning] = useState(saved.lightning ?? true);
+  // Which MiniMax-H3 models have already had the default-on turbo variant applied (sc-18727).
+  //
+  // Turbo IS a LoRA selection — the control and the generic LoRA picker write the same
+  // `selectedLoraIds`, which is the only way the two entry points can't disagree (sc-18727's "route
+  // both through one resolver"). That makes "default on" a ONE-SHOT seed rather than a default
+  // value: without this marker, re-selecting the default every time the studio saw an empty
+  // selection would silently undo a deliberate "Off", and undo it identically whether the user
+  // turned it off in the turbo control or deselected the adapter in the picker.
+  //
+  // Persisted in the studio snapshot (mirrored to server ui-preferences, so it survives a desktop
+  // relaunch — a localStorage-only marker would re-seed on every launch and re-defeat "Off").
+  // Per-model because the two partitions take different adapters.
+  const [turboSeededModels, setTurboSeededModels] = useState(saved.turboSeededModels ?? []);
   // LTX-2.3 native guidance knobs (epic 1753 sc-1769). The native ltx-core
   // path has no diffusers scheduler to swap — these three values (cfg + STG +
   // rescale) drive its sealed MultiModalGuiderParams instead.
@@ -563,6 +583,59 @@ export function VideoStudio() {
     initialLoraWeights: saved.loraWeights ?? {},
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
+  // ── MiniMax-H3 turbo (sc-18726 / sc-18727) ────────────────────────────────────────────────
+  //
+  // Every value below is derived from the LoRA catalog and the live selection; there is no separate
+  // turbo state to keep in sync. `turboVariants` is already narrowed to installed + compatible by
+  // `compatibleLoras`, so the control can only ever offer an adapter that would actually enqueue.
+  const turboVariants = useMemo(
+    () => turboVariantsForModel(selectedModel, compatibleLoras),
+    [selectedModel, compatibleLoras],
+  );
+  const activeTurboVariant = selectedTurboVariant(turboVariants, selectedLoraIds);
+  // Shown whenever the model is MiniMax-H3, even with nothing installed: an absent control would
+  // answer "why is this render two and a half hours?" with silence. With no variant installed the
+  // control renders the reason and the Model Manager pointer instead of an empty menu.
+  const showTurbo = modelIsMinimaxH3(selectedModel);
+  // Default-on seed. Runs once per model (see `turboSeededModels`) and only once the LoRA catalog
+  // has actually resolved — seeding against an empty `turboVariants` during the restart-restore
+  // window would mark the model seeded and leave turbo permanently off, the same sc-11962 trap the
+  // preset/LoRA prunes above guard.
+  useEffect(() => {
+    if (!showTurbo || !turboVariants.length) return;
+    if (turboSeededModels.includes(model)) return;
+    setTurboSeededModels((seeded) => (seeded.includes(model) ? seeded : [...seeded, model]));
+    // A variant already selected — a replayed recipe, a restored snapshot, a preset — is the
+    // caller's choice and the seed must not stack a SECOND accelerator on top of it. Two adapters
+    // asking for different schedules is refused by the worker, so seeding blind here would turn
+    // "replay this render" into a hard enqueue failure.
+    if (selectedTurboVariant(turboVariants, selectedLoraIds)) return;
+    const preferred = defaultTurboVariant(selectedModel, turboVariants);
+    if (!preferred) return;
+    setSelectedLoraIds((ids) => (ids.includes(preferred.id) ? ids : [...ids, preferred.id]));
+  }, [
+    showTurbo,
+    turboVariants,
+    turboSeededModels,
+    model,
+    selectedModel,
+    selectedLoraIds,
+    setSelectedLoraIds,
+  ]);
+  // Selecting a variant REPLACES any other turbo adapter rather than stacking: two accelerators ask
+  // for two different schedules and the worker refuses the pair by name
+  // (`resolve_turbo_recipe`), so letting the control build that payload would offer a selection that
+  // can only fail. Plain (non-accelerator) LoRAs are untouched — a style LoRA rides alongside turbo.
+  const selectTurboVariant = useCallback(
+    (id) => {
+      const turboIds = new Set(turboVariants.map((variant) => variant.id));
+      setSelectedLoraIds((ids) => {
+        const withoutTurbo = ids.filter((existing) => !turboIds.has(existing));
+        return id ? [...withoutTurbo, id] : withoutTurbo;
+      });
+    },
+    [turboVariants, setSelectedLoraIds],
+  );
   // Sampler / scheduler menus declared by the model. Video Wan torch
   // declares the full menu; sealed paths (LTX native, MLX) drop to
   // default-only and the picker hides. Gated to the ACTIVE backend (epic 7114 P5):
@@ -1091,6 +1164,10 @@ export function VideoStudio() {
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
     lightning,
+    // The MiniMax-H3 turbo default-on one-shot marker (sc-18727). The SELECTION itself already
+    // persists through `selectedLoraIds`; this records only that the seed has fired, so a
+    // deliberate "Off" is not re-seeded on the next mount or the next relaunch.
+    turboSeededModels,
     videoCfgGuidanceScale: ltxVideoCfg,
     videoStgGuidanceScale: ltxVideoStg,
     videoRescaleScale: ltxVideoRescale,
@@ -2109,6 +2186,39 @@ export function VideoStudio() {
                   </p>
                 </div>
               ) : null}
+              {/* MiniMax-H3 turbo (sc-18727). A VARIANT selector, not a toggle: the three published
+                  fl2v adapters carry three different (NFE, video shift) pairs, so "on" is not one
+                  state. Writes the SAME `selectedLoraIds` the LoRA picker writes — the control and
+                  the picker are two views of one selection, which is why they cannot disagree.
+                  Default-on (seeded once per model): sc-18729 measured 2.42 h against 12.6 min at
+                  the model's default canvas. */}
+              {showTurbo ? (
+                <div className="lightning-toggle">
+                  <label>
+                    Turbo (step-distilled)
+                    <select
+                      aria-label="Turbo (step-distilled)"
+                      disabled={!turboVariants.length}
+                      onChange={(event) => selectTurboVariant(event.target.value)}
+                      value={activeTurboVariant?.id ?? ""}
+                    >
+                      <option value="">Off — {selectedModel?.defaults?.steps ?? 50} steps</option>
+                      {turboVariants.map((variant) => (
+                        <option key={variant.id} value={variant.id}>
+                          {variant.name} — {variant.sampling.steps} steps
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="helper-copy">
+                    {!turboVariants.length
+                      ? "No turbo adapter installed for this model. Install one from the LoRA library to render in 4–8 steps instead of the full schedule."
+                      : activeTurboVariant
+                        ? `On: ${turboRecipeSummary(activeTurboVariant)}. Roughly 7–12× faster (measured 12.6 min against 2.42 h at 1344×768). The distilled checkpoints are trained at 544p/768p and upstream is still improving their detail, so this is a different sample rather than the same one faster — turn it off for the reference schedule.`
+                        : "Off: the full schedule at the model's own sigma shift. Slow — a default-canvas clip measured 2.42 h."}
+                  </p>
+                </div>
+              ) : null}
               {model === ltxVideoModelId ? (
                 <>
                   <label>
@@ -2387,16 +2497,27 @@ export function VideoStudio() {
                         ? "4 (Lightning)"
                         : stepsPinned
                           ? `${stepsPinnedValue} (fixed schedule)`
-                          : String(stepsDefaultFromModel(selectedModel) ?? "")
+                          : /* Turbo supplies a step count but does NOT seize the control, unlike
+                               Lightning above: upstream's own spec table lists the 8-step MiniMax-H3
+                               adapter as "8 / 4", so a caller who knows the checkpoint may run it
+                               shorter, and `minimax_h3_sampling` honours an explicit
+                               `advanced.steps` over the variant's default for exactly that reason.
+                               So the placeholder REPORTS the recipe's count while the box stays
+                               editable — a knob honoured rather than rejected. */
+                            activeTurboVariant
+                            ? `${activeTurboVariant.sampling.steps} (Turbo)`
+                            : String(stepsDefaultFromModel(selectedModel) ?? "")
                     }
                     title={
                       lightningActive
                         ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
                         : stepsPinned
                           ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
-                          : minSteps > 1
-                            ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
-                            : undefined
+                          : activeTurboVariant
+                            ? `${activeTurboVariant.name} is distilled for ${activeTurboVariant.sampling.steps} steps, which is what runs when this is blank. You can still set your own count.`
+                            : minSteps > 1
+                              ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
+                              : undefined
                     }
                     type="number"
                     value={lightningActive || stepsPinned ? "" : stepsOverride}

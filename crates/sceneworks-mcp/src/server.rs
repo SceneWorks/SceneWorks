@@ -264,11 +264,16 @@ pub struct SubmitVideoJobArgs {
     /// at the default canvas; the cheap draft an agent would reach for was unreachable.
     /// Per-model floors are real (`limits.hardMinSteps`), so `list_models` reports them.
     #[schemars(
-        description = "Denoise steps. Omit for the model's own default. Fewer steps render proportionally faster; a model may declare a minimum (minSteps from list_models) below which the request is refused rather than raised."
+        description = "Denoise steps. Omit for the model's own default. Fewer steps render proportionally faster; a model may declare a minimum (minSteps from list_models) below which the request is refused rather than raised. If a step-distill adapter is attached (see loras), omitting this runs that adapter's own trained step count; setting it overrides that count."
     )]
     pub steps: Option<u32>,
+    /// sc-18727. The turbo variant selector IS this field — a step-distill adapter is selected the
+    /// same way any other LoRA is, which is what keeps the MCP surface, the Video Studio control and
+    /// the generic picker on one payload key and one server-side resolver. The description says so
+    /// explicitly because the effect is not guessable from an id: attaching
+    /// `minimax_h3_turbo_4step_768p` changes the schedule, not just the weights.
     #[schemars(
-        description = "LoRA adapters to apply: [{\"id\": <from list_loras>, \"weight\": 0.0-2.0}]."
+        description = "LoRA adapters to apply: [{\"id\": <from list_loras>, \"weight\": 0.0-2.0}]. An adapter whose list_loras entry carries role=\"accelerator\" and a sampling block is a step-distill accelerator: attaching it also switches the render to that adapter's trained schedule (its sampling.steps and sampling.schedulerShift), which is how a MiniMax-H3 job renders in 4-8 steps instead of 50. Attach at most one accelerator per job — two asking for different schedules are refused."
     )]
     pub loras: Option<Vec<Value>>,
     #[schemars(
@@ -1655,6 +1660,16 @@ pub(crate) fn compact_loras(loras: &Value) -> Value {
                 "triggerWords",
                 "defaultWeight",
                 "installState",
+                // sc-18727 — the sampling-regime marker and the recipe it carries. Without these an
+                // agent listing LoRAs sees "MiniMax-H3 Turbo (4-step)" as a name and nothing else:
+                // it cannot tell that selecting it takes the render from the model's `defaults.steps`
+                // of 50 to 4 (a measured 2.42 h to 12.6 min), nor which of the three published
+                // variants runs which schedule. That is the same class of gap sc-17161 closed for
+                // `steps` — a knob reachable through `generate_video`'s `loras` field but invisible
+                // in the catalog that is supposed to describe it. `role` alone is not enough,
+                // because the numbers differ per adapter and no naming convention carries the shift.
+                "role",
+                "sampling",
             ],
             &mut out,
         );
@@ -1746,6 +1761,42 @@ mod tests {
                 "defaultWeight": 0.8,
                 "installState": "missing",
                 "compatibleFamilies": ["ltx-video"]
+            }])
+        );
+    }
+
+    /// sc-18727 — a step-distill adapter's REGIME (`role`) and its RECIPE (`sampling`) survive the
+    /// compaction, because an agent that cannot see them cannot tell a 4-step render from a 50-step
+    /// one before submitting it.
+    ///
+    /// Asserted with a NON-DEFAULT recipe (4 steps at video shift 6.0, against the model's
+    /// `defaults.steps: 50` and the engine's own shift 12.0) so the arm cannot pass against a
+    /// mapper that emits placeholder or default values. The negative half is the arm above: a plain
+    /// LoRA carries neither key and gains neither.
+    #[test]
+    fn compact_loras_keeps_the_accelerator_role_and_its_sampling_recipe() {
+        let full = json!([{
+            "id": "minimax_h3_turbo_4step_768p",
+            "name": "MiniMax-H3 Turbo (4-step, 768p)",
+            "family": "minimax-h3",
+            "role": "accelerator",
+            "sampling": { "steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0 },
+            "defaultWeight": 1.0,
+            "installState": "installed",
+            "compatibility": { "families": ["minimax-h3"] },
+            "source": { "provider": "huggingface", "repo": "lightx2v/Minimax-h3-Turbo" }
+        }]);
+        assert_eq!(
+            compact_loras(&full),
+            json!([{
+                "id": "minimax_h3_turbo_4step_768p",
+                "name": "MiniMax-H3 Turbo (4-step, 768p)",
+                "family": "minimax-h3",
+                "defaultWeight": 1.0,
+                "installState": "installed",
+                "role": "accelerator",
+                "sampling": { "steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0 },
+                "compatibleFamilies": ["minimax-h3"]
             }])
         );
     }
