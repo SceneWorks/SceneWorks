@@ -6947,7 +6947,57 @@
         // the per-tier picker gates it). Mirrors Krea 2 Turbo's mlx block.
         "minMemoryGb": 48,
         "quantize": 8,
-        "repo": "SceneWorks/krea-2-raw-mlx"
+        "repo": "SceneWorks/krea-2-raw-mlx",
+        // SC-18452: the exact Raw provider owns this declaration. True CFG is internal to
+        // `krea_2_raw` (paired conditional/unconditional carries at batch 1), not a synthetic route
+        // mode. Plain, reference-latent img2img, PiD, low-rank, and low-rank+PiD generation use the
+        // same reopenable 28-block DiT. The public img2img toggle intentionally remains this
+        // declaration's
+        // `text_to_image` coordinate plus one runtime reference; the provider behavior context is
+        // `ImageToImage`/reference_count=1. PiD is the same route with its independently bounded 2048/256 decoder
+        // domain. Dense diff patches, Kontext edit, control, identity, File sources, and load-time
+        // quantization remain outside this declaration and fail closed in the typed intersection.
+        // Raw has no promoted calibration binding: these implementation rows enable conservative
+        // estimate-backed admission only and do not inherit Turbo measurements.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "krea_2_raw",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate (sc-9994, epic 9992). Raw shares Turbo's resident surface (the 12B
       // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE), and the resident weights dominate the peak.
