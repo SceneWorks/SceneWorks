@@ -13263,12 +13263,49 @@
           "schedulers": ["default"]
         }
       },
-      // NO `candle` block, and the downloads are `macos` only. That is a statement about the LANE,
-      // not about VRAM: the candle MiniMax-H3 provider has no end-to-end path yet (sc-19008 →
-      // sc-17156 → sc-17157), and the hosted tiers are MLX-packed. sc-17156 measures the candle
-      // ceilings and adds `candle` + the windows/linux platforms; the weights-floor table on
-      // sc-17158 activity 18683 is explicitly NOT to be backfilled here (it is a weights floor, not
-      // a generate peak).
+      // sc-17156 — THE CANDLE LANE EXISTS AS CODE AND IS NOT YET REACHABLE AS A PRODUCT.
+      //
+      // `candle-gen-minimax-h3` now ships a real end-to-end t2va + fl2va generator and is registered
+      // in `candle-gen-catalog`. What it does NOT yet have is a measured VRAM ceiling or any
+      // artifact a user could install off-Mac, so this block declares the two things that are
+      // provable today and deliberately omits the two that are not.
+      //
+      // ⚠️ NO `vramGbByTier` AND NO `minMemoryGb`, AND THAT IS THE HONEST STATE, NOT AN OVERSIGHT.
+      // The candle probe (`candle-gen-minimax-h3/tests/vram_probe.rs::minimax_h3_vram_bf16`) is
+      // written and wired into the `candle-minimax-h3` CUDA lane behind the `minimax_h3_vram_probe`
+      // dispatch input, but it has never been executed, for two reasons that are both operator
+      // actions rather than code:
+      //   1. the repository variable `CANDLE_MINIMAX_H3_SNAPSHOT` is UNSET, so the lane fails closed
+      //      at its first step by design; and
+      //   2. the pinned `minimax-h3` row in inference's `release/real-weight-models.toml` carries a
+      //      `download_files` allow-list (~11.6 GB: vae/, audio_vae/, FL2VA/audio_vae/, tokenizer/
+      //      and the text-encoder shard INDEX) that deliberately EXCLUDES `transformer/` and the
+      //      fourteen TE shards. A render needs both, so CI cannot materialize what the probe reads.
+      // Until that number exists, `predicted_peak_gb` returning `None` for this model is CORRECT:
+      // the fit gate stays best-effort rather than admitting a card against a guess. Do NOT
+      // backfill an estimate here — a 66.7 GB conditioner staged before a 66.3 GB DiT is not
+      // something to extrapolate from a sibling, and the weights-floor table on sc-17158 activity
+      // 18683 is a weights floor, not a generate peak.
+      //
+      // `measured: false` is therefore load-bearing rather than decorative: it is the schema's own
+      // way of saying this lane's ceilings are not evidence yet.
+      //
+      // THE DOWNLOADS STAY `macos`-ONLY, and this block does not change that. The hosted tiers are
+      // MLX-packed by the MLX lane's `convert`, and the candle provider advertises
+      // `supported_quants: &[]` with no tier loader — it reads a raw upstream `MiniMaxAI/MiniMax-H3`
+      // snapshot instead, which this catalog hosts no row for. So there is nothing for a Windows or
+      // Linux user to install, which is why `VIDEO_MODEL_CAPS` still carries every candle column
+      // false for both partitions. A `candle` block is metadata about a backend; the routing catalog
+      // is the authority on which lane serves a request, and the two agree today that this one does
+      // not (GH #2074 — declaration is not reachability).
+      "candle": {
+        // Provable, and structural rather than requested: the provider pins
+        // `OFFLOAD_POLICY = OffloadPolicy::Sequential` and ignores `spec.offload_policy` entirely,
+        // so a caller cannot talk it into resident staging. Pinned by
+        // `the_offload_policy_is_forced_sequential_even_when_resident_is_requested`.
+        "supportsSequentialOffload": true,
+        "measured": false
+      },
       "ui": {
         "label": "MiniMax-H3",
         // sc-17227 — §IV.2 of the MiniMax H3 Community License: "You shall prominently display
@@ -13479,6 +13516,21 @@
           "schedulers": ["default"]
         }
       },
+      // sc-17156 — NO `candle` block HERE, and unlike `minimax_h3` the reason is a REFUSAL IN CODE
+      // rather than a missing measurement.
+      //
+      // `minimax_h3` got a `candle` block because a candle generator for that partition exists and
+      // merely lacks a measured ceiling. This partition is different in kind: the candle provider
+      // serves the `transformer` checkpoint only, and `ref2va` is DEFAULT-DENIED at the descriptor's
+      // conditioning allowlist — `Reference`, `ReferenceVideo` and `ReferenceAudio` are deliberately
+      // absent, so `Capabilities::validate_request` turns a reference request into a typed
+      // `Unsupported` naming the kind. There is no candle code path that can render this entry, so a
+      // `candle` block would be advertising a lane that the provider actively rejects.
+      //
+      // sc-17157 ports the `transformer_ref` partition, the omni-reference presentation and the
+      // audio VAE encoder. That is the story that earns this entry a `candle` block — and it needs
+      // its own VRAM measurement when it lands, not a copy of `minimax_h3`'s, because the reference
+      // presentation adds an encode stage the base partition never runs.
       "ui": {
         "label": "MiniMax-H3 References",
         // §IV.2 attribution, same as `minimax_h3` — see that entry for the citation (sc-17227).

@@ -1251,13 +1251,22 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
   });
 
   it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
-    // MINOR 4. The header said `candle.measured` is false on "five shipped entries". It is false on 19;
+    // MINOR 4. The header said `candle.measured` is false on "five shipped entries". It is false on 20;
     // eleven of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers are
     // pinned so the prose cannot drift from the catalog again. sc-16025 adds the six Mage profiles to
     // this set because their q4/q8 numeric identity changed and the historical samples are no longer
     // valid current measurements.
+    //
+    // sc-17156 made 19 into 20 and, in doing so, introduced a THIRD shape that did not exist before,
+    // so the split below is asserted rather than lumped in. `minimax_h3` carries `measured: false`
+    // with NEITHER `vramGbByTier` NOR `minMemoryGb`: the candle generator exists but has never been
+    // measured, because the CUDA lane that would measure it is gated on operator action (an unset
+    // `CANDLE_MINIMAX_H3_SNAPSHOT`, and a pinned snapshot allow-list that omits the components a
+    // render reads). Calling it "blanket-only" would be wrong — there is no blanket either, and
+    // that is deliberate: with no number at all, `predicted_peak_gb` returns null and the fit gate
+    // stays best-effort instead of admitting a card against a guess.
     const estimatedLane = manifestModels.filter((model) => model.candle?.measured === false);
-    expect(estimatedLane.length).toBe(19);
+    expect(estimatedLane.length).toBe(20);
     const withPerTier = estimatedLane.filter(
       (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length > 0,
     );
@@ -1276,8 +1285,17 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "sd3_5_medium",
       ].sort(),
     );
-    // The other eight are blanket-only, so the flag has nothing per-tier to qualify on them.
-    expect(estimatedLane.length - withPerTier.length).toBe(8);
+    // The remaining nine split two ways, and the split is the point.
+    const rest = estimatedLane.filter(
+      (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length === 0,
+    );
+    expect(rest.length).toBe(9);
+    // Eight are blanket-only — a curated `minMemoryGb` with nothing per-tier for the flag to qualify.
+    const blanketOnly = rest.filter((model) => Number.isFinite(model.candle?.minMemoryGb));
+    expect(blanketOnly.length).toBe(8);
+    // And exactly one declares the lane with NO number of any kind (sc-17156, above).
+    const unmeasured = rest.filter((model) => !Number.isFinite(model.candle?.minMemoryGb));
+    expect(unmeasured.map((model) => model.id)).toEqual(["minimax_h3"]);
   });
 
   it("pins the shipped shapes the SimpleModelManager fixtures claim", () => {
