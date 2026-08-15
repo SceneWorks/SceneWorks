@@ -2101,6 +2101,69 @@ def test_lora_source_guard_is_live_against_the_real_catalog():
     )
 
 
+def test_lora_schema_accepts_a_declared_model_id_list():
+    """sc-19563: the entry is additionalProperties:false, so a per-model-id key is an
+    explicit schema addition rather than a free-form one. Pin that it is accepted at
+    all — reverting the property would turn every shipped `modelIds` into an
+    authoring error."""
+    entry = _sample_lora_entry()
+    entry["modelIds"] = ["minimax_h3_ref"]
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert not errors, "a declared modelIds list must be schema-valid:\n" + _format_errors(errors)
+
+
+def test_lora_schema_rejects_a_malformed_model_id_list():
+    """`modelIds` is typed, not free-form: a bare string, an empty list, a non-string
+    element and an empty id are each rejected. Without the typing an author could
+    write `"modelIds": "minimax_h3_ref"` and the gate would read nothing — the key
+    present, the constraint absent, which is worse than declaring none at all."""
+    for value, keyword in (
+        ("minimax_h3_ref", "type"),
+        ([], "minItems"),
+        ([123], "type"),
+        ([""], "minLength"),
+    ):
+        entry = _sample_lora_entry()
+        entry["modelIds"] = value
+        errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+        assert any(
+            error.validator == keyword
+            and list(error.absolute_path)[:3] == ["loras", 0, "modelIds"]
+            for error in errors
+        ), f"modelIds={value!r} must be rejected by `{keyword}`; got {_format_errors(errors)}"
+
+
+def test_every_minimax_h3_lora_declares_its_partition_in_the_real_catalog():
+    """sc-19563, against the SHIPPED manifest rather than a sample entry.
+
+    Both H3 partitions are one architecture and declare one family, so family
+    membership cannot express which of `minimax_h3` / `minimax_h3_ref` an adapter is
+    distilled for; cross-selecting used to fold cleanly at the wrong quality.
+
+    The final inequality is the load-bearing half: a catalog that gave all four the
+    same `modelIds` would pass a presence check and enforce nothing."""
+    manifest = _load_jsonc(LORA_MANIFEST_PATH)
+    declared = {
+        entry["id"]: entry.get("modelIds")
+        for entry in manifest["loras"]
+        if entry.get("family") == "minimax-h3"
+    }
+    assert declared, "no minimax-h3 LoRAs found; this guard would be vacuous"
+    for lora_id, model_ids in declared.items():
+        assert model_ids, f"{lora_id} declares no modelIds (sc-19563)"
+    assert declared["minimax_h3_ref2v_turbo_4step"] == ["minimax_h3_ref"]
+    fl2v = [
+        ids for lora_id, ids in declared.items() if lora_id != "minimax_h3_ref2v_turbo_4step"
+    ]
+    assert all(
+        ids == ["minimax_h3"] for ids in fl2v
+    ), f"the fl2v adapters must name minimax_h3; got {fl2v}"
+    assert declared["minimax_h3_ref2v_turbo_4step"] != fl2v[0], (
+        "the ref2v and fl2v adapters must name DIFFERENT partitions, or the declaration "
+        "enforces nothing"
+    )
+
+
 # --- Control-overlay catalog (builtin.control_overlays.jsonc) ---------------
 
 
