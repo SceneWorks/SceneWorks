@@ -1973,6 +1973,91 @@ test("a rung-4 implementation claim survives an absent rung 1 exactly when the p
   );
 });
 
+test("a structurally-N/A rung 1 satisfies the provider's own rung-4 edge vacuously", async () => {
+  // `validate_selection` has TWO accepting arms for a `Rung { .. EngagedInSameRequest }` edge, and
+  // the gate shipped only the first. inference
+  // `crates/contracts/gen-core/src/memory_strategy.rs:1468-1481` at pinned `014134e3`:
+  //
+  //     if self.engages(selection.strategy, rung) { continue; }
+  //     // `StructurallyNotApplicable` satisfies the edge vacuously: it asserts the
+  //     // architecture has no such component to shed.
+  //     if matches!(self.support(rung), Some(StructurallyNotApplicable { .. })) { continue; }
+  //
+  // Missing arm 2, a provider that both appends the edge and declares rung 1 structurally N/A is
+  // UNDER-admitted: the contract accepts the composition and the matrix reports it Missing.
+  //
+  // MUTATION: delete the `structurally_not_applicable` line from the `rung` evaluator and the first
+  // assertion below reds. Nothing else in the suite moves, which is the point — the arm is
+  // unreachable on today's records (`mlx-gen-sensenova` is the only N/A declarer and it appends no
+  // edge), so only a test that CONSTRUCTS the combination can grade it.
+  const edge = {
+    kind: "rung",
+    rung: "staged_residency",
+    scope: "engaged_in_same_request",
+    source: "crates/media/mlx-gen/mlx-gen-fixture/src/memory_strategy.rs",
+    conditional: false,
+  };
+  // A context in which rung 1 is NOT available, so arm 1 cannot be what admits.
+  const cannotStage = {
+    backend: "candle",
+    model: { id: "fixture", candle: {} },
+    route: { engine: "fixture" },
+    sequentialEngines: new Set(),
+    manifestById: new Map(),
+  };
+  const admits = (stagedResidencySupport) =>
+    rung4ContractAdmits(
+      { crate: "crates/media/mlx-gen/mlx-gen-fixture", additionalPrerequisites: [edge], stagedResidencySupport },
+      cannotStage,
+    );
+
+  assert.equal(admits("structurally_not_applicable"), true, "arm 2 must satisfy the edge");
+  // Each of the other declarations individually, because "N/A admits" would also hold if the gate
+  // simply stopped consulting the record at all.
+  assert.equal(admits("implemented"), false);
+  assert.equal(admits("missing"), false);
+  assert.equal(
+    admits(null),
+    false,
+    "an unreadable declaration must fall through to the engagement term, never admit",
+  );
+  // ...and arm 1 still admits on its own when rung 1 IS available, so arm 2 is an addition rather
+  // than a replacement.
+  assert.equal(
+    rung4ContractAdmits(
+      {
+        crate: "crates/media/mlx-gen/mlx-gen-fixture",
+        additionalPrerequisites: [edge],
+        stagedResidencySupport: "implemented",
+      },
+      { ...cannotStage, model: { id: "fixture", candle: { supportsSequentialOffload: true } } },
+    ),
+    true,
+  );
+  // The declaration this arm exists for is a fact about a REAL provider, not an invented one: the
+  // records must still carry exactly the N/A declaration the pinned tree contains.
+  const records = await prerequisitesFixture();
+  const naLanes = Object.entries(records.families).flatMap(([group, family]) =>
+    Object.entries(family.backends)
+      .filter(([, record]) => record.stagedResidencySupport === "structurally_not_applicable")
+      .map(([backend]) => `${group}:${backend}`),
+  );
+  assert.ok(
+    naLanes.length > 0,
+    "no record declares rung 1 structurally N/A, so the extractor half of this arm grades nothing",
+  );
+  // Stated rather than assumed: those lanes append no rung edge today, so the arm is currently
+  // unreachable through `buildMatrix` and the assertions above are the only thing grading it.
+  for (const lane of naLanes) {
+    const [group, backend] = lane.split(":");
+    assert.equal(
+      records.families[group].backends[backend].additionalPrerequisites.length,
+      0,
+      `${lane} now appends an edge, so the N/A arm is reachable end to end — grade it there too`,
+    );
+  }
+});
+
 test("the rung-4 prerequisite records cover every advertised lane, exactly and currently", async () => {
   const matrix = await buildMatrix({ publish: false });
   const advertised = new Set(
@@ -2053,6 +2138,29 @@ test("the rung-4 prerequisite records cover every advertised lane, exactly and c
         ];
       }),
     /must cite the provider file/,
+  );
+  // sc-19542 review: an absent `conditional` is a CLAIM that the construction is unconditional, so
+  // it may not be defaulted in. Same for a support spelling this gate has no arm for.
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.additionalPrerequisites = [
+          {
+            kind: "rung",
+            rung: "staged_residency",
+            scope: "engaged_in_same_request",
+            source: "crates/x/src/lib.rs",
+          },
+        ];
+      }),
+    /must say whether the construction that appends it is conditional/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.stagedResidencySupport = "probably-not";
+      }),
+    /is not a gen-core MemoryStrategySupport this gate knows/,
   );
 
   // ...and the fence is WIRED, not merely correct. The assertions above call it directly, so they

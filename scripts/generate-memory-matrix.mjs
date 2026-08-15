@@ -1515,6 +1515,11 @@ export function assertRung4SurveyCoversEveryFamily(survey, models) {
  * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1028-1044` at pinned
  * rev `014134e3`: `required_by_realization` is true by construction, so the conjunction is the
  * `matches!(self.support(rung), Some(Implemented))` term).
+ *
+ * This is the reduction of ONE of `validate_selection`'s two accepting arms, not of the whole
+ * prerequisite check. The second arm is `StructurallyNotApplicable`, and it lives in the `rung`
+ * evaluator below rather than here, because it is a fact about the provider's declaration and not
+ * about what this lane makes available.
  */
 function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }) {
   const declaredModel =
@@ -1566,11 +1571,28 @@ const RUNG4_PREREQUISITE_EVALUATORS = Object.freeze({
    */
   "load-shape": () => true,
   /**
-   * gen-core: satisfied iff `self.engages(selection.strategy, rung)`. For an edge the realization
-   * itself appended, `engages`'s `required_by_realization` term is true by construction, so the
-   * conjunction reduces to that rung being declared `Implemented` on this lane.
+   * gen-core's `EngagedInSameRequest` arm has TWO ways to be satisfied, and this mirrors both —
+   * inference `crates/contracts/gen-core/src/memory_strategy.rs:1468-1481` at pinned `014134e3`.
+   *
+   * 1. `if self.engages(selection.strategy, rung) { continue }`. For an edge the realization itself
+   *    appended, `engages`'s `required_by_realization` term is true by construction, so the
+   *    conjunction reduces to that rung being declared `Implemented` on this lane — which is what
+   *    `stagedResidencyIsAvailable` answers.
+   * 2. `if matches!(self.support(rung), Some(StructurallyNotApplicable { .. })) { continue }` — the
+   *    edge is satisfied VACUOUSLY, because the provider asserts its architecture has no such
+   *    component to shed. gen-core's own comment says so.
+   *
+   * Arm 2 was missing, and this gate exists to follow the contract's actual rule rather than a
+   * reduction of half of it. It is fail-closed and currently unreachable — `mlx-gen-sensenova` is
+   * the only provider declaring `StagedResidency` structurally N/A at the pinned revision, and it
+   * appends no rung edge for the arm to satisfy — but the first provider that does both would be
+   * under-admitted without it.
+   *
+   * `record.stagedResidencySupport` is `null` wherever the extractor could not read the declaration
+   * unambiguously, and `null` falls through to arm 1. That asymmetry is deliberate: arm 2 ADMITS, so
+   * only a positive reading of the provider's own declaration may fire it.
    */
-  rung: (prerequisite, context) => {
+  rung: (prerequisite, context, record) => {
     if (
       prerequisite.rung !== "staged_residency" ||
       prerequisite.scope !== "engaged_in_same_request"
@@ -1580,12 +1602,28 @@ const RUNG4_PREREQUISITE_EVALUATORS = Object.freeze({
           "evaluator for — teach it one rather than admitting the cell (sc-19542)",
       );
     }
+    if (record.stagedResidencySupport === "structurally_not_applicable") return true;
     return stagedResidencyIsAvailable(context);
   },
 });
 
 /** The prerequisite kinds a record may carry, derived from the evaluators that can answer them. */
 export const RUNG4_PREREQUISITE_KINDS = Object.freeze(Object.keys(RUNG4_PREREQUISITE_EVALUATORS));
+
+/**
+ * What a record may say a provider declares for the rung its edges name.
+ *
+ * gen-core's `MemoryStrategySupport` has three variants; `null` is this gate's fourth answer, for a
+ * declaration the extractor could not read unambiguously. Only `structurally_not_applicable` changes
+ * an admission, and only in the ADMITTING direction, which is why the unknown case is spelled at all
+ * rather than defaulted.
+ */
+export const RUNG4_DECLARED_SUPPORTS = Object.freeze([
+  "implemented",
+  "missing",
+  "structurally_not_applicable",
+  null,
+]);
 
 /**
  * Whether rung 4's DECLARED prerequisite graph admits this cell (sc-19542).
@@ -1600,7 +1638,13 @@ export const RUNG4_PREREQUISITE_KINDS = Object.freeze(Object.keys(RUNG4_PREREQUI
  * `record.additionalPrerequisites` is derived from the pinned revision by
  * `scripts/rung4-contract-prerequisites.mjs`, and 21 of the catalog's 40 (family, backend) pairs
  * carry the rung-1 edge while 19 do not — so which families this consults the rung-1 predicate for
- * is now a property of the providers rather than a blanket rule.
+ * is now a property of the providers rather than a blanket rule. That 21/19 is a fact about the
+ * RECORD SET; what it does to today's catalog is measured, and much smaller (see below).
+ *
+ * An edge flagged `conditional` — appended by a `then_some` on a runtime condition, or inside a
+ * `#[cfg]`-gated item that is not in every production build — is evaluated as PRESENT. "This
+ * provider may demand rung 1" is the fail-closed reading for an admission gate: a conditional
+ * prerequisite dropped is a cell admitted that some builds refuse.
  */
 export function rung4ContractAdmits(record, context) {
   if (!record) {
@@ -1616,7 +1660,7 @@ export function rung4ContractAdmits(record, context) {
         `rung-4 prerequisite kind ${JSON.stringify(prerequisite.kind)} has no evaluator (sc-19542)`,
       );
     }
-    return evaluate(prerequisite, context);
+    return evaluate(prerequisite, context, record);
   });
 }
 
@@ -1667,10 +1711,24 @@ export function parseRung4ContractPrerequisites(body, { pin }) {
         if (!edge.source) {
           throw new Error(`${at}: every edge must cite the provider file it was derived from`);
         }
+        // An absent `conditional` would read as "unconditional", which is a claim about the
+        // provider rather than the absence of one.
+        if (typeof edge.conditional !== "boolean") {
+          throw new Error(
+            `${at}: every edge must say whether the construction that appends it is conditional`,
+          );
+        }
+      }
+      if (!RUNG4_DECLARED_SUPPORTS.includes(record.stagedResidencySupport ?? null)) {
+        throw new Error(
+          `${at}: stagedResidencySupport ${JSON.stringify(record.stagedResidencySupport)} is not a ` +
+            `gen-core MemoryStrategySupport this gate knows (${RUNG4_DECLARED_SUPPORTS.join(", ")})`,
+        );
       }
       records.set(`${group}:${backend}`, {
         crate: record.crate,
         additionalPrerequisites: edges,
+        stagedResidencySupport: record.stagedResidencySupport ?? null,
       });
     }
   }

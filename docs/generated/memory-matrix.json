@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:958fca7856be0fee945718ee8de656f83c53f4f717cc5e0390bb30375af7f699",
+    "sceneWorksRevision": "source-tree:760e7a8f501a6bb5a877723ab6bc3e79cf6a4d0aa64fd093fb76602f1ba2b198",
     "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071",
     "sources": {
       "manifest": {
@@ -62,7 +62,7 @@
       },
       "rung4ContractPrerequisites": {
         "path": "config/rung4-contract-prerequisites.json",
-        "sha256": "e4b2c6f36ae6cfe267cecf879eb4cc0f23ce5e5e765a9e26c5803c8f7beb95d2"
+        "sha256": "54f063895770caa04c91c7b6a7017fb5379e3e23fab29b22729bf3cdf59059e2"
       },
       "cargo": {
         "path": "Cargo.toml",
