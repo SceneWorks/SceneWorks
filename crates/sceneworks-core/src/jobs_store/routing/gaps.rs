@@ -8,7 +8,7 @@ use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::candle::{
     image_job_is_candle_eligible, image_request_candle_pose_reject,
     training_job_is_candle_eligible, upscale_job_is_candle_eligible, video_job_is_candle_eligible,
-    video_upscale_job_is_candle_eligible, CANDLE_POSE_MODELS,
+    video_request_is_candle_eligible, video_upscale_job_is_candle_eligible, CANDLE_POSE_MODELS,
 };
 use crate::jobs_store::routing::catalog::{
     CANDLE_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
@@ -16,7 +16,7 @@ use crate::jobs_store::routing::catalog::{
 use crate::jobs_store::routing::mlx::{
     caption_job_is_mlx_eligible, job_is_mlx_eligible, training_job_is_mlx_eligible,
     understanding_job_is_mlx_eligible, upscale_job_is_mlx_eligible, video_job_is_mlx_eligible,
-    video_mode_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
+    video_mode_is_mlx_eligible, video_request_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::SENSENOVA_MODEL_IDS;
 
@@ -49,6 +49,36 @@ pub(crate) fn job_is_any_candle_eligible(job: &JobSnapshot) -> bool {
         || caption_job_is_mlx_eligible(job)
         || understanding_job_is_mlx_eligible(job)
         || training_job_is_candle_eligible(job)
+}
+
+/// **The enqueue-time no-lane gate (sc-19504).** True when SOME lane's real claim predicate would
+/// accept this video request — the exact union `worker_supports_job` consults, asked one layer
+/// earlier, from the `(job_type, payload)` pair `create_video_job` holds before a [`JobSnapshot`]
+/// exists.
+///
+/// `false` is not "unavailable on this host", it is **unclaimable by every backend that exists**:
+/// neither an `mlx` worker on macOS nor a candle worker off-Mac will ever take it, so the job does
+/// not fail — it sits `queued` / "Waiting for an available worker." forever next to an idle worker,
+/// with no error and no terminal state. That is the sc-15328 / GH #2074 / sc-19504 failure mode, and
+/// it is strictly worse than a rejection. The enforce sweeps cannot save it either: both
+/// [`super::super::JobsStore::fail_unsupported_mlx_jobs`] and its candle twin no-op unless the
+/// deployment opts into `enforce`, whose default is **warn**.
+///
+/// Rejecting on this predicate can never refuse work that would otherwise have RENDERED — by
+/// construction the refused set is exactly the set that would have hung. It deliberately does NOT
+/// look at the manifest's declared `capabilities`: several shipped pairs are claimable without being
+/// advertised (`wan_2_2_t2v_14b` + `extend_clip` is candle-VACE-served, `wan_2_2_i2v_14b` +
+/// `replace_person` likewise), and a capability-shaped gate would 400 those working shapes.
+///
+/// Nor is it a platform gate: a job one lane claims stays enqueued for that lane's worker even on a
+/// host that has none, which is how the two shipped topologies (macOS ⇒ mlx only, Windows/Linux ⇒
+/// candle only) share one queue.
+pub fn video_request_is_claimable_by_any_lane(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+) -> bool {
+    video_request_is_mlx_eligible(job_type, payload)
+        || video_request_is_candle_eligible(job_type, payload)
 }
 
 /// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
