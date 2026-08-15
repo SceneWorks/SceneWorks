@@ -13242,12 +13242,22 @@
         // the default canvas is already two hours. Recommending a shorter scalar would falsely
         // imply long clips are infeasible everywhere (sc-17152).
         "recommendedMaxDuration": 14.375,
-        // The scheduler's sigma grid is `linspace(1, 0, num_inference_steps)` and the terminal 0 is
-        // a GRID POINT, not a sentinel appended afterwards — so N steps drive N-1 model evaluations
-        // and a single point is a schedule with nothing between its ends. `set_timesteps` raises
-        // "`num_inference_steps` >= 2, got 1" (diffusers `MiniMaxH3Scheduler`), so 1 step is not a
-        // fast draft here, it is unrenderable, and it is REFUSED rather than quietly raised to 2 —
-        // the same reject-never-clamp posture the duration bounds take (sc-19426).
+        // 🔴 THE UNIT IS MODEL EVALUATIONS (NFE), and it is the same unit everywhere: `defaults.steps`
+        // above, `advanced.steps`, this floor, and the `sampling.steps` each turbo adapter declares
+        // in builtin.loras.jsonc. The engine builds the sigma grid as `linspace(1, 0, steps + 1)` —
+        // it appends the terminal 0 ITSELF (`JointSchedule::with_shifts(evaluations + 1, ..)`) — so
+        // `defaults.steps: 50` really is 50 evaluations and nothing in SceneWorks adds or subtracts
+        // one. sc-18726 asked for that call to be made once and tested; it is pinned by
+        // `minimax_h3_turbo_steps_are_model_evaluations_not_grid_points` (sceneworks-core) and by
+        // the arm-level `a_selected_turbo_variant_changes_the_job_that_reaches_the_engine`.
+        //
+        // ⚠️ This comment previously read "N steps drive N-1 model evaluations" and concluded that
+        // `steps: 1` is unrenderable. That describes diffusers' `num_inference_steps`, which is NOT
+        // what this key carries: at 1 NFE the engine builds a legal 2-point grid and renders. So the
+        // floor is a PRODUCT judgement, not an engine limit — a 1-evaluation schedule is a single
+        // Euler jump from pure noise, which is not a fast draft, it is noise. 2 is the smallest
+        // schedule with an intermediate sigma. REFUSED rather than quietly raised, the same
+        // reject-never-clamp posture the duration bounds take (sc-19426, corrected sc-18726).
         "hardMinSteps": 2,
         // One cadence. The lattice, the duration window and every measured render are 24 fps.
         "fps": [24],
@@ -13357,9 +13367,63 @@
         // prose. §III.3.a separately encourages the "Powered by MiniMax H3" wording, so one line
         // discharges both.
         "attribution": "Powered by MiniMax H3",
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — which is why renders are measured in hours at the default canvas. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. macOS native MLX only, and it needs a large-memory Mac.",
+        // sc-17162 — THE HONESTY PASS OVER THE WITHHELD UPSTREAM COMPONENTS, in the one place a
+        // user reads before committing to a ~30 GB install (`ModelManagerScreen.jsx` renders this
+        // as the model card body; it is `ui.description`'s ONLY reader). Four claims here are
+        // load-bearing rather than descriptive, and each is checkable:
+        //   1. NOT the hosted product — `H3-Context-IR` and `H3-Regenerate-2K` are unreleased, so
+        //      prompt adherence differs from the Hailuo API and 2K is unreachable. The load-bearing
+        //      enforcement for THAT claim is `CANVAS_MAX_PIXELS` (1,032,192), the AREA budget: a 2K
+        //      frame is >2x it on area alone, so no per-edge value can make 2K reachable and there
+        //      is no 2K path to be coy about. See inference
+        //      `docs/reference/minimax-h3-withheld-upstream-components.md`.
+        //
+        //      ⚠️ DO NOT cite `max_size: 1344` as the 2K argument, which this comment previously
+        //      did. It read as a contradiction against this entry's own `limits.resolutions`, which
+        //      advertises `1536x672` / `672x1536` — 1536 > 1344 on the long edge — so the same PR
+        //      appeared to assert a 1344 per-edge ceiling and a 1536-wide bucket at once. The area
+        //      budget is the argument that actually carries the 2K claim and is not in tension with
+        //      anything, so it is the one stated above.
+        //
+        //      The per-edge cap is a SEPARATE, independently-applied bound, and it currently sits
+        //      BELOW this entry's advertised 21:9 pair. So `1536x672` / `672x1536` are ADVERTISED
+        //      BUT NOT YET RENDERABLE: the area check passes and the edge check refuses.
+        //
+        //      ⚠️ THE UNBLOCKING CHANGE IS IN THE ENGINE REPO, NOT THIS ONE — inference PR #640
+        //      (`story/sc-17152-h3-max-size-1536`), which raises the per-edge ceiling to the widest
+        //      canvas `resolve_canvas_size` itself emits. **This entry's 21:9 buckets and #640 must
+        //      not be separated at merge**: shipping these two `resolutions` values without that
+        //      engine change advertises a canvas the engine refuses. The prompt guide's *Sizes*
+        //      section carries the same caveat for the user and is pinned by
+        //      `minimaxH3CatalogCopy.test.jsx`.
+        //
+        //      Do NOT write the new ceiling's VALUE here or in the copy. It is an engine internal
+        //      that dates this comment the moment the resolver moves, and 1536 — the intuitive
+        //      guess, being this pair's own long edge — is WRONG: the resolver emits wider still at
+        //      the 4:1 aspect ceiling, so a 1536 cap would keep refusing a canvas the engine
+        //      produces on its own. #640 carries a guard that reds specifically on that value.
+        //
+        //      Note this repo CANNOT check any of it: `pinned_engine_geometry.rs` classifies both
+        //      partitions `PinnedAreaCap::NotInThePinnedBundle` — the pin (014134e3) exposes no
+        //      importable `providers::minimax_h3`, so
+        //      `shipped_manifest_matches_each_engines_real_geometry` cannot compare this entry's
+        //      geometry against the engine's at all. sc-18650's pin bump is what makes the guard
+        //      able to catch a regression here automatically.
+        //   2. Dense attention, because the sparse-attention inference path is unreleased — which
+        //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
+        //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`
+        //      lattice, which sparse attention does not touch. Do not conflate the two in copy.
+        //   3. 15 s is REFUSED, not shortened. `limits.hardMaxDuration` is 14.375 and the next
+        //      lattice rung is 15.083 s, so a 15 s request errors — a user who reads "5–15 s" on
+        //      MiniMax's own page and plans around it needs to learn that HERE, not from a failed
+        //      submit two hours into a queue.
+        //   4. No still-image mode — `min_duration = 5.0` is hardcoded upstream, so `T = 1` does
+        //      not render at all.
+        // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
+        // in the prompt guide, which is the only place a user would copy that syntax from.
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It RENDERS on macOS only, through the native MLX lane, and needs a large-memory Mac; the weights themselves may be downloadable on other platforms.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
-        "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
+        "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
         "promptGuide": {
           "title": "MiniMax-H3 Prompt Guide",
           "path": "/prompt-guides/minimax-h3.md",
@@ -13559,7 +13623,9 @@
         "hardMinDuration": 5.1667,
         "hardMaxDuration": 14.375,
         "recommendedMaxDuration": 14.375,
-        // Same scheduler, same two-grid-point floor as `minimax_h3` — see that entry (sc-19426).
+        // Same scheduler, same two-EVALUATION floor as `minimax_h3` — see that entry for the unit
+        // (NFE, not sigma grid points) and for why 2 is a product judgement rather than an engine
+        // limit (sc-19426, corrected sc-18726).
         "hardMinSteps": 2,
         "fps": [24],
         "maxPixels": 1032192,
@@ -13604,9 +13670,13 @@
         "label": "MiniMax-H3 References",
         // §IV.2 attribution, same as `minimax_h3` — see that entry for the citation (sc-17227).
         "attribution": "Powered by MiniMax H3",
-        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. Same open-weights caveats as MiniMax-H3: no hosted prompt refinement, no native 2K, dense attention, and no guidance or negative-prompt axis.",
+        // sc-17162 — the same honesty pass as `minimax_h3`, carried in full rather than by
+        // reference. The two entries are separate model cards and a user can install THIS one
+        // without ever reading that one's, so "see the other entry" would leave the withheld
+        // components undisclosed on the surface where the decision is actually made.
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
         "recommendedFor": ["reference_to_video"],
-        "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps, and the same canvas-dominated cost — start at 576x320.",
+        "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps — nothing in between renders and 15s is refused rather than shortened to 14.38s — and the same canvas-dominated cost, so start at 576x320.",
         "promptGuide": {
           "title": "MiniMax-H3 Prompt Guide",
           "path": "/prompt-guides/minimax-h3.md",

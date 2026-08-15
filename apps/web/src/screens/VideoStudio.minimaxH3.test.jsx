@@ -167,6 +167,27 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     }
   });
 
+  it("tells the user in prose that 15s is refused, not shortened (sc-17162)", async () => {
+    // The menu test above proves the studio cannot SUBMIT 15s. It does not prove the user is ever
+    // told why the option they came for is missing, and an absent option explains nothing — a
+    // user who read MiniMax's advertised "5-15 s" will read the 14.38s cap as a SceneWorks
+    // shortcoming rather than a property of these weights.
+    //
+    // `ui.durationHint` is the field that carries that, and it has exactly ONE reader
+    // (`VideoStudio.jsx` → `<p className="helper-copy">`). Set-derived over the family, so a third
+    // partition is covered the day it ships, and read out of the DOM rather than off the manifest:
+    // pinning the string alone would stay green if the reader were dropped.
+    for (const model of manifestModels.filter((entry) => entry.family === "minimax-h3")) {
+      const fixture = { ...shipped(model.id), installState: "installed", usable: true };
+      await render(baseContext({ videoModels: [fixture] }));
+      const helper = [...container.querySelectorAll(".helper-copy")].map((node) => node.textContent);
+      expect(
+        helper.some((text) => /\b15s is refused\b[^.]{0,60}\bshortened\b/.test(text)),
+        `${model.id} must render its durationHint's 15s refusal`,
+      ).toBe(true);
+    }
+  });
+
   it("preselects the declared default duration, not the first menu entry", async () => {
     // Asserted on BERNINI, because MiniMax-H3's `defaults.duration` and `limits.durations[0]` are
     // the same 5.1667 — on H3 alone the two claims are indistinguishable, and substituting

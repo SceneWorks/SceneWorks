@@ -880,8 +880,15 @@ const seededFallbackModels = [
       // fallback one is what they get before /api/v1/models lands — a licence obligation that is
       // discharged only once the network answers is not discharged (sc-17161).
       attribution: "Powered by MiniMax H3",
-      description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt.",
-      durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
+      // sc-17162 — the withheld-component disclosure has to survive into the MIRROR for the same
+      // reason the attribution does. `ModelManagerScreen` renders `ui.description` from whichever
+      // catalog is in hand, so a description that only warns about H3-Context-IR / H3-Regenerate-2K
+      // / dense attention once /api/v1/models answers leaves the pre-network card advertising a
+      // model that does more than these weights do. Condensed against the manifest's prose, but it
+      // carries the same four load-bearing claims, and
+      // `minimaxH3CatalogCopy.test.js` pins the mirror to the manifest claim-by-claim.
+      description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps, and 15s is refused rather than shortened to 14.38s. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },
   },
@@ -908,8 +915,10 @@ const seededFallbackModels = [
     ui: {
       // §IV.2 attribution, same as `minimax_h3` — see that entry (sc-17227 / sc-17161).
       attribution: "Powered by MiniMax H3",
-      description: "MiniMax-H3 reference-driven video: up to 9 images, 3 clips and 3 audio references (12 files total), with synchronized stereo audio.",
-      durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, and the same canvas-driven cost.",
+      // sc-17162 — carried in full rather than by reference, same as the manifest entry: this is a
+      // separate model card and a user can install it without ever opening the other one's.
+      description: "MiniMax-H3 reference-driven video: up to 9 images, 3 clips and 3 audio references (12 files total), with synchronized stereo audio. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. No guidance scale and no negative prompt. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, 15s is refused rather than shortened to 14.38s, and the same canvas-driven cost.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },
   },

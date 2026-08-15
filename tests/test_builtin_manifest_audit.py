@@ -2133,6 +2133,56 @@ def test_lora_schema_rejects_a_malformed_model_id_list():
         ), f"modelIds={value!r} must be rejected by `{keyword}`; got {_format_errors(errors)}"
 
 
+def test_lora_schema_accepts_a_declared_sampling_recipe():
+    """sc-18726: `sampling` is an explicit schema addition on an
+    additionalProperties:false entry, so pin that a well-formed block is accepted at
+    all — reverting the property would turn every shipped turbo entry into an
+    authoring error."""
+    entry = _sample_lora_entry()
+    entry["role"] = "accelerator"
+    entry["sampling"] = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert not errors, "a declared sampling recipe must be schema-valid:\n" + _format_errors(errors)
+
+
+def test_lora_schema_rejects_a_malformed_sampling_recipe():
+    """The negative arm, and the one that carries the weight (sc-18726).
+
+    `parse_turbo_recipes` DROPS a block it cannot read rather than failing — a
+    silently recipe-less accelerator renders 50 steps at the base shift, which is the
+    2 h 25 m render this whole feature exists to avoid, with no error anywhere. So
+    every way of writing the block wrong has to be an authoring-time red: a partial
+    block (each of the three keys is load-bearing and none has a safe default), an
+    out-of-band step count, a zero shift, a string where a number belongs, a typo'd
+    key, and a non-object.
+    """
+    good = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    cases = [
+        ({key: value for key, value in good.items() if key != missing}, "required")
+        for missing in good
+    ]
+    cases += [
+        ({**good, "steps": 0}, "minimum"),
+        ({**good, "steps": 4.5}, "type"),
+        ({**good, "schedulerShift": 0}, "exclusiveMinimum"),
+        ({**good, "audioSchedulerShift": "3.0"}, "type"),
+        # The sc-12288 field class, one level in: a typo'd key is silently ignored by a
+        # permissive object, and `required` alone would not catch a MISSPELLED extra.
+        ({**good, "schedulerShifts": 6.0}, "additionalProperties"),
+        (4, "type"),
+    ]
+    for value, keyword in cases:
+        entry = _sample_lora_entry()
+        entry["role"] = "accelerator"
+        entry["sampling"] = value
+        errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+        assert any(
+            error.validator == keyword
+            and list(error.absolute_path)[:3] == ["loras", 0, "sampling"]
+            for error in errors
+        ), f"sampling={value!r} must be rejected by `{keyword}`; got {_format_errors(errors)}"
+
+
 def test_every_minimax_h3_lora_declares_its_partition_in_the_real_catalog():
     """sc-19563, against the SHIPPED manifest rather than a sample entry.
 
