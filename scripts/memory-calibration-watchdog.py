@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 HARD_STOP_EXIT = 97
@@ -27,7 +27,7 @@ HARD_STOP_EXIT = 97
 class Identity:
     pid: int
     pgid: int
-    state: str
+    state: str = field(compare=False)
     started: str
 
 
@@ -64,6 +64,14 @@ def identity_is_live(identity: Identity) -> bool:
     return bool(current and current.pgid == identity.pgid and current.started == identity.started)
 
 
+def anchor_main() -> int:
+    """TERM-resistant exact-identity anchor retained if the launch sentinel crashes."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    while True:
+        signal.pause()
+
+
 def sentinel_main(control_fd: int, command: list[str]) -> int:
     """Stable launch-owned PGID anchor; it outlives an early-exiting guarded root."""
     if command[:1] == ["--"]:
@@ -95,9 +103,21 @@ def sentinel_main(control_fd: int, command: list[str]) -> int:
             raise RuntimeError(f"sentinel retained live descendants: {survivors}")
 
     control = socket.socket(fileno=control_fd)
-    child = subprocess.Popen(command, preexec_fn=restore_child_signals)
-    control.sendall(b"R")
-    if control.recv(1) != b"G":
+    anchor = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--anchor"])
+    try:
+        child = subprocess.Popen(command, preexec_fn=restore_child_signals)
+    except BaseException:
+        anchor.kill()
+        anchor.wait()
+        raise
+    try:
+        control.sendall(f"R {anchor.pid}\n".encode())
+        acknowledged = control.recv(1) == b"G"
+    except BaseException:
+        cleanup_descendants()
+        child.wait()
+        raise
+    if not acknowledged:
         cleanup_descendants()
         child.wait()
         return HARD_STOP_EXIT
@@ -110,6 +130,32 @@ def sentinel_main(control_fd: int, command: list[str]) -> int:
 
 
 class DarwinFootprintSampler:
+    @staticmethod
+    def parse_processes(pids: list[int], payload: object) -> int:
+        requested = set(pids)
+        if len(requested) != len(pids):
+            raise RuntimeError("footprint request contains duplicate PIDs")
+        processes = payload.get("processes") if isinstance(payload, dict) else None
+        if not isinstance(processes, list):
+            raise RuntimeError("footprint returned no process telemetry")
+        observed: dict[int, int] = {}
+        for process in processes:
+            if not isinstance(process, dict):
+                raise RuntimeError("footprint returned malformed process telemetry")
+            pid = process.get("pid")
+            auxiliary = process.get("auxiliary")
+            value = auxiliary.get("phys_footprint") if isinstance(auxiliary, dict) else None
+            if not isinstance(pid, int) or not isinstance(value, int) or value < 0:
+                raise RuntimeError("footprint omitted PID or non-negative phys_footprint")
+            if pid in observed:
+                raise RuntimeError(f"footprint returned duplicate PID {pid}")
+            observed[pid] = value
+        if set(observed) != requested:
+            missing = sorted(requested - set(observed))
+            extra = sorted(set(observed) - requested)
+            raise RuntimeError(f"footprint PID set mismatch: missing={missing}, extra={extra}")
+        return sum(observed.values())
+
     def sample(self, pids: list[int], timeout: float) -> int:
         if sys.platform != "darwin":
             raise RuntimeError("Darwin phys_footprint telemetry is unavailable")
@@ -127,13 +173,7 @@ class DarwinFootprintSampler:
             )
             if result.returncode != 0:
                 raise RuntimeError(f"footprint exited {result.returncode}: {result.stderr.strip()}")
-            processes = json.loads(Path(output).read_text()).get("processes")
-            if not isinstance(processes, list) or not processes:
-                raise RuntimeError("footprint returned no process telemetry")
-            values = [process.get("auxiliary", {}).get("phys_footprint") for process in processes]
-            if any(not isinstance(value, int) or value < 0 for value in values):
-                raise RuntimeError("footprint omitted a non-negative phys_footprint")
-            return sum(values)
+            return self.parse_processes(pids, json.loads(Path(output).read_text()))
         finally:
             Path(output).unlink(missing_ok=True)
 
@@ -178,11 +218,16 @@ class OwnedGroup:
             leader = process_identity(self.child.pid)
             if leader and leader.pgid == self.pgid:
                 self.leader = leader
-                self.retained = {leader}
                 try:
                     parent_control.settimeout(2)
-                    if parent_control.recv(1) != b"R":
+                    ready = parent_control.makefile("rb").readline(64).decode().strip().split()
+                    if len(ready) != 2 or ready[0] != "R":
                         raise RuntimeError("launch sentinel closed before readiness")
+                    anchor = process_identity(int(ready[1]))
+                    if not anchor or anchor.pgid != self.pgid:
+                        raise RuntimeError("launch sentinel reported an invalid group anchor")
+                    self.anchors = (leader, anchor)
+                    self.retained = {leader, anchor}
                     self.retained.update(group_identities(self.pgid))
                     parent_control.sendall(b"G")
                     return
@@ -207,14 +252,16 @@ class OwnedGroup:
         raise RuntimeError("guarded command did not establish its process group")
 
     def refresh(self) -> list[Identity]:
-        # Never adopt a process by numeric PGID after the exact launch-owned leader disappears.
-        if identity_is_live(self.leader):
+        # Numeric PGID census is safe only while an exact launch-owned anchor proves the original
+        # group still exists. The auxiliary anchor outlives a killed sentinel and cannot exit on
+        # TERM/INT, closing the between-censuses descendant race without permitting PGID reuse.
+        if any(identity_is_live(anchor) for anchor in self.anchors):
             self.retained.update(group_identities(self.pgid))
         return [identity for identity in self.retained if identity_is_live(identity)]
 
     def terminate(self, grace: float) -> None:
         live = self.refresh()
-        if identity_is_live(self.leader):
+        if any(identity_is_live(anchor) for anchor in self.anchors):
             try:
                 os.killpg(self.pgid, signal.SIGTERM)
             except ProcessLookupError:
@@ -227,8 +274,10 @@ class OwnedGroup:
                     pass
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline and any(identity_is_live(item) for item in live):
+            live = self.refresh()
             time.sleep(0.02)
-        if identity_is_live(self.leader):
+        live = self.refresh()
+        if any(identity_is_live(anchor) for anchor in self.anchors):
             try:
                 os.killpg(self.pgid, signal.SIGKILL)
             except ProcessLookupError:
@@ -377,6 +426,8 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     try:
+        if sys.argv[1:2] == ["--anchor"]:
+            raise SystemExit(anchor_main())
         if sys.argv[1:2] == ["--sentinel"]:
             raise SystemExit(sentinel_main(int(sys.argv[2]), sys.argv[3:]))
         raise SystemExit(guard(parse_args()))

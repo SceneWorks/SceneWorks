@@ -18,11 +18,19 @@ async function fixture() {
 mode, pid_file, telemetry_file, event_file = sys.argv[1:]
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 child_code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_DFL); time.sleep(60)" if mode == "complete" else "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
-child = subprocess.Popen([sys.executable, "-c", child_code])
+child = None if mode == "delayed-child" else subprocess.Popen([sys.executable, "-c", child_code])
 with open(pid_file, "w") as output:
-    output.write(f"{os.getpid()}\n{child.pid}\n")
+    output.write(f"{os.getpid()}\n")
+    if child:
+        output.write(f"{child.pid}\n")
     output.flush()
-if mode == "high":
+if mode == "delayed-child":
+    time.sleep(0.05)
+    child = subprocess.Popen([sys.executable, "-c", child_code])
+    with open(pid_file, "a") as output:
+        output.write(f"{child.pid}\n")
+        output.flush()
+elif mode == "high":
     time.sleep(0.15)
     open(telemetry_file, "w").write("100\n")
 elif mode == "lost":
@@ -192,6 +200,26 @@ test("loss of the stable launch sentinel fails closed and removes retained desce
   result.pids.forEach(assertGone);
 });
 
+test("immediate sentinel loss cannot hide a descendant spawned after the last census", async () => {
+  const files = await fixture();
+  await writeFile(files.telemetry, "1\n");
+  const watchdog = spawn("python3", [
+    WATCHDOG, "--max-footprint-bytes", "100", "--sample-interval", "0.2",
+    "--telemetry-timeout", "0.2", "--term-grace", "0.1",
+    "--event-file", files.events, "--telemetry-file", files.telemetry,
+    "--allow-synthetic-telemetry", "--", "python3", files.program, "delayed-child",
+    files.pids, files.telemetry, files.events,
+  ], { stdio: "ignore" });
+  const started = await waitForJsonEvent(files.events, (event) => event.event === "started");
+  process.kill(started.pid, "SIGKILL");
+  const status = await new Promise((resolve) => watchdog.once("close", resolve));
+  assert.equal(status, 97);
+  await waitForFile(files.pids);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  assert.equal(pids.length, 2, "delayed descendant never exercised the post-census race");
+  pids.forEach(assertGone);
+});
+
 test("event-log failure is a monitor failure and still leaves no owned residue", async () => {
   const files = await fixture();
   await writeFile(files.telemetry, "1\n");
@@ -220,7 +248,45 @@ module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module;
 live = module.process_identity(os.getpid())
 stale = module.Identity(live.pid, live.pgid, live.state, "Thu Jan  1 00:00:00 1970")
 assert not module.identity_is_live(stale)
+group = module.OwnedGroup.__new__(module.OwnedGroup)
+group.pgid = live.pgid
+group.leader = stale
+group.anchors = (stale,)
+group.retained = {stale}
+class Finished:
+    def wait(self, timeout=None): return 0
+group.child = Finished()
+module.group_identities = lambda pgid: (_ for _ in ()).throw(AssertionError("blind PGID census"))
+module.os.killpg = lambda pgid, sig: (_ for _ in ()).throw(AssertionError("blind PGID signal"))
+assert group.refresh() == []
+group.terminate(0.01)
 print("stale identity refused")
 `]);
   assert.match(probe.stdout, /stale identity refused/);
+});
+
+test("footprint parser requires exact PID parity and sums a complete multi-PID sample", async () => {
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+payload = {"processes": [
+    {"pid": 11, "auxiliary": {"phys_footprint": 40}},
+    {"pid": 22, "auxiliary": {"phys_footprint": 60}},
+]}
+assert module.DarwinFootprintSampler.parse_processes([11, 22], payload) == 100
+for mutated in [
+    {"processes": payload["processes"][:1]},
+    {"processes": [payload["processes"][0], payload["processes"][0]]},
+    {"processes": [*payload["processes"], {"pid": 33, "auxiliary": {"phys_footprint": 1}}]},
+]:
+    try:
+        module.DarwinFootprintSampler.parse_processes([11, 22], mutated)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("partial, duplicate, or extra PID telemetry was accepted")
+print("exact footprint PID set required")
+`]);
+  assert.match(probe.stdout, /exact footprint PID set required/);
 });

@@ -5327,7 +5327,7 @@ fn refuse_unsafe_ltx_capture(
     request: &Value,
     tier: &str,
     geometry: LtxGeometry,
-    strategy: MemoryStrategy,
+    selection: &MemorySelection,
 ) -> Result<(), String> {
     let inventory_bytes = match tier {
         "q4" => LTX_Q4_INVENTORY_BYTES,
@@ -5352,14 +5352,18 @@ fn refuse_unsafe_ltx_capture(
             ))
         }
     };
-    let bounded = strategy == MemoryStrategy::BoundedDecode;
+    let bounded = selection.strategy == MemoryStrategy::BoundedDecode;
+    let incident_carrier = selection.parameters.decode_tile_edge == Some(384)
+        && selection.parameters.decode_overlap == Some(64);
     let incident = tier == "q4"
         && bounded
+        && incident_carrier
         && geometry.width == 1280
         && geometry.height == 704
         && geometry.frames == 305;
     let monotonic_rung2 = tier == "q4"
         && bounded
+        && incident_carrier
         && geometry.width == 1280
         && geometry.height == 704
         && geometry.frames > 305;
@@ -6263,7 +6267,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
              implements {LTX_CALIBRATION_FINGERPRINT}"
         ));
     }
-    refuse_unsafe_ltx_capture(request, tier, geometry, selection.strategy)?;
+    refuse_unsafe_ltx_capture(request, tier, geometry, &selection)?;
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, tier, &selection)?;
     // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
@@ -8058,6 +8062,20 @@ mod ltx_tests {
             assert!(error.contains(disposition), "{error}");
             assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{error}");
         }
+
+        let mut wrong_carrier = ltx_request_json(1280, 704, 449);
+        set_ltx_bounded_case(
+            &mut wrong_carrier,
+            "q4",
+            LTX_Q4_INVENTORY_BYTES,
+            449,
+            LTX_ARITHMETIC_UNMEASURABLE,
+        );
+        wrong_carrier["planned"]["strategy"]["parameters"]["decodeTileEdge"] = json!(256);
+        let error = run_ltx(&wrong_carrier)
+            .expect_err("a different carrier cannot inherit the q4 f449 arithmetic proof");
+        assert!(error.contains(LTX_SAFETY_REFUSED_OPEN), "{error}");
+        assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{error}");
     }
 
     #[test]
