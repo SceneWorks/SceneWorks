@@ -12386,9 +12386,16 @@ fn drive_minimax_h3_arm_in_project(
 /// **What sc-19508 changed.** sc-17159 filled the slot with an unconditional refusal carrying a
 /// hard-coded "not in the pinned inference revision" string, because there was no dispatch arm to
 /// fall through to. There is one now, so the refusal is DERIVED: the arm asks the registry whether
-/// the engine is linked. At the current pin it is not, so every assertion below still holds — but it
-/// now holds for a reason that re-evaluates itself when the pin moves, instead of a string that can
-/// only go stale.
+/// the engine is linked.
+///
+/// **What sc-19721 changed.** The pin moved and the engine IS linked, so layer (1) of
+/// `ensure_minimax_h3_renderable` no longer fires — exactly the substitution the pre-bump version of
+/// this test demanded in its own premise assertion. The property under test is unchanged and is the
+/// whole point of the design: with the engine present but the weights unprovisioned, the ladder must
+/// STILL fall to `Stub` and the fail-loud gate must STILL refuse. It is layer (3) that refuses now,
+/// and its error is the resolver's own — `InvalidPayload`, naming the missing snapshot — rather than
+/// the `Engine` variant layer (1) produced. Asserting the variant AND the reason is what makes that
+/// substitution visible instead of silent.
 ///
 /// The refusal is asserted by ITS OWN reason, not by `is_err()`: a bare error check would go inert
 /// the moment the request were rejected for some unrelated cause (sc-19488).
@@ -12403,16 +12410,35 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
         data_dir: data_dir_guard.path().to_path_buf(),
         ..Settings::from_env()
     };
-    // The premise this whole test rests on, asserted rather than assumed: at the pinned inference
-    // revision the MiniMax-H3 engine is genuinely absent from the linked bundle. If a future pin
-    // registers it, this assertion fires FIRST and says so, instead of the four below failing with
-    // a confusing "expected a refusal" — the test tells you the world changed, not that you broke
-    // something.
+    // sc-19721: HERMETIC, and newly load-bearing. Before the pin bump the refusal short-circuited on
+    // "engine not registered" and never touched the filesystem, so no env var could reach it. Now
+    // the resolver runs, and `SCENEWORKS_MLX_MINIMAX_H3_*_DIR` / `HF_HUB_CACHE` are written by other
+    // tests in this SAME process — a concurrent writer pointing them at a staged tier would make
+    // `resolve_minimax_h3_load` succeed here, route the request to `VideoRoute::MiniMaxH3`, and fail
+    // this test for a reason that has nothing to do with it (observed, not theorised). Pinning them
+    // takes the crate-wide env lock, which is the only thing that makes the read atomic.
+    let _env = crate::test_env::EnvVars::set(&[
+        (crate::video_jobs::minimax_h3::MINIMAX_H3_TIER_DIR_ENV, ""),
+        (crate::video_jobs::minimax_h3::MINIMAX_H3_BASE_DIR_ENV, ""),
+        (
+            "HF_HUB_CACHE",
+            data_dir_guard
+                .path()
+                .join("no-such-hub")
+                .to_str()
+                .expect("utf-8 hub path"),
+        ),
+    ]);
+    // The premise this whole test rests on, asserted rather than assumed: the engine IS in the
+    // linked bundle, so the refusal below is the weights-unprovisioned one and not the
+    // engine-absent one. If a future pin drops the provider, this fires FIRST and says so, instead
+    // of the assertions below passing for the WRONG reason — an engine-absent refusal would satisfy
+    // "it refused" while proving nothing about the unprovisioned-install path.
     assert!(
-        !crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
-        "the linked inference bundle now REGISTERS minimax_h3 — the pin moved (sc-18650). This \
-         guard's premise is gone: re-point it at the weights-unprovisioned case, which is the \
-         refusal that survives the bump."
+        crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        "the linked inference bundle no longer registers minimax_h3 — the pin moved backwards off \
+         the sc-17137 inference feature head. This guard would then be re-testing layer (1), which \
+         is not the property it is here for."
     );
 
     // Every declared mode of BOTH partitions, so no shape slips past on a route the ladder happens
@@ -12437,22 +12463,31 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
         );
         let err = ensure_video_engine_weights(&req, &settings)
             .expect_err("a MiniMax-H3 job MUST fail loudly, never render a fake video");
-        let WorkerError::Engine(message) = err else {
-            panic!("{model}/{mode}: expected a WorkerError::Engine, got a different variant");
+        let WorkerError::InvalidPayload(message) = err else {
+            panic!(
+                "{model}/{mode}: expected the resolver's WorkerError::InvalidPayload. A \
+                 WorkerError::Engine here would mean layer (1) fired — the engine went missing \
+                 from the bundle — which is a different failure this test is not about."
+            );
         };
         assert!(
             message.contains(model),
             "{model}/{mode}: the error must name the model: {message}"
         );
         assert!(
-            message.contains("not in the pinned inference revision"),
-            "{model}/{mode}: the error must name the real cause — no engine, not missing weights: \
-             {message}"
+            message.contains("is not downloaded"),
+            "{model}/{mode}: the error must name the real cause — the weights are unprovisioned, \
+             which is the refusal that survives the pin bump: {message}"
         );
         assert!(
-            message.contains("No output was produced"),
-            "{model}/{mode}: the error must say nothing was rendered, so the failure cannot be \
+            message.contains("Model Manager"),
+            "{model}/{mode}: the error must tell the user how to fix it, so the failure cannot be \
              mistaken for a finished job: {message}"
+        );
+        assert!(
+            !message.contains("not in the pinned inference revision"),
+            "{model}/{mode}: layer (1)'s pre-bump string must be GONE — the engine is linked now, \
+             and leaving that reason reachable would be a lie about why the job failed: {message}"
         );
     }
 
@@ -12548,25 +12583,32 @@ fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
 /// lookup keyed on a string — so nothing needs the provider importable at compile time. What it
 /// needs is the id PRESENT in the registry.
 ///
-/// Both halves are load-bearing. The `is_none()` half proves the check is asking the real registry
-/// (a hard-coded `false` would pass it, but not the `is_some()` half for a model that IS linked); the
-/// `is_some()` half proves the registry read actually discriminates, so a check stubbed to always
-/// report "absent" — which would make every MiniMax job refuse forever, silently surviving the pin
-/// bump — fails here.
+/// Both halves are load-bearing, and sc-19721's pin bump FLIPPED which one is which. The engine is
+/// now in the linked bundle, so `minimax_h3` resolves; the discriminating negative is an id the
+/// registry genuinely does not carry. A check stubbed to answer "present" to everything fails the
+/// negative half, and one stubbed to answer "absent" — which would make every MiniMax job refuse
+/// forever while looking exactly like the pre-bump world — fails the positive half. That second
+/// failure mode is the one this test exists for now: before the bump it was the passing state.
 #[cfg(target_os = "macos")]
 #[test]
 fn minimax_h3_engine_presence_is_read_from_the_registry() {
     assert!(
-        crate::inference_runtime::media_descriptor("minimax_h3").is_none(),
-        "minimax_h3 is not registered at the pinned inference revision"
+        crate::inference_runtime::media_descriptor("minimax_h3").is_some(),
+        "minimax_h3 IS registered at the pinned inference revision (sc-19721 moved the pin onto \
+         the sc-17137 inference feature head, which is where mlx-gen-catalog first re-exports it)"
     );
     assert!(
         crate::inference_runtime::media_descriptor("wan2_2_t2v_14b").is_some(),
-        "the probe must discriminate: a registered video engine has to resolve, or `is_none()` \
-         above would pass against a registry that answers None to everything"
+        "the probe must resolve a long-registered video engine too, or the assertion above says \
+         nothing about MiniMax specifically"
     );
     assert!(
-        !crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        crate::inference_runtime::media_descriptor("minimax_h4").is_none(),
+        "the probe must discriminate: an id the bundle does not carry has to resolve to None, or \
+         `is_some()` above would pass against a registry that answers Some to everything"
+    );
+    assert!(
+        crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
         "the helper must agree with the registry read it claims to perform"
     );
 }

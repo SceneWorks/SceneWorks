@@ -262,6 +262,13 @@ impl MlxRequestPlan {
     /// component contract. `spec_component_bytes` folds raw control and resident adapter sources
     /// into the legacy scalar. A typed declaration replaces the corresponding raw source bytes with
     /// the provider's load-exact residency. Non-adopting providers retain the legacy scalar.
+    ///
+    /// A [`gen_core::MemoryComponentResidency::PrecomputedThenEvicted`] declaration deliberately
+    /// does NOT move this figure (sc-19721). This is the resident BASELINE's peak: it is the one
+    /// candidate that must always cover the widest instant of the whole pipeline, and the precompute
+    /// instant — where the evictable sub-stack is fully materialized — is inside it. The eviction is
+    /// a steady-state fact and reaches the floor candidates through
+    /// [`estimate_floor_weights_bytes`], never this leg.
     fn contract_base_peak_bytes(
         &self,
         legacy_total_peak_bytes: u64,
@@ -1519,6 +1526,27 @@ fn estimate_evidence(
     }
 }
 
+/// Bytes the provider declares it drops from INSIDE `asset_facts.transformer_bytes` before the
+/// declaring phase reaches steady state — gen-core's
+/// [`MemoryComponentKind::TransformerSubStack`] + [`MemoryComponentResidency::PrecomputedThenEvicted`]
+/// pair (SC-18665), read through [`MemoryProviderContract::steady_state_transformer_bytes`].
+///
+/// **Zero for all 23 providers that have not adopted the sub-stack vocabulary**, because the
+/// accessor returns `asset_facts.transformer_bytes` unchanged for them. That is what makes this
+/// term safe to fold into a shared floor: a non-adopting contract is byte-identical to the
+/// pre-sc-19721 arithmetic.
+///
+/// Deliberately NOT [`MemoryProviderContract::evicted_component_bytes`], which sums the drop over
+/// EVERY declared component including auxiliary networks. Those bytes are not inside
+/// `transformer_bytes`, so subtracting them from the transformer's own term would remove bytes the
+/// transformer never held.
+fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
+    contract
+        .asset_facts
+        .transformer_bytes
+        .saturating_sub(contract.steady_state_transformer_bytes())
+}
+
 /// The floor's per-rung WEIGHTS term, derived only from the provider contract's own declarations
 /// (sc-18096). Nothing here is a tuned coefficient:
 ///
@@ -1534,17 +1562,55 @@ fn estimate_evidence(
 ///   promising an unmeasured saving.
 /// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
 ///   itself declares them `bounded_by` a rung the composition engages.
+/// * A declared intra-transformer eviction ([`intra_transformer_evicted_bytes`]) leaves the floor
+///   only on the STAGED branch, and only down to the load-exact transformer (sc-19721). Both
+///   restrictions are the same rule: **the drop lowers the steady state, not the peak.** The
+///   declaring phase still holds the whole sub-stack at the precompute instant — MiniMax-H3's
+///   denoise runs 64.56 GB → 38.70 GB *across* it — so the evicted bytes may only be removed from
+///   bytes that are provably NOT co-resident with that instant.
+///   * Without `StagedResidency` nothing is staged out of it: the conditioning stack, the
+///     transformer and the decoder are all charged as one co-residency, and that co-residency
+///     includes the instant. Removing anything there would under-charge it by the whole eviction —
+///     the OOM direction, and the exact asymmetry the provider's `retained_bytes` declaration is
+///     chosen to avoid.
+///   * With it engaged, `heavy` is still a lumped charge for the transformer plus every later
+///     phase's component (the decoder). Clamping the reduced lump at `transformer_bytes` — the
+///     load-exact figure, sub-stack included — keeps the precompute instant covered while letting
+///     the drop cancel against the later phases' bytes, which are not resident at that instant.
+///     The reduction is therefore `min(evicted, base_bytes − conditioning − transformer)`, never
+///     the raw eviction, and this leg is deliberately not an un-lumping of the staged phases: no
+///     measured basis for that exists here (epic 18093 owns it).
+///   * `BoundedTransformerResidency` still subtracts the load-exact `transformer_bytes`, because
+///     that rung windows the whole transformer — the sub-stack is inside it, so a second deduction
+///     would double-count the same bytes.
+///
+/// The auxiliary fold deliberately charges `resident_bytes`, not
+/// `MemoryResidentComponent::steady_state_bytes`: an auxiliary network stands beside the base model
+/// rather than inside a staged phase, so nothing here establishes that its widest instant is not
+/// co-resident with the rest of the floor. No shipped provider declares an evicting auxiliary
+/// component today, so the two readings are byte-identical; this comment records which one is meant
+/// if one ever does.
 fn estimate_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> u64 {
     let facts = contract.asset_facts;
     let conditioning = facts.conditioning_bytes;
-    let mut heavy = facts.base_bytes.saturating_sub(conditioning);
+    let staged = engaged.contains(&MemoryStrategy::StagedResidency);
+    // The load-exact non-conditioning working set: what the transformer's own phase holds while the
+    // evictable sub-stack is still materialized.
+    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
+    let mut heavy = if staged {
+        heavy_load_exact
+            .saturating_sub(intra_transformer_evicted_bytes(contract))
+            .max(facts.transformer_bytes)
+    } else {
+        heavy_load_exact
+    };
     if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
         heavy = heavy.saturating_sub(facts.transformer_bytes);
     }
-    let base = if engaged.contains(&MemoryStrategy::StagedResidency) {
+    let base = if staged {
         conditioning.max(heavy)
     } else {
         conditioning.saturating_add(heavy)
@@ -2283,6 +2349,13 @@ fn evaluate_request_with_budget_using_bundle(
     // process's current state. Only bytes above the cache-recorded pre-load external baseline, and
     // no more than the provider-declared total resident envelope, may be credited as already
     // present. Unrelated process allocations therefore remain charged on the available side.
+    //
+    // sc-19721: `total_resident_bytes()` stays the LOAD-EXACT envelope on a provider that declares
+    // an eviction. It is a ceiling on a credit, and the credit is already floored by what the
+    // process has actually committed — so a provider caught before its precompute-and-evict is
+    // credited for what it really holds, while one caught after is bounded by `committed_bytes`
+    // anyway. Lowering the ceiling to the steady state would only refuse credit that is genuinely
+    // resident.
     let attributable_resident_bytes = budget
         .committed_bytes
         .saturating_sub(external_committed_bytes)
@@ -2765,11 +2838,35 @@ pub(crate) fn evaluate_request(
 /// carries: MLX providers are explicitly anchored on macOS, while the CUDA bundle exposes its explicit
 /// Candle catalog. The same query is shared by the MLX fit gate (sc-10840) and Candle fit gate
 /// (sc-12130), so adding a truthful provider capability needs no worker allowlist edit.
+/// **Two descriptor bits, one question (sc-19721).** gen-core split the attestation in two, and this
+/// gate's question is the disjunction:
+///
+/// * `supports_sequential_offload` — the SELECTABLE [`OffloadPolicy::Sequential`] is honoured.
+/// * `unconditionally_engages_staged_residency` — the provider stages eligible components through a
+///   load/use/drop lifecycle on EVERY generation, with or without a policy request.
+///
+/// Either one makes "peak is the dominant component, not the sum" true, which is the only thing this
+/// gate reads the bit for. The pair is not redundant: MLX Bernini holds no component weights on the
+/// generator at all, so it never had a selectable control to honour — it advertised
+/// `supports_sequential_offload: true` purely to reach this gate, and inference corrected that to the
+/// second bit. Reading only the first would have charged Bernini the SUM of the Qwen2.5-VL planner,
+/// the UMT5-XXL encoder and the two MoE experts — a co-residency `generate_impl` never creates — and
+/// refused a model that fits, silently, on a pin bump. The `false` default still means "no
+/// attestation", so an unwired engine (sensenova's fused MoT) is still never offered `Sequential`.
+///
+/// Requesting `Sequential` from a provider that stages unconditionally but exposes no selectable
+/// control is safe in the direction that matters: the policy is *advisory* (gen-core treats an
+/// unwired request as `Resident`, never an error), and here the staged behaviour the prediction
+/// assumes is what the provider physically does regardless.
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
     crate::inference_runtime::media()
         .generators()
         .find(|reg| (reg.descriptor)().id == engine_id)
-        .is_some_and(|reg| (reg.descriptor)().capabilities.supports_sequential_offload)
+        .is_some_and(|reg| {
+            let capabilities = (reg.descriptor)().capabilities;
+            capabilities.supports_sequential_offload
+                || capabilities.unconditionally_engages_staged_residency
+        })
 }
 
 /// Emulate a smaller Mac: force the total-unified-memory budget (GB). Set e.g.
@@ -10968,6 +11065,7 @@ mod tests {
                     kind: MemoryComponentKind::ControlBranch,
                     resident_bytes: CONTROL_RESIDENT_BYTES,
                     bounded_by: None,
+                    residency: gen_core::MemoryComponentResidency::WholeRender,
                 }],
             };
         }
@@ -11174,6 +11272,7 @@ mod tests {
                 kind: MemoryComponentKind::AdapterStack,
                 resident_bytes: gib_to_bytes(ADAPTER_GIB),
                 bounded_by: None,
+                residency: gen_core::MemoryComponentResidency::WholeRender,
             }],
         };
         const PRECISION_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
@@ -12011,6 +12110,29 @@ mod tests {
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
         // BIT, not mere registry membership.
         assert!(!engine_supports_sequential("sensenova_u1_8b"));
+
+        // sc-19721: WHICH engines reach `true` through the second bit rather than the first, pinned
+        // as a set so the disjunction cannot quietly widen. Every one of these declares
+        // `unconditionally_engages_staged_residency: true` and `supports_sequential_offload: false`
+        // at the pinned revision: they stage physically on every generation and expose no selectable
+        // control to honour. Bernini is here because inference moved it between the two bits, which
+        // is what made the disjunction necessary.
+        for id in ["bernini", "krea_realtime_14b", "ltx_2_3", "scail2_14b"] {
+            let capabilities = crate::inference_runtime::media()
+                .generators()
+                .find(|reg| (reg.descriptor)().id == id)
+                .map(|reg| (reg.descriptor)().capabilities)
+                .unwrap_or_else(|| panic!("{id} is registered in the pinned bundle"));
+            assert!(
+                !capabilities.supports_sequential_offload,
+                "{id}: this set is specifically the engines the FIRST bit does not cover"
+            );
+            assert!(
+                capabilities.unconditionally_engages_staged_residency,
+                "{id}: reaches the gate only through the unconditional-staging bit"
+            );
+            assert!(engine_supports_sequential(id));
+        }
     }
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a
@@ -12944,5 +13066,480 @@ mod tests {
             900,
             "a self-contained snapshot counts its own components exactly once"
         );
+    }
+
+    /// sc-19721 — the AdaLN exclusion, at the only consumer that can honour it.
+    ///
+    /// gen-core landed `MemoryComponentKind::TransformerSubStack` +
+    /// `MemoryComponentResidency::PrecomputedThenEvicted` (SC-18665) with **zero** non-test callers,
+    /// so the declaration moved no estimate by a byte. These grade the consumer, and they grade the
+    /// half that is easy to get wrong in the OOM direction: the drop lowers the STEADY STATE, and
+    /// the declaring phase still holds the whole sub-stack at the precompute instant.
+    ///
+    /// Every figure is MiniMax-H3's own declaration, tied to the pinned engine's public constants by
+    /// [`the_h3_eviction_figures_are_the_pinned_engines_own`]. Nothing is asserted against a default:
+    /// `evicted_component_bytes()` is asserted non-zero and equal to `resident − retained` first, so
+    /// a contract that declared no component (or a build with the feature deleted) cannot pass by
+    /// comparing zero with zero.
+    mod adaln_exclusion_reaches_the_estimate_floor {
+        use super::*;
+
+        /// Qwen3-VL-32B, the dense conditioning stack — `mlx_gen_minimax_h3::TEXT_ENCODER_BYTES`.
+        const TEXT_ENCODER_BYTES: u64 = 66_714_912_872;
+        /// One bf16 33B DiT partition — `DIT_BF16_BYTES`. A render loads exactly one.
+        const DIT_BF16_BYTES: u64 = 66_280_504_216;
+        /// Video VAE + audio VAE: the decode-phase components, i.e. the part of the `heavy` lump
+        /// that is NOT the transformer.
+        const VAE_BYTES: u64 = 10_415_558_888 + 605_429_340;
+        /// The 50-block `adaln_proj` stack at bf16 — `ADALN_EVICTED_BYTES`.
+        const ADALN_RESIDENT_BF16_BYTES: u64 = 26_020_915_200;
+        /// The same 50 projections on the packed q4 tier — `ADALN_EVICTED_Q4_BYTES`. **The lever is
+        /// tier-scaled**, which is why q4 is graded here and not only bf16.
+        const ADALN_RESIDENT_Q4_BYTES: u64 = 7_325_337_600;
+        /// What the precompute keeps in the projections' place —
+        /// `ADALN_MODULATION_TABLE_MAX_BYTES`. Deliberately **not** tier-scaled: the table's dtype is
+        /// the compute dtype, not the tier's bit width. Applying one factor to both would be wrong at
+        /// every tier but bf16, and this pair is what makes that visible.
+        const ADALN_RETAINED_BYTES: u64 = 3_870_720_000;
+
+        /// A packed conditioning tier (sc-19120 re-hosts one). Used as a STAND-IN so the DiT-side
+        /// arithmetic is observable at all: with the dense encoder above, `max(conditioning, heavy)`
+        /// is pinned by the conditioner at q4 and the whole exclusion is invisible at the floor —
+        /// itself a finding, graded by [`q4_with_the_dense_conditioner_moves_nothing`].
+        const PACKED_TEXT_ENCODER_BYTES: u64 = TEXT_ENCODER_BYTES / 4;
+
+        const STAGED: &[MemoryStrategy] = &[MemoryStrategy::StagedResidency];
+        const CO_RESIDENT: &[MemoryStrategy] = &[];
+        const STAGED_PLUS_RUNG4: &[MemoryStrategy] = &[
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+
+        /// MiniMax-H3's contract shape: three base components, and one `TransformerSubStack`
+        /// component inside `transformer_bytes` that is precomputed and evicted during Denoise.
+        /// `evicting = false` builds the byte-identical contract a provider had before SC-18665
+        /// existed — the control every delta below is measured against.
+        fn h3_shaped_contract(
+            conditioning_bytes: u64,
+            dit_bytes: u64,
+            adaln_resident_bytes: u64,
+            evicting: bool,
+        ) -> MemoryProviderContract {
+            let mut contract = MemoryProviderContract::compatibility_default(
+                "minimax_h3",
+                MemoryBackendRealization::MlxMetal {
+                    bounded_wired_residency: false,
+                    lazy_or_mmap_materialization: true,
+                    explicit_evaluation_and_synchronization: false,
+                    cache_eviction: true,
+                },
+            );
+            contract.asset_facts.conditioning_bytes = conditioning_bytes;
+            contract.asset_facts.transformer_bytes = dit_bytes;
+            contract.asset_facts.decoder_bytes = VAE_BYTES;
+            contract.asset_facts.base_bytes = conditioning_bytes + dit_bytes + VAE_BYTES;
+            let phases = contract.lifecycle.phases.clone();
+            contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+                phases,
+                variables: vec![gen_core::MemoryFormulaVariable::AssetBytes],
+                resident_components: vec![gen_core::MemoryResidentComponent {
+                    id: "dit_adaln_proj_stack".to_owned(),
+                    kind: gen_core::MemoryComponentKind::TransformerSubStack(
+                        TransformerComponent::Dit,
+                    ),
+                    resident_bytes: adaln_resident_bytes,
+                    bounded_by: None,
+                    residency: if evicting {
+                        gen_core::MemoryComponentResidency::PrecomputedThenEvicted {
+                            precomputed_in: gen_core::MemoryPhase::Denoise,
+                            retained_bytes: ADALN_RETAINED_BYTES,
+                            evidence: "sc-19721 fixture mirroring \
+                                       mlx-gen-minimax-h3::memory_strategy::adaln_component"
+                                .to_owned(),
+                        }
+                    } else {
+                        gen_core::MemoryComponentResidency::WholeRender
+                    },
+                }],
+            };
+            contract
+        }
+
+        /// The declared drop, read off the contract rather than recomputed — and proved non-zero and
+        /// equal to the provider's own `resident − retained`, so none of the deltas below can be a
+        /// zero-versus-zero pass.
+        fn declared_eviction(contract: &MemoryProviderContract, adaln_resident: u64) -> u64 {
+            let evicted = contract.evicted_component_bytes();
+            assert_eq!(
+                evicted,
+                adaln_resident - ADALN_RETAINED_BYTES,
+                "the fixture must declare the NET drop the provider declares: the precompute keeps \
+                 a modulation table in the projections' place, and a gross declaration claims a \
+                 saving the runtime does not deliver"
+            );
+            assert!(
+                evicted > 0,
+                "a zero drop would make every delta below vacuous"
+            );
+            assert_eq!(
+                contract.steady_state_transformer_bytes(),
+                contract.asset_facts.transformer_bytes - evicted,
+                "the accessor under test must correct transformer_bytes by exactly that drop"
+            );
+            evicted
+        }
+
+        /// bf16 + the dense Qwen3-VL-32B conditioner: the shipped cell today.
+        ///
+        /// The lump `heavy = transformer + decoder` is 77.30 GB against a 66.71 GB conditioner, so
+        /// the staged floor is the lump. The drop cancels against the decoder's bytes — which the
+        /// denoise phase does not hold — until it hits the load-exact transformer, and there the
+        /// clamp stops it. The conditioner is then the taller leg, so the floor lands on it.
+        #[test]
+        fn bf16_staged_floor_falls_to_the_conditioning_stack_and_never_below_the_transformer() {
+            let legacy = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                true,
+            );
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            assert_eq!(
+                legacy.evicted_component_bytes(),
+                0,
+                "the control declares WholeRender, so it drops nothing"
+            );
+
+            let before = estimate_floor_weights_bytes(&legacy, STAGED);
+            let after = estimate_floor_weights_bytes(&adopted, STAGED);
+            assert_eq!(
+                before,
+                DIT_BF16_BYTES + VAE_BYTES,
+                "before: the staged floor is the transformer+decoder lump"
+            );
+            assert_eq!(
+                after, TEXT_ENCODER_BYTES,
+                "after: the lump falls below the conditioning stack, which becomes the binding leg"
+            );
+            assert!(
+                before > after,
+                "a configuration between {after} and {before} bytes was refused and now fits"
+            );
+            assert!(
+                after >= DIT_BF16_BYTES,
+                "the precompute instant holds the WHOLE DiT ({DIT_BF16_BYTES} B, sub-stack \
+                 included). A floor below it under-charges that instant by up to {evicted} B — the \
+                 OOM direction, and the exact asymmetry ADALN_MODULATION_TABLE_MAX_BYTES exists to \
+                 avoid."
+            );
+        }
+
+        /// bf16 + a packed conditioner: the clamp is the ONLY thing stopping the fall, and the floor
+        /// lands exactly on the load-exact transformer. This is the cell that would go silently
+        /// wrong if the eviction were subtracted raw.
+        #[test]
+        fn bf16_staged_floor_stops_exactly_at_the_load_exact_transformer() {
+            let legacy = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                true,
+            );
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            assert!(
+                evicted > VAE_BYTES,
+                "this cell only means something while the drop is bigger than the decode-phase \
+                 bytes it can cancel against"
+            );
+
+            let before = estimate_floor_weights_bytes(&legacy, STAGED);
+            let after = estimate_floor_weights_bytes(&adopted, STAGED);
+            assert_eq!(before, DIT_BF16_BYTES + VAE_BYTES);
+            assert_eq!(
+                after, DIT_BF16_BYTES,
+                "the fall stops at the load-exact transformer — the precompute instant — so the \
+                 reduction is the decode-phase bytes ({VAE_BYTES}), never the raw drop ({evicted})"
+            );
+            assert_eq!(before - after, VAE_BYTES);
+        }
+
+        /// q4 + a packed conditioner: neither clamp binds, so the floor falls by EXACTLY
+        /// `evicted_component_bytes()`. Grading a second tier is not redundant — the resident side
+        /// is tier-scaled (26.02 → 7.33 GB) while the retained table is not, so a single factor
+        /// applied to both would be right at bf16 and wrong here.
+        #[test]
+        fn q4_staged_floor_falls_by_exactly_the_declared_eviction() {
+            let legacy = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                true,
+            );
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_Q4_BYTES);
+            assert!(
+                evicted < VAE_BYTES,
+                "at q4 the drop is smaller than the decode-phase bytes, so the clamp does not bind \
+                 and the whole declared exclusion reaches the floor"
+            );
+            assert_ne!(
+                evicted,
+                ADALN_RESIDENT_BF16_BYTES - ADALN_RETAINED_BYTES,
+                "the exclusion must be tier-scaled; a q4 drop equal to bf16's is the error this \
+                 cell exists to catch"
+            );
+
+            let before = estimate_floor_weights_bytes(&legacy, STAGED);
+            let after = estimate_floor_weights_bytes(&adopted, STAGED);
+            assert_eq!(
+                before - after,
+                evicted,
+                "the whole declared exclusion reaches the fit gate at this cell"
+            );
+            assert_eq!(after, DIT_BF16_BYTES / 4 + VAE_BYTES - evicted);
+        }
+
+        /// q4 + the dense conditioner: the floor does NOT move, because the 66.71 GB conditioning
+        /// stack is taller than the whole packed DiT pipeline. Pinned rather than left unsaid: it is
+        /// why sc-19120's packed text encoder and this change are a pair, and why a q4 assertion
+        /// against the shipped dense encoder would have looked like the fix doing nothing.
+        #[test]
+        fn q4_with_the_dense_conditioner_moves_nothing() {
+            let legacy = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                true,
+            );
+            declared_eviction(&adopted, ADALN_RESIDENT_Q4_BYTES);
+            assert_eq!(
+                estimate_floor_weights_bytes(&legacy, STAGED),
+                TEXT_ENCODER_BYTES
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, STAGED),
+                TEXT_ENCODER_BYTES,
+                "the dense conditioning stack still binds; the DiT-side win is real but invisible \
+                 here"
+            );
+        }
+
+        /// Without `StagedResidency` nothing is staged out of the precompute instant: the
+        /// conditioner, the transformer and the decoder are charged as ONE co-residency, and that
+        /// co-residency includes the instant. The floor must not move by a byte.
+        #[test]
+        fn a_co_resident_composition_takes_no_reduction_at_all() {
+            for (conditioning, dit, adaln) in [
+                (
+                    TEXT_ENCODER_BYTES,
+                    DIT_BF16_BYTES,
+                    ADALN_RESIDENT_BF16_BYTES,
+                ),
+                (
+                    PACKED_TEXT_ENCODER_BYTES,
+                    DIT_BF16_BYTES,
+                    ADALN_RESIDENT_BF16_BYTES,
+                ),
+                (
+                    PACKED_TEXT_ENCODER_BYTES,
+                    DIT_BF16_BYTES / 4,
+                    ADALN_RESIDENT_Q4_BYTES,
+                ),
+            ] {
+                let legacy = h3_shaped_contract(conditioning, dit, adaln, false);
+                let adopted = h3_shaped_contract(conditioning, dit, adaln, true);
+                declared_eviction(&adopted, adaln);
+                assert_eq!(
+                    estimate_floor_weights_bytes(&adopted, CO_RESIDENT),
+                    estimate_floor_weights_bytes(&legacy, CO_RESIDENT),
+                    "co-resident floor moved for conditioning={conditioning} dit={dit}: the \
+                     precompute instant is inside this charge and would be under-charged"
+                );
+                assert_eq!(
+                    estimate_floor_weights_bytes(&adopted, CO_RESIDENT),
+                    conditioning + dit + VAE_BYTES
+                );
+            }
+        }
+
+        /// Rung 4 windows the WHOLE transformer, sub-stack included, so the eviction must not be
+        /// deducted a second time on top of it.
+        #[test]
+        fn rung_four_deducts_the_transformer_once_not_twice() {
+            let legacy = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                true,
+            );
+            declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, STAGED_PLUS_RUNG4),
+                estimate_floor_weights_bytes(&legacy, STAGED_PLUS_RUNG4),
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, STAGED_PLUS_RUNG4),
+                PACKED_TEXT_ENCODER_BYTES.max(VAE_BYTES),
+                "the windowed transformer leaves the floor exactly once"
+            );
+        }
+
+        /// The 23 providers that never adopted the sub-stack vocabulary must be byte-identical.
+        /// `steady_state_transformer_bytes()` returns `asset_facts.transformer_bytes` unchanged for
+        /// them, which is the property that makes this change safe to land at the shared floor.
+        #[test]
+        fn a_provider_that_declares_no_sub_stack_is_byte_identical() {
+            let mut contract = MemoryProviderContract::compatibility_default(
+                "fixture_provider",
+                MemoryBackendRealization::MlxMetal {
+                    bounded_wired_residency: false,
+                    lazy_or_mmap_materialization: true,
+                    explicit_evaluation_and_synchronization: false,
+                    cache_eviction: true,
+                },
+            );
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = gib_to_bytes(2.0);
+            contract.asset_facts.base_bytes = gib_to_bytes(8.0);
+            assert!(contract.resident_components().is_empty());
+            assert_eq!(contract.evicted_component_bytes(), 0);
+            assert_eq!(
+                contract.steady_state_transformer_bytes(),
+                contract.asset_facts.transformer_bytes
+            );
+            assert_eq!(intra_transformer_evicted_bytes(&contract), 0);
+
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED),
+                gib_to_bytes(7.0),
+                "staged: max(conditioning, transformer + decoder)"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, CO_RESIDENT),
+                gib_to_bytes(8.0),
+                "co-resident: the whole base"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
+                gib_to_bytes(2.0),
+                "rung 4: max(conditioning, decoder) with the transformer windowed out"
+            );
+        }
+
+        /// An eviction declared on an AUXILIARY network is not inside `transformer_bytes`, so it
+        /// must not be subtracted from the transformer's term. This is the distinction between
+        /// `steady_state_transformer_bytes()` and `evicted_component_bytes()`, and swapping one for
+        /// the other is invisible on MiniMax-H3 (whose only component is the sub-stack) — which is
+        /// exactly why it is graded on a contract that has both.
+        #[test]
+        fn an_evicting_auxiliary_component_does_not_move_the_transformer_term() {
+            const CONTROL_RESIDENT: u64 = 4_000_000_000;
+            const CONTROL_RETAINED: u64 = 1_000_000_000;
+            let mut contract = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                true,
+            );
+            let sub_stack_only = estimate_floor_weights_bytes(&contract, STAGED);
+            let intra = intra_transformer_evicted_bytes(&contract);
+
+            if let gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+                resident_components,
+                ..
+            } = &mut contract.formula
+            {
+                resident_components.push(gen_core::MemoryResidentComponent {
+                    id: "fixture.control".to_owned(),
+                    kind: gen_core::MemoryComponentKind::ControlBranch,
+                    resident_bytes: CONTROL_RESIDENT,
+                    bounded_by: None,
+                    residency: gen_core::MemoryComponentResidency::PrecomputedThenEvicted {
+                        precomputed_in: gen_core::MemoryPhase::Denoise,
+                        retained_bytes: CONTROL_RETAINED,
+                        evidence: "sc-19721 fixture: an evicting auxiliary network".to_owned(),
+                    },
+                });
+            } else {
+                panic!("fixture declares a ComponentPhaseEnvelope formula");
+            }
+
+            assert_eq!(
+                contract.evicted_component_bytes(),
+                intra + (CONTROL_RESIDENT - CONTROL_RETAINED),
+                "the contract-wide accessor now sums BOTH drops"
+            );
+            assert_eq!(
+                intra_transformer_evicted_bytes(&contract),
+                intra,
+                "…but only the sub-stack's drop is inside transformer_bytes"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED),
+                sub_stack_only + CONTROL_RESIDENT,
+                "the auxiliary network adds its LOAD-EXACT residency and removes nothing from the \
+                 transformer term; reading evicted_component_bytes() here would take {} B off a \
+                 stack that never held them",
+                CONTROL_RESIDENT - CONTROL_RETAINED
+            );
+        }
+
+        /// The fixture figures above are the PINNED engine's own constants, not transcriptions that
+        /// can drift from it. Gated to the lanes that have a provider bundle in scope, exactly like
+        /// `pinned_engine_geometry`.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        #[test]
+        fn the_h3_eviction_figures_are_the_pinned_engines_own() {
+            use platform_runtime::providers::minimax_h3::memory_strategy as h3;
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            use runtime_cuda as platform_runtime;
+            #[cfg(target_os = "macos")]
+            use runtime_macos as platform_runtime;
+
+            assert_eq!(TEXT_ENCODER_BYTES, h3::TEXT_ENCODER_BYTES);
+            assert_eq!(DIT_BF16_BYTES, h3::DIT_BF16_BYTES);
+            assert_eq!(VAE_BYTES, h3::VIDEO_VAE_BYTES + h3::AUDIO_VAE_BYTES);
+            assert_eq!(ADALN_RESIDENT_BF16_BYTES, h3::ADALN_EVICTED_BYTES);
+            assert_eq!(ADALN_RESIDENT_Q4_BYTES, h3::ADALN_EVICTED_Q4_BYTES);
+            assert_eq!(
+                ADALN_RETAINED_BYTES,
+                h3::ADALN_MODULATION_TABLE_MAX_BYTES,
+                "the retained table is NOT tier-scaled; if this constant moves, every tier cell \
+                 above changes and must be re-derived rather than re-stamped"
+            );
+        }
     }
 }
