@@ -406,12 +406,11 @@ impl CandleStrictControl for ZImageStrictControl {
         let paths = ZImageControlPaths {
             snapshot: self.snapshot.clone(),
             control: self.controlnet.clone(),
-            // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
-            // performed.
-            adapters: Vec::new(),
             // Base `z_image` (sc-8680) → the faithful undistilled control path (shift-6.0, ~50-step,
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
+            // main plumbed a real adapter stack through this lane; sc-19721's `Vec::new()` was the
+            // stopgap for a lane that had none, and it is superseded here.
             adapters: self.adapters.clone(),
         };
         let model = ZImageControl::load(&paths).map_err(|error| {
