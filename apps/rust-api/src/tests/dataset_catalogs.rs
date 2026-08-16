@@ -24,12 +24,66 @@ fn catalog_scan_hook_test_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// Fixed cost of getting a scan scheduled, started and reaped, independent of
+/// how many rows it has to get through.
+const SCAN_IDLE_BASE: Duration = Duration::from_secs(30);
+
+/// Throughput floor a catalog scan must beat to count as making progress.
+///
+/// Worst throughput measured while calibrating this (see
+/// [`catalog_scan_idle_budget`]) was ~894 rows/s. 300 leaves a ~3x margin under
+/// that, so the budget tracks the work rather than the host.
+const SCAN_IDLE_ROWS_PER_SEC: u64 = 300;
+
+/// Wall-clock budget for one catalog scan to reach idle, derived from the row
+/// count that scan actually has to get through.
+///
+/// A single flat cap for every scan in this module was the defect: the same
+/// 60 s covered a 10-row scan and a 100_000-row one. It is not remotely enough
+/// for the big ones on a contended host. Measured on an 18-core Mac with this
+/// whole module running in parallel under 48 external CPU hogs (1-minute load
+/// average 72 rising to 139):
+///
+/// | rows      | worst observed wait | budget |
+/// |-----------|---------------------|--------|
+/// | 30_000    | 4.5 s               | 130 s  |
+/// | 80_000    | 20.9 s              | 296 s  |
+/// | 100_000   | 111.8 s             | 363 s  |
+///
+/// A lighter run of the same module (load average 73-106) put the worst
+/// 100_000-row wait at 69.4 s — already past the flat cap, which is why those
+/// two tests failed on a loaded dev host while CI, uncontended at ~19 s for that
+/// same scan, stayed green. sc-17723 hit this class before and answered it by
+/// raising the magic numbers; deriving from the work is the successor, because
+/// it does not need re-tuning per host.
+///
+/// Note this is TIGHTER than the old flat cap for every scan below 9_000 rows,
+/// which is most of the module — a wedged small scan now fails in 30 s rather
+/// than 60 s. Only the genuinely heavy scans get a long budget, and even the
+/// largest (100_000 rows, 363 s) reports well inside `parity-rust`'s 30-minute
+/// cap on a job that runs in ~9 minutes.
+fn catalog_scan_idle_budget(rows: u64) -> Duration {
+    SCAN_IDLE_BASE + Duration::from_secs(rows / SCAN_IDLE_ROWS_PER_SEC)
+}
+
 async fn wait_for_catalog_scan_idle(
     supervisor: &crate::catalog_scan_supervisor::CatalogScanSupervisor,
+    rows: u64,
 ) {
-    tokio::time::timeout(Duration::from_secs(60), supervisor.wait_for_idle())
+    let budget = catalog_scan_idle_budget(rows);
+    let started = std::time::Instant::now();
+    if tokio::time::timeout(budget, supervisor.wait_for_idle())
         .await
-        .expect("catalog scan supervisor becomes idle");
+        .is_err()
+    {
+        panic!(
+            "catalog scan supervisor never reached idle for a {rows}-row scan: waited {:?} \
+             against a {budget:?} budget. That budget already allows {SCAN_IDLE_ROWS_PER_SEC} \
+             rows/s, ~3x slower than the worst measured host, so this scan is wedged rather \
+             than merely slow",
+            started.elapsed()
+        );
+    }
 }
 
 fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord {
@@ -703,7 +757,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     assert_eq!(created["counts"]["recordCount"], 0);
     assert!(created["storage"]["totalBytes"].as_u64().unwrap() > 0);
     let catalog_id = created["id"].as_str().unwrap().to_owned();
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 0).await;
     let (_, initial_status) = request(
         app.clone(),
         "GET",
@@ -1640,7 +1694,7 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
     // releasing the catalog processing lease. Status is therefore not a
     // quiescence signal: wait on the supervisor's event-driven teardown seam
     // before issuing a new lifecycle mutation that must acquire that lease.
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 50_000).await;
 
     let revision = paused["processingControl"]["revision"].as_u64().unwrap();
     let (resume_status, resumed) = request(
@@ -1655,9 +1709,11 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
     assert_eq!(resumed["processingControl"]["desiredState"], "running");
 
     let mut completed = None;
-    // 120s: resuming the 50k-record scan is the long pole of this test on a loaded
-    // hosted runner (the old 2000 x 5ms budget was the M5-calibrated one).
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    // Resuming the 50k-record scan is the long pole of this test on a loaded runner (the
+    // old 2000 x 5ms budget was the M5-calibrated one, and 120s after that was still a
+    // hand-picked number). Same completion wait as `wait_for_catalog_scan_idle`, so it
+    // takes the same work-derived budget.
+    let deadline = std::time::Instant::now() + catalog_scan_idle_budget(50_000);
     while std::time::Instant::now() < deadline {
         let (_, status_body) = request(
             app.clone(),
@@ -1763,7 +1819,7 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
     );
     state.catalog_scan_terminal_exit_release.notify_waiters();
 
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 100_000).await;
     let (_, completed) = request(
         app.clone(),
         "GET",
@@ -1888,7 +1944,7 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
         1,
         "new AppState status discovery schedules the persisted successor"
     );
-    wait_for_catalog_scan_idle(&restarted_state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&restarted_state.catalog_scan_supervisor, 100_000).await;
     let (_, completed) = request(
         restarted_app.clone(),
         "GET",
@@ -1929,7 +1985,7 @@ async fn transient_sqlite_contention_retries_and_completes_exactly() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("catalog id");
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 1_000).await;
     let (_, completed) = request(
         app,
         "GET",
@@ -1977,7 +2033,7 @@ async fn exhausted_sqlite_contention_is_visible_and_actionable() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("catalog id");
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 10).await;
     let (_, failed) = request(
         app,
         "GET",
@@ -2043,7 +2099,7 @@ async fn shutdown_during_contention_backoff_preserves_paused_resume_boundary() {
     )
     .await;
     assert_eq!(pause_status, StatusCode::OK, "{paused}");
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 100_000).await;
     let (_, durable_pause) = request(
         app.clone(),
         "GET",
@@ -2114,7 +2170,7 @@ async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoi
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().unwrap();
 
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 30_000).await;
     let (_, recovery_started) = request(
         app.clone(),
         "GET",
@@ -2123,7 +2179,7 @@ async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoi
     )
     .await;
     assert_eq!(recovery_started["processing"]["processedCount"], 25_000);
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 30_000).await;
     let (_, completed) = request(
         app.clone(),
         "GET",
@@ -2165,7 +2221,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("catalog id").to_owned();
 
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 80_000).await;
 
     let before_recovered_start = Arc::new(tokio::sync::Barrier::new(2));
     *state.catalog_scan_before_driver_start_once.lock() = Some(Arc::clone(&before_recovered_start));
@@ -2185,7 +2241,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
         .await
         .expect("recovered generation reaches its prestart barrier");
 
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 80_000).await;
     let registry = CatalogRegistry::new(temporary.path().join("config"));
     let twice_interrupted = registry.open_attached(&id).expect("catalog opens");
     assert_eq!(
@@ -2206,7 +2262,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     )
     .await;
     assert_eq!(second_recovery["processing"]["processedCount"], 50_000);
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 80_000).await;
     let (_, completed) = request(
         app.clone(),
         "GET",
@@ -2248,7 +2304,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("catalog id").to_owned();
 
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 30_000).await;
 
     let original = temporary.path().join("source-original.parquet");
     std::fs::rename(&source, &original).expect("original source moves aside");
@@ -2261,7 +2317,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
     )
     .await;
     assert_eq!(recovery_started["processing"]["processedCount"], 25_000);
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 30_000).await;
 
     let (_, failed) = request(
         app.clone(),
@@ -2303,7 +2359,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
     .await;
     assert_eq!(resume_status, StatusCode::OK, "{resumed}");
 
-    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 30_000).await;
     let (_, completed) = request(
         app.clone(),
         "GET",
@@ -2745,8 +2801,9 @@ async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint(
     // macos-26 runners, where resuming a 50k-record scan can outlast that budget under
     // load (sc-17723). This is a completion wait, not a boundary assertion, so a
     // generous ceiling deletes no coverage — the assert below still demands the full
-    // record count.
-    let resume_deadline = std::time::Instant::now() + Duration::from_secs(120);
+    // record count. Work-derived rather than hand-picked, same as
+    // `wait_for_catalog_scan_idle`.
+    let resume_deadline = std::time::Instant::now() + catalog_scan_idle_budget(50_000);
     while std::time::Instant::now() < resume_deadline {
         let (_, status_body) = request(
             restarted_app.clone(),
