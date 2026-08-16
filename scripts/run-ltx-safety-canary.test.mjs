@@ -20,11 +20,13 @@ import {
   inventoryAtRoot,
   parseMemoryFreePercent,
   parseSwapFreeBytes,
+  preservePrimaryFailure,
   preflightFreeFloor,
   repositoryToolchain,
   runtimeFreeFloor,
   telemetryResolutionBytes,
   validateCanaryResponse,
+  watchdogFailureSummary,
 } from "./run-ltx-safety-canary.mjs";
 
 const TEXT_ENCODER_INVENTORY = {
@@ -189,6 +191,47 @@ test("controller interruption preserves shell signal status after cleanup", () =
   assert.equal(new CanaryInterrupted("SIGTERM").exitCode, 143);
 });
 
+test("watchdog failures retain the exact hard-stop reason before scratch cleanup", () => {
+  const status = { code: 97, signal: null };
+  assert.equal(
+    watchdogFailureSummary(status, [
+      JSON.stringify({ event: "started" }),
+      JSON.stringify({ event: "hard_stop", reason: "child_attestation_failed:TimeoutError" }),
+      JSON.stringify({ event: "terminated" }),
+    ].join("\n")),
+    "watchdog failed closed: code=97 signal=null reason=child_attestation_failed:TimeoutError",
+  );
+  assert.match(watchdogFailureSummary(status, ""), /reason=event_stream_unavailable$/);
+  assert.match(watchdogFailureSummary(status, "not-json\n"), /reason=event_stream_malformed$/);
+  assert.match(
+    watchdogFailureSummary(status, JSON.stringify({ event: "hard_stop", reason: "line1\nline2" })),
+    /reason=line1 line2$/,
+  );
+  assert.match(
+    watchdogFailureSummary(status, [
+      JSON.stringify({ event: "hard_stop", reason: "physical_footprint_at_or_above_limit" }),
+      '{"event":"terminated"',
+    ].join("\n")),
+    /reason=physical_footprint_at_or_above_limit;event_stream_malformed$/,
+  );
+  assert.match(
+    watchdogFailureSummary(status, `${JSON.stringify({ event: "started" })}\n`),
+    /reason=hard_stop_event_absent$/,
+  );
+});
+
+test("scratch cleanup cannot mask the primary watchdog or signal failure", () => {
+  const primary = new CanaryInterrupted("SIGTERM");
+  const cleanup = new Error("permission denied\nwhile removing scratch");
+  const combined = preservePrimaryFailure(primary, cleanup);
+  assert.strictEqual(combined, primary);
+  assert.equal(combined.exitCode, 143);
+  assert.match(combined.message, /scratch cleanup failed: permission denied while removing scratch$/);
+  assert.strictEqual(combined.cause, cleanup);
+  assert.strictEqual(preservePrimaryFailure(primary, null), primary);
+  assert.strictEqual(preservePrimaryFailure(null, cleanup), cleanup);
+});
+
 test("the production runner can only launch through the identity-checked watchdog", async () => {
   const source = await readFile(new URL("./run-ltx-safety-canary.mjs", import.meta.url), "utf8");
   assert.match(source, /scripts\/memory-calibration-watchdog\.py/);
@@ -224,6 +267,8 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /RUSTUP_TOOLCHAIN: channel/);
   assert.match(source, /CARGO_HOME: path\.join\(scratch, "cargo-home"\)/);
   assert.match(source, /CARGO_TARGET_DIR: path\.join\(scratch, "target"\)/);
+  assert.match(source, /TMPDIR: privateTemp/);
+  assert.doesNotMatch(source, /TMPDIR: process\.env\.TMPDIR/);
   assert.match(source, /Cargo inference source tree differs from the verified checkout/);
   assert.match(source, /response\?\.inferenceRevision !== expectedInferenceRevision/);
   assert.match(source, /--require-child-attestation/);
@@ -231,6 +276,10 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /await chmod\(adapterDirectory, 0o500\)/);
   assert.match(source, /execFileAsync\("\/bin\/cp", \["-c", cloneSource, output\]/);
   assert.match(source, /await cleanupCanaryScratch\(scratch\)/);
+  const failureRead = source.indexOf("const eventBytes = await readFile(eventsPath");
+  const cleanup = source.indexOf("await cleanupCanaryScratch(scratch)");
+  assert.ok(failureRead >= 0 && cleanup > failureRead,
+    "watchdog failure reason must be read before scratch cleanup");
   assert.match(source, /cancellation\.abort\(new CanaryInterrupted\(signalName\)\)/);
   assert.match(source, /process\.exitCode = error instanceof CanaryInterrupted \? error\.exitCode : 1/);
 });
@@ -268,6 +317,8 @@ test("the runner binds the pinned toolchain and private same-volume artifact clo
       assert.equal(toolchain.channel, "1.97.1");
       assert.equal(toolchain.env.RUSTUP_TOOLCHAIN, toolchain.channel);
       assert.equal(toolchain.env.CARGO_HOME, path.join(scratch, "cargo-home"));
+      assert.equal(toolchain.env.TMPDIR, path.join(scratch, "tmp"));
+      assert.equal((await stat(toolchain.env.TMPDIR)).mode & 0o777, 0o700);
       assert.ok(path.isAbsolute(toolchain.cargo));
     }
 
