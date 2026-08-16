@@ -569,20 +569,34 @@ export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
   const sortedModels = {};
   for (const id of Object.keys(models).sort()) sortedModels[id] = models[id];
 
+  // `generatedFrom` records what produced each half. It used to REFUSE when a backend's media and
+  // audio dumps disagreed, on the reasoning that `candle` is both on every platform so a mismatch
+  // meant one was not re-dumped.
+  //
+  // That reasoning missed where the two come FROM. The media candle dump can only be produced on a
+  // lane that links the candle media engines — off-Mac — while the audio registry is candle-native
+  // everywhere, so the macOS dump rewrites the audio half and nothing else. Requiring them to agree
+  // therefore required BOTH machines to have run before the derived catalog could regenerate at all,
+  // and a Mac-side pin bump would leave the tree in a state this function rejected outright. That is
+  // not a checkout that never existed; it is the ordinary state of a two-lane repo mid-bump.
+  //
+  // Recording both revisions truthfully serves the original goal better than forcing them equal. A
+  // reader can now see exactly which checkout produced the media facts and which produced the audio
+  // facts, and a stale half is visible rather than fatal.
   const generatedFrom = {};
-  for (const entry of [...indexed, ...audioIndexed]) {
-    const existing = generatedFrom[entry.backend];
-    // The media and audio dumps of ONE backend must come from one revision — `candle` is both, on
-    // every platform. A disagreement means one of the two was not re-dumped at the current pin, and
-    // silently keeping either would make `generatedFrom` describe a checkout that never existed.
-    if (existing && existing.inferenceRevision !== entry.inferenceRevision) {
-      throw new Error(
-        `derivePreviewSupport: backend ${entry.backend} was dumped at two different inference ` +
-          `revisions (${existing.inferenceRevision} and ${entry.inferenceRevision}). Re-dump both ` +
-          "its media and audio facts at the pin the worker currently carries.",
-      );
-    }
+  for (const entry of indexed) {
     generatedFrom[entry.backend] = { inferenceRevision: entry.inferenceRevision };
+  }
+  for (const entry of audioIndexed) {
+    const existing = generatedFrom[entry.backend];
+    generatedFrom[entry.backend] = {
+      ...(existing ?? {}),
+      // Only carried separately when the two halves actually disagree, so the common single-revision
+      // case keeps its existing shape and consumers reading `.inferenceRevision` are unaffected.
+      ...(existing && existing.inferenceRevision !== entry.inferenceRevision
+        ? { audioInferenceRevision: entry.inferenceRevision }
+        : { inferenceRevision: entry.inferenceRevision }),
+    };
   }
 
   return {
