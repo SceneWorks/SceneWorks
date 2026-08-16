@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -141,6 +141,7 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
     pressureSamples = [[memoryFreePercent, memoryFreeBytes, swapFreeBytes]],
+    environment = process.env,
   } = options;
   const launcher = `${files.program}.production-watchdog.py`;
   await writeFile(launcher, String.raw`import importlib.util, sys
@@ -169,7 +170,7 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--require-child-attestation", "--", *${JSON.stringify(childCommand)}]
 raise SystemExit(module.guard(module.parse_args()))
 `);
-  return execFileAsync("python3", [launcher], { timeout: 10_000 });
+  return execFileAsync("python3", [launcher], { timeout: 10_000, env: environment });
 }
 
 test("physical-footprint hard stop terminates the responsive owned group with no residue", async () => {
@@ -321,6 +322,48 @@ while True:
   assert.ok(events.slice(0, attested).some((event) =>
     event.event === "sample" && event.phase === "child_attested_before_allocation"));
   assert.ok(events.some((event) => event.event === "child_completed"));
+});
+
+test("child attestation uses a short socket path when TMPDIR is a long external path", async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("the production safety canary is categorically Darwin-only");
+    return;
+  }
+  const files = await fixture();
+  const longTmpRoot = await mkdtemp(path.join(tmpdir(), "sc19741-long-external-tmp-"));
+  t.after(() => rm(longTmpRoot, { recursive: true, force: true }));
+  const longTmp = path.join(
+    longTmpRoot,
+    "nested-external-campaign-directory".repeat(4),
+  );
+  await mkdir(longTmp, { recursive: true });
+  const attester = `${files.program}.long-tmp-attest.py`;
+  const socketRecord = `${files.pids}.socket`;
+  await writeFile(attester, String.raw`import json, os, socket, sys
+socket_path = os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"]
+open(sys.argv[1], "w").write(socket_path + "\n")
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(socket_path)
+def line():
+    data = b""
+    while not data.endswith(b"\n"): data += sock.recv(1)
+    return data.decode().strip()
+payload = json.loads(line()); nonce = payload["nonce"]
+sock.sendall(f"ACK {nonce}\n".encode())
+assert line() == f"GO {nonce}"
+sock.sendall(f"DONE {nonce}\n".encode())
+while True:
+    message = line()
+    if message == f"BYE {nonce}": break
+    assert message == f"PING {nonce}"
+`);
+  await runWithMockedProductionTelemetry(files, ["python3", attester, socketRecord], {
+    environment: { ...process.env, TMPDIR: longTmp },
+  });
+  const socketPath = (await readFile(socketRecord, "utf8")).trim();
+  assert.equal(path.dirname(path.dirname(socketPath)), "/tmp");
+  assert.ok(socketPath.length < 104, `socket path is ${socketPath.length} bytes`);
+  assert.equal(socketPath.startsWith(longTmp), false);
 });
 
 test("a child that cannot attest is terminated with no owned residue", async () => {

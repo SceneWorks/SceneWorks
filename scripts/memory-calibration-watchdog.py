@@ -502,11 +502,28 @@ def guard(args: argparse.Namespace) -> int:
     attestation_directory = None
     attestation_path = None
     if args.require_child_attestation:
-        attestation_directory = Path(tempfile.mkdtemp(prefix="sceneworks-watchdog-attestation-"))
-        attestation_path = attestation_directory / "watchdog.sock"
-        attestation_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        attestation_listener.bind(str(attestation_path))
-        attestation_listener.listen(1)
+        try:
+            # Darwin's sockaddr_un path is capped at 104 bytes. The caller may
+            # put TMPDIR on a deliberately long external-volume path for large
+            # build artifacts, so keep this tiny, mode-0700 rendezvous under the
+            # system's short temporary root.
+            short_temp_root = Path("/tmp")
+            if not short_temp_root.is_dir():
+                short_temp_root = Path(tempfile.gettempdir())
+            attestation_directory = Path(tempfile.mkdtemp(
+                prefix="sceneworks-watchdog-attestation-", dir=short_temp_root))
+            attestation_path = attestation_directory / "watchdog.sock"
+            attestation_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            attestation_listener.bind(str(attestation_path))
+            attestation_listener.listen(1)
+        except BaseException:
+            if attestation_listener is not None:
+                attestation_listener.close()
+            if attestation_path is not None:
+                attestation_path.unlink(missing_ok=True)
+            if attestation_directory is not None:
+                attestation_directory.rmdir()
+            raise
     previous_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
     }
