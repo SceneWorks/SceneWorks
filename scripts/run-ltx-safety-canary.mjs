@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const MAX_FOOTPRINT_BYTES = 53_347_146_863;
 export const MAX_RUNTIME_SECONDS = 1_800;
+export const CHILD_ATTESTATION_TIMEOUT_SECONDS = 30;
 export const MIN_MEMORY_FREE_PERCENT = 70;
 export const MIN_SWAP_FREE_BYTES = 1024 ** 3;
 export const MIN_PREFLIGHT_FREE_BYTES = MAX_FOOTPRINT_BYTES * 2;
@@ -711,6 +712,7 @@ async function controller(argv) {
       "--min-swap-free-bytes", String(MIN_SWAP_FREE_BYTES),
       "--sample-interval", "0.25",
       "--telemetry-timeout", "1",
+      "--child-attestation-timeout", String(CHILD_ATTESTATION_TIMEOUT_SECONDS),
       "--term-grace", "1",
       "--event-file", eventsPath,
       "--require-child-attestation",

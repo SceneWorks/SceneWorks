@@ -139,10 +139,13 @@ function assertGone(pid) {
 async function runWithMockedProductionTelemetry(files, childCommand, options = {}) {
   const {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
+    childAttestationTimeout = 1,
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
     pressureSamples = [[memoryFreePercent, memoryFreeBytes, swapFreeBytes]],
+    pressureFailureAt = null,
     environment = process.env,
   } = options;
+  const pressureFailureAtPython = pressureFailureAt === null ? "None" : String(pressureFailureAt);
   const launcher = `${files.program}.production-watchdog.py`;
   await writeFile(launcher, String.raw`import importlib.util, sys
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
@@ -152,6 +155,8 @@ class Footprint:
 class Pressure:
     def __init__(self, host_memory_bytes): self.index = 0
     def sample(self, timeout):
+        if self.index == ${pressureFailureAtPython}:
+            raise RuntimeError("injected startup pressure failure")
         samples = ${JSON.stringify(pressureSamples)}
         values = samples[min(self.index, len(samples) - 1)]
         self.index += 1
@@ -166,6 +171,7 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--min-memory-free-bytes", "100",
     "--min-swap-free-bytes", "100", "--sample-interval", "0.02",
     "--telemetry-timeout", ${JSON.stringify(String(telemetryTimeout))},
+    "--child-attestation-timeout", ${JSON.stringify(String(childAttestationTimeout))},
     "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
     "--require-child-attestation", "--", *${JSON.stringify(childCommand)}]
 raise SystemExit(module.guard(module.parse_args()))
@@ -366,21 +372,156 @@ while True:
   assert.equal(socketPath.startsWith(longTmp), false);
 });
 
-test("a child that cannot attest is terminated with no owned residue", async () => {
+test("a cold child gets a separately bounded startup window while strict telemetry continues", async () => {
   const files = await fixture();
+  const attester = `${files.program}.delayed-attest.py`;
+  await writeFile(attester, String.raw`import json, os, socket, time
+time.sleep(0.35)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+def line():
+    data = b""
+    while not data.endswith(b"\n"): data += sock.recv(1)
+    return data.decode().strip()
+payload = json.loads(line()); nonce = payload["nonce"]
+sock.sendall(f"ACK {nonce}\n".encode())
+assert line() == f"GO {nonce}"
+sock.sendall(f"DONE {nonce}\n".encode())
+while True:
+    message = line()
+    if message == f"BYE {nonce}": break
+    assert message == f"PING {nonce}"
+`);
+  await runWithMockedProductionTelemetry(files, ["python3", attester], {
+    telemetryTimeout: 0.1,
+    childAttestationTimeout: 1,
+  });
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  const waiting = events.filter((event) =>
+    event.event === "sample" && event.phase === "awaiting_child_attestation");
+  assert.ok(waiting.length >= 2, `expected repeated startup samples, saw ${waiting.length}`);
+  assert.ok(events.some((event) => event.event === "child_attested"));
+  assert.ok(events.some((event) => event.event === "child_completed"));
+});
+
+test("child startup never weakens the strict pre-allocation pressure floor", async () => {
+  const files = await fixture();
+  const attester = `${files.program}.pressured-delayed-attest.py`;
+  await writeFile(attester, String.raw`import os, socket, time
+time.sleep(0.35)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+time.sleep(60)
+`);
   let status = 0;
   try {
-    await runWithMockedProductionTelemetry(files, [
-      "python3", files.program, "hold", files.pids, files.telemetry, files.events,
-    ], { telemetryTimeout: 0.2 });
+    await runWithMockedProductionTelemetry(files, ["python3", attester], {
+      telemetryTimeout: 0.1,
+      childAttestationTimeout: 1,
+      pressureSamples: [[90, 900, 900], [69, 900, 900]],
+    });
   } catch (error) {
     status = error.code;
   }
   assert.equal(status, 97);
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.ok(events.some((event) => event.reason?.includes("child_attestation_failed")));
+  assert.ok(events.some((event) =>
+    event.reason?.includes("initial_host_memory_free_percent_below_70")));
+  assert.equal(events.some((event) => event.event === "child_attested"), false);
+});
+
+test("a child that cannot attest is terminated with no owned residue", async () => {
+  const files = await fixture();
+  const started = Date.now();
+  let status = 0;
+  try {
+    await runWithMockedProductionTelemetry(files, [
+      "python3", files.program, "hold", files.pids, files.telemetry, files.events,
+    ], { telemetryTimeout: 0.2, childAttestationTimeout: 0.25 });
+  } catch (error) {
+    status = error.code;
+  }
+  assert.equal(status, 97);
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.ok(events.some((event) =>
+    event.reason === "child_attestation_timeout_at_or_above_0.25s"));
+  assert.ok(Date.now() - started < 1_500, "startup timeout drifted toward the runtime deadline");
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
   pids.forEach(assertGone);
+});
+
+test("a connected child that stalls before ACK remains monitored until the hard startup deadline", async () => {
+  const files = await fixture();
+  const staller = `${files.program}.stall-before-ack.py`;
+  await writeFile(staller, String.raw`import os, signal, socket, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(sys.argv[1], "w").write(f"{os.getpid()}\n")
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+while not sock.recv(4096).endswith(b"\n"): pass
+time.sleep(60)
+`);
+  const started = Date.now();
+  let status = 0;
+  try {
+    await runWithMockedProductionTelemetry(files, ["python3", staller, files.pids], {
+      telemetryTimeout: 0.1,
+      childAttestationTimeout: 0.3,
+    });
+  } catch (error) {
+    status = error.code;
+  }
+  assert.equal(status, 97);
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.ok(events.some((event) => event.phase === "awaiting_child_ack"));
+  assert.ok(events.some((event) =>
+    event.reason === "child_attestation_timeout_at_or_above_0.3s"));
+  assert.ok(Date.now() - started < 1_500, "ACK stall exceeded the startup bound");
+  assertGone(Number((await readFile(files.pids, "utf8")).trim()));
+});
+
+test("telemetry loss during child startup preserves its exact forensic category", async () => {
+  const files = await fixture();
+  const delayed = `${files.program}.telemetry-loss-startup.py`;
+  await writeFile(delayed, "import time; time.sleep(60)\n");
+  let status = 0;
+  try {
+    await runWithMockedProductionTelemetry(files, ["python3", delayed], {
+      telemetryTimeout: 0.1,
+      childAttestationTimeout: 1,
+      pressureFailureAt: 1,
+    });
+  } catch (error) {
+    status = error.code;
+  }
+  assert.equal(status, 97);
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.ok(events.some((event) => event.reason?.startsWith(
+    "child_attestation_telemetry_lost:RuntimeError:injected startup pressure failure")));
+});
+
+test("sentinel loss during child startup preserves the launch-sentinel category", async () => {
+  const files = await fixture();
+  const killer = `${files.program}.kill-sentinel-during-startup.py`;
+  await writeFile(killer, String.raw`import os, signal, sys, time
+open(sys.argv[1], "w").write(f"{os.getpid()}\n")
+time.sleep(0.08)
+os.kill(os.getppid(), signal.SIGKILL)
+time.sleep(60)
+`);
+  let status = 0;
+  try {
+    await runWithMockedProductionTelemetry(files, ["python3", killer, files.pids], {
+      telemetryTimeout: 0.1,
+      childAttestationTimeout: 1,
+    });
+  } catch (error) {
+    status = error.code;
+  }
+  assert.equal(status, 97);
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.ok(events.some((event) => event.reason?.startsWith("launch_sentinel_lost:status_-")));
+  assertGone(Number((await readFile(files.pids, "utf8")).trim()));
 });
 
 test("loss of the held attestation lease after GO hard-stops the owned group", async () => {

@@ -660,25 +660,151 @@ def guard(args: argparse.Namespace) -> int:
                 "minSwapFreeBytes": args.min_swap_free_bytes,
             }
             try:
-                attestation_listener.settimeout(bounded_telemetry_timeout())
-                attestation_stream, _ = attestation_listener.accept()
-                attestation_stream.settimeout(bounded_telemetry_timeout())
-                attestation_stream.sendall((json.dumps(attestation, separators=(",", ":")) + "\n").encode())
-                if recv_line(attestation_stream) != f"ACK {nonce}":
-                    raise RuntimeError("guarded child returned an invalid watchdog acknowledgement")
-                _, footprint, pressure, _ = observe_group(
-                    group, sampler, host_sampler, bounded_telemetry_timeout(),
+                child_attestation_deadline = (
+                    time.monotonic() + args.child_attestation_timeout
                 )
-                hard_stop = check_initial_observation(footprint, pressure)
+                startup_deadline = min(runtime_deadline, child_attestation_deadline)
+
+                def startup_deadline_reason() -> str | None:
+                    if time.monotonic() < startup_deadline:
+                        return None
+                    if runtime_deadline <= child_attestation_deadline:
+                        return f"runtime_at_or_above_{args.max_runtime_seconds}s"
+                    return (
+                        "child_attestation_timeout_at_or_above_"
+                        f"{args.child_attestation_timeout}s"
+                    )
+
+                def observe_startup() -> tuple[
+                        str | None, int | None, HostPressure | None]:
+                    stopped = startup_deadline_reason()
+                    if stopped is not None:
+                        return stopped, None, None
+                    status = group.child.poll()
+                    if status is not None:
+                        if status < 0:
+                            return f"launch_sentinel_lost:status_{status}", None, None
+                        return (
+                            "child_attestation_failed:guarded_child_exited:"
+                            f"status_{status}", None, None,
+                        )
+                    remaining = startup_deadline - time.monotonic()
+                    if remaining <= 0:
+                        return startup_deadline_reason(), None, None
+                    try:
+                        _, current_footprint, current_pressure, _ = observe_group(
+                            group, sampler, host_sampler,
+                            min(
+                                args.telemetry_timeout,
+                                remaining,
+                            ),
+                        )
+                    except MonitorSignal:
+                        raise
+                    except Exception as error:
+                        failed_at_or_after_startup_deadline = (
+                            time.monotonic() >= startup_deadline
+                        )
+                        status = group.child.poll()
+                        if status is not None and status < 0:
+                            return f"launch_sentinel_lost:status_{status}", None, None
+                        if status is not None:
+                            return (
+                                "child_attestation_failed:guarded_child_exited:"
+                                f"status_{status}", None, None,
+                            )
+                        if failed_at_or_after_startup_deadline:
+                            return startup_deadline_reason(), None, None
+                        return (
+                            "child_attestation_telemetry_lost:"
+                            f"{type(error).__name__}:{error}", None, None,
+                        )
+                    stopped = startup_deadline_reason()
+                    if stopped is None:
+                        stopped = check_initial_observation(
+                            current_footprint, current_pressure,
+                        )
+                    return stopped, current_footprint, current_pressure
+
+                def pause_startup() -> None:
+                    remaining = startup_deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(args.sample_interval, remaining))
+
+                attestation_listener.setblocking(False)
+                while attestation_stream is None and hard_stop is None:
+                    try:
+                        attestation_stream, _ = attestation_listener.accept()
+                        break
+                    except BlockingIOError:
+                        pass
+                    hard_stop, footprint, pressure = observe_startup()
+                    if footprint is not None:
+                        emit_sample(footprint, pressure, "awaiting_child_attestation")
+                    if hard_stop is None:
+                        pause_startup()
                 if hard_stop is None:
-                    emit_sample(footprint, pressure, "child_attested_before_allocation")
-                    emit(args.event_file, {"event": "child_attested"})
-                    attestation_stream.sendall(f"GO {nonce}\n".encode())
+                    remaining = startup_deadline - time.monotonic()
+                    if remaining <= 0:
+                        hard_stop = startup_deadline_reason()
+                    else:
+                        attestation_stream.settimeout(min(args.telemetry_timeout, remaining))
+                if hard_stop is None:
+                    attestation_stream.sendall((
+                        json.dumps(attestation, separators=(",", ":")) + "\n"
+                    ).encode())
                     attestation_stream.setblocking(False)
+                    acknowledgement = bytearray()
+                    while hard_stop is None and b"\n" not in acknowledgement:
+                        try:
+                            chunk = attestation_stream.recv(4096)
+                        except BlockingIOError:
+                            chunk = None
+                        if chunk == b"":
+                            hard_stop = (
+                                "child_attestation_failed:channel_closed_before_ack"
+                            )
+                            break
+                        if chunk:
+                            acknowledgement.extend(chunk)
+                            if len(acknowledgement) > 4096:
+                                hard_stop = (
+                                    "child_attestation_failed:ack_exceeded_size_bound"
+                                )
+                                break
+                        if b"\n" in acknowledgement:
+                            line, remainder = bytes(acknowledgement).split(b"\n", 1)
+                            if remainder or line.decode() != f"ACK {nonce}":
+                                hard_stop = (
+                                    "child_attestation_failed:invalid_acknowledgement"
+                                )
+                            break
+                        hard_stop, footprint, pressure = observe_startup()
+                        if footprint is not None:
+                            emit_sample(footprint, pressure, "awaiting_child_ack")
+                        if hard_stop is None:
+                            pause_startup()
+                if hard_stop is None:
+                    hard_stop, footprint, pressure = observe_startup()
+                    if hard_stop is None:
+                        emit_sample(footprint, pressure, "child_attested_before_allocation")
+                        emit(args.event_file, {"event": "child_attested"})
+                        remaining = startup_deadline - time.monotonic()
+                        if remaining <= 0:
+                            hard_stop = startup_deadline_reason()
+                if hard_stop is None:
+                    attestation_stream.settimeout(min(args.telemetry_timeout, remaining))
+                    try:
+                        attestation_stream.sendall(f"GO {nonce}\n".encode())
+                    finally:
+                        attestation_stream.setblocking(False)
             except MonitorSignal:
                 raise
             except Exception as error:
-                hard_stop = f"child_attestation_failed:{type(error).__name__}:{error}"
+                if hard_stop is None:
+                    hard_stop = (
+                        f"child_attestation_failed:{type(error).__name__}:{error}"
+                    )
         while True:
             if hard_stop is not None:
                 break
@@ -810,6 +936,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-swap-free-bytes", type=int)
     parser.add_argument("--sample-interval", type=float, default=0.25)
     parser.add_argument("--telemetry-timeout", type=float, default=1.0)
+    parser.add_argument("--child-attestation-timeout", type=float, default=5.0)
     parser.add_argument("--term-grace", type=float, default=0.5)
     parser.add_argument("--event-file", type=Path)
     parser.add_argument("--telemetry-file", type=Path)
@@ -824,7 +951,9 @@ def parse_args() -> argparse.Namespace:
         args.command = args.command[1:]
     if not args.command:
         parser.error("a guarded command is required after --")
-    for name in ["max_footprint_bytes", "sample_interval", "telemetry_timeout", "term_grace"]:
+    for name in [
+            "max_footprint_bytes", "sample_interval", "telemetry_timeout",
+            "child_attestation_timeout", "term_grace"]:
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.max_runtime_seconds is not None and args.max_runtime_seconds <= 0:
