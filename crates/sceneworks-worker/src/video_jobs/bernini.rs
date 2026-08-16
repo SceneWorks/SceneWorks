@@ -7,6 +7,8 @@ use super::ltx::extract_clip_frames;
 use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::wan::local_mlx_dir;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::wan::resolve_wan_adapters;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -457,12 +459,10 @@ pub(super) async fn generate_bernini(
 // `crate::inference_runtime::load("bernini")` through runtime-cuda's explicit catalog. Serves
 // `text_to_video` + the editing/reference/multi-source video
 // modes (v2v / r2v / rv2v / mv2v / ads2v); `generate_candle_bernini` maps the SceneWorks mode to the
-// engine guidance task and resolves the source media into the planner conditioning. Loads the converted
-// `SceneWorks/bernini` snapshot DENSE (the candle loader reads the tree as-is; the off-Mac
-// packed-tier select is deferred WITH the still lane until the `SceneWorks/bernini` tier layout lands —
-// GPU-val is gated on sc-11003). No LoRA (the engine reports
-// `supports_lora=false`). A distinct candle engine — NO torch fallback (a missing snapshot fails loud
-// at load, never a silent stub).
+// engine guidance task and resolves the source media into the planner conditioning. Loads the selected
+// published `SceneWorks/bernini` bf16/q8/q4 tier and installs the resolved request LoRA/LoKr stack
+// through the renderer's adapter-aware load path. A distinct candle engine — NO torch fallback (a
+// missing snapshot fails loud at load, never a silent stub).
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real candle Bernini VIDEO asset — the `candle_<family>` sibling of the MLX
@@ -580,9 +580,10 @@ async fn resolve_candle_bernini_conditioning(
 /// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. The converted `SceneWorks/bernini`
 /// snapshot descends into the requested quant tier subfolder (`bf16/`|`q8/`|`q4/`, sc-11003) via the
 /// shared [`crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant`] so video + still load from
-/// the same tier: no explicit `mlxQuantize` ⇒ bf16 dense, `:4`|`:8` opt into the packed tiers. No LoRA
-/// (the engine reports `supports_lora=false`); steps / guidance stay at the engine defaults. Frame
-/// count uses the Wan 1-mod-4 stride (the renderer is Wan).
+/// the same tier: no explicit `mlxQuantize` ⇒ bf16 dense, `:4`|`:8` opt into the packed tiers. The
+/// candle descriptor advertises LoRA/LoKr, and the resolved request adapter stack is installed at
+/// load; steps / guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4 stride (the
+/// renderer is Wan).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) async fn generate_candle_bernini(
     api: &ApiClient,
@@ -604,12 +605,14 @@ pub(super) async fn generate_candle_bernini(
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let (model_dir, quant) =
         crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
+    let adapters = resolve_wan_adapters(settings, request, engine_id)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
         model_dir,
         quant,
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,

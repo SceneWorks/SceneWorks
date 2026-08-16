@@ -29,6 +29,69 @@ const DEFAULT_MODEL: &str = "ltx_2_3";
 const DEFAULT_QUALITY: &str = "balanced";
 const DEFAULT_REPLACEMENT_MODE: &str = "face_only";
 
+/// Whether a selected LoRA stack contains the LTX in-context conditioning adapter required by
+/// extend, bridge, and native replacement. Routing and execution share this predicate so a job
+/// cannot be claimed and then rejected by a stricter worker-side spelling of the contract.
+pub fn loras_contain_ltx_ic_lora(loras: &[Value]) -> bool {
+    loras.iter().any(lora_looks_like_ltx_ic_lora)
+}
+
+/// Recognize the explicit metadata and canonical naming markers used by LTX IC-LoRA packages.
+pub fn lora_looks_like_ltx_ic_lora(lora: &Value) -> bool {
+    let Some(object) = lora.as_object() else {
+        return lora
+            .as_str()
+            .is_some_and(|value| ltx_ic_lora_marker(&value.to_lowercase().replace('_', "-")));
+    };
+    if object.get("icLora") == Some(&Value::Bool(true))
+        || object.get("isIcLora") == Some(&Value::Bool(true))
+    {
+        return true;
+    }
+    if object
+        .get("conditioningRole")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.trim().to_lowercase().replace('-', "_") == "ic_lora")
+    {
+        return true;
+    }
+    let source = object.get("source").and_then(Value::as_object);
+    let mut values = Vec::new();
+    for key in [
+        "id",
+        "loraId",
+        "name",
+        "displayName",
+        "installedPath",
+        "sourcePath",
+        "path",
+    ] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            values.push(value);
+        }
+    }
+    if let Some(source) = source {
+        for key in ["repo", "file", "path"] {
+            if let Some(value) = source.get(key).and_then(Value::as_str) {
+                values.push(value);
+            }
+        }
+    }
+    match source
+        .and_then(|value| value.get("files"))
+        .or_else(|| object.get("files"))
+    {
+        Some(Value::Array(files)) => values.extend(files.iter().filter_map(Value::as_str)),
+        Some(Value::String(file)) => values.push(file),
+        _ => {}
+    }
+    ltx_ic_lora_marker(&values.join(" ").to_lowercase().replace('_', "-"))
+}
+
+fn ltx_ic_lora_marker(value: &str) -> bool {
+    value.contains("ic-lora") || value.contains("ltx-2-3-ic-")
+}
+
 /// A typed video-generation request, parsed from a job payload. One job produces a
 /// single video asset (unlike images, which batch `count`).
 #[derive(Debug, Clone, PartialEq)]
@@ -1185,6 +1248,26 @@ mod tests {
     fn steps_menu_message(entry: &JsonObject, steps: u32) -> String {
         steps_limit_error("some_distilled", steps, entry)
             .unwrap_or_else(|| panic!("{steps} steps must be refused by the declared menu"))
+    }
+
+    #[test]
+    fn ltx_ic_lora_predicate_accepts_metadata_and_canonical_markers_only() {
+        for lora in [
+            json!({ "icLora": true }),
+            json!({ "conditioningRole": "ic-lora" }),
+            json!({ "source": { "file": "ltx-2-3-ic-camera.safetensors" } }),
+            json!("community_ic_lora_v2"),
+        ] {
+            assert!(lora_looks_like_ltx_ic_lora(&lora), "{lora}");
+        }
+        assert!(!loras_contain_ltx_ic_lora(&[json!({
+            "id": "ordinary-ltx-style",
+            "source": { "file": "cinematic.safetensors" }
+        })]));
+        assert!(loras_contain_ltx_ic_lora(&[
+            json!({ "id": "ordinary-ltx-style" }),
+            json!({ "isIcLora": true }),
+        ]));
     }
 
     #[test]

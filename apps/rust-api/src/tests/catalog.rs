@@ -297,6 +297,19 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
             Value::Bool(true),
             "{id} ui.img2img exposed"
         );
+        if matches!(id, "sana_1600m" | "sana_sprint_1600m") {
+            assert!(
+                m["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.contains(&Value::String("image_to_image".into()))),
+                "{id} must advertise image_to_image through /api/v1/models"
+            );
+            assert_eq!(
+                m["ui"]["img2imgStrength"]["default"],
+                serde_json::json!(0.5),
+                "{id} strength contract exposed"
+            );
+        }
     }
 }
 
@@ -4814,10 +4827,9 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         "expose only the validated VACE mode"
     );
 
-    // Per-platform download split (sc-8613): macOS pulls the native MLX VACE-Fun checkpoint;
-    // Windows/Linux pull the DIFFERENT candle Wan2.1-VACE-14B diffusers tree the candle `wan_vace`
-    // provider reads (CANDLE_WAN_VACE_REPO). Both are diffusers-loadable conversions, never the raw
-    // VideoX-Fun upstream. Every OS must have exactly one install path.
+    // Every native backend pulls the dedicated VACE-Fun diffusers checkpoint. Windows/Linux must
+    // not substitute the incompatible Wan2.1 VACE tree now that the Candle VACE-Fun provider is
+    // registered. The raw VideoX-Fun upstream remains unsuitable for either native loader.
     let downloads = model["downloads"].as_array().expect("downloads array");
     let download_for = |os: &str| {
         downloads
@@ -4834,11 +4846,11 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     assert_eq!(macos["provider"], "huggingface");
     assert_eq!(macos["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
     let windows = download_for("windows");
-    assert_eq!(windows["repo"], "Wan-AI/Wan2.1-VACE-14B-diffusers");
+    assert_eq!(windows["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
     assert_eq!(
         download_for("linux")["repo"],
-        "Wan-AI/Wan2.1-VACE-14B-diffusers",
-        "Linux rides the same candle checkpoint as Windows"
+        "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+        "Linux rides the same dedicated VACE-Fun checkpoint as Windows"
     );
     for download in downloads {
         assert_eq!(download["provider"], "huggingface");

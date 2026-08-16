@@ -30,6 +30,7 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
+import { promptEnhancementAvailable } from "../promptEnhancement.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
   DEFAULT_SCENE_PROMPT,
@@ -693,7 +694,7 @@ export function ImageStudio() {
       setFaceRestore(false);
     }
     if (launchRequest.characterId) {
-      setMode(launchRequest.mode ?? "character_image");
+      setMode(normalizeImageMode(launchRequest.mode ?? "character_image"));
       setCharacterId(launchRequest.characterId);
       setCharacterLookId(launchRequest.lookId ?? "");
       if (launchRequest.referenceAssetId) {
@@ -704,7 +705,7 @@ export function ImageStudio() {
     if (launchRequest.assetId !== selectedAsset?.id) {
       return;
     }
-    setMode(launchRequest.mode);
+    setMode(normalizeImageMode(launchRequest.mode));
     // Preselect the family-matched edit model resolved at launch time (App.jsx). It's
     // edit-capable by construction, so the availableModels snap-to-first effect leaves
     // it in place; when absent the snap falls back to the default edit model.
@@ -873,7 +874,6 @@ export function ImageStudio() {
     setBatchConfirmPending(false);
   }, [batchTotal, setBatchConfirmPending]);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
-  const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
   const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
@@ -896,6 +896,20 @@ export function ImageStudio() {
   // the worker's capability downtier (sc-10733) still clamps a non-explicit pick to what actually fits.
   const hostMemory = useHostMemory();
   const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  // Route-aware prompt enhancement: both native FLUX.2-dev base/edit providers implement it, while
+  // Candle's unsupported character/reference aliases, Klein, an unknown backend, and the separate
+  // strict-control provider fail closed. `posePayload` is the strict-pose route even when the control
+  // panel itself is not open (character recipe replay).
+  const promptEnhanceStrictControlActive =
+    posePayload.length > 0 ||
+    (controlActive && activeControlMode !== "pose") ||
+    Boolean(controlPassthroughId || controlOverlayId);
+  const promptEnhance = promptEnhancementAvailable({
+    model: selectedModel,
+    backend: activeBackend,
+    mode,
+    strictControlActive: promptEnhanceStrictControlActive,
+  });
   const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
     () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
@@ -1385,6 +1399,14 @@ export function ImageStudio() {
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
     );
   }, [guidanceMethodOptions, guidanceMethod, selectedModel]);
+  // A sticky or replayed `true` must not survive a route change that hides the control. This keeps
+  // visible state, persisted state, and the submit-time gate aligned instead of silently carrying an
+  // old request into a backend/model that will reject it.
+  useEffect(() => {
+    if (!promptEnhance && enhancePrompt) {
+      setEnhancePrompt(false);
+    }
+  }, [enhancePrompt, promptEnhance]);
   // Keep the selected resolution valid for the current model's buckets. Switching
   // to a model whose options exclude the current value snaps to its default (or
   // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
@@ -3650,7 +3672,7 @@ export function ImageStudio() {
               {promptEnhance ? (
                 <label
                   className="checkline prompt-enhance-toggle"
-                  title="Have FLUX.2-dev's built-in LLM rewrite (upsample) your prompt before generating — text-only for new images, and reference-aware when editing. Distinct from the Refine button; off by default."
+                  title="Have FLUX.2-dev's native prompt enhancer rewrite your prompt before generating. If enhancement safely falls back, the saved recipe records that the original prompt ran. Distinct from Refine; off by default."
                 >
                   <input
                     checked={enhancePrompt}

@@ -39,9 +39,10 @@ fn main() {
 
     let media = sceneworks_worker::engine_capability_facts::dump_to(&dir);
     let audio = sceneworks_worker::engine_capability_facts::dump_audio_to(&dir);
+    let runtime = sceneworks_worker::engine_capability_facts::dump_runtime_descriptor_to(&dir);
 
     let mut failed = false;
-    for outcome in [media, audio] {
+    for outcome in [media, audio, runtime] {
         match outcome {
             Ok(written) => {
                 for path in written {

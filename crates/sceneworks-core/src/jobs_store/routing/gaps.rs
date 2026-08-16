@@ -341,8 +341,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::ImageDetail => Err(UnsupportedReason::new(
             model,
             "non-SDXL tile-detail refine",
-            "image_detail is ported to MLX only for the SDXL/RealVisXL backbones (sc-3060); other models / third-party LyCORIS are not available in the native flow on Mac.",
-            Some("epic 3041"),
+            "image_detail runs on the native MLX/Candle SDXL-family tile provider for SDXL, RealVisXL, and Illustrious backbones; this model is outside that family.",
+            Some("sc-18480"),
         )),
 
         // SenseNova-U1 VQA + Document-Studio interleave are ported to the Rust MLX worker
@@ -403,8 +403,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation runs in-process on the macOS Rust worker (the box-PVS path of the
         // sc-4926 SAM3 stack — `segment_jobs::run_image_segment_job`), so the Image Editor
-        // smart-select tool is native on Mac. Mac-only by construction: the capability
-        // is advertised only by `mlx_gpu`, so no other native worker claims it.
+        // smart-select tool is native on Mac. The off-Mac Candle sibling is advertised and
+        // dispatched separately; this oracle intentionally describes only the Mac path.
         JobType::ImageSegment => Ok(()),
 
         // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS runs
@@ -585,9 +585,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // `job_is_any_candle_eligible`, so reaching here means "no candle worker yet" — leave Ok
         // rather than enforce-fail, the same "parity landing later" treatment as lora_train.
         | JobType::ControlTraining
-        // sc-6535: a candle CLIP embedder (`candle-gen-clip`) is future work; until then
-        // dataset_analysis routes by capability (no candle worker advertises it) rather than
-        // enforce-failing — the same "parity landing later" treatment as the surfaces above.
+        // Dataset CLIP analysis routes by capability. Both native runtimes now register the paired
+        // image/text CLIP providers; a build missing either half withholds the advertisement.
         | JobType::DatasetAnalysis
         | JobType::CatalogAnalysis
         // sc-6539: dataset_upscale parity on candle routes by capability, like dataset_analysis.

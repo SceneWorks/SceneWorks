@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
+    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries, resolve_adapters,
     resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
     GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
     Value, WorkerError, WorkerResult,
@@ -205,6 +205,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let adapters = resolve_adapters(request, settings)?;
     let paths = resolve_qwen_comfyui_paths(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
             "ComfyUI Qwen-Image components could not be resolved (family/usable/transformer/snapshot)"
@@ -214,11 +215,12 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
     let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
     let snapshot_vae = paths.snapshot_dir.join("vae");
     let admission_vae = paths.vae.as_deref().unwrap_or(snapshot_vae.as_path());
-    let admission_paths = [
+    let mut admission_paths = vec![
         paths.transformer.as_path(),
         snapshot_text_encoder.as_path(),
         admission_vae,
     ];
+    admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
     admit_candle_base_floor(
         &request.model,
         "ComfyUI Qwen-Image",
@@ -257,6 +259,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
                 transformer,
                 snapshot_dir,
                 vae,
+                adapters,
             )
             .map_err(|error| {
                 WorkerError::Engine(format!("ComfyUI Qwen-Image load failed: {error}"))

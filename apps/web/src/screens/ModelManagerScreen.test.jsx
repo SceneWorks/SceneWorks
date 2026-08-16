@@ -1014,7 +1014,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
   }
 
   const MODELS = [
-    { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image", "style_variations"], installState: "missing" },
+    { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image"], installState: "missing" },
     { id: "wan_t2v", name: "Wan T2V", type: "video", family: "wan-video", capabilities: ["text_to_video"], installState: "missing" },
     { id: "real_esrgan", name: "Real-ESRGAN", type: "utility", family: "real-esrgan", capabilities: [], installState: "missing" },
   ];
@@ -1083,10 +1083,12 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(section.querySelectorAll(".model-card").length).toBe(1);
   });
 
-  it("describes each model's capabilities as chips on the card", async () => {
-    await render({ models: [MODELS[0]] });
+  it("describes live capabilities as chips and suppresses the retired style mode", async () => {
+    // A stale imported/catalog record may still carry this legacy token. The Model Manager must
+    // never turn it back into a visible affordance after Image Studio retired the mode.
+    await render({ models: [{ ...MODELS[0], capabilities: ["text_to_image", "style_variations"] }] });
     const chips = [...container.querySelectorAll(".model-capabilities .chip")].map((c) => c.textContent);
-    expect(chips).toEqual(["Text to Image", "Style Variations"]);
+    expect(chips).toEqual(["Text to Image"]);
   });
 
   // sc-8445: Krea Realtime is the first catalog model to advertise all three video generation

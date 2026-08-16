@@ -4,7 +4,9 @@ import {
   assertBackendCoverage,
   catalogToWebPreviewSupport,
   derivePreviewSupport,
+  parseBespokePreviewRoutes,
   parseEngineModelTable,
+  parsePulidPreviewRoutes,
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
   PREVIEW_SUPPORT_GENERATOR,
@@ -14,6 +16,9 @@ import previewSupport from "./previewSupport.json";
 // live outside the web root — see the server.fs.allow entries in vite.config.js (mirrors the
 // style.txt / builtin.styles.jsonc pair).
 import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
+import qwenEditCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs?raw";
+import pulidMlxSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid.rs?raw";
+import pulidCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid_candle.rs?raw";
 import previewSupportManifestRaw from "../../../../config/manifests/builtin.preview-support.jsonc?raw";
 // The inference pin itself. `verifyEngineCapabilityFacts` in scripts/bump-inference.mjs compares the
 // facts files against it, but that script runs only when someone bumps THROUGH it — CI never invokes
@@ -54,7 +59,16 @@ const audioFactsEntries = Object.entries(audioFactsModules)
 const audioFactsFiles = audioFactsEntries.map((entry) => entry.facts);
 
 const rows = parseEngineModelTable(enginesSource);
-const derived = derivePreviewSupport(rows, factsFiles, audioFactsFiles);
+const qwenPreviewRoutes = parseBespokePreviewRoutes(qwenEditCandleSource);
+const pulidPreviewRoutes = parsePulidPreviewRoutes(pulidMlxSource, pulidCandleSource);
+const bespokePreviewRoutes = [
+  ...qwenPreviewRoutes,
+  ...pulidPreviewRoutes,
+];
+const derived = derivePreviewSupport(rows, factsFiles, audioFactsFiles, bespokePreviewRoutes);
+const bespokePreviewKeys = new Set(
+  bespokePreviewRoutes.map((route) => `${route.modelId}\u0000${route.backend}`),
+);
 
 /** Every audio engine id, which for audio IS the SceneWorks model id it answers for. */
 const audioEngineIds = new Set(
@@ -131,6 +145,73 @@ describe("preview-support catalog: the artifacts are derived, not authored", () 
     ].sort();
     expect(JSON.parse(previewSupportManifestRaw).backends).toEqual(onDisk);
     expect(previewSupport.backends).toEqual(onDisk);
+  });
+});
+
+describe("preview-support catalog: bespoke Candle Qwen-Edit preview", () => {
+  it("derives the two live catalog routes from the worker's exact sink-bearing declaration", () => {
+    expect(qwenPreviewRoutes).toEqual([
+      { modelId: "qwen_image_edit_2511", backend: "candle", supportsPreview: true },
+      {
+        modelId: "qwen_image_edit_2511_lightning",
+        backend: "candle",
+        supportsPreview: true,
+      },
+    ]);
+    for (const route of qwenPreviewRoutes) {
+      expect(previewSupport.models[route.modelId]?.[route.backend]).toBe(true);
+    }
+  });
+
+  it("drops the claim loudly if the request stops carrying drive_gen_items' preview sink", () => {
+    const withoutSink = qwenEditCandleSource.replace(
+      /\n\s*preview,\n\s*\};/,
+      "\n                        ..Default::default()\n                    };",
+    );
+    expect(withoutSink).not.toBe(qwenEditCandleSource);
+    expect(() => parseBespokePreviewRoutes(withoutSink)).toThrow(/live preview sink/);
+  });
+
+  it("refuses a declared route that has no MODEL_TABLE authority", () => {
+    expect(() =>
+      derivePreviewSupport(rows, factsFiles, audioFactsFiles, [
+        { modelId: "not_a_shipped_model", backend: "candle", supportsPreview: true },
+      ]),
+    ).toThrow(/unknown MODEL_TABLE id/);
+  });
+});
+
+describe("preview-support catalog: direct-dispatch PuLID preview", () => {
+  it("derives both native preview sinks from their exact worker requests", () => {
+    expect(pulidPreviewRoutes).toEqual([
+      {
+        modelId: "pulid_flux_dev",
+        backend: "mlx",
+        supportsPreview: true,
+        directDispatch: true,
+      },
+      {
+        modelId: "pulid_flux_dev",
+        backend: "candle",
+        supportsPreview: true,
+        directDispatch: true,
+      },
+    ]);
+    expect(previewSupport.models.pulid_flux_dev).toEqual({ candle: true, mlx: true });
+  });
+
+  it("fails closed if either direct request drops its live sink", () => {
+    const withoutMlxSink = pulidMlxSource.replace(/\n\s*preview,\n/, "\n");
+    expect(() => parsePulidPreviewRoutes(withoutMlxSink, pulidCandleSource)).toThrow(
+      /MLX GenerationRequest has no live preview sink/,
+    );
+    const withoutCandleSink = pulidCandleSource.replace(
+      /\n\s*preview:\s*preview\.clone\(\),\n/,
+      "\n",
+    );
+    expect(() => parsePulidPreviewRoutes(pulidMlxSource, withoutCandleSink)).toThrow(
+      /Candle PulidFluxRequest has no live preview sink/,
+    );
   });
 });
 
@@ -502,8 +583,10 @@ describe("preview-support catalog: the MODEL_TABLE join", () => {
       for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
         if (!(facts.backend in byBackend)) continue;
         // Two namespaces answer under one backend key: MODEL_TABLE ids through the media facts, and
-        // audio engine ids through the identity join. An entry backed by NEITHER would be invented.
+        // audio engine ids through the identity join. Bespoke direct-dispatch routes are backed by
+        // the parsed worker sink above. An entry backed by NONE of those would be invented.
         if (audioIds.has(modelId)) continue;
+        if (bespokePreviewKeys.has(`${modelId}\u0000${facts.backend}`)) continue;
         const engineId = rows.find((row) => row.sceneworksId === modelId)?.engineId;
         expect(factsIds.has(engineId), `${modelId} → ${engineId} @ ${facts.backend}`).toBe(true);
       }
@@ -572,7 +655,7 @@ describe("preview-support catalog: the MODEL_TABLE join", () => {
 // nobody regenerated — which is the whole point of landing sc-16965 before those stories.
 describe("preview-support catalog: the shipped answers match the dumped facts", () => {
   it.each(factsEntries.map((entry) => [entry.facts.backend, entry.facts]))(
-    "advertises live preview on %s for exactly the routes whose descriptors say so",
+    "advertises live preview on %s for exactly the descriptor or bespoke-worker routes that say so",
     (backend, facts) => {
       const advertisingEngines = new Set(
         facts.engines.filter((engine) => engine.supportsPreview).map((engine) => engine.id),
@@ -589,6 +672,11 @@ describe("preview-support catalog: the shipped answers match the dumped facts", 
             .flatMap((audio) =>
               audio.engines.filter((engine) => engine.supportsPreview).map((engine) => engine.id),
             ),
+        )
+        .concat(
+          bespokePreviewRoutes
+            .filter((route) => route.backend === backend && route.supportsPreview)
+            .map((route) => route.modelId),
         )
         .sort();
       const actual = Object.entries(previewSupport.models)

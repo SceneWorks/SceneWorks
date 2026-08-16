@@ -4,6 +4,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
+use crate::image_request::MAX_JOB_POSES;
 use crate::jobs_store::routing::catalog::{
     imported_image_request_family_eligible, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS,
     CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
@@ -15,28 +16,35 @@ use crate::jobs_store::routing::mlx::{
     video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
+    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
+    has_nonempty_nested_array, has_nonempty_or_malformed_array,
+    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
+    has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier,
+    krea_edit_has_unsupported_carrier,
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
 /// carrying `request.loras` stays on the candle lane instead of being refused. Wan-14B applies
 /// adapters per MoE expert, while LTX installs additive residuals on its video-attention projections
-/// for both the packed Q4 base and dense Eros checkpoint. Wan-5B, SVD, and Mochi advertise no LoRA
-/// slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
+/// for both the packed Q4 base and dense Eros checkpoint. Wan-5B now applies dense/packed LoRA and
+/// LoKr too; SVD and Mochi advertise no adapter slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
 /// `CANDLE_VIDEO_ROUTED_MODELS` mirrors the routed engines.
 pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
+    "wan_2_2",
     "wan_2_2_t2v_14b",
     "wan_2_2_i2v_14b",
     "ltx_2_3",
     "ltx_2_3_eros",
+    "bernini",
 ];
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
 /// the conditioned shapes ported under epic 5480 — SDXL/FLUX.2/Qwen `edit_image` (sc-5487), IP-Adapter
 /// reference (sc-5488/sc-5872), InstantID/PuLID identity (sc-5491/sc-5492), and strict-pose ControlNet
-/// (sc-5489). Anything still without a candle lane (an unsupported family or shape, or a LoRA on a
-/// non-Lens family) is refused here and remains queued for a capable native worker.
+/// (sc-5489). Anything still without a candle lane (an unsupported family or shape, or an adapter on
+/// a family whose descriptor advertises no adapter support) is refused here and remains queued for a
+/// capable native worker.
 ///
 /// Like the MLX twin [`image_job_is_mlx_eligible`], this accepts BOTH `image_generate` and the distinct
 /// `image_edit` job type (the Image Studio/Editor "plain Image Edit": `mode == "edit_image"` +
@@ -53,6 +61,7 @@ pub(crate) enum CandleImageLane {
     SdxlEdit,
     Flux2Edit,
     QwenEdit,
+    SenseNovaEdit,
     ZImageEdit,
     ZImageIdentity,
     IdeogramEdit,
@@ -67,9 +76,11 @@ pub(crate) enum CandleImageLane {
     FluxIpAdapter,
     QwenControl,
     KolorsControl,
+    KolorsEdit,
     ZImageControl,
     ZImageImg2Img,
     Sd3Img2Img,
+    SanaImg2Img,
     Flux1Control,
     Flux2Control,
     KreaControl,
@@ -133,6 +144,18 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
             "qwen_image_edit_2511_lightning",
         ]),
         shape: qwen_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::SenseNovaEdit,
+        models: ModelMatch::Any(&[
+            "sensenova_u1_8b",
+            "sensenova_u1_8b_infographic_v2",
+            "sensenova_u1_8b_infographic_v3",
+            "sensenova_u1_8b_fast",
+            "sensenova_u1_8b_infographic_v2_fast",
+            "sensenova_u1_8b_infographic_v3_fast",
+        ]),
+        shape: sensenova_edit_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::ZImageEdit,
@@ -209,6 +232,11 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         shape: kolors_control_candle_eligible,
     },
     CandleImageRoute {
+        lane: CandleImageLane::KolorsEdit,
+        models: ModelMatch::Any(&["kolors"]),
+        shape: kolors_edit_candle_eligible,
+    },
+    CandleImageRoute {
         lane: CandleImageLane::ZImageControl,
         models: ModelMatch::Any(&["z_image_turbo", "z_image"]),
         shape: zimage_control_candle_eligible,
@@ -222,6 +250,11 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         lane: CandleImageLane::Sd3Img2Img,
         models: ModelMatch::Family(is_sd3_family_candle_model),
         shape: sd3_img2img_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::SanaImg2Img,
+        models: ModelMatch::Any(&["sana_1600m", "sana_sprint_1600m"]),
+        shape: sana_img2img_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::Flux1Control,
@@ -315,6 +348,40 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     if !CANDLE_ROUTED_MODELS.contains(&model) {
         return false;
     }
+    // sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
+    // singular carrier is present but not a non-empty string, do not let it fall through as txt2img.
+    if matches!(model, "sana_1600m" | "sana_sprint_1600m")
+        && (payload
+            .get("referenceAssetId")
+            .is_some_and(|value| match value.as_str() {
+                Some(id) => id.trim().is_empty(),
+                None => true,
+            })
+            || sana_has_unsupported_carrier(payload))
+    {
+        return false;
+    }
+    // These families' reference-bearing modes are owned exclusively by specialized routes above.
+    // If their carrier is blank/malformed or another shape check fails, never reinterpret the job as
+    // registered text-to-image and silently drop the user's conditioning intent.
+    let reference_only_mode = matches!(
+        payload.get("mode").and_then(Value::as_str),
+        Some("reference" | "image_to_image" | "character_image" | "style_variations")
+    );
+    if reference_only_mode
+        && (matches!(
+            model,
+            "flux2_dev" | "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2"
+        ) || matches!(
+            model,
+            "qwen_image_edit"
+                | "qwen_image_edit_2509"
+                | "qwen_image_edit_2511"
+                | "qwen_image_edit_2511_lightning"
+        ) || model.starts_with("sensenova_u1_8b"))
+    {
+        return false;
+    }
     // Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679, epic 8236): the candle `z_image` base
     // generator (shift-6.0 / ~50-step / real CFG) is now a candle txt2img provider (`is_candle_engine`),
     // so a plain (non-pose, non-edit) `z_image` job routes to the generic candle txt2img lane here — the
@@ -332,23 +399,21 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     // shapes in the Lens port).
     if has_nonempty_string(payload, "sourceAssetId")
         || has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string_array(payload, "referenceAssetIds")
         || has_nonempty_string(payload, "maskAssetId")
     {
         return false;
     }
-    // Lens / Lens-Turbo and Krea 2 Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request OR a LoRA stays
-    // on the candle lane for them (Krea gained Q4/Q8 in sc-9607, joining Lens in the both-set — sc-9983).
-    // Z-Image (Turbo/base), SD3.5 (sc-7880), the Ideogram/Boogu packed families (sc-9607), and Qwen-Image
-    // (sc-11020) accept Q4/Q8 but NOT inference LoRA (quant stays, LoRA defers). Z-Image's value is a
-    // pre-packed tier SELECT, not an on-the-fly quantization request; the shared gate intentionally
-    // covers both forms. Every other candle family advertises neither and defers both. The
-    // two capabilities are decoupled: `supports_lora` and `supports_quant` each consult the both-set plus
-    // their own list.
+    // Adapter-capable families are derived from the same audited capability table as quant support.
+    // Some accept both adapters and Q4/Q8 (including Z-Image, Qwen, FLUX.2, SD3.5, Lens, Krea, and
+    // SDXL), while others accept only adapters or only quant. A quant value may select a pre-packed
+    // tier rather than request on-the-fly quantization; the gate intentionally covers both forms.
+    // The two capabilities remain decoupled and fail closed through their separate derived lists.
     let supports_lora =
         CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_LORA_MODELS.contains(&model);
     let supports_quant =
         CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model);
-    // LoRAs: not in the candle lane unless the family advertises adapters (Lens / Krea).
+    // LoRAs: not in the candle lane unless the audited family row advertises adapters.
     if !supports_lora
         && payload
             .get("loras")
@@ -365,6 +430,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
         .and_then(Value::as_array)
         .is_some_and(|poses| !poses.is_empty());
     if has_poses {
+        return false;
+    }
+    if has_nonempty_nested_array(payload, "advanced", "phases") {
         return false;
     }
     // A quant/tier request (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
@@ -398,12 +466,25 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
         .is_some_and(|bits| bits > 0)
 }
 
+fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("quantization"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| {
+            let value = value.trim();
+            !value.is_empty() && !value.eq_ignore_ascii_case("auto")
+        })
+}
+
 /// Does this video job belong on the candle video lane? The candle wan/ltx providers drive plain
 /// text-to-video, the 14B I2V's single source-image conditioning (sc-5175), SVD image→video (sc-5493),
 /// **and** the Wan-VACE advanced modes — replace_person / extend / bridge (sc-5494, the `PersonReplace`
-/// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Every other shape
-/// (reference/mask/first-last-frame conditioning, LoRAs) is refused here and remains queued for a
-/// capable native worker. SCAIL-2 (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
+/// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Model-advertised user
+/// LoRAs remain on the compatible base lane; unsupported conditioning, or an adapter on a provider
+/// with no adapter slot, is refused here and remains queued for a capable native worker. SCAIL-2
+/// (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
 /// `animate_character` + `replace_person` (sc-6837, epic 6563) — gated separately (it is not a VACE
 /// model). Bernini (`bernini`) adds another DISTINCT candle engine off-Mac — t2v + the editing/
 /// reference/multi-source video modes (sc-10997, epic 6562) — also gated separately. The per-model
@@ -424,6 +505,11 @@ pub(crate) fn video_request_is_candle_eligible(
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
+    if candle_request_wants_torch_quantization(payload) {
+        // `advanced.quantization` selects a Torch GGUF overlay. Native Candle tiers use
+        // `mlxQuantize`; accepting this field would silently discard the user's explicit choice.
+        return false;
+    }
     match job_type {
         // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
         // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
@@ -438,10 +524,12 @@ pub(crate) fn video_request_is_candle_eligible(
         JobType::PersonReplace => {
             video_request_candle_vace_eligible(model, payload, job_type)
                 || scail2_replace_candle_eligible(model, payload)
+                || ltx_replace_candle_eligible(model, payload)
         }
         // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
         JobType::VideoExtend | JobType::VideoBridge => {
-            video_request_candle_vace_eligible(model, payload, job_type)
+            video_request_candle_eligible(model, payload)
+                || video_request_candle_vace_eligible(model, payload, job_type)
         }
         _ => false,
     }
@@ -453,7 +541,97 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
         return false;
     }
-    if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
+    if candle_request_wants_torch_quantization(payload) {
+        return false;
+    }
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros") {
+        match payload.get("mode").and_then(Value::as_str) {
+            Some("text_to_video") => {
+                if has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                    || has_nonempty_string(payload, "sourceClipAssetId")
+                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
+                {
+                    return false;
+                }
+            }
+            Some("image_to_video") => {
+                if !has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                    || has_nonempty_string(payload, "sourceClipAssetId")
+                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
+                {
+                    return false;
+                }
+            }
+            Some("first_last_frame") => {
+                if !has_nonempty_string(payload, "sourceAssetId")
+                    || !has_nonempty_string(payload, "lastFrameAssetId")
+                    || has_nonempty_string(payload, "sourceClipAssetId")
+                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
+                {
+                    return false;
+                }
+            }
+            Some("extend_clip") => {
+                if !has_nonempty_string(payload, "sourceClipAssetId")
+                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
+                    || has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                    || !payload
+                        .get("loras")
+                        .and_then(Value::as_array)
+                        .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
+                {
+                    return false;
+                }
+            }
+            Some("video_bridge") => {
+                if !has_nonempty_string(payload, "sourceClipAssetId")
+                    || !has_nonempty_string(payload, "bridgeRightClipAssetId")
+                    || has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                    || !payload
+                        .get("loras")
+                        .and_then(Value::as_array)
+                        .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    } else if model == "wan_2_2" {
+        match payload.get("mode").and_then(Value::as_str) {
+            Some("text_to_video") => {
+                if has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                {
+                    return false;
+                }
+            }
+            Some("image_to_video") => {
+                if !has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                {
+                    return false;
+                }
+            }
+            Some("first_last_frame") => {
+                if !has_nonempty_string(payload, "sourceAssetId")
+                    || !has_nonempty_string(payload, "lastFrameAssetId")
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        if has_nonempty_string(payload, "sourceClipAssetId")
+            || has_nonempty_string(payload, "bridgeRightClipAssetId")
+        {
+            return false;
+        }
+    } else if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
         // Wan 14B I2V is image→video ONLY (sc-5175): require the `image_to_video` mode + a source
         // image. A txt2video shape (no source) is rejected and remains queued.
         if payload.get("mode").and_then(Value::as_str) != Some("image_to_video") {
@@ -480,10 +658,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     {
         return false;
     }
-    // User LoRAs on the candle video lane are gated by the provider descriptor. Wan-14B and LTX
-    // advertise `supports_lora`, and their worker paths apply each `request.loras` entry from its
-    // file path. Wan-5B, SVD, and Mochi advertise no LoRA slot, so a LoRA there is refused here
-    // rather than being silently ignored.
+    // User LoRAs on the candle video lane are gated by the provider descriptor. Wan-5B/14B and LTX
+    // apply each `request.loras` entry from its file path. SVD and Mochi still reject rather than
+    // silently dropping an adapter.
     if !CANDLE_VIDEO_LORA_MODELS.contains(&model)
         && payload
             .get("loras")
@@ -492,24 +669,65 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     {
         return false;
     }
-    // On-the-fly quantization is refused (the candle video providers are dense; sc-5099).
-    if candle_request_wants_quant(payload) {
+    // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
+    // LTX base's shared packed-q4 turnkey. Other video providers remain dense and fail closed.
+    if candle_request_wants_quant(payload) && !candle_video_tier_select_eligible(model, payload) {
         return false;
     }
     true
 }
 
+fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if matches!(model, "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b") {
+        return true;
+    }
+    model == "ltx_2_3"
+        && payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get("mlxQuantize"))
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| value.as_str()?.trim().parse().ok())
+            })
+            == Some(4)
+}
+
+/// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
+/// route keeps the selected LTX/Eros model and forwards the tracked clip, masks, references, and
+/// selected IC-LoRA to that model's `ControlClip`/keyframe-append provider path.
+pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if !matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+        || !has_nonempty_string(payload, "sourceClipAssetId")
+        || !has_nonempty_string(payload, "personTrackId")
+        || !has_nonempty_string(payload, "characterId")
+        || !payload
+            .get("loras")
+            .and_then(Value::as_array)
+            .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
+    {
+        return false;
+    }
+    !candle_request_wants_quant(payload) || candle_video_tier_select_eligible(model, payload)
+}
+
 /// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
 /// (replace_person), `VideoExtend` (extend_clip), `VideoBridge` (video_bridge). Routes to the candle
-/// `wan_vace` engine when the model is VACE-capable and the per-mode source assets are present. LoRA /
-/// on-the-fly quant are not in the candle video lane (the VACE provider rejects them). Factored out so
-/// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
+/// `wan_vace` engine when the model is VACE-capable and the per-mode source assets are present. The
+/// dedicated VACE-Fun provider is admitted here only for PersonReplace and accepts user adapters;
+/// generic VACE still rejects them. Factored out so the routing tests can probe it with synthetic
+/// payloads (parity with [`video_request_candle_eligible`]).
 pub(crate) fn video_request_candle_vace_eligible(
     model: &str,
     payload: &Map<String, Value>,
     job_type: &JobType,
 ) -> bool {
-    if !CANDLE_VIDEO_VACE_MODELS.contains(&model) {
+    if model == "wan_2_2_vace_fun_14b" {
+        if !matches!(job_type, JobType::PersonReplace) {
+            return false;
+        }
+    } else if !CANDLE_VIDEO_VACE_MODELS.contains(&model) {
         return false;
     }
     match job_type {
@@ -538,8 +756,8 @@ pub(crate) fn video_request_candle_vace_eligible(
         }
         _ => return false,
     }
-    // LoRAs / on-the-fly quant are not in the candle video lane (the VACE provider rejects them).
-    if has_nonempty_array(payload, "loras") {
+    // Only the dedicated VACE-Fun provider accepts adapters. On-the-fly quant remains unsupported.
+    if model != "wan_2_2_vace_fun_14b" && has_nonempty_array(payload, "loras") {
         return false;
     }
     if candle_request_wants_quant(payload) {
@@ -583,8 +801,9 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
 
 /// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
 /// `PersonReplace` job: the source control clip + the tracked person + the character references (the
-/// same per-mode assets the Wan-VACE replace gate requires). No LoRA / on-the-fly quant (the provider
-/// rejects them; inference LoRA is sc-6838). A distinct candle engine, so it is gated here rather than
+/// same per-mode assets the Wan-VACE replace gate requires). Inference adapters use the same provider
+/// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch); only on-the-fly quant remains
+/// unsupported. A distinct candle engine, so it is gated here rather than
 /// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
 pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "scail2_14b" {
@@ -593,13 +812,6 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
     if !has_nonempty_string(payload, "sourceClipAssetId")
         || !has_nonempty_string(payload, "personTrackId")
         || !has_nonempty_string(payload, "characterId")
-    {
-        return false;
-    }
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
     {
         return false;
     }
@@ -619,9 +831,9 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
 /// `ads2v`. Routed on the model id + mode, not weight availability — the worker's dedicated
 /// `CandleVideoRoute::Bernini` dispatch resolves-or-errors loudly if the `SceneWorks/bernini`
 /// snapshot is unprovisioned (sc-11003), and validates the per-mode source media when it assembles the
-/// conditioning. No LoRA (the engine reports `supports_lora=false`); an explicit `mlxQuantize` is
-/// recorded for lineage but does NOT push the job off candle (the loader reads the converted tree dense,
-/// exactly like the still lane, sc-10996) — there is no torch Bernini to fall back to. Factored out so
+/// conditioning. User LoRA/LoKr applies to the renderer's high/low experts; an explicit `mlxQuantize` remains
+/// on Candle because the worker resolves the published bf16/q8/q4 tier subdirectories (sc-11003) —
+/// there is no torch Bernini to fall back to. Factored out so
 /// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
 pub(crate) fn bernini_video_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "bernini" {
@@ -686,41 +898,129 @@ pub(crate) fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     has_nonempty_string(payload, "sourceAssetId")
 }
 
-/// FLUX.2 Klein reference-route candle conditions. Edit/reference, character, and style requests all
-/// use native token-concat conditioning and must carry a concrete source/reference id. The route table
-/// scopes this expanded predicate to the three Klein catalog entries; dev retains its edit-only gate.
+/// FLUX.2 reference-route candle conditions. Edit/reference, character, and style requests all
+/// use native token-concat conditioning and must carry a concrete source/reference id.
 /// Mirrors the worker's `flux2_edit_candle_available` gate minus local weight resolution.
 pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
     if !matches!(
-        payload.get("mode").and_then(Value::as_str),
+        mode,
         Some(
             "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
         )
     ) {
         return false;
     }
-    has_nonempty_string_array(payload, "referenceAssetIds")
-        || has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "sourceAssetId")
+    conditioned_reference_count(
+        payload,
+        matches!(mode, Some("edit_image" | "image_to_image")),
+        4,
+    )
+    .is_some()
+        && !conditioned_edit_has_unsupported_carrier(payload, true, false, false)
+        && !conditioned_true_cfg_is_malformed(payload)
 }
 
 fn flux2_dev_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) == Some("edit_image")
-        && (has_nonempty_string_array(payload, "referenceAssetIds")
-            || has_nonempty_string(payload, "sourceAssetId"))
+    flux2_edit_candle_eligible(payload)
 }
 
-/// Qwen-Image-Edit candle-routing conditions (sc-5487, epic 5480). The candle `QwenEdit` provider
-/// serves `edit_image` mode with a `sourceAssetId` on the non-lightning Qwen-Image-Edit family —
-/// dual-latent reference editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit
-/// lane's). Same payload predicate as `flux2_edit_candle_eligible`, gated to the qwen-edit family by the
-/// caller. Mirrors the worker's `qwen_edit_candle_available` gate (minus the local weight-resolve check)
-/// so the router and worker agree. Candle-only — macOS keeps the MLX `qwen_image_edit` registry path.
+/// Qwen-Image-Edit candle-routing conditions (sc-5487, sc-18476). The candle `QwenEdit` provider
+/// serves instruction edit plus ordered singular/plural reference and character/angle workflows on
+/// the Qwen-Image-Edit family. Character Studio pose sets are supported only with exactly one identity
+/// reference: each pose skeleton is appended as the second ordered edit reference. Masks, controls,
+/// phases, malformed pose sets/CFG, and conflicting reference carriers are rejected rather than
+/// dropped. Mirrors the worker's
+/// `qwen_edit_candle_available` gate (minus local weight resolution); macOS keeps the corresponding
+/// MLX `qwen_image_edit` path, including its pre-existing best-effort pose grouping.
 pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+    let mode = payload.get("mode").and_then(Value::as_str);
+    if !matches!(mode, Some("edit_image" | "character_image")) {
         return false;
     }
-    has_nonempty_string(payload, "sourceAssetId")
+    let Some(reference_count) = conditioned_reference_count(payload, mode == Some("edit_image"), 5)
+    else {
+        return false;
+    };
+    let Some(pose_count) = strict_candle_pose_count(payload) else {
+        return false;
+    };
+    (pose_count == 0 || (mode == Some("character_image") && reference_count == 1))
+        && !conditioned_edit_has_unsupported_carrier(payload, true, false, true)
+        && !conditioned_true_cfg_is_malformed(payload)
+}
+
+/// Strict Character Studio pose carrier shared by the newly conditioned Candle routes.
+/// Missing/null/empty means no pose set; a supplied set must contain only objects and stay within the
+/// API-wide pose bound. Workers parse those same objects with the production whole-body renderer.
+fn strict_candle_pose_count(payload: &Map<String, Value>) -> Option<usize> {
+    match payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+    {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Array(poses))
+            if poses.len() <= MAX_JOB_POSES && poses.iter().all(Value::is_object) =>
+        {
+            Some(poses.len())
+        }
+        Some(_) => None,
+    }
+}
+
+/// SenseNova-U1's registered Candle generator accepts structural Reference/MultiReference
+/// conditioning plus image true-CFG. Unsupported blend-strength, control, mask, adapter, pose, and
+/// phase carriers are rejected here so they can never reach the generic registered stream as T2I.
+pub(crate) fn sensenova_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
+    if !matches!(mode, Some("edit_image" | "character_image")) {
+        return false;
+    }
+    conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
+        && !conditioned_edit_has_unsupported_carrier(payload, false, true, false)
+        && !conditioned_true_cfg_is_malformed(payload)
+}
+
+fn conditioned_true_cfg_is_malformed(payload: &Map<String, Value>) -> bool {
+    ["trueCfgScale", "imageGuidanceScale"]
+        .iter()
+        .any(|key| has_malformed_optional_nested_number(payload, "advanced", key))
+}
+
+fn conditioned_edit_has_unsupported_carrier(
+    payload: &Map<String, Value>,
+    allow_loras: bool,
+    reject_strength: bool,
+    allow_poses: bool,
+) -> bool {
+    (!allow_loras && has_nonempty_or_malformed_array(payload, "loras"))
+        || ["controls", "controlnets"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        || ["maskAssetId"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_string(payload, key))
+        || (!allow_poses && has_nonempty_or_malformed_nested_array(payload, "advanced", "poses"))
+        || has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
+        || [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        || (reject_strength
+            && ["strength", "ipAdapterScale", "referenceStrength"]
+                .iter()
+                .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key)))
+        || (reject_strength
+            && ["strength", "referenceStrength"]
+                .iter()
+                .any(|key| payload.get(*key).is_some_and(|value| !value.is_null())))
 }
 
 /// Z-Image img2img / edit candle-routing conditions (sc-6595, epic 5480). The candle `ZImageEdit`
@@ -751,8 +1051,8 @@ pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    has_nonempty_string_array(payload, "referenceAssetIds")
-        || has_nonempty_string(payload, "sourceAssetId")
+    conditioned_reference_count(payload, true, 2).is_some()
+        && !krea_edit_has_unsupported_carrier(payload)
 }
 
 /// Krea 2 img2img (reference-guided latent-init) candle-routing conditions (sc-10134 Turbo, sc-10226 Raw;
@@ -809,6 +1109,58 @@ pub(crate) fn sd3_img2img_candle_eligible(payload: &Map<String, Value>) -> bool 
         return false;
     }
     has_nonempty_string(payload, "referenceAssetId")
+}
+
+/// SANA base/Sprint non-edit img2img: exactly one singular reference, with no edit/control/adapter
+/// carrier that the generic worker path would otherwise drop. Candle has no Q4/Q8 or LoRA surface for
+/// these dense snapshots, so those request shapes remain unclaimed.
+pub(crate) fn sana_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+        && has_nonempty_string(payload, "referenceAssetId")
+        && !sana_has_unsupported_carrier(payload)
+}
+
+/// SANA consumes only one singular reference. Optional empty/null carriers mean "absent"; any
+/// non-empty unsupported or malformed carrier must not fall through to the generic txt2img lane,
+/// whose worker request type would otherwise ignore it.
+fn sana_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
+    ["referenceAssetIds", "controls", "controlnets", "loras"]
+        .iter()
+        .any(|key| has_nonempty_or_malformed_array(payload, key))
+        || ["sourceAssetId", "maskAssetId"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_string(payload, key))
+        || ["poses", "phases"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        || [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        || sana_has_unsupported_quant_carrier(payload)
+}
+
+fn sana_has_unsupported_quant_carrier(payload: &Map<String, Value>) -> bool {
+    let Some(value) = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"))
+    else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
+        .map_or(true, |bits| bits > 0)
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic
@@ -984,6 +1336,35 @@ pub(crate) fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bo
     has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
+/// Kolors source-image img2img/edit through the registered Candle generator. The existing pure
+/// `referenceAssetId` IP-Adapter route and pose ControlNet route are intentionally separate and
+/// precede this route. Only a singular `sourceAssetId` is accepted here; plural/reference/mask/
+/// control carriers fail closed rather than being discarded by the generic stream.
+pub(crate) fn kolors_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+        && has_nonempty_string(payload, "sourceAssetId")
+        && !["referenceAssetIds", "controls", "controlnets", "loras"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        && !["referenceAssetId", "maskAssetId"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_string(payload, key))
+        && !["poses", "phases"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+        && [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .all(|key| !has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        && !has_malformed_optional_nested_number(payload, "advanced", "strength")
+}
+
 /// Z-Image strict-control Fun-ControlNet candle-routing conditions (sc-5489 origin / sc-8379 base, epic
 /// 8236). The candle `ZImageControl` provider serves `z_image_turbo` OR the base `z_image` + a non-empty
 /// `advanced.poses` (one image per pose, each conditioned on a DWPose skeleton via the VACE-style
@@ -1076,7 +1457,7 @@ pub(crate) fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) ->
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    has_nonempty_nested_array(payload, "advanced", "poses")
+    strict_candle_pose_count(payload).is_some_and(|count| count > 0)
 }
 
 /// Krea 2 pose-ControlNet candle-routing conditions (sc-8464, epic 8459). The candle `Krea2Control`
@@ -1162,11 +1543,8 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
 /// Linux/NVIDIA) worker? The training sibling of
 /// [`image_job_is_candle_eligible`]/[`video_job_is_candle_eligible`]: the candle engine has a native
 /// trainer for the family. Both dry-run and real runs are eligible (the dry-run validates the same
-/// resolved plan). `wan_moe_lora` is candle-eligible ONLY for the **T2V** A14B base model
-/// (`wan_2_2_t2v_14b`) — the candle Wan trainer is registered under `wan2_2_t2v_14b` only; the I2V
-/// A14B and the dense `wan_lora` 5B have no candle trainer, so they are refused and remain queued. UNLIKE the mlx Wan
-/// path, the candle Wan trainer DOES support LoKr (its `build_lokr_targets` merge), so there is no
-/// LoKr-on-Wan exclusion here. The resolved plan is stamped into the payload at submit (apps/rust-api
+/// resolved plan). `wan_moe_lora` accepts both A14B T2V and I2V bases, while `wan_lora` accepts the
+/// dense TI2V-5B base. The resolved plan is stamped into the payload at submit (apps/rust-api
 /// training.rs), so the kernel + base model are readable without touching the dataset or weights.
 pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // The ControlNet studio job (epic 10159) trains through the SAME native executor keyed on the
@@ -1183,19 +1561,44 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel) {
-        return true;
+    if !CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+        return false;
     }
-    // The A14B MoE: candle registers only the T2V trainer (`wan2_2_t2v_14b`). The I2V A14B base
-    // model has no candle trainer, so it is refused and remains queued.
-    if kernel == "wan_moe_lora" {
-        let base_model = target
-            .and_then(|target| target.get("baseModel"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        return base_model == "wan_2_2_t2v_14b";
+    let base_model = target
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let network_type = plan
+        .get("config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("advanced"))
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("networkType"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("lora");
+    let is_adapter =
+        network_type.eq_ignore_ascii_case("lora") || network_type.eq_ignore_ascii_case("lokr");
+
+    match kernel {
+        "kolors_lora" => base_model == "kolors" && is_adapter,
+        "sd3_lora" => matches!(base_model, "sd3_5_large" | "sd3_5_medium") && is_adapter,
+        "wan_lora" => base_model == "wan_2_2" && network_type.eq_ignore_ascii_case("lora"),
+        "wan_moe_lora" => match base_model {
+            "wan_2_2_t2v_14b" => is_adapter,
+            "wan_2_2_i2v_14b" => network_type.eq_ignore_ascii_case("lora"),
+            _ => false,
+        },
+        "anima_lora" => base_model == "anima_base" && is_adapter,
+        "mage_flow_lora" => {
+            base_model == "mage_flow_base"
+                && (is_adapter || network_type.eq_ignore_ascii_case("full"))
+        }
+        // Existing native families keep their established admission. Their trainers perform the
+        // final typed validation; Krea ControlNet deliberately has no adapter-kind selector.
+        _ => true,
     }
-    false
 }
 
 /// Whether an `image_upscale` job is candle-eligible (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic

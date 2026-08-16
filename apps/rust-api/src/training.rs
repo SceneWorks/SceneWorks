@@ -1,12 +1,90 @@
 use super::*;
 
 pub(crate) async fn list_training_targets() -> Json<TrainingTargetRegistry> {
-    Json(builtin_training_targets())
+    Json(effective_training_targets())
 }
 
 pub(crate) async fn list_training_presets(
 ) -> Json<sceneworks_core::training::TrainingPresetRegistry> {
-    Json(builtin_training_presets())
+    Json(effective_training_presets())
+}
+
+/// Return the training catalog as it executes on this platform. The core registry deliberately
+/// retains the established MLX defaults; on non-macOS hosts the API projects only the Candle
+/// limitations into the response the Studio seeds and later submits. That makes the visible form,
+/// submitted config, resolved plan, and provenance snapshot agree without a worker-side override.
+fn effective_training_targets() -> TrainingTargetRegistry {
+    effective_training_targets_for_candle(!cfg!(target_os = "macos"))
+}
+
+pub(crate) fn effective_training_targets_for_candle(candle: bool) -> TrainingTargetRegistry {
+    let mut registry = builtin_training_targets();
+    if candle {
+        for target in &mut registry.targets {
+            apply_candle_training_defaults(&target.kernel, &mut target.defaults);
+        }
+    }
+    registry
+}
+
+fn effective_training_presets() -> sceneworks_core::training::TrainingPresetRegistry {
+    effective_training_presets_for_candle(!cfg!(target_os = "macos"))
+}
+
+pub(crate) fn effective_training_presets_for_candle(
+    candle: bool,
+) -> sceneworks_core::training::TrainingPresetRegistry {
+    let mut presets = builtin_training_presets();
+    if candle {
+        let targets = builtin_training_targets();
+        for preset in &mut presets.presets {
+            if let Some(target) = targets
+                .targets
+                .iter()
+                .find(|target| target.id == preset.target_id)
+            {
+                apply_candle_training_defaults(&target.kernel, &mut preset.config);
+            }
+        }
+    }
+    presets
+}
+
+fn apply_candle_training_defaults(
+    kernel: &str,
+    config: &mut sceneworks_core::training::TrainingConfig,
+) {
+    match kernel {
+        // These Candle trainers are intentionally dense and do not render previews. MLX retains
+        // its established checkpointing/preview defaults in the core catalog and macOS response.
+        "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "anima_lora" => {
+            config
+                .advanced
+                .insert("gradientCheckpointing".to_owned(), json!(false));
+            config.advanced.insert("sampleEvery".to_owned(), json!(0));
+            if kernel == "mage_flow_lora" {
+                config.advanced.insert(
+                    "fullFinetuneConfig".to_owned(),
+                    json!({
+                        "mixedPrecision": "f32",
+                        "gradientCheckpointing": false
+                    }),
+                );
+            }
+        }
+        // The Wan single-DiT and I2V trainers do not preview. Both A14B variants require
+        // checkpointing on Candle; TI2V-5B remains a negative and honors its existing value.
+        "wan_lora" => {
+            config.advanced.insert("sampleEvery".to_owned(), json!(0));
+        }
+        "wan_moe_lora" => {
+            config
+                .advanced
+                .insert("gradientCheckpointing".to_owned(), json!(true));
+            config.advanced.insert("sampleEvery".to_owned(), json!(0));
+        }
+        _ => {}
+    }
 }
 
 pub(crate) async fn list_training_datasets(
@@ -1328,7 +1406,7 @@ pub(crate) async fn create_training_job(
     // run hands the same plan to the worker's Z-Image LoRA kernel.
     //
     // Targets come from the Rust-owned registry; the request only names one.
-    let registry = builtin_training_targets();
+    let registry = effective_training_targets();
     let target = registry
         .targets
         .iter()
@@ -1363,7 +1441,7 @@ pub(crate) async fn create_training_job(
     }
     let preset_metadata = match payload.preset_id.as_deref() {
         Some(preset_id) => {
-            let preset_registry = builtin_training_presets();
+            let preset_registry = effective_training_presets();
             let preset = preset_registry
                 .presets
                 .iter()
@@ -1605,6 +1683,7 @@ pub(crate) async fn create_training_job(
     // entry is upserted on completion (story 1418), so this stays purely
     // informational. Dry runs never register.
     let timestamp = now_rfc3339();
+    let manifest_files = training_adapter_manifest_files(&plan);
     let mut manifest_entry = json!({
         "id": lora_id.clone(),
         "name": output_name.clone(),
@@ -1617,7 +1696,7 @@ pub(crate) async fn create_training_job(
             "provider": "training",
             "path": source_relpath,
         },
-        "files": [plan.output.file_name.clone()],
+        "files": manifest_files,
         "provenance": {
             "kind": "training",
             "trainingJobId": job_id.clone(),
@@ -1755,6 +1834,28 @@ pub(crate) async fn create_training_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Final adapter files a trainer is required to produce. Wan A14B is a dual-expert model and its
+/// production trainers write one adapter per noise expert; declaring only the primary high-noise
+/// path let completion register a half-trained stack while silently dropping the low expert.
+pub(crate) fn training_adapter_manifest_files(
+    plan: &sceneworks_core::training::TrainingPlan,
+) -> Vec<String> {
+    if plan.target.kernel != "wan_moe_lora" {
+        return vec![plan.output.file_name.clone()];
+    }
+    ["high_noise", "low_noise"]
+        .into_iter()
+        .map(|suffix| training_file_with_suffix(&plan.output.file_name, suffix))
+        .collect()
+}
+
+fn training_file_with_suffix(file_name: &str, suffix: &str) -> String {
+    match file_name.rsplit_once('.') {
+        Some((stem, extension)) => format!("{stem}.{suffix}.{extension}"),
+        None => format!("{file_name}.{suffix}"),
+    }
 }
 
 /// Write the resolved training plan to `<output_dir>/training-config.json` at submit time as a
@@ -2457,7 +2558,8 @@ pub(crate) fn human_gib(bytes: u64) -> String {
 /// The trusted `files` list for a trained LoRA: the adapter file names the plan
 /// declared (staged into `manifestEntry.files` at submit), each validated as a
 /// plain in-tree file and confirmed to exist under the recomputed output dir.
-/// Returns `None` when none qualify.
+/// Returns `None` unless every declared file qualifies. This is apply-or-reject for multi-file
+/// adapters: a Wan A14B run must never register only one noise expert because its sibling is absent.
 ///
 /// Trusting the declared name rather than the first `.safetensors` on disk
 /// matters: the trainer leaves step checkpoints (`<stem>-stepNNN.safetensors`)
@@ -2470,16 +2572,17 @@ pub(crate) fn trusted_adapter_files(
     output_dir: &FsPath,
 ) -> Option<Vec<String>> {
     let declared = declared?.as_array()?;
-    let files = declared
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|name| is_plain_relative_file(name) && output_dir.join(name).is_file())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if files.is_empty() {
+    if declared.is_empty() {
         None
     } else {
-        Some(files)
+        declared
+            .iter()
+            .map(|value| {
+                let name = value.as_str()?;
+                (is_plain_relative_file(name) && output_dir.join(name).is_file())
+                    .then(|| name.to_owned())
+            })
+            .collect()
     }
 }
 

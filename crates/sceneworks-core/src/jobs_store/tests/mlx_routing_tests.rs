@@ -1,8 +1,8 @@
 use super::{
     flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible, image_request_mlx_eligible,
     instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-    sdxl_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job, z_image_mlx_eligible,
-    JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
+    sdxl_mlx_eligible, video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
+    z_image_mlx_eligible, JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use serde_json::{json, Map, Value};
 
@@ -27,6 +27,25 @@ fn image_generate_job(payload: Value) -> JobSnapshot {
         "updatedAt": "2026-07-23T00:00:00Z"
     }))
     .expect("valid image job")
+}
+
+fn video_job(job_type: &str, payload: Value) -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job_video_ltx_ic",
+        "type": job_type,
+        "status": "queued",
+        "payload": payload,
+        "result": {},
+        "requestedGpu": "auto",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-07-23T00:00:00Z",
+        "updatedAt": "2026-07-23T00:00:00Z"
+    }))
+    .expect("valid video job")
 }
 
 fn mlx_worker() -> WorkerSnapshot {
@@ -139,6 +158,103 @@ fn z_image_plain_txt2img_is_eligible() {
         json!({ "prompt": "a misty fjord" })
     )));
     assert!(z_image_mlx_eligible(&Map::new()));
+}
+
+#[test]
+fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
+    for model in ["sana_1600m", "sana_sprint_1600m"] {
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "prompt": "p" }))
+        ));
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "referenceAssetId": "reference-1", "advanced": { "strength": 0.5 } }))
+        ));
+        for bits in [4, 8] {
+            assert!(
+                image_request_mlx_eligible(
+                    model,
+                    &object(
+                        json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": bits } })
+                    )
+                ),
+                "{model} must preserve supported MLX Q{bits} selection"
+            );
+        }
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "advanced": { "mlxQuantize": " 4 " } }))
+        ));
+        for empty_carriers in [
+            json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
+            json!({
+                "referenceAssetId": "reference-1",
+                "controls": null,
+                "controlnets": [],
+                "referenceAssetIds": [],
+                "loras": [],
+                "sourceAssetId": " ",
+                "maskAssetId": null,
+                "advanced": {
+                    "strength": 0.5,
+                    "poses": [],
+                    "phases": null,
+                    "controlMode": null,
+                    "controlImage": null,
+                    "controlScale": null,
+                    "controlWeights": null,
+                    "convRot": null,
+                    "quantTier": null,
+                    "mlxQuantize": null
+                }
+            }),
+        ] {
+            assert!(
+                image_request_mlx_eligible(model, &object(empty_carriers.clone())),
+                "{model} empty/null optional carriers preserve txt2img/img2img: {empty_carriers}"
+            );
+        }
+        for malformed in [
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+            json!({ "referenceAssetId": 7 }),
+            json!({ "referenceAssetId": " " }),
+            json!({ "referenceAssetId": "reference-1", "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1", "maskAssetId": "mask-1" }),
+            json!({ "referenceAssetId": "reference-1", "loras": [{ "id": "lora-1" }] }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "poses": [{}] } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "phases": [{}] } }),
+            json!({ "referenceAssetId": "reference-1", "referenceAssetIds": [7] }),
+            json!({ "referenceAssetId": "reference-1", "referenceAssetIds": 7 }),
+            json!({ "referenceAssetId": "reference-1", "controls": [{}] }),
+            json!({ "referenceAssetId": "reference-1", "controls": 7 }),
+            json!({ "referenceAssetId": "reference-1", "controlnets": [{}] }),
+            json!({ "referenceAssetId": "reference-1", "controlnets": "invalid" }),
+            json!({ "referenceAssetId": "reference-1", "loras": 7 }),
+            json!({ "referenceAssetId": "reference-1", "sourceAssetId": 7 }),
+            json!({ "referenceAssetId": "reference-1", "maskAssetId": {} }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "poses": 7 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "phases": {} } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlMode": "canny" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlImage": "control-1" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlScale": 0.9 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "convRot": true } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "quantTier": "nvfp4" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": {} } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": true } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": 4.5 } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": "q4" } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": { "mlxQuantize": [] } }),
+            json!({ "referenceAssetId": "reference-1", "advanced": 7 }),
+        ] {
+            assert!(
+                !image_request_mlx_eligible(model, &object(malformed.clone())),
+                "{model} malformed img2img shape must reject: {malformed}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -332,18 +448,139 @@ fn qwen_edit_without_reference_falls_back_to_torch() {
 
 #[test]
 fn flux2_txt2img_edit_and_lycoris_all_route_mlx() {
-    // FLUX.2 is MLX-only: txt2img (sc-3025), edit/reference (sc-3029), and — since epic 3641 —
-    // third-party LyCORIS all route MLX.
+    // FLUX.2 txt2img (sc-3025), edit/reference (sc-3029), and — since epic 3641 — third-party
+    // LyCORIS all route MLX on Mac; native Candle owns the corresponding off-Mac lanes.
     assert!(flux2_mlx_eligible(&object(
         json!({ "prompt": "a red fox" })
     )));
-    assert!(flux2_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "image_generation", "prompt": "a red fox"
+    }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "edit_image", "sourceAssetId": "asset_1"
+    }))));
     assert!(flux2_mlx_eligible(&object(
-        json!({ "referenceAssetId": "asset_1" })
+        json!({ "mode": "reference", "referenceAssetId": "asset_1" })
     )));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "character_image", "referenceAssetIds": ["asset_1", "asset_2"]
+    }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "character_image", "referenceAssetId": "asset_1",
+        "advanced": { "poses": [{ "id": "pose_1" }] }
+    }))));
+    assert!(flux2_mlx_eligible(&object(json!({
+        "mode": "style_variations", "referenceAssetId": "asset_1"
+    }))));
+    assert!(!flux2_mlx_eligible(&object(
+        json!({ "mode": "edit_image" })
+    )));
+    assert!(!flux2_mlx_eligible(&object(json!({
+        "mode": "reference", "referenceAssetId": "asset_1", "sourceAssetId": "asset_2"
+    }))));
+    assert!(!flux2_mlx_eligible(&object(json!({
+        "mode": "image_generation", "referenceAssetId": "asset_1"
+    }))));
     assert!(flux2_mlx_eligible(&object(json!({
         "loras": [{ "networkType": "lycoris" }]
     }))));
+}
+
+#[test]
+fn conditioned_mlx_routes_reject_conflicting_malformed_and_silent_t2i_shapes() {
+    for model in ["qwen_image_edit_2511", "sensenova_u1_8b"] {
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({
+                "mode": "character_image", "referenceAssetIds": ["a", "b"],
+                "advanced": { "trueCfgScale": "2.5" }
+            }))
+        ));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_request_mlx_eligible(
+                model,
+                &object(json!({
+                    "mode": "character_image", "referenceAssetIds": absent_plural,
+                    "referenceAssetId": "a"
+                }))
+            ));
+        }
+        for malformed in [
+            json!({ "mode": "character_image", "referenceAssetIds": ["a", ""] }),
+            json!({ "mode": "character_image", "referenceAssetIds": ["a", "b", "c", "d", "e", "f"] }),
+            json!({ "mode": "character_image", "referenceAssetIds": {} }),
+            json!({ "mode": "character_image", "referenceAssetId": "" }),
+            json!({ "mode": "character_image", "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "mode": "character_image", "referenceAssetId": "a", "advanced": { "trueCfgScale": false } }),
+        ] {
+            assert!(!image_request_mlx_eligible(model, &object(malformed)));
+        }
+    }
+    assert!(!image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "text_to_image", "referenceAssetId": "ignored" }))
+    ));
+    assert!(image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "image_generation", "prompt": "a red fox" }))
+    ));
+    assert!(!image_request_mlx_eligible(
+        "sensenova_u1_8b",
+        &object(json!({ "mode": "image_generation", "referenceAssetId": "ignored" }))
+    ));
+    for model in ["krea_2_raw", "krea_2_turbo"] {
+        assert!(image_request_mlx_eligible(
+            model,
+            &object(json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a" }))
+        ));
+        assert!(!image_request_mlx_eligible(
+            model,
+            &object(
+                json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "b" })
+            )
+        ));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_request_mlx_eligible(
+                model,
+                &object(json!({
+                    "model": model, "mode": "edit_image",
+                    "referenceAssetIds": absent_plural, "referenceAssetId": "a"
+                }))
+            ));
+        }
+        for unsupported in [
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "maskAssetId": "mask" }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "controls": [{}] }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "poses": [{}] } }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "phases": [{}] } }),
+        ] {
+            assert!(!image_request_mlx_eligible(model, &object(unsupported)));
+        }
+    }
+    for model in [
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_request_mlx_eligible(
+                model,
+                &object(json!({
+                    "mode": "style_variations", "referenceAssetIds": absent_plural,
+                    "referenceAssetId": "a"
+                }))
+            ));
+        }
+        for malformed in [
+            json!({ "mode": "reference", "referenceAssetIds": ["a", "b", "c", "d", "e"] }),
+            json!({ "mode": "reference", "referenceAssetIds": ["a", null] }),
+            json!({ "mode": "reference", "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "mode": "reference", "referenceAssetId": "a", "advanced": { "trueCfgScale": [] } }),
+        ] {
+            assert!(!image_request_mlx_eligible(model, &object(malformed)));
+        }
+    }
 }
 
 #[test]
@@ -616,6 +853,32 @@ fn sd3_5_text_to_image_routes_to_mlx() {
 }
 
 #[test]
+fn wan5_mlx_routing_requires_an_exact_source_shape_for_each_base_mode() {
+    for payload in [
+        json!({ "model": "wan_2_2", "mode": "text_to_video", "sourceAssetId": "stale" }),
+        json!({ "model": "wan_2_2", "mode": "text_to_video", "lastFrameAssetId": "stale" }),
+        json!({ "model": "wan_2_2", "mode": "image_to_video" }),
+        json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "first", "lastFrameAssetId": "stale" }),
+        json!({ "model": "wan_2_2", "mode": "first_last_frame", "sourceAssetId": "first" }),
+    ] {
+        assert!(
+            !video_job_is_mlx_eligible(&video_job("video_generate", payload.clone())),
+            "malformed Wan5 media shape must not be reinterpreted by the MLX worker: {payload}"
+        );
+    }
+    for payload in [
+        json!({ "model": "wan_2_2", "mode": "text_to_video" }),
+        json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "first" }),
+        json!({ "model": "wan_2_2", "mode": "first_last_frame", "sourceAssetId": "first", "lastFrameAssetId": "last" }),
+    ] {
+        assert!(
+            video_job_is_mlx_eligible(&video_job("video_generate", payload.clone())),
+            "valid Wan5 media shape must remain MLX-eligible: {payload}"
+        );
+    }
+}
+
+#[test]
 fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its
     // renderer is Wan2.2-T2V, no still-image-to-video), SCAIL-2 (animate_character only) and
@@ -627,12 +890,23 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     // dual-expert control checkpoint, sc-3458) and `minimax_h3_ref` (reference_to_video ONLY — the
     // `transformer_ref` partition, sc-17159). `minimax_h3` itself DOES serve both generic modes, so
     // it is deliberately absent from these lists and is asserted by the generic arm.
+    //
+    // The Wan A14B t2v/i2v split is the other exclusion, and it came from main rather than from this
+    // epic: `wan_2_2_t2v_14b` is text-to-video only and `wan_2_2_i2v_14b` is image-to-video only, so
+    // each is excluded from exactly the mode the other serves. Both sets of exclusions are true at
+    // once, so the lists below are the UNION of the two sides of the sc-17137 sync merge — taking
+    // either side alone would have dropped the other's arm and reported a false capability.
     for model in VIDEO_MLX_ROUTED_MODELS {
         assert_eq!(
             video_mode_is_mlx_eligible(model, "image_to_video"),
             !matches!(
                 *model,
-                "bernini" | "scail2_14b" | "mochi_1" | "wan_2_2_vace_fun_14b" | "minimax_h3_ref"
+                "wan_2_2_t2v_14b"
+                    | "bernini"
+                    | "scail2_14b"
+                    | "mochi_1"
+                    | "wan_2_2_vace_fun_14b"
+                    | "minimax_h3_ref"
             ),
             "image_to_video eligibility for {model}"
         );
@@ -640,7 +914,11 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
             video_mode_is_mlx_eligible(model, "text_to_video"),
             !matches!(
                 *model,
-                "svd" | "scail2_14b" | "wan_2_2_vace_fun_14b" | "minimax_h3_ref"
+                "wan_2_2_i2v_14b"
+                    | "svd"
+                    | "scail2_14b"
+                    | "wan_2_2_vace_fun_14b"
+                    | "minimax_h3_ref"
             ),
             "text_to_video eligibility for {model}"
         );
@@ -824,6 +1102,24 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
         "wan_2_2_vace_fun_14b",
         "replace_person"
     ));
+    // …and NOTHING else (main, sc-17159's sibling assertion). Kept alongside the dedicated
+    // `wan_vace_fun_is_mlx_routed_and_serves_its_only_advertised_mode` test below rather than
+    // folded into it: both sides of this sync merge asserted it, and neither is dropped.
+    for mode in [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "video_to_video",
+        "animate_character",
+        "nonsense",
+    ] {
+        assert!(
+            !video_mode_is_mlx_eligible("wan_2_2_vace_fun_14b", mode),
+            "VACE-Fun is replace_person-only and should not serve {mode}"
+        );
+    }
     // Neither MiniMax-H3 partition serves replace_person — it declares no such capability, and
     // routing it would hand a Wan-VACE request to a MiniMax checkpoint.
     for id in ["minimax_h3", "minimax_h3_ref"] {
@@ -1160,4 +1456,25 @@ fn wan_vace_fun_is_mlx_routed_and_serves_its_only_advertised_mode() {
         Some(&true),
         "Video Studio must enable replace_person for wan_2_2_vace_fun_14b"
     );
+}
+#[test]
+fn mlx_ltx_clip_and_replace_jobs_require_the_same_ic_lora_as_execution() {
+    for (job_type, mode) in [
+        ("video_extend", "extend_clip"),
+        ("video_bridge", "video_bridge"),
+        ("person_replace", "replace_person"),
+    ] {
+        let mut payload = json!({
+            "model": "ltx_2_3",
+            "mode": mode,
+            "loras": [{ "id": "ordinary_ltx_style" }]
+        });
+        let job = video_job(job_type, payload.clone());
+        assert!(
+            !video_job_is_mlx_eligible(&job),
+            "routing must not claim {mode} with an ordinary LoRA that execution rejects"
+        );
+        payload["loras"] = json!([{ "source": { "file": "ltx-2-3-ic-union.safetensors" } }]);
+        assert!(video_job_is_mlx_eligible(&video_job(job_type, payload)));
+    }
 }
