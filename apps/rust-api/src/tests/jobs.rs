@@ -4624,24 +4624,28 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
          (9 reference images + 3 source clips + 3 audio references). Remove 3 of them."
     );
 
-    // 9 + 2 + 1 = 12. ACCEPTED, at the cap, and every list reaches the enqueued payload.
-    let (status, job) = submit("minimax_h3_ref", 9, 2, 1).await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(job["type"], "video_generate");
-    assert_eq!(
-        job["payload"]["referenceAssetIds"].as_array().map(Vec::len),
-        Some(9)
-    );
-    assert_eq!(
-        job["payload"]["sourceClipAssetIds"]
-            .as_array()
-            .map(Vec::len),
-        Some(2)
-    );
-    assert_eq!(
-        job["payload"]["referenceAudioAssetIds"],
-        json!(["aud-0"]),
-        "the audio references must reach the worker verbatim, not just validate"
+    // 9 + 2 + 1 = 12 — AT the cap, so the cap admits it. It is still refused, by the LATER no-lane
+    // gate, because the `minimax_h3_ref`/`reference_to_video` MLX declaration is withheld until
+    // sc-17157 (see the `minimax_h3_ref` arm in `routing/mlx.rs`).
+    //
+    // The cap logic above is unaffected and still fully asserted: validation runs BEFORE the
+    // enqueue gate, which is why the 15-file case still fails with its own decomposed message
+    // rather than this one. Asserting the reason here is what keeps the two distinguishable — a
+    // bare 400 would let a cap regression hide behind the withdrawal.
+    //
+    // COVERAGE DELIBERATELY LOST UNTIL sc-17157, recorded rather than quietly dropped: the
+    // at-the-cap request no longer reaches an enqueued payload, so nothing here now proves the
+    // three reference lists survive into the job verbatim. Restoring the four assertions this
+    // replaced is part of un-withholding the route.
+    let (status, at_cap) = submit("minimax_h3_ref", 9, 2, 1).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        at_cap["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no backend implements it"),
+        "at the cap the refusal must come from the withheld route, NOT from the reference caps — \
+         if this reads as a cap message the budget arithmetic regressed: {at_cap}"
     );
 
     // A shape that clears the blanket but not what THIS model declares: 4 clips against its
@@ -8480,6 +8484,34 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
             .expect("body object")
             .extend(extra.as_object().expect("case object").clone());
         let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        if model == "minimax_h3_ref" {
+            // REF2VA IS WITHHELD, NOT BROKEN (sc-17157). The MLX declaration for
+            // `minimax_h3_ref`/`reference_to_video` is deliberately not made — the pinned MLX
+            // provider does not declare `ConditioningKind::MultiReference`, so advertising the
+            // route made `dump-engine-capabilities` refuse to emit the runtime artifact for every
+            // model. See the `minimax_h3_ref` arm in `routing/mlx.rs` for the measurement.
+            //
+            // With no lane claiming it, sc-19504's enqueue gate refuses at submission instead of
+            // admitting a job that would fail at the worker. Asserted on the REASON, not just the
+            // code: a bare 400 would also be satisfied by a payload-validation refusal, which is
+            // exactly what the request shapes above are built to get past.
+            //
+            // When sc-17157 lands, this branch is deleted and these three cases rejoin the 201
+            // assertion below unchanged — they are left in the table for that reason.
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{label}: ref2va is withheld until sc-17157, so it must be refused at enqueue: {job}"
+            );
+            assert!(
+                job["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("no backend implements it"),
+                "{label}: the refusal must be the no-lane gate, not payload validation: {job}"
+            );
+            continue;
+        }
         assert_eq!(
             status,
             StatusCode::CREATED,
@@ -8507,6 +8539,13 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
     }
 
     // The conditioning media reaches the worker verbatim rather than merely validating.
+    //
+    // COVERAGE DELIBERATELY LOST UNTIL sc-17157, recorded rather than quietly deleted: ref2va is
+    // withheld at the enqueue gate (see the `minimax_h3_ref` arm in `routing/mlx.rs`), so no ref2va
+    // request reaches an enqueued payload and the three pass-through assertions below cannot run.
+    // They are what un-withholding restores — together with the same four in
+    // `ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve`. The t2va / fl2va pass-through
+    // above is unaffected and still covers the `minimax_h3` partition.
     let (status, ref2va) = request(
         app.clone(),
         "POST",
@@ -8522,15 +8561,13 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(
-        ref2va["payload"]["referenceAssetIds"],
-        json!(["img-0", "img-1"])
-    );
-    assert_eq!(ref2va["payload"]["sourceClipAssetIds"], json!(["clip-0"]));
-    assert_eq!(
-        ref2va["payload"]["referenceAudioAssetIds"],
-        json!(["aud-0"])
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        ref2va["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no backend implements it"),
+        "the withheld route must be the refusal, not a payload rule: {ref2va}"
     );
 
     // A named duration ON the lattice is honoured verbatim — the accepting side of the menu, so
@@ -8783,10 +8820,25 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
         }),
     )
     .await;
+    // Still refused, but for a DIFFERENT reason, and the difference is the whole point of this
+    // pairing: the audio-only case above is refused by the ref2va payload rule, this one only by
+    // the withheld route (sc-17157 — see the `minimax_h3_ref` arm in `routing/mlx.rs`). Asserting
+    // the reason keeps the contrast the test was written to draw. If the payload rule ever
+    // wrongly rejected audio-alongside-an-image, this arm would surface that message here instead
+    // of the no-lane one and go red.
     assert_eq!(
         status,
-        StatusCode::CREATED,
-        "audio alongside a visual reference is the shape Ref2VA serves: {audio_with_image}"
+        StatusCode::BAD_REQUEST,
+        "ref2va is withheld until sc-17157, so every shape is refused at enqueue: \
+         {audio_with_image}"
+    );
+    assert!(
+        audio_with_image["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no backend implements it"),
+        "audio alongside a visual reference is the shape Ref2VA serves — it must be refused by the \
+         WITHHELD ROUTE, never by the reference rule above: {audio_with_image}"
     );
     // Bernini's engine takes image references alone, so the loosened arm must not become a way to
     // hand its r2v path a clips-only conditioning set. The API admits it (the arm is
@@ -9009,10 +9061,12 @@ fn mlx_only_stranded_pairs() -> Vec<(&'static str, Value)> {
             "minimax_h3",
             json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
         ),
-        (
-            "minimax_h3_ref",
-            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
-        ),
+        // `minimax_h3_ref` / `reference_to_video` was the seventh row and is deliberately gone. It
+        // is no longer MLX-only-stranded — its MLX declaration is WITHHELD until sc-17157 (see the
+        // `minimax_h3_ref` arm in `routing/mlx.rs`), so NO lane claims it and sc-19504's
+        // enqueue gate refuses it with a 400 rather than admitting it for a platform verdict. This
+        // table is for pairs that enqueue and then strand; that pair no longer enqueues.
+        // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` in `routing/catalog.rs` owns it now.
     ]
 }
 
@@ -9097,9 +9151,9 @@ async fn the_video_enqueue_contract_is_identical_on_every_platform() {
     // seven means a genuinely stranded pair stopped being covered.
     assert_eq!(
         stranded.len(),
-        7,
-        "the stranded set is the seven mac-only-download pairs — a shrunken table would narrow \
-         every guard that reads it"
+        6,
+        "the stranded set is the six mac-only-download pairs that still enqueue — a shrunken table \
+         would narrow every guard that reads it"
     );
 
     for os in ["macos", "windows", "linux"] {

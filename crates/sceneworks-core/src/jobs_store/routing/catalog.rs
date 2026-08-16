@@ -2693,7 +2693,18 @@ mod tests {
     /// to latent frame 0 — and the checkpoint's `in_dim 36` patch embedding was trained on
     /// "frame 0 image, rest zeros", so a second pinned frame is out-of-distribution rather than an
     /// unwired flag. The 5B's FLF rides a mask-blend architecture the A14B does not have.
-    const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[];
+    const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[(
+        "minimax_h3_ref",
+        "reference_to_video",
+        "sc-17157. The manifest advertises Ref2VA and the MLX declaration for it is WITHHELD — see \
+         the `minimax_h3_ref` arm in `routing/mlx.rs` for the measurement. The pinned MLX provider \
+         does not declare `ConditioningKind::MultiReference`, which SceneWorks requires for \
+         `reference_to_video` and which `bernini` (the only other engine mapped to that mode) does \
+         declare; advertising the route made `dump-engine-capabilities` refuse to emit the runtime \
+         artifact for EVERY model. Nothing is reachable today regardless: the family's engine is \
+         absent from the pinned bundle and this partition has no off-Mac downloads. Delete this row \
+         when sc-17157 lands the conditioning declaration.",
+    )];
 
     /// **THE CLASS GUARD (sc-17159, GH #2074).** A video mode in a shipped model's `capabilities`
     /// is a promise to the user — the Video Studio builds its mode tabs from that array. This
@@ -2854,7 +2865,11 @@ mod tests {
             ("minimax_h3", "text_to_video"),
             ("minimax_h3", "image_to_video"),
             ("minimax_h3", "first_last_frame"),
-            ("minimax_h3_ref", "reference_to_video"),
+            // `minimax_h3_ref` / `reference_to_video` is NOT here any more. It is not MLX-only, it
+            // is claimable by NO lane — the MLX declaration is withheld until sc-17157 (see the
+            // `minimax_h3_ref` arm in `routing/mlx.rs`), so it belongs in
+            // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` instead. This set means "MLX serves it and
+            // candle does not"; leaving it here would assert an MLX lane that no longer exists.
         ];
 
         let models = builtin_video_models();

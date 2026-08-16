@@ -2840,6 +2840,26 @@ async fn try_render_frame_png(
     Ok(tokio::fs::try_exists(output_path).await?)
 }
 
+// `main` fixed this same defect independently, as an `-sseof -0.100` retry inside this function
+// after a failed render (`f24c9227c`). It did NOT conflict with sc-19549's fix and both landed in
+// the merged tree; the retry is dropped here and sc-19549's clamp is the one that survives.
+//
+// Not a preference — the two do not compose:
+//   * Every production caller of `render_frame_png` already routes its seek through
+//     `frame_seek_timestamp` (`render_frame_asset` via `resolve_frame_seek`, the degenerate
+//     single-frame cadence arm, and the person-track e2e path), so the retry is unreachable.
+//   * `resolve_frame_seek` covers BOTH cases the retry's comment cited, and covers them earlier:
+//     a still short-circuits to t=0 via `asset_is_image_source`, and a clip clamps to
+//     `duration - FRAME_SEEK_GUARD_SECONDS`. The retry would have spawned ffmpeg a second time to
+//     reach a frame the first spawn already got right.
+//   * It actively breaks `still_at_a_nonzero_playhead_*`'s CONTROL arm, which asserts an unclamped
+//     seek MUST fail with "did not produce frame output" and says in as many words that if it
+//     starts succeeding the test below stops proving anything. A silent retry makes it succeed.
+//   * sc-19549 also picks the RIGHT frame rather than whatever sits 0.1 s before EOF, and its
+//     `video_past_its_end_yields_the_last_frame_not_the_first` test asserts that on PIXELS.
+//
+// The user-visible defect main fixed stays fixed — more precisely, one ffmpeg spawn earlier, and
+// on the three seek paths rather than one.
 pub(crate) async fn render_frame_png(
     ffmpeg: &str,
     source_path: &Path,

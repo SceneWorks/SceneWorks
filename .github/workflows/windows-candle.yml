@@ -905,7 +905,7 @@ jobs:
           echo ::error::git could not compare the checked-in capabilities.candle.json against the fresh dump. This is a tooling or missing-file failure, NOT a restamp - read the git error above.
           exit /b 1
           :restamped
-          echo ::error::config/engine-capabilities/capabilities.candle.json does not match a fresh dump at this pin. Re-dump it on a CUDA box with: cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle - then run npm run gen:preview-support from apps/web. Do NOT just rewrite the inferenceRevision line.
+          echo ::error::config/engine-capabilities/capabilities.candle.json does not match a fresh dump. DOWNLOAD the backend-capability-facts-candle artifact from this run and commit its capabilities.candle.json - this job already produced the authoritative file, so there is no reason to re-dump by hand on a CUDA box. Then run npm run gen:preview-support from apps/web. Do NOT just rewrite the inferenceRevision line.
           exit /b 1
           :no_audio_file
           echo ::error::the dumper wrote capabilities.candle.json but no audio/capabilities.candle.json. This build links no audio registry, so every audio route is unverified here - both runtime bundles carry the audio lane default-on, so reconcile the build features with SCENEWORKS_AUDIO_BACKENDS.
@@ -914,7 +914,7 @@ jobs:
           echo ::error::git could not compare the checked-in audio/capabilities.candle.json against the fresh dump. This is a tooling or missing-file failure, NOT a restamp - read the git error above.
           exit /b 1
           :audio_restamped
-          echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump at this pin. Either box re-dumps it - the audio registry is candle-native everywhere - then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
+          echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump. DOWNLOAD the backend-capability-facts-candle artifact from this run and commit its audio/capabilities.candle.json - either box can produce it, the audio registry is candle-native everywhere, but this job already did. Then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
           exit /b 1
           :no_runtime_file
           echo ::error::the dumper wrote legacy facts but no runtime/capabilities.candle.json. The rich inference descriptor snapshot required by the backend matrix was not captured.
