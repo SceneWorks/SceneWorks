@@ -2353,12 +2353,21 @@ test("MiniMax-H3 is surveyed per stack, and the family verdict is derived from t
       verdict.implementation,
       backend === "mlx" ? "shared-primitive" : "none",
     );
-    // Still `unmeasured` on BOTH backends after sc-18662, and deliberately: that story measured the
-    // two PHASE arms (9.13x on the encoder, 8.85-20.82x on the DiT across three tiers) but this axis
-    // asks about the REQUEST peak, and `generate_impl` does not yet route a whole render through the
-    // deferred loaders. The survey's own note says a static proxy will not do.
-    assert.equal(verdict.requestPeak.finding, "unmeasured");
     if (backend === "mlx") {
+      // sc-18662 closed this axis on MLX: `generate_impl` now routes a whole render through the
+      // deferred loaders when the request selects the rung, and one streamed t2va request was
+      // measured end to end — 5.80 GB against the resident request's 53.07 GB conditioning mark,
+      // decode-bound. `moves` is the specific value that must hold, and the reason must carry the
+      // measured figure and its scope (the q4/q4 cell), not restate the phase-arm cells.
+      assert.equal(verdict.requestPeak.finding, "moves");
+      assert.match(verdict.requestPeak.reason, /5\.80 GB/);
+      assert.match(verdict.requestPeak.reason, /RUNG4_REQUEST_PEAK_Q4_BYTES/);
+      assert.ok(
+        verdict.requestPeak.evidence?.some((entry) =>
+          entry.source.includes("streamed_generate_real.rs"),
+        ),
+        "the requestPeak verdict must cite the end-to-end streamed harness",
+      );
       // sc-18662 landed both deferred loaders, so the shape rung 4 requires is now satisfiable and
       // the contract implements it on a `DeferredMaterialization` load.
       assert.equal(verdict.contractSupport, "implemented");
@@ -2368,6 +2377,9 @@ test("MiniMax-H3 is surveyed per stack, and the family verdict is derived from t
       // DiT-only result.
       assert.match(verdict.contractReason, /Both/);
     } else {
+      // Candle's REQUEST axis stays `unmeasured`: the rung-3 lesson is that a measurement does not
+      // transfer across backends, and candle has no deferred loader to route a request through.
+      assert.equal(verdict.requestPeak.finding, "unmeasured");
       // Candle is untouched: the rung-3 lesson is that a verdict does not transfer across backends,
       // and neither does an implementation.
       assert.equal(verdict.contractSupport, "missing");
@@ -2536,14 +2548,24 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
   assert.equal(pin, "75d66db50543ac288deb278853d0f0b432f92c5c");
 
+  // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
+  // streamed-request measurement re-surveyed the MLX record against the story branch, while the
+  // Candle record was last surveyed at 79f02e6d0 and re-stamping it without re-surveying would be
+  // provenance theater.
+  const expected = {
+    mlx: "2f0de72ade4ee54ec3f5656f007b7f4a9642688b",
+    candle: "79f02e6d0eaca861a0698ee490b70daa7441e321",
+  };
   for (const backend of ["mlx", "candle"]) {
     const revision = h3(survey).backends[backend].contractRevision;
-    assert.equal(revision, "79f02e6d0eaca861a0698ee490b70daa7441e321");
+    assert.equal(revision, expected[backend]);
     // The field earns its place only because it DIFFERS from the pin. Asserting a value that
     // happened to equal the pin would be a green that proves nothing.
     assert.notEqual(revision, pin);
   }
-  // And the divergence is stated in prose too, not left for a reader to infer from two shas.
+  // And the divergence is stated in prose too, not left for a reader to infer from two shas —
+  // BOTH revisions, since the record's paths no longer date at a single one.
+  assert.match(h3(survey).whyOutOfMatrix, /2f0de72ade4ee54ec3f5656f007b7f4a9642688b/);
   assert.match(h3(survey).whyOutOfMatrix, /79f02e6d0eaca861a0698ee490b70daa7441e321/);
 
   // Each guard mutated alone.
