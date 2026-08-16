@@ -591,18 +591,25 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
   // and also includes SC-18237's production-deferred pair. The new q4/bf16 cells carry one exact
   // current record each. Exact counts keep both facts visible.
+  //
+  // sc-19721 bumped the inference pin 014134e3 -> 75d66db5, which staled every one of these cells
+  // (the closure digest is what currency keys on, and mlx-gen/src/residency.rs moved +272 lines).
+  // The re-capture adds exactly ONE current record per cell, so every count below rises by one and
+  // no other shape changes. The uniform +1 is the signature of a clean sweep: a partial or
+  // duplicated ingest would show a ragged delta here, and the seven-cell SET assertion above still
+  // pins which cells may appear at all.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 2,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 4,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 4,
     },
     "every Verified Qwen cell must carry its exact dynamic evidence",
   );
