@@ -138,7 +138,13 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # Resident-only MLX FLUX.2 records (q4/q8 at 768/1024): runtime-complete 15 -> 19.
     # SC-18353 adds thirteen physical deferred-materialization Qwen bf16/q4 records without
     # replacing the retained history: complete 52 -> 65.
-    assert records_by_status == {"complete": 65, "runtime_complete": 19}
+    # sc-19721 re-captures both MLX families at inference 75d66db5, which the pin bump had staled,
+    # again retaining the superseded history rather than replacing it: fifteen Qwen records
+    # (bf16 x11, q4 x2, q8 x2) take complete 65 -> 80, and four Resident-only FLUX.2 records
+    # (q4/q8 at 768/1024) take runtime-complete 19 -> 23. The split is the invariant worth reading
+    # here: Qwen captures land complete and FLUX.2 lands runtime-complete, so a re-capture that
+    # moved only one total, or moved a record between the two buckets, would not look like this.
+    assert records_by_status == {"complete": 80, "runtime_complete": 23}
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
