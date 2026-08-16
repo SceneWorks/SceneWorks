@@ -435,7 +435,12 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         "flux2_edit",
         0,
         move || {
-            let paths = Flux2EditPaths { root: flux2_base };
+            let paths = Flux2EditPaths {
+                root: flux2_base,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                adapters: Vec::new(),
+            };
             let model = if is_dev {
                 match &memory_context {
                     Some(context) => Flux2Edit::load_dev_with_memory_context(
@@ -480,6 +485,14 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         steps: steps as usize,
                         guidance,
                         seed: seed as u64,
+                        // Caption upsampling (sc-6135) is not threaded into this bespoke edit lane —
+                        // `PromptEnhance::from_advanced` is read only on the registry txt2img path.
+                        // Off + engine defaults keeps the prompt used verbatim, which is what this
+                        // lane has always done.
+                        enhance_prompt: false,
+                        enhance_max_tokens: None,
+                        enhance_temperature: None,
+                        prompt_enhancement: gen_core::PromptEnhancementSink::default(),
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
                         preview: preview.clone(),

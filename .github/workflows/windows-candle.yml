@@ -911,3 +911,20 @@ jobs:
           :audio_restamped
           echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump at this pin. Either box re-dumps it - the audio registry is candle-native everywhere - then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
           exit /b 1
+      # sc-19721. Every error path above ends in "re-dump it on a CUDA box", which is not an
+      # instruction most people can follow: `capabilities.candle.json` is the ONE pin-keyed artifact
+      # a Mac cannot produce (the candle media lanes are cfg(not(target_os = "macos")), so a
+      # candle-featured dumper on macOS writes the MLX file instead). This lane IS that box, and the
+      # step above has already produced the exact bytes the tree needs - they were compared and then
+      # thrown away. Uploading them turns an inference pin bump from a hardware requisition into a
+      # download, and it is why this runs on `failure()` rather than `success()`.
+      #
+      # Not a bypass: nothing here rewrites the checked-in file or changes the job's conclusion. The
+      # lane is still red until a human commits the dump and this step's own diff goes green.
+      - name: Upload the fresh candle capability dump for the pin bump
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-capability-facts-candle-${{ github.run_id }}
+          path: ${{ runner.temp }}/engine-capability-facts-verify
+          if-no-files-found: warn

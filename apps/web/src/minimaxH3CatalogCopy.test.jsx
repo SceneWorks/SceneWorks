@@ -301,55 +301,43 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     }
   });
 
-  it("ties the 21:9 caveat to the PIN BUMP, not to the already-merged engine PR", () => {
-    // The 21:9 pair is ADVERTISED in `limits.resolutions` and satisfies the area budget, but the
-    // engine bounds each EDGE independently and that ceiling currently sits below 1536, so the
-    // bucket is offered and refused.
+  it("no longer carries the 21:9 caveat, because the pin that caused it has moved (sc-19721)", () => {
+    // HISTORY, because the shape of this assertion inverted and the reason matters.
     //
-    // This assertion previously demanded the guide cite `inference` PR #640 as PENDING. **#640 is
-    // now MERGED** — `75d66db5`, the head merge commit on the engine's `feature/sc-17137-minimax-h3`
-    // — so that framing became a live trap rather than a citation. A reader following it finds a
-    // closed PR, concludes the caveat is discharged, deletes it, and SceneWorks goes back to
-    // advertising a canvas the engine refuses.
+    // The 21:9 pair (`1536x672`) is advertised in `limits.resolutions` and has always satisfied the
+    // AREA budget — it is 1,032,192 px, byte for byte what `1344x768` is. What refused it was the
+    // engine's INDEPENDENT per-edge ceiling, which sat below 1536. inference PR #640 raised that
+    // ceiling; the caveat survived #640 merging because SceneWorks runs a PINNED revision and the
+    // pin predated it, so this file asserted the caveat was cited against the PIN BUMP (sc-18650)
+    // rather than against the PR.
     //
-    // The refusal did NOT end when #640 merged, because SceneWorks does not run the engine's branch
-    // head; it runs a PINNED revision. `Cargo.toml` pins `014134e3`, and `75d66db5` is not an
-    // ancestor of it (`git merge-base --is-ancestor 75d66db5 014134e3` exits 1). So the caveat is
-    // still substantively correct, for a DIFFERENT reason, and the citation has to name the event
-    // that actually ends it: **sc-18650's inference pin bump**.
+    // sc-19721 is that pin bump: `Cargo.toml` now pins `75d66db5`, which carries #640, and the
+    // engine's own `max_size` is `MAX_CANVAS_EDGE = 2016` on both lanes. The refusal is gone, so the
+    // caveat is a false claim and is deleted rather than re-pointed at a third event.
     //
-    // The three assertions below are the three ways this can go wrong: the discharging event goes
-    // unnamed; #640 gets named without saying it is already merged (re-arming the trap); or someone
-    // re-points the caveat back at #640 as the thing being waited on.
+    // What keeps this from being a vacuous absence check is that the real guard lives where it can
+    // read the engine: `pinned_engine_geometry.rs` asserts every advertised MiniMax-H3 resolution's
+    // long edge against the PINNED provider's `capabilities.max_size`. If the pin ever moves back
+    // below 1536, that goes red in Rust — the copy cannot silently re-acquire a lie. The three
+    // assertions here are the three ways the COPY can go wrong.
     expect(
-      /\bsc-18650\b/.test(guide),
-      "guide must cite the inference pin bump (sc-18650) as what discharges the caveat",
-    ).toBe(true);
-    // MEASURED, not assumed: the first form of this assertion was
-    // `/#640[^.]{0,120}\bmerged\b|\bmerged\b[^.]{0,120}#640/`, and deleting "already merged" from
-    // the sentence that actually makes the claim left it GREEN — because the guide says "#640" and
-    // "merged" a second time in the NEGATED clause below ("not #640 being merged"), and the regex
-    // matched those leftovers. Same defect the duration-range assertion had twice on this story.
-    // So it is sentence-scoped and the negated clause is excluded explicitly: what must exist is a
-    // sentence that names #640 and asserts its merged status AFFIRMATIVELY.
-    const sentences = guide.split(/(?<=[.!?])\s+/);
-    expect(
-      sentences.some(
-        (sentence) =>
-          /#640/.test(sentence) &&
-          /\bmerged\b/i.test(sentence) &&
-          !/\bnot\b[^.]{0,40}\bmerged\b/i.test(sentence),
-      ),
-      "guide names #640, so some sentence must affirmatively say it is already merged — a bare citation sends the reader to a closed PR",
-    ).toBe(true);
-    expect(
-      /\b(?:pending|awaiting|until|once|when|blocked (?:on|by))\b[^.]{0,120}#640/is.test(guide),
-      "guide must not frame #640 as the thing still being waited on — it is merged; the PIN is what is outstanding",
+      /not renderable|pending an engine change/i.test(guide),
+      "the 21:9 pair renders at the current pin — the guide must not tell the user it does not",
     ).toBe(false);
+    expect(
+      /\b(?:pending|awaiting|until|once|when|blocked (?:on|by))\b[^.]{0,120}(?:#640|sc-18650)/is.test(
+        guide,
+      ),
+      "neither #640 nor the pin bump is outstanding any more; framing either as awaited is stale",
+    ).toBe(false);
+    // The bucket itself must still be DOCUMENTED — deleting the caveat by deleting the row would
+    // satisfy both assertions above while removing the thing they are about.
+    expect(
+      /\b1536x672\b/.test(guide),
+      "the 21:9 bucket must still appear in the Sizes table; it is reachable now, not absent",
+    ).toBe(true);
     // NO NUMERIC PER-EDGE CEILING IN CATALOG COPY. The resolver's widest output is an engine
     // internal a user never sees, and writing it down dates the page the moment the resolver moves.
-    // 1536 was also the plausible-but-wrong value — a 1536 ceiling would still refuse a canvas the
-    // resolver produces on its own — so a number here would very likely have been the wrong one.
     expect(
       /per-edge (?:ceiling|cap)[^.]{0,60}\b\d{3,4}\b/i.test(guide),
       "guide must describe the per-edge ceiling relatively, never as a number",

@@ -326,6 +326,9 @@ impl CandleStrictControl for Flux2StrictControl {
         let paths = Flux2ControlPaths {
             root: self.base.clone(),
             control: self.control.clone(),
+            // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+            // performed.
+            adapters: Vec::new(),
         };
         let loaded = match &self.memory_context {
             Some(context) => Flux2Control::load_with_memory_context(

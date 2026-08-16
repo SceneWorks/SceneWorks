@@ -2232,7 +2232,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2245,7 +2245,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2258,7 +2258,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2271,7 +2271,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2284,7 +2284,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2297,7 +2297,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "4a649d9c46e8b56b232422cb92550028108b44c9",
             "matrixSourceRevision": "source-tree:e2081fbe647526b7a198efb4047ca89c30ec944e54ef4218d4a339f19b0523ba",
-            "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2310,7 +2310,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "4a649d9c46e8b56b232422cb92550028108b44c9",
             "matrixSourceRevision": "source-tree:e2081fbe647526b7a198efb4047ca89c30ec944e54ef4218d4a339f19b0523ba",
-            "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2323,7 +2323,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2336,7 +2336,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -7364,7 +7364,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7377,7 +7377,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7390,7 +7390,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7403,7 +7403,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -13532,10 +13532,12 @@
         "maxReferenceAssets": 0,
         "maxSourceClipAssets": 0,
         "maxReferenceAudioAssets": 0,
-        // Default-only until the engine descriptor is reachable from this repo: the inference pin is
-        // still 014134e3 (sc-18650 owns the bump), so the sampler/scheduler drift guard in
-        // engines.rs cannot yet compare a curated menu against MiniMax-H3's real capabilities. A
-        // curated menu is additive once the descriptor is visible.
+        // Default-only. sc-19721's pin bump (`75d66db5`) DID make the descriptor reachable, so the
+        // engines.rs drift guard can now compare a curated menu against MiniMax-H3's real
+        // capabilities — but the provider advertises `samplers: ["default"]` and no scheduler menu
+        // of its own, so there is nothing to curate INTO. This stays `["default"]` because that is
+        // what the engine offers, not because the descriptor is invisible; a curated menu is
+        // additive if the engine ever grows one.
         "samplers": ["default"],
         "schedulers": ["default"]
       },
@@ -13634,21 +13636,17 @@
         //      BELOW this entry's advertised 21:9 pair. So `1536x672` / `672x1536` are ADVERTISED
         //      BUT NOT YET RENDERABLE: the area check passes and the edge check refuses.
         //
-        //      ⚠️ #640 IS MERGED, AND THIS CAVEAT STILL STANDS — DO NOT DELETE IT ON THAT NEWS.
-        //      inference PR #640 (`story/sc-17152-h3-max-size-1536`) raised the per-edge ceiling to
-        //      the widest canvas `resolve_canvas_size` itself emits, and merged into the engine's
-        //      `feature/sc-17137-minimax-h3` as `75d66db5`. That is not the same as SceneWorks
-        //      HAVING it: `Cargo.toml` pins inference at `014134e3`, and `75d66db5` is not an
-        //      ancestor of that pin (`git merge-base --is-ancestor 75d66db5 014134e3` exits 1), so
-        //      the engine this app actually runs still refuses the pair.
+        //      ✅ DISCHARGED BY sc-19721's PIN BUMP. `Cargo.toml` now pins `75d66db5`, which
+        //      carries inference PR #640 (`story/sc-17152-h3-max-size-1536`) — the per-edge ceiling
+        //      is `MAX_CANVAS_EDGE = 2016` on both lanes, comfortably above 1536, so the pinned
+        //      engine accepts the pair and the paragraph above is HISTORY, kept only because it
+        //      explains why the area budget alone never settled the question.
         //
-        //      **WHAT DISCHARGES THIS CAVEAT IS THE PIN BUMP (sc-18650), NOT #640 BEING MERGED.**
-        //      This note previously read "pending inference PR #640", which is now a trap: a reader
-        //      who checks that PR finds it closed, concludes the caveat is obsolete, deletes it, and
-        //      SceneWorks re-advertises a canvas the pinned engine refuses — the exact failure the
-        //      note exists to prevent. It is re-pointed at the pin bump so the citation ends when
-        //      the refusal does. The prompt guide's *Sizes* section carries the same caveat for the
-        //      user, names the same discharging event, and is pinned by
+        //      The tie is enforced, not asserted in prose: `pinned_engine_geometry.rs` reads the
+        //      PINNED provider's own `capabilities.max_size` and refuses any advertised resolution
+        //      whose long edge exceeds it, so a pin that moved backwards would go red in Rust
+        //      instead of silently re-advertising a canvas the engine refuses. The prompt guide's
+        //      *Sizes* section carries the pair with no caveat, pinned by
         //      `minimaxH3CatalogCopy.test.jsx`.
         //
         //      Do NOT write the new ceiling's VALUE here or in the copy. It is an engine internal
@@ -13657,12 +13655,12 @@
         //      the 4:1 aspect ceiling, so a 1536 cap would keep refusing a canvas the engine
         //      produces on its own. #640 carries a guard that reds specifically on that value.
         //
-        //      Note this repo CANNOT check any of it: `pinned_engine_geometry.rs` classifies both
-        //      partitions `PinnedAreaCap::NotInThePinnedBundle` — the pin (014134e3) exposes no
-        //      importable `providers::minimax_h3`, so
-        //      `shipped_manifest_matches_each_engines_real_geometry` cannot compare this entry's
-        //      geometry against the engine's at all. sc-18650's pin bump is what makes the guard
-        //      able to catch a regression here automatically.
+        //      This repo now CHECKS all of it. `PinnedAreaCap::NotInThePinnedBundle` is gone with
+        //      sc-19721's pin bump: `pinned_engine_geometry.rs` imports
+        //      `providers::minimax_h3::pipeline` and ties `maxPixels` to the engine's own
+        //      `CANVAS_MAX_PIXELS` and every advertised resolution's long edge to the registered
+        //      descriptor's `max_size`. A manifest that got ahead of the engine, or a pin that
+        //      moved behind the manifest, is red there rather than a job-time reject.
         //   2. Dense attention, because the sparse-attention inference path is unreleased — which
         //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
         //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`

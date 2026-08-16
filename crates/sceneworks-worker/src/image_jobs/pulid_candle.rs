@@ -424,6 +424,8 @@ pub(super) async fn generate_candle_pulid_stream(
         pulid_weights: adapter.clone(),
         eva_weights: eva.clone(),
         face_dir: face_dir.clone(),
+        // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always performed.
+        adapters: Vec::new(),
     };
     let tier = pulid_memory_tier_key(&contract_paths)?;
     let pulid_contract =
@@ -535,6 +537,9 @@ pub(super) async fn generate_candle_pulid_stream(
                 pulid_weights: adapter,
                 eva_weights: eva,
                 face_dir,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                adapters: Vec::new(),
             };
             let model = match load_memory_context.as_ref() {
                 Some(context) => PulidFlux::load_with_memory_context(&paths, context.clone()),
@@ -690,6 +695,7 @@ mod tests {
             pulid_weights: temp.path().join("pulid.safetensors"),
             eva_weights: temp.path().join("eva.safetensors"),
             face_dir: temp.path().join("face"),
+            adapters: Vec::new(),
         };
 
         assert_eq!(pulid_memory_tier_key(&paths).expect("q4 tier"), "q4");

@@ -1301,13 +1301,24 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
     // keeps a long `workflow_dispatch`-only calibration tail after it, which is skipped on every PR
     // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
     // the point — nothing else would notice an unconditional step being appended later.
+    //
+    // A `failure()`-gated step is the one other admissible tail (sc-19721). The rule protects
+    // COVERAGE: a step appended unconditionally after the verifier is SKIPPED on exactly the red
+    // pin-bump runs the verifier exists to produce, so whatever it checks silently stops being
+    // checked there. A step that runs only when the job has already failed carries no coverage to
+    // lose and cannot suppress a verdict — every earlier step has already run by definition. The
+    // candle lane uses it to upload the fresh dump it just compared and would otherwise discard,
+    // which is the only way a contributor without a CUDA box can complete an inference pin bump.
+    const ADMISSIBLE_TAIL =
+      /if: \$\{\{[^\n]*(github\.event_name == 'workflow_dispatch'|failure\(\))/;
     for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
       assert.match(
         block,
-        /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
+        ADMISSIBLE_TAIL,
         `${path}: "${block.split("\n")[0]}" runs after the dump-verification step on the PR path. ` +
           "That step must stay last for everything a PR executes, so its failure cannot cancel " +
-          "coverage this lane is the only place to have. Move it above the verification step.",
+          "coverage this lane is the only place to have. Move it above the verification step, or " +
+          "gate it on `failure()` if it exists only to salvage artifacts from an already-red run.",
       );
     }
 

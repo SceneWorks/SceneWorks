@@ -186,6 +186,9 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 text_encoder,
                 vae,
                 tokenizer_dir,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                Vec::new(),
             )
             .map_err(|error| {
                 WorkerError::Engine(format!("ComfyUI Z-Image load failed: {error}"))

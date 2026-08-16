@@ -1106,7 +1106,11 @@ function main(argv) {
   }
   const records = readRecords();
   const pin = inferencePin(readFileSync(path.join(repoRoot, "Cargo.toml"), "utf8"));
-  if (records.inferenceRevision !== pin) {
+  // The staleness guard is a READ-path guard only (sc-19721). It used to run ahead of `--write`
+  // too, which made the very command the message tells you to run refuse to run: after a pin bump
+  // the recorded revision is by definition the OLD one, so `--write` exited 1 and no pin bump could
+  // ever re-derive this file. `--write` derives at the live pin below and re-stamps it.
+  if (!argv.includes("--write") && records.inferenceRevision !== pin) {
     process.stderr.write(
       `${RECORDS_PATH} is keyed to ${records.inferenceRevision?.slice(0, 9) ?? "(unset)"} but ` +
         `Cargo pins ${pin.slice(0, 9)}. Re-run: node scripts/rung4-contract-prerequisites.mjs ` +
@@ -1124,6 +1128,7 @@ function main(argv) {
   }
   const repo = path.resolve(argv[repoIndex + 1]);
   if (argv.includes("--write")) {
+    records.inferenceRevision = pin;
     for (const family of Object.values(records.families)) {
       for (const [backend, record] of Object.entries(family.backends)) {
         void backend;
