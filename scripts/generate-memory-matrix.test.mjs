@@ -3312,20 +3312,41 @@ async function currentManifestCalibrationFixture({
   return JSON.stringify(parsed);
 }
 
-/// Retained Qwen q8 records using the shared rung-4 fingerprint, re-stamped current.
+/// Qwen records re-stamped current: the retained q8 rung-4 fixture, plus SC-18353's physical
+/// captures.
 ///
-/// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
-/// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
-/// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
-/// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: SC-18353 now supplies
-/// their real production-deferred current captures.
+/// The q8 half is selected by calibration fingerprint, which is what separates it from the 22 older
+/// Qwen records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the
+/// bare `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the
+/// `-eager` / `-deferred` load-shape variants.
+///
+/// **The physical half was added by sc-19721 and the reason matters.** Q4/BF16 used to be
+/// deliberately excluded here, because SC-18353's real production-deferred captures were CURRENT on
+/// their own and using them unmodified was the stronger arrangement. sc-19721's inference pin bump
+/// (`014134e3` -> `75d66db5`) moved `mlx:qwen_image`'s compile closure — `mlx-gen/src/residency.rs`
+/// alone is +272 lines, and it is the shared MLX residency mechanism these captures measure — so
+/// those records stopped being current and the two fixture-backed assertions below collapsed from
+/// 9/7 promotions to 2. Re-stamping them here restores what this fixture is FOR: proving that
+/// current evidence plus current bindings promotes a cell, whether or not the shipped bundle
+/// happens to be current. The same reasoning the Krea comment in the sc-16060 test records.
+///
+/// Selection is on `sourceProvenance` rather than tier, and that is load-bearing: it re-stamps only
+/// records backed by a validated physical MLX session. The harness refuses the alternative outright
+/// — `validateCurrentPhysicalMlxProvenance` fails any authoritative Qwen q4/bf16 record stamped
+/// current without `sourceProvenance === "physical_mlx_v1"` — so a broader selector here does not
+/// widen coverage, it makes the whole fixture unbuildable. Verified by running it.
+///
+/// This does NOT claim the shipped corpus is current. It is not: the shipped Qwen and FLUX.2 cells
+/// demote to `Implemented/unverified` under this pin, the assertions below that read the shipped
+/// matrix say so, and the re-capture is sc-19721's own work rather than another family's.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
 const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({
     select: (record) =>
       record.target.provider === "qwen_image" &&
-      record.target.tier === "q8" &&
-      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT,
+      (record.sourceProvenance === "physical_mlx_v1" ||
+        (record.target.tier === "q8" &&
+          record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT)),
   });
 
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
