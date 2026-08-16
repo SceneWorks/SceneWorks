@@ -247,20 +247,43 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         )
         for run in mlx_flux2_runtime
     } == expected_mlx_flux2_runtime
-    assert all(run["semantics"] == "current" for run in mlx_flux2_runtime)
-    assert all(run["binding"]["eligible"] for run in mlx_flux2_runtime)
+    # sc-19721 bumped the pin 014134e3 -> 75d66db5, which staled the original four: they are now
+    # historical at the old revision, and the re-capture's four are current at the new one. Assert
+    # the split exactly — a bare `<= {"current", "historical"}` would accept any mixture, and
+    # asserting only the count would let a demotion on one geometry mask a promotion on another.
+    mlx_flux2_by_semantics = {"current": [], "historical": []}
+    for run in mlx_flux2_runtime:
+        mlx_flux2_by_semantics[run["semantics"]].append(run)
+    assert {
+        run["record"]["id"] for run in mlx_flux2_by_semantics["current"]
+    } == {
+        "imc-51dd1b02e0d1c2ec6fa0",
+        "imc-421a1bb45e9c2f5d916c",
+        "imc-8f2a6f6c75bee2ead9dd",
+        "imc-d778d59acb0aae38dcbe",
+    }
+    # Only the current rows carry admission; the historical rows must not.
+    assert all(run["binding"]["eligible"] for run in mlx_flux2_by_semantics["current"])
     live_closures = json.loads(
         (ROOT / "config/inference-provider-closures.json").read_text(encoding="utf-8")
     )["providers"]
     for run in mlx_flux2_runtime:
         record = evidence_by_id[run["record"]["id"]]
         tier, width = expected_mlx_flux2_runtime[record["id"]]
-        assert record["repositories"]["inference"]["revision"] == (
-            "10831e4ca5b8bf780319a8ee7f21427175075448"
-        )
-        assert record["repositories"]["inference"]["closureDigest"] == live_closures[
-            "mlx:flux2_dev"
-        ]["digest"]
+        if run["semantics"] == "current":
+            assert record["repositories"]["inference"]["revision"] == (
+                "75d66db50543ac288deb278853d0f0b432f92c5c"
+            )
+            assert record["repositories"]["inference"]["closureDigest"] == live_closures[
+                "mlx:flux2_dev"
+            ]["digest"]
+        else:
+            assert record["repositories"]["inference"]["revision"] == (
+                "10831e4ca5b8bf780319a8ee7f21427175075448"
+            )
+            assert record["repositories"]["inference"]["closureDigest"] != live_closures[
+                "mlx:flux2_dev"
+            ]["digest"]
         assert record["status"] == "runtime_complete"
         assert record["loadShape"] == "eager_materialization"
         assert record["calibrationFingerprint"] == (
