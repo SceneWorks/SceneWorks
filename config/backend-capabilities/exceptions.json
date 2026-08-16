@@ -16,6 +16,10 @@
     {
       "name": "Michael Trefry",
       "authority": "epic-7434"
+    },
+    {
+      "name": "Michael Trefry",
+      "authority": "epic-17137"
     }
   ],
   "records": [
@@ -155,6 +159,68 @@
         "models/illustrious_xl_v2/guidanceMethod/cfg_pp",
         "models/realvisxl/guidanceMethod/cfg_pp",
         "models/sdxl/guidanceMethod/cfg_pp"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-operation-sequencing",
+      "category": "operation",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-16. MiniMax-H3 is a macOS-only family: sc-19721 bumped the inference pin to 75d66db5, which is the first revision where mlx-gen-catalog registers mlx_gen_minimax_h3::register_providers, so these cells became visible to the generated matrix for the first time. There is no Candle lane to be at parity with — the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-16",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3/operationAndMode/text_to_video",
+        "models/minimax_h3/operationAndMode/image_to_video",
+        "models/minimax_h3/operationAndMode/first_last_frame"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-conditioning-sequencing",
+      "category": "conditioning",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-16. MiniMax-H3 is a macOS-only family: sc-19721 bumped the inference pin to 75d66db5, which is the first revision where mlx-gen-catalog registers mlx_gen_minimax_h3::register_providers, so these cells became visible to the generated matrix for the first time. There is no Candle lane to be at parity with — the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-16",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3/conditioningShape/keyframe",
+        "models/minimax_h3/conditioningShape/reference"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-precision-sequencing",
+      "category": "precision",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-16. MiniMax-H3 is a macOS-only family: sc-19721 bumped the inference pin to 75d66db5, which is the first revision where mlx-gen-catalog registers mlx_gen_minimax_h3::register_providers, so these cells became visible to the generated matrix for the first time. There is no Candle lane to be at parity with — the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-16",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3/precisionTier/bf16",
+        "models/minimax_h3/precisionTier/q4",
+        "models/minimax_h3/precisionTier/q8"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-adapter-sequencing",
+      "category": "adapter",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-16. MiniMax-H3 is a macOS-only family: sc-19721 bumped the inference pin to 75d66db5, which is the first revision where mlx-gen-catalog registers mlx_gen_minimax_h3::register_providers, so these cells became visible to the generated matrix for the first time. There is no Candle lane to be at parity with — the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-16",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3/userAdapters/lora",
+        "models/minimax_h3/userAdapters/lokr"
       ]
     }
   ]

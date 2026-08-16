@@ -8,6 +8,30 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::contracts::JobType;
+
+/// Video capabilities a shipped manifest entry advertises that NO lane can currently claim.
+///
+/// Promoted out of the test module by the sc-19721 main sync, because two checks need it and only
+/// one could see it: the class guard in this file's tests, and `matrix::canonical_model_request`,
+/// which `main` added later and which errors on a video entry with no routed mode. One row is the
+/// single place saying "advertised, knowingly unroutable, and why"; duplicating it would let the
+/// two drift apart.
+///
+/// EXACT, not a suppression list — the class guard fails if a row here is no longer needed, so a
+/// capability that becomes claimable forces its row to be deleted.
+pub(super) const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[(
+    "minimax_h3_ref",
+    "reference_to_video",
+    "sc-17157. The manifest advertises Ref2VA and the MLX declaration for it is WITHHELD — see \
+     the `minimax_h3_ref` arm in `routing/mlx.rs` for the measurement. The pinned MLX provider \
+     does not declare `ConditioningKind::MultiReference`, which SceneWorks requires for \
+     `reference_to_video` and which `bernini` (the only other engine mapped to that mode) does \
+     declare; advertising the route made `dump-engine-capabilities` refuse to emit the runtime \
+     artifact for EVERY model. Nothing is reachable today regardless: the family's engine \
+     default-denies ref2va at its conditioning allowlist and this partition has no off-Mac \
+     downloads. Delete this row when sc-17157 lands the conditioning declaration.",
+)];
+
 use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
 use crate::jobs_store::routing::gaps::{
     classify_candle_video_gap, classify_image_gap, classify_video_gap, UnsupportedReason,
@@ -2693,18 +2717,7 @@ mod tests {
     /// to latent frame 0 — and the checkpoint's `in_dim 36` patch embedding was trained on
     /// "frame 0 image, rest zeros", so a second pinned frame is out-of-distribution rather than an
     /// unwired flag. The 5B's FLF rides a mask-blend architecture the A14B does not have.
-    const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[(
-        "minimax_h3_ref",
-        "reference_to_video",
-        "sc-17157. The manifest advertises Ref2VA and the MLX declaration for it is WITHHELD — see \
-         the `minimax_h3_ref` arm in `routing/mlx.rs` for the measurement. The pinned MLX provider \
-         does not declare `ConditioningKind::MultiReference`, which SceneWorks requires for \
-         `reference_to_video` and which `bernini` (the only other engine mapped to that mode) does \
-         declare; advertising the route made `dump-engine-capabilities` refuse to emit the runtime \
-         artifact for EVERY model. Nothing is reachable today regardless: the family's engine is \
-         absent from the pinned bundle and this partition has no off-Mac downloads. Delete this row \
-         when sc-17157 lands the conditioning declaration.",
-    )];
+    use super::KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES;
 
     /// **THE CLASS GUARD (sc-17159, GH #2074).** A video mode in a shipped model's `capabilities`
     /// is a promise to the user — the Video Studio builds its mode tabs from that array. This

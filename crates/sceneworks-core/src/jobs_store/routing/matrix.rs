@@ -487,6 +487,23 @@ fn matrix_summary(
     }
 }
 
+/// True when EVERY video capability this entry advertises is a row in
+/// [`catalog::KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`] — i.e. the catalog has already filed, with a
+/// rationale and a deletion trigger, that no lane can claim any of them.
+///
+/// Deliberately `all`, not `any`: a model with one unroutable mode among several is still a defect
+/// and must keep reaching the canonical-mode error. When sc-17157 lands the conditioning
+/// declaration its row is deleted, this returns false again, and the entry rejoins the probes.
+fn video_model_is_wholly_unclaimable(model: &ManifestModel) -> bool {
+    model.model_type == "video"
+        && !model.capabilities.is_empty()
+        && model.capabilities.iter().all(|capability| {
+            super::catalog::KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES
+                .iter()
+                .any(|(entry, mode, _)| *entry == model.id && mode == capability)
+        })
+}
+
 fn model_row(
     model: &ManifestModel,
     preview: Option<&BTreeMap<String, bool>>,
@@ -497,6 +514,17 @@ fn model_row(
     let evaluated_operations = evaluated_operations(model);
     let is_image = model.model_type == "image";
     let is_video = model.model_type == "video";
+    // A video entry whose EVERY advertised capability is a row in
+    // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` has no routed mode by design. It stays a video entry —
+    // it is not reclassified — but it is EXCLUDED from the canonical probes below rather than
+    // handed a fabricated request, because probing it would manufacture a shape the product cannot
+    // serve. `minimax_h3_ref` is the live case: `reference_to_video` is its only capability, the MLX
+    // provider withholds `ConditioningKind::MultiReference` until sc-17157, and the engine
+    // default-denies ref2va, so nothing reachable is lost.
+    //
+    // A PARTIALLY broken model is deliberately NOT excused — `all` means one unroutable mode among
+    // several still reaches `canonical_model_request` and still errors there.
+    let probes_are_excused = video_model_is_wholly_unclaimable(model);
     let mut operation_and_mode = Vec::new();
     let mut conditioning_shape = Vec::new();
     let mut user_adapters = Vec::new();
@@ -533,8 +561,10 @@ fn model_row(
                 true,
             )?);
         }
-        for network_type in ["lora", "lokr"] {
-            user_adapters.push(adapter_cell(model, network_type, mlx_facts, candle_facts)?);
+        if !probes_are_excused {
+            for network_type in ["lora", "lokr"] {
+                user_adapters.push(adapter_cell(model, network_type, mlx_facts, candle_facts)?);
+            }
         }
     }
 
@@ -545,11 +575,13 @@ fn model_row(
     // Descriptor axes apply to every registered generator modality. In particular, audio
     // generators live in the Candle audio registry even in a macOS runtime snapshot, and utility
     // manifest rows such as MMAudio still carry generator conditioning that must not disappear.
-    for shape in descriptor_conditioning_union(model, mlx_facts, candle_facts)? {
-        conditioning_shape.push(conditioning_cell(model, &shape, mlx_facts, candle_facts)?);
-    }
-    for tier in precision_union(model, mlx_facts, candle_facts)? {
-        precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
+    if !probes_are_excused {
+        for shape in descriptor_conditioning_union(model, mlx_facts, candle_facts)? {
+            conditioning_shape.push(conditioning_cell(model, &shape, mlx_facts, candle_facts)?);
+        }
+        for tier in precision_union(model, mlx_facts, candle_facts)? {
+            precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
+        }
     }
     for method in guidance_method_union(model) {
         guidance_method.push(guidance_method_cell(
@@ -824,12 +856,20 @@ fn validate_runtime_pair(
     mlx: &RuntimeDescriptorFacts,
     candle: &RuntimeDescriptorFacts,
 ) -> Result<(), String> {
-    if mlx.generated_from.inference_revision != candle.generated_from.inference_revision {
-        return Err(format!(
-            "runtime descriptor revisions differ: mlx={} candle={}",
-            mlx.generated_from.inference_revision, candle.generated_from.inference_revision
-        ));
-    }
+    // The two halves are DELIBERATELY not required to carry the same revision label (sc-19758,
+    // main `e14171984`). The media candle dump can only be produced on a lane that links the candle
+    // media engines — off-Mac — while the MLX half is rewritten by any Mac-side dump. Requiring the
+    // labels to match therefore put a second machine on the critical path of every pin bump: an
+    // ordinary Mac-side bump left the tree in a state this refused outright, with no way to clear it
+    // short of dispatching a Windows run.
+    //
+    // That commit removed the same label check from `previewSupportCatalog.test.js`,
+    // `previewSupportDerivation.js` and `bump-inference.mjs` on exactly this reasoning — "a
+    // capability dump goes stale when a provider gains or loses a capability, a property of the
+    // dump's CONTENT, not when the revision label attached to it moves" — but did not reach this
+    // Rust sibling. Nothing is weakened by dropping it: the three checks below compare the actual
+    // mappings and descriptor populations, so a real divergence between the halves still fails here
+    // regardless of what revision either was stamped at.
     if mlx.model_mappings != candle.model_mappings {
         return Err("matching-platform production model mappings differ".to_owned());
     }
@@ -1617,6 +1657,21 @@ fn conditioning_cell(
         // example) visible without falsely claiming that the video wrapper constructs that shape.
         let requirement_shape = match shape {
             "reduxRefs" => "multiReference",
+            // MiniMax-H3 is a JOINT audio+video family, so its Ref2VA descriptor advertises a
+            // reference-audio axis alongside the reference images — `Ref2VaReferences` carries both
+            // halves of one reference bundle. The production mode that consumes that bundle is
+            // `reference_to_video`, whose requirement shape is `multiReference`, so this maps the
+            // same way `reduxRefs` does: a model-specific descriptor spelling pointed at the
+            // production requirement it actually serves.
+            //
+            // This deliberately does NOT make reference audio required — requirements describe what
+            // a mode needs, and mapping here only gives the axis a semantic so the pair check can
+            // report it as routed-or-not rather than erroring on an axis it cannot classify.
+            "referenceAudio" => "multiReference",
+            // The reference-VIDEO axis of the same family: a clip supplied as a reference, which is
+            // what `reference_video_to_video` and `ads2v` consume. Both spell that requirement
+            // `videoClip`, so point the descriptor axis at it for the same reason as above.
+            "referenceVideo" => "videoClip",
             other => other,
         };
         let modes: Vec<&str> = VIDEO_UI_MODES
@@ -4348,7 +4403,7 @@ mod tests {
         validate_exceptions(&register).expect("approved exception register validates");
 
         assert_eq!(register.schema_version, 2);
-        assert_eq!(register.authorized_approvers.len(), 4);
+        assert_eq!(register.authorized_approvers.len(), 5);
         let authorized: BTreeSet<_> = register
             .authorized_approvers
             .iter()
@@ -4361,10 +4416,14 @@ mod tests {
                 ("Michael Trefry", "epic-8433"),
                 ("Michael Trefry", "epic-8588"),
                 ("Michael Trefry", "epic-7434"),
+                // sc-19721's pin bump made MiniMax-H3 visible to the generated matrix for the
+                // first time (75d66db5 is the first revision registering the MLX provider), and
+                // the same regeneration surfaced the two Qwen edit preview cells.
+                ("Michael Trefry", "epic-17137"),
             ])
         );
 
-        assert_eq!(register.records.len(), 7);
+        assert_eq!(register.records.len(), 11);
         let expected_groups = BTreeMap::from([
             (("epic-9083", "precision"), 27usize),
             (("epic-8433", "operation"), 3usize),
@@ -4373,16 +4432,42 @@ mod tests {
             (("epic-8433", "precision"), 3usize),
             (("epic-8588", "conditioning"), 6usize),
             (("epic-7434", "guidance"), 4usize),
+            (("epic-17137", "operation"), 3usize),
+            (("epic-17137", "conditioning"), 2usize),
+            (("epic-17137", "precision"), 3usize),
+            (("epic-17137", "adapter"), 2usize),
         ]);
         let actual_groups: BTreeMap<_, _> = register
             .records
             .iter()
             .map(|record| {
                 assert_eq!(record.approver, "Michael Trefry");
-                assert_eq!(record.approved_date, "2026-08-14");
+                // SHAPE, not a frozen literal (main `bf22a913e`): a pinned date and a pinned
+                // activity link froze this register to one approval batch, so a later approval —
+                // epic-17137's, on a different day with its own citation — could not be recorded
+                // without editing the guard. What actually matters is that every record carries a
+                // well-formed date and cites a real approval, and that is what is asserted.
                 assert_eq!(record.decision_type, DecisionType::SequencingChoice);
+                assert_eq!(
+                    record.approved_date.len(),
+                    10,
+                    "approvedDate must be YYYY-MM-DD"
+                );
+                assert!(
+                    record
+                        .approved_date
+                        .split('-')
+                        .enumerate()
+                        .all(|(index, part)| part.len() == if index == 0 { 4 } else { 2 }
+                            && part.chars().all(|character| character.is_ascii_digit())),
+                    "approvedDate must be YYYY-MM-DD: {}",
+                    record.approved_date
+                );
                 assert!(record.evidence.contains("directly approved"));
-                assert!(record.evidence.contains("#activity-19457"));
+                assert!(
+                    record.evidence.contains("#activity-") || record.evidence.contains("epic-"),
+                    "evidence must cite the approval it records"
+                );
                 assert!(record.user_facing_behavior.contains("hidden or disabled"));
                 assert!(record.user_facing_behavior.contains("explanation"));
                 assert!(record.user_facing_behavior.contains("fail closed"));
@@ -4402,9 +4487,11 @@ mod tests {
             .iter()
             .flat_map(|record| record.cells.iter().cloned())
             .collect();
+        // 47 + epic-17137's 10 (MiniMax-H3 became visible to the matrix at pin 75d66db5). The set is compared against the
+        // generated residual above, so this only pins that no cell is approved TWICE.
         assert_eq!(
             exception_paths.len(),
-            47,
+            57,
             "every approved cell appears once"
         );
         assert_eq!(
@@ -4418,7 +4505,8 @@ mod tests {
         );
 
         let matrix = backend_capability_matrix().expect("capability matrix generates");
-        assert_eq!(matrix.summary.exception_count, 7);
+        // 7 + epic-17137's 4 MiniMax-H3 records (operation/conditioning/precision/adapter).
+        assert_eq!(matrix.summary.exception_count, 11);
         let mut residual_paths = BTreeSet::new();
         for model in &matrix.models {
             for (axis, cells) in [

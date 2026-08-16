@@ -7,7 +7,7 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071",
+      "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
       "audioInferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c"
     },
     "mlx": {
@@ -163,6 +163,10 @@
     "moss_ttsd_v05": {
       "candle": false
     },
+    "pulid_flux_dev": {
+      "mlx": true,
+      "candle": true
+    },
     "qwen_image": {
       "candle": true,
       "mlx": true
@@ -174,10 +178,12 @@
       "mlx": true
     },
     "qwen_image_edit_2511": {
-      "mlx": true
+      "mlx": true,
+      "candle": true
     },
     "qwen_image_edit_2511_lightning": {
-      "mlx": true
+      "mlx": true,
+      "candle": true
     },
     "realvisxl": {
       "candle": true,
