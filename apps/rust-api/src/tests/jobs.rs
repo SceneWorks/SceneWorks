@@ -4421,6 +4421,17 @@ async fn image_and_video_job_routes_normalize_payloads() {
         "/api/v1/video/jobs",
         json!({
             "projectId": "project-1",
+            // Names `wan_2_2` rather than riding `default_video_model()`, which is `ltx_2_3`.
+            // LTX's replacement provider is the IC-LoRA keyframe-append path, so
+            // `video_request_is_mlx_eligible` and `ltx_replace_candle_eligible` both require
+            // `loras_contain_ltx_ic_lora`; an adapter-free LTX `replace_person` is claimed by NO
+            // lane, and sc-19504's enqueue gate correctly 400s it rather than letting it sit
+            // `queued` forever. Supplying an adapter instead would need a seeded LoRA catalog and
+            // an on-disk weight file, dragging catalog resolution into a test that exists to prove
+            // payload NORMALIZATION. `wan_2_2` is claimable adapter-free on both lanes (native
+            // Wan-VACE), so the shape below is unchanged and the assertions stay on topic. The
+            // server-default video model has its own dedicated coverage further down this file.
+            "model": "wan_2_2",
             "mode": "replace_person",
             "prompt": "hero walks through rain",
             "sourceClipAssetId": "asset-video",

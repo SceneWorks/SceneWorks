@@ -75,7 +75,15 @@ const PLATFORM_RUNTIME_DEP: &str = "runtime-cuda";
 /// in for the provider: it MUST move for the provider to become importable. This half is broad —
 /// it fires even if inference renames the module — but it can be discharged by re-stamping this
 /// constant, so it is paired with [`minimax_h3_arrival_tripwire`], which cannot.
-const REV_WITHOUT_MINIMAX_H3: &str = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
+///
+/// **Re-stamped `014134e3` → `0e4adc6f` when `main` was synced into this epic branch — deliberately,
+/// having actually looked**, which is exactly what this tripwire's panic message asks for. The
+/// evidence is a real dump rather than a reading of the source: `cargo run -p sceneworks-worker
+/// --bin dump-engine-capabilities` at `0e4adc6f` enumerates **65** MLX generators and **14** MLX
+/// audio generators, and none of them is `minimax_h3`. The provider is still not exposed, so
+/// `PinnedAreaCap::NotInThePinnedBundle` remains a derived fact rather than an unverified leftover,
+/// and sc-18650 still owns the bump that will change it.
+const REV_WITHOUT_MINIMAX_H3: &str = "0e4adc6f05884e6891e29dfecd32ee695efe8b18";
 
 /// The `rev = "…"` a Cargo manifest pins `dep` to.
 ///
