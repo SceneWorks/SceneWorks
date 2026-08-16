@@ -36,11 +36,12 @@ pub(crate) use routing::mlx::*;
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
     candle_routed_image_models, imported_image_model_lora_advertisement, mac_capabilities,
-    model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
+    model_candle_support, model_mac_support, video_job_type_for_mode, MacCapabilities,
+    ModelCandleSupport, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, mac_rust_supported, video_request_is_claimable_by_any_lane,
-    UnsupportedReason, NATIVE_CONVERTERS,
+    video_request_is_claimable_on_platform, UnsupportedReason, NATIVE_CONVERTERS,
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 pub use routing::{
@@ -2023,6 +2024,84 @@ impl JobsStore {
                    set status = 'failed',
                        stage = 'failed',
                        message = 'Candle worker unavailable.',
+                       error = ?2,
+                       completed_at = ?1,
+                       updated_at = ?1,
+                       worker_id = null
+                 where id = ?3 and status = 'queued'
+                ",
+                params![now_text, error, job.id],
+            )?;
+            failed_ids.push(job.id.clone());
+        }
+        let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
+        transaction.commit()?;
+        Ok(failed)
+    }
+
+    /// **The platform-reachability sweep (sc-19570).** Fails, terminal, every queued video job
+    /// whose (model, mode) pair no lane that can exist on `host_os` will ever claim.
+    ///
+    /// This is where the platform-conditional refusal lives, and the reason it lives HERE rather
+    /// than at `POST /api/v1/video/jobs`: an HTTP contract is not platform-dependent. The route
+    /// answers `201` for the same body on every host; what varies is the job's *execution outcome*,
+    /// which is inherently a property of the machine. sc-19570 shipped the refusal as a `400` first
+    /// and that was ruled out — the published surface must not differ by OS.
+    ///
+    /// It closes the real defect, which is not "the request was accepted" but "the job never
+    /// terminates": an MLX-only pair submitted off-Mac sat `queued` / "Waiting for an available
+    /// worker." with no error and no terminal state, forever. None of the four existing sweeps
+    /// rescues it. [`Self::fail_stranded_candle_jobs`] returns early the moment ANY live candle
+    /// worker exists — and one normally does; the job is unclaimable, not unserved. Its `mlx` twin
+    /// is `mlx_required`-gated and inert off-Mac. Both `fail_unsupported_*` sweeps default to
+    /// **warn**. So the job fell through all four.
+    ///
+    /// **No flag and no grace window,** unlike every sweep above it. Unreachability is structural
+    /// rather than transient: no worker capable of claiming the job can register on this OS at all,
+    /// so there is no window to wait out, and gating it behind a rollout switch would leave the
+    /// hang in place for every default deployment — which is exactly the state sc-19570 found. On
+    /// macOS it is inert by construction ([`video_request_is_claimable_on_platform`] returns `true`
+    /// there unconditionally), so no Mac-served pair is touched.
+    ///
+    /// Scoped to the four video job types via [`video_job_is_platform_unreachable`] — the same
+    /// range `create_video_job` enqueues — so it can never reach an image, training or upscale job.
+    /// Returns the jobs it failed so the caller can emit the structured event and publish updates.
+    pub fn fail_platform_unreachable_jobs(
+        &self,
+        host_os: &str,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        // Cheap exit on the platform where this can never fire, before taking the write lock.
+        if matches!(host_os, "macos" | "darwin") {
+            return Ok(Vec::new());
+        }
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_unix_seconds();
+
+        let mut statement = transaction.prepare(
+            "
+            select * from jobs
+             where status = 'queued'
+             order by created_at asc
+            ",
+        )?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        drop(statement);
+
+        let now_text = format_unix_seconds(now);
+        let mut failed_ids = Vec::new();
+        for job in candidates {
+            if !video_job_is_platform_unreachable(&job, host_os) {
+                continue;
+            }
+            let error = platform_unreachable_error(&job, host_os);
+            transaction.execute(
+                "
+                update jobs
+                   set status = 'failed',
+                       stage = 'failed',
+                       message = 'This mode has no backend on this platform.',
                        error = ?2,
                        completed_at = ?1,
                        updated_at = ?1,

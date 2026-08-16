@@ -13807,8 +13807,12 @@ fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
         "the refusal must name the collision: {message}"
     );
 
-    // Audio-only leaves the visual stream unconditioned — the vision tower is the reference
-    // conditioner, so the engine refuses it. Refused here first, before any load.
+    // Audio-only leaves the visual stream unconditioned — upstream's `before_encoder.py` raises on
+    // `set(kinds) == {"audio"}` because an audio reference never reaches the reference conditioner.
+    // Refused here first, before any load. sc-19574 lifted the RULE into
+    // `sceneworks_core::video_request::classify_reference_set`, which the API and the MCP tool read
+    // too, so this asserts the worker's end of a decision the three now share rather than the only
+    // layer that held it.
     let audio_only = minimax_h3_request(
         "minimax_h3_ref",
         json!({ "referenceAudioAssetIds": ["a1"] }),
@@ -13820,6 +13824,26 @@ fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
         message.contains("audio-only"),
         "the refusal must name the shape: {message}"
     );
+    // WHICH refusal: a reference-free request hits a DIFFERENT arm with a different reason, and an
+    // `is_err()`-shaped assertion could not tell them apart. Both are `InvalidPayload`, so the
+    // message is the only discriminator.
+    let none_at_all = minimax_h3_request("minimax_h3_ref", json!({}));
+    let message = minimax_h3_validate_partition(&none_at_all)
+        .expect_err("a reference-free r2v request must be refused")
+        .to_string();
+    assert!(
+        message.contains("requires at least one reference") && !message.contains("audio-only"),
+        "an empty reference set must report the empty-set reason, not the audio one: {message}"
+    );
+    // …and an image alongside the same audio is accepted, so the audio list is a companion rather
+    // than a disqualifier. Without this leg the assertion above would pass for a guard that
+    // refused every request carrying audio at all.
+    let image_and_audio = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "referenceAssetIds": ["r1"], "referenceAudioAssetIds": ["a1"] }),
+    );
+    minimax_h3_validate_partition(&image_and_audio)
+        .expect("an image + audio reference set is the shape Ref2VA serves");
 
     // `Conditioning::ReferenceVideo` — the only variant carrying a reference clip's own frame rate
     // — arrives with the sc-18650 pin bump. Refused BY NAME rather than downgraded to

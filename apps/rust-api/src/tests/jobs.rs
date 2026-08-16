@@ -8355,8 +8355,36 @@ fn every_declared_video_capability_is_submittable() {
 /// whose numbers the test itself chose (sc-17159 — a seeded probe would prove the ROUTE works, not
 /// that the shipped family is reachable).
 async fn shipped_manifest_app(temp_dir: &tempfile::TempDir) -> (axum::Router, String) {
+    shipped_manifest_app_on_os(temp_dir, "macos").await
+}
+
+/// The same app, told it is running on `os` (sc-19570). The ONLY difference from
+/// [`shipped_manifest_app`] is `Settings::host_os`, which production always fills with
+/// `std::env::consts::OS`.
+///
+/// It exists because macOS structurally cannot detect the defect sc-19570 fixed by running on
+/// itself: the per-mode reachability sweep terminates exactly what no Windows/Linux lane will
+/// claim, and on a Mac that branch never executes. Tagging the fixture with the FOREIGN OS is what
+/// makes the check run everywhere, on the sc-17227 precedent.
+///
+/// What varies with `os` is the JOB's outcome, never the response. `POST /api/v1/video/jobs`
+/// answers `201` for the same body on every value passed here — that is asserted directly by
+/// [`the_video_enqueue_contract_is_identical_on_every_platform`] — and only the created job's
+/// `status` differs. A guard that expects a different STATUS CODE per `os` is asserting the shape
+/// this story removed.
+///
+/// The OS is always passed explicitly — never read from `std::env::consts::OS`. The two lanes that
+/// run this suite disagree (`parity-rust` is `ubuntu-latest`, the hosted workspace job is macOS),
+/// so reading the runner would make every assertion here mean something different depending on
+/// which lane executed it. [`shipped_manifest_app`] therefore pins macOS and these guards pin the
+/// foreign OS, and both lanes reach the same verdict.
+async fn shipped_manifest_app_on_os(
+    temp_dir: &tempfile::TempDir,
+    os: &str,
+) -> (axum::Router, String) {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
-    let settings = test_settings(temp_dir);
+    let mut settings = test_settings(temp_dir);
+    settings.host_os = os.to_owned();
     sceneworks_core::builtin_manifests::seed_builtin_manifests(
         &settings.config_dir,
         sceneworks_core::builtin_manifests::SeedMode::Overwrite,
@@ -8419,14 +8447,16 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
                 "referenceAudioAssetIds": ["aud-0"]
             }),
         ),
-        // The shape that was 400'd until sc-17159: `validate_video_job`'s r2v arm required a
-        // reference IMAGE, but sc-17149's acceptance is that all three reference modalities bind
-        // "individually", so an audio-only reference set is a shape the checkpoint serves.
+        // Audio references as a COMPANION to a visual one — the shape sc-17159 unblocked, minus
+        // the audio-ONLY case it also unblocked by mistake. sc-19574 refused that one again (see
+        // `minimax_h3_refusals_each_name_their_own_reason`): upstream's `before_encoder.py` raises
+        // on `set(kinds) == {"audio"}`, so it is not a shape the checkpoint serves.
         (
-            "Ref2VA audio references only",
+            "Ref2VA one image with three audio references",
             "minimax_h3_ref",
             json!({
                 "mode": "reference_to_video",
+                "referenceAssetIds": ["img-0"],
                 "referenceAudioAssetIds": ["aud-0", "aud-1", "aud-2"]
             }),
         ),
@@ -8720,7 +8750,43 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         no_refs["detail"],
-        "Reference to Video requires at least one reference image, video clip or audio clip."
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
+    );
+    // THE sc-19574 SHAPE: audio references and nothing else. sc-17159's widening went one list too
+    // far — upstream's `before_encoder.py` raises on `set(kinds) == {"audio"}` because an audio
+    // reference never reaches the visual conditioner — so the API accepted a request the worker
+    // then refused. It is refused HERE now, which is the first point the user could learn it.
+    let (status, audio_only) = submit(
+        "minimax_h3_ref",
+        json!({ "mode": "reference_to_video", "referenceAudioAssetIds": ["aud-0", "aud-1"] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an audio-only reference set must not be admitted: {audio_only}"
+    );
+    assert_eq!(
+        audio_only["detail"],
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
+    );
+    // …and the SAME audio references alongside one image are accepted, so the refusal above is
+    // about the missing visual reference and not about the audio list existing at all.
+    let (status, audio_with_image) = submit(
+        "minimax_h3_ref",
+        json!({
+            "mode": "reference_to_video",
+            "referenceAssetIds": ["img-0"],
+            "referenceAudioAssetIds": ["aud-0", "aud-1"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "audio alongside a visual reference is the shape Ref2VA serves: {audio_with_image}"
     );
     // Bernini's engine takes image references alone, so the loosened arm must not become a way to
     // hand its r2v path a clips-only conditioning set. The API admits it (the arm is
@@ -8754,7 +8820,8 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         bernini_bare["detail"],
-        "Reference to Video requires at least one reference image, video clip or audio clip."
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
     );
 }
 
@@ -8892,6 +8959,589 @@ async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
     }))
     .await;
     assert_eq!(status, StatusCode::CREATED, "{bridge}");
+}
+
+/// The measured MLX-only, candle-unclaimable pairs (sc-19570), each with the media its mode
+/// requires so the request is legal in every OTHER respect — a 400 from a missing asset would be
+/// the wrong outcome entirely and would leave a guard below passing for a reason that has nothing
+/// to do with platform.
+///
+/// ALL TWENTY are listed, not a sample and not only the thirteen the story measured: the three
+/// mac-only-download families (`krea_realtime_14b`, `minimax_h3`, `minimax_h3_ref`) ride the same
+/// route, because "install state is not a reachability gate" is only an argument until the REST leg
+/// actually exercises it.
+fn mlx_only_stranded_pairs() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "ltx_2_3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "video_bridge", "sourceClipAssetId": "clip-1", "bridgeRightClipAssetId": "clip-2" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "video_bridge", "sourceClipAssetId": "clip-1", "bridgeRightClipAssetId": "clip-2" }),
+        ),
+        (
+            "ltx_2_3_eros",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        (
+            "wan_2_2",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "wan_2_2",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        // The seven pairs the story's measurement did NOT list, because those three families ship
+        // `platforms: ["macos"]` downloads and it scoped itself to Windows/Linux-installable
+        // models. They belong on the REST leg specifically: the whole argument for having an
+        // enqueue gate at all is that it must refuse a raw REST call REGARDLESS of install state,
+        // and a core-predicate assertion cannot exercise that. Install state is not a reachability
+        // gate — a mac-only download list is one manifest edit from changing — and the route
+        // resolves these ids from the seeded manifest on every OS, so there is nothing to exempt.
+        ("krea_realtime_14b", json!({ "mode": "text_to_video" })),
+        (
+            "krea_realtime_14b",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "krea_realtime_14b",
+            json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
+        ),
+        ("minimax_h3", json!({ "mode": "text_to_video" })),
+        (
+            "minimax_h3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "minimax_h3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "minimax_h3_ref",
+            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
+        ),
+    ]
+}
+
+/// The pairs the candle lane genuinely serves off-Mac — the other half of every guard below. A
+/// mechanism that simply failed everything off-Mac would satisfy the stranded assertions and go red
+/// here.
+fn candle_served_pairs() -> Vec<(&'static str, Value)> {
+    vec![
+        ("wan_2_2", json!({ "mode": "text_to_video" })),
+        (
+            "wan_2_2",
+            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
+        ),
+        (
+            "wan_2_2",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        ("ltx_2_3", json!({ "mode": "text_to_video" })),
+        (
+            "wan_2_2_i2v_14b",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "svd",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        ("bernini", json!({ "mode": "text_to_video" })),
+        (
+            "bernini",
+            json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
+        ),
+    ]
+}
+
+/// Build the full `POST /api/v1/video/jobs` body for one `(model, case)` row.
+fn video_job_body(project_id: &str, model: &str, case: &Value) -> Value {
+    let mut full = json!({ "projectId": project_id, "prompt": "a fox runs", "model": model });
+    full.as_object_mut()
+        .expect("body object")
+        .extend(case.as_object().expect("case object").clone());
+    full
+}
+
+/// **THE HTTP CONTRACT GUARD (sc-19570).** `POST /api/v1/video/jobs` answers `201 Created` for
+/// byte-identical bodies on macOS, Windows and Linux alike — for the twenty MLX-only pairs AND for
+/// the candle-served ones.
+///
+/// This is the property Michael ruled on: *"http contracts are not platform dependant and never
+/// should be."* sc-19570's first shipped fix refused the MLX-only pairs with a `400` off-Mac, so
+/// the published surface disagreed with itself across hosts and
+/// `test_person_tracking_and_replace_person_contracts` (the cross-runtime parity suite, which runs
+/// on Linux) caught it as a 400 where it expected 201.
+///
+/// The assertion is deliberately status-code-shaped and platform-blind: every row, every OS, one
+/// expected value. A future edit that reintroduces ANY platform-conditional refusal on this route
+/// — for any subset, with any message — turns this red. The companion guard
+/// [`an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac`] owns the other half, that
+/// accepting these off-Mac does not resurrect the hang.
+#[tokio::test]
+async fn the_video_enqueue_contract_is_identical_on_every_platform() {
+    let stranded = mlx_only_stranded_pairs();
+    let served = candle_served_pairs();
+    assert_eq!(
+        stranded.len(),
+        20,
+        "the measured stranded set is twenty pairs — a shrunken table would narrow every guard \
+         that reads it"
+    );
+
+    for os in ["macos", "windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        for (model, case) in stranded.iter().chain(served.iter()) {
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let body_json = video_job_body(&project_id, model, case);
+            let (status, body) =
+                request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{model} + {mode} on {os}: the enqueue contract must not vary by platform — the \
+                 same body answers 201 everywhere, and what this host can RENDER is reported on \
+                 the job, not in the status code: {body}"
+            );
+            // The response SHAPE is part of the contract too: a job snapshot with an id, on every
+            // platform. A host that answered 201 with a different envelope would be just as
+            // platform-dependent as one that answered 400.
+            assert!(
+                body["id"].as_str().is_some_and(|id| !id.is_empty()),
+                "{model} + {mode} on {os}: 201 must carry a job snapshot: {body}"
+            );
+        }
+    }
+}
+
+/// The cross-runtime PARITY fixture, pinned here so its platform-independence is proved by a test
+/// that runs on every lane (sc-19570).
+///
+/// `tests/test_rust_api_contract_snapshots.py::test_person_tracking_and_replace_person_contracts`
+/// submits this exact body and snapshots the whole response, including the job's `status`, `stage`
+/// and `error`. That suite runs on `ubuntu-latest` only, so a fixture whose job outcome depends on
+/// the host records a Linux-shaped snapshot no other lane can reproduce — and it did: the fixture
+/// used to omit `model`, inheriting the catalog default `ltx_2_3`, whose `replace_person` is
+/// MLX-only and now terminates at once off-Mac.
+///
+/// `wan_2_2` serves `replace_person` on both lanes, so this asserts `201` AND `queued` on all
+/// three platforms. If someone repoints that fixture at an MLX-only model, this goes red on a Mac
+/// developer's machine instead of only on the Linux CI lane hours later.
+#[tokio::test]
+async fn the_parity_replace_person_fixture_is_platform_independent() {
+    for os in ["macos", "windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "projectName": "Parity Project",
+                "model": "wan_2_2",
+                "mode": "replace_person",
+                "prompt": "hero walks through rain",
+                "sourceClipAssetId": "asset-video",
+                "personTrackId": "track_fixture",
+                "characterId": "character_fixture",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "on {os}: {body}");
+        assert_eq!(
+            body["status"], "queued",
+            "the parity fixture must enqueue identically on every platform, or its snapshot is \
+             only reproducible on the lane that recorded it — on {os}: {body}"
+        );
+        assert!(
+            body["error"].is_null(),
+            "on {os} the parity fixture must carry no error: {body}"
+        );
+    }
+}
+
+/// **THE TERMINAL-STATE GUARD (sc-19570) — the property this story actually owns.** An MLX-only
+/// pair submitted off-Mac must reach a terminal `failed` state with a legible reason, NOT sit
+/// `queued` forever.
+///
+/// That hang is the real defect. `ltx_2_3` + `image_to_video` and the other nineteen were admitted
+/// by sc-19504's (correct, platform-independent) gate, offered as Video Studio tabs off-Mac, and
+/// then claimed by nothing — no `mlx` worker can register on Windows or Linux — leaving the job at
+/// `queued` / "Waiting for an available worker." with no error and no terminal state. None of the
+/// four pre-existing sweeps rescues it: `fail_stranded_candle_jobs` bails the instant any live
+/// candle worker exists (the job is unclaimable, not unserved), its `mlx` twin is inert off-Mac,
+/// and both `fail_unsupported_*` sweeps default to warn.
+///
+/// The whole twenty-pair table drives it, on BOTH off-Mac platforms, so coverage did not shrink
+/// when the refusal moved off the HTTP boundary. Three further arms keep it honest:
+///   * the terminal state is asserted on the enqueue RESPONSE, proving it does not wait for a
+///     worker poll — the deployments that need this most are the ones where no worker ever polls;
+///   * the failure names WHICH reason (`platform_unreachable:`), because a `status == "failed"`
+///     assertion alone would be satisfied by any unrelated failure path;
+///   * the same pairs stay `queued` on macOS, and the candle-served pairs stay `queued` off-Mac,
+///     so a sweep that failed everything cannot pass.
+#[tokio::test]
+async fn an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac() {
+    let stranded = mlx_only_stranded_pairs();
+    let served = candle_served_pairs();
+
+    for os in ["windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        for (model, case) in &stranded {
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let body_json = video_job_body(&project_id, model, case);
+            let (status, body) =
+                request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{model} + {mode} on {os}: {body}"
+            );
+            assert_eq!(
+                body["status"], "failed",
+                "{model} + {mode} on {os} has no lane here — the job must TERMINATE, not sit \
+                 queued waiting for a worker that can never exist: {body}"
+            );
+            // WHICH failure, not merely "a failure". Every one of these requests is well-formed, so
+            // a bare `status == failed` assertion could be satisfied by an unrelated terminal path
+            // and would still be green if the platform verdict never ran.
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(
+                error.starts_with("platform_unreachable: "),
+                "{model} + {mode} on {os} must fail for the PLATFORM reason, not some other \
+                 terminal path: {body}"
+            );
+            assert!(
+                error.contains(model) && error.contains(mode) && error.contains(os),
+                "{model} + {mode} on {os}: the reason must name the model, the mode and the host \
+                 so the job card explains itself: {error}"
+            );
+            // Terminal means terminal: re-reading the job returns the same failed state, so this is
+            // a persisted transition and not a response-only decoration.
+            let job_id = body["id"].as_str().expect("job id");
+            let (status, reread) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{reread}");
+            assert_eq!(
+                reread["status"], "failed",
+                "{model} + {mode} on {os}: the terminal state must be PERSISTED: {reread}"
+            );
+            assert_eq!(reread["error"], body["error"]);
+        }
+
+        // The sweep is not "fail everything off-Mac": a candle-served pair stays queued on the same
+        // host, in the same run, waiting for the worker that will claim it.
+        for (model, case) in &served {
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let body_json = video_job_body(&project_id, model, case);
+            let (status, body) =
+                request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{model} + {mode} on {os}: {body}"
+            );
+            assert_eq!(
+                body["status"], "queued",
+                "{model} + {mode} is candle-served on {os} and must stay claimable: {body}"
+            );
+        }
+    }
+
+    // …and on a Mac every stranded pair stays QUEUED, because the MLX engine renders it there.
+    // Without this arm the assertions above would be satisfied by a sweep that failed these pairs
+    // on every platform — which would break the Mac to fix Windows.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "macos").await;
+    for (model, case) in &stranded {
+        let mode = case["mode"].as_str().expect("case names a mode");
+        let body_json = video_job_body(&project_id, model, case);
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+        assert_eq!(status, StatusCode::CREATED, "{model} + {mode}: {body}");
+        assert_eq!(
+            body["status"], "queued",
+            "{model} + {mode} renders on macOS and must stay claimable there: {body}"
+        );
+        assert!(
+            body["error"].as_str().unwrap_or_default().is_empty(),
+            "{model} + {mode} on macOS must carry no error: {body}"
+        );
+    }
+}
+
+/// The claim-path arm of the same sweep (sc-19570). `POST /api/v1/video/jobs` terminates an
+/// unreachable job inline, but that route is not the only way a job reaches `queued`: **retry**
+/// and **duplicate** re-queue an existing job without passing through it, and a job already sitting
+/// `queued` from a build that predates this sweep never saw it at all.
+///
+/// So the store method also runs on every `POST /api/v1/jobs/claim`. This drives the retry door: a
+/// stranded pair is submitted (terminal off-Mac), retried back to `queued` with no reachability
+/// check anywhere on that path, and must be terminal again after a single claim.
+#[tokio::test]
+async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "windows").await;
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "a fox runs",
+            "model": "ltx_2_3",
+            "mode": "image_to_video",
+            "sourceAssetId": "img-1",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["status"], "failed", "{created}");
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+
+    // Retry re-queues verbatim — no video validation, no reachability check. Without the claim-path
+    // arm this is the hang, reopened one button-press later.
+    let (status, retried) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{retried}");
+    assert_eq!(
+        retried["status"], "queued",
+        "retry re-queues without a reachability check, which is why the claim path needs the \
+         sweep: {retried}"
+    );
+
+    let retry_id = retried["id"].as_str().expect("retry id").to_owned();
+    assert_ne!(retry_id, job_id, "retry creates a fresh queued row");
+
+    // A LIVE, capable candle worker polls — the realistic off-Mac deployment, and the exact
+    // condition under which `fail_stranded_candle_jobs` declines to act. The job is unclaimable,
+    // not unserved, so only the reachability sweep can terminate it.
+    let (status, registered) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-sweep-probe",
+            "gpuId": "0",
+            "gpuName": "Test GPU",
+            "capabilities": ["gpu", "candle", "video_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-sweep-probe" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+
+    let (status, after) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{retry_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(
+        after["status"], "failed",
+        "a queued job no lane on this host can claim must be swept terminal at claim time: {after}"
+    );
+    assert!(
+        after["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("platform_unreachable: "),
+        "the claim sweep must fail it for the PLATFORM reason: {after}"
+    );
+    // The claim itself must not have HANDED the unreachable job to the worker — the sweep runs
+    // first, so there is nothing left for `claim_next_job_routed` to return.
+    assert!(
+        claimed["job"].is_null(),
+        "the swept job must not also be claimed: {claimed}"
+    );
+}
+
+/// **sc-19504 IS INTACT AND DISTINGUISHABLE (sc-19570).** The no-lane-ANYWHERE gate is a correct
+/// `400` and stays one: a mode no backend implements is a malformed request on every host, so
+/// refusing it is platform-independent. Only the platform-conditional refusal moved.
+///
+/// The two must never be collapsed again, so this asserts them side by side on the SAME host:
+/// `wan_2_2_i2v_14b` + `first_last_frame` (no lane anywhere) is a 400 on macOS, Windows AND Linux
+/// with the same wording, while `ltx_2_3` + `image_to_video` (no lane HERE) is a 201 on all three.
+/// A future edit that turns either into the other turns this red.
+#[tokio::test]
+async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_case() {
+    for os in ["macos", "windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+
+        // NO LANE ANYWHERE → 400, identically on every platform.
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "a fox runs",
+                "model": "wan_2_2_i2v_14b",
+                "mode": "first_last_frame",
+                "sourceAssetId": "img-1",
+                "lastFrameAssetId": "img-2",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the sc-19504 gate is platform-INdependent and must still refuse on {os}: {body}"
+        );
+        assert_eq!(
+            body["detail"],
+            "wan_2_2_i2v_14b cannot render the \"first_last_frame\" mode — no backend implements \
+             it, so this job would wait for a worker that will never claim it. Choose a mode this \
+             model lists in its capabilities, or a model that supports this one.",
+            "the no-lane-anywhere refusal must keep its own wording on {os}, never the platform one"
+        );
+        assert!(
+            !body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("platform"),
+            "the two refusals must stay distinguishable to a reader on {os}: {body}"
+        );
+
+        // NO LANE *HERE* → 201 on every platform, with the verdict on the job instead.
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "a fox runs",
+                "model": "ltx_2_3",
+                "mode": "image_to_video",
+                "sourceAssetId": "img-1",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a pair some lane serves must never be refused by STATUS CODE on {os}: {body}"
+        );
+        let expected_status = if os == "macos" { "queued" } else { "failed" };
+        assert_eq!(
+            body["status"], expected_status,
+            "on {os} the platform verdict belongs on the job, not the response code: {body}"
+        );
+    }
+}
+
+/// The `candleSupport` block itself (sc-19570), read off the real `GET /api/v1/models` response —
+/// the off-Mac twin of `macSupport`, and what `candleVideoModeBlock` in the web client reads.
+///
+/// Emitted on EVERY platform (the client decides whether to act on it from `candleGatingActive`),
+/// so this asserts it from a macOS test run too. A block that only appeared off-Mac could never be
+/// asserted by the macOS rust lane — which is how the off-Mac half of this defect stayed invisible.
+#[tokio::test]
+async fn the_models_endpoint_carries_a_candle_support_block_for_every_video_model() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, _project_id) = shipped_manifest_app(&temp_dir).await;
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    let models = models["models"]
+        .as_array()
+        .or_else(|| models.as_array())
+        .expect("models list");
+    let mut video_models = 0_usize;
+    for model in models {
+        if model["type"].as_str() != Some("video") {
+            continue;
+        }
+        video_models += 1;
+        let id = model["id"].as_str().expect("model id");
+        let candle = &model["candleSupport"];
+        assert!(
+            candle.is_object(),
+            "{id}: every video model must carry a candleSupport block"
+        );
+        // The block must AGREE with the routing predicate, per mode. Restating the verdict here
+        // would assert nothing; deriving it from `model_candle_support` is what makes a routing
+        // change move this guard with it.
+        let expected = serde_json::to_value(sceneworks_core::jobs_store::model_candle_support(
+            id, "video",
+        ))
+        .expect("candle support serializes");
+        assert_eq!(
+            *candle, expected,
+            "{id}: the serialized candleSupport drifted from the predicate"
+        );
+    }
+    assert!(
+        video_models >= 12,
+        "only {video_models} video models were checked — the catalog read is wrong and this guard \
+         is vacuous"
+    );
+
+    // The two gating switches the client reads, and the reason `candleGatingActive` is
+    // platform-intrinsic rather than the `candle_required` rollout flag: the pairs it hides are
+    // unreachable off-Mac whether or not a deployment opted into terminal gap reporting.
+    let caps = |os: &str| sceneworks_core::jobs_store::mac_capabilities(os, false);
+    assert!(!caps("macos").candle_gating_active, "inert on a Mac");
+    assert!(!caps("darwin").candle_gating_active, "inert on the alias");
+    assert!(caps("windows").candle_gating_active, "engaged on Windows");
+    assert!(caps("linux").candle_gating_active, "engaged on Linux");
 }
 
 /// The withdrawal itself (sc-19504), read off the SHIPPED manifest bytes rather than restated: the

@@ -85,8 +85,11 @@ pub(crate) async fn person_capability_readiness(
 /// `macGatingActive=false` and applies no gating at all. Per-model support rides on
 /// `GET /api/v1/models` (`macSupport`); this endpoint carries the global/feature half.
 pub(crate) async fn mac_capability_support(State(state): State<AppState>) -> Json<MacCapabilities> {
+    // The host OS comes off `Settings` (sc-19570), which holds `std::env::consts::OS` in
+    // production. Same value, one substitutable seam: `candleGatingActive` is derived from it, and
+    // a guard for off-Mac gating that can only run off-Mac is a guard that never runs in CI.
     Json(mac_capabilities(
-        std::env::consts::OS,
+        &state.settings.host_os,
         state.settings.mlx_required,
     ))
 }

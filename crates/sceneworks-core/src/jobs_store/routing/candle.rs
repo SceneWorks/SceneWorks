@@ -535,6 +535,29 @@ pub(crate) fn video_request_is_candle_eligible(
     }
 }
 
+/// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the
+/// off-Mac twin of [`super::mlx::video_mode_is_mlx_eligible`] and the predicate
+/// [`super::catalog::video_model_candle_support`] maps over [`super::catalog::VIDEO_UI_MODES`]
+/// (sc-19570).
+///
+/// It is **derived, not restated**: it reconstructs the canonical minimal request for the mode
+/// ([`super::catalog::video_mode_probe_payload`]) and asks the REAL claim predicate
+/// [`video_request_is_candle_eligible`] — the same function `worker_supports_job`'s candle arm
+/// consults. A second, hand-maintained mode list here would answer with its own copy and stay green
+/// while the four underlying gates (base / VACE / SCAIL-2 / Bernini) moved, which is the shape that
+/// let the pairs sc-19570 measured ship undetected.
+///
+/// The mode is carried BOTH as the payload `mode` and through the job type
+/// ([`super::catalog::video_job_type_for_mode`]) because the underlying predicate reads it from
+/// whichever is authoritative for that shape: the advanced job types (`extend_clip` /
+/// `video_bridge` / `replace_person`) derive it from the job type and ignore the payload key, while
+/// `video_generate` reads the key.
+pub(crate) fn video_mode_is_candle_eligible(model: &str, mode: &str) -> bool {
+    let job_type = crate::jobs_store::routing::catalog::video_job_type_for_mode(mode);
+    let payload = crate::jobs_store::routing::catalog::video_mode_probe_payload(model, mode);
+    video_request_is_candle_eligible(&job_type, &payload)
+}
+
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
 /// synthetic payloads (parity with `image_request_candle_eligible`).
 pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
