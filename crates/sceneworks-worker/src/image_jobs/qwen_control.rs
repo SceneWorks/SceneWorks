@@ -424,6 +424,9 @@ impl CandleStrictControl for QwenStrictControl {
         let paths = QwenFunControlPaths {
             qwen_base: self.qwen_base.clone(),
             controlnet: self.controlnet.clone(),
+            // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+            // performed.
+            adapters: Vec::new(),
         };
         QwenFunControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))

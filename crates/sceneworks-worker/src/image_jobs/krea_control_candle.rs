@@ -561,6 +561,9 @@ impl CandleStrictControl for KreaStrictControl {
         let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
             root: self.base.clone(),
             convrot_dit: self.convrot_dit.clone(),
+            // The worker's control lane pairs the base snapshot (optionally an INT8-ConvRot DiT)
+            // with the pose overlay; the caller-owned native-mmdit DiT route is not plumbed here.
+            native_dit: None,
             control: self.control.clone(),
             adapters: self.adapters.clone(),
             // Tier integrity (sc-15799): the branch's tier is a function of the base tier, decided

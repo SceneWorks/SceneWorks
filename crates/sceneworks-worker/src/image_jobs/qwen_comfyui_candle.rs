@@ -257,6 +257,9 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
                 transformer,
                 snapshot_dir,
                 vae,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                Vec::new(),
             )
             .map_err(|error| {
                 WorkerError::Engine(format!("ComfyUI Qwen-Image load failed: {error}"))

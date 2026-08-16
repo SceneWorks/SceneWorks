@@ -370,19 +370,23 @@ fn advertised_minimax_h3_resolutions_fit_the_pinned_engine_edge_cap() {
 #[test]
 fn minimax_h3_component_names_are_the_pinned_engines_own() {
     use platform_runtime::providers::minimax_h3::model as engine;
-    use sceneworks_core::mlx_tier_completeness::{
-        MINIMAX_H3_PARTITIONS, MINIMAX_H3_TEXT_ENCODER_DIR,
-    };
+    use sceneworks_core::mlx_tier_completeness::MINIMAX_H3_PARTITIONS;
+    #[cfg(target_os = "macos")]
+    use sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR;
 
     assert_eq!(
         MINIMAX_H3_PARTITIONS,
         [
-            ("minimax_h3", engine::DIT_COMPONENT),
+            ("minimax_h3", engine::BASE_DIT_PARTITION),
             ("minimax_h3_ref", engine::REFERENCE_DIT_PARTITION),
         ],
         "the install-integrity mirror's DiT partition dirs must be the engine's own constants — a \
          rename upstream has to red here, not at load time on a user's machine"
     );
+    // The staged text-encoder dir has a `pub const` on MLX (`TEXT_ENCODER_COMPONENT`) but not on
+    // candle: `candle-gen-minimax-h3::model` spells it as a bare `"text_encoder"` literal inside a
+    // private `REQUIRED_COMPONENT_DIRS`, so there is no symbol to bind to on that lane.
+    #[cfg(target_os = "macos")]
     assert_eq!(
         MINIMAX_H3_TEXT_ENCODER_DIR,
         engine::TEXT_ENCODER_COMPONENT,

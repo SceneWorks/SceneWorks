@@ -322,6 +322,9 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                 transformer,
                 snapshot_dir,
                 Some(quant),
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                Vec::new(),
             )
             .map_err(|error| {
                 WorkerError::Engine(format!("ComfyUI FLUX.2-dev load failed: {error}"))
