@@ -801,13 +801,45 @@ for (const [id, reason] of UNDETERMINED) {
   }
 }
 
+// Report, don't gate (sc-19751).
+//
+// Everything above still runs — coverage, stale ids, duplicates, document wiring, the
+// revision-locked source audit, and fail-closed crate classification. What changed is what happens
+// to the result: findings are printed for a human to act on, and the process exits 0.
+//
+// Three of these rules fired on changes with nothing to do with licensing. The source audit is
+// revision-locked to the inference pin, so EVERY pin bump demanded a manual re-audit of upstream
+// NOTICE/LICENSE-*/`include_str!` sites before CI could go green; the audit digest rejected any
+// piecemeal edit; and a new production-Rust crate in the pinned revision failed closed until
+// someone classified it. That is the same defect as sc-19728's decode-quality fingerprint — a
+// digest keyed to a whole revision, refusing on any change, hand-re-derived each time it fires —
+// and it made an ordinary inference pin bump cost a licensing audit.
+//
+// The analysis is the valuable part and is kept: it is the worklist for the compliance pass, and
+// `--self-test` still proves every rule detects its mutation, so detection stays mutation-checked
+// even though nothing is enforced. `--strict` restores exit 1 for that pass, when it happens.
+//
+// NOT affected: `scripts/check-no-nc-weights.mjs` stays fail-closed in both `check.yml` and
+// `release.yml`. It does not fire on a missing license record — it fires on Non-Commercial weights
+// baked into a distributed artifact, which would make SceneWorks a distributor of a Derivative and
+// attach the NC obligations (sc-10526, docs/packaging-nc-weights-guard.md).
+const STRICT = process.argv.includes("--strict");
+
 if (errors.length > 0) {
-  console.error("License coverage check FAILED:\n");
-  for (const error of errors) console.error(`  - ${error}`);
   console.error(
-    `\n${errors.length} problem(s). The About→Licenses page must record every model whose weights SceneWorks downloads.`,
+    STRICT ? "License coverage check FAILED:\n" : "[license-coverage] REPORT — not enforced:\n",
   );
-  process.exit(1);
+  for (const error of errors) console.error(`  - ${error}`);
+  if (STRICT) {
+    console.error(
+      `\n${errors.length} problem(s). The About→Licenses page must record every model whose weights SceneWorks downloads.`,
+    );
+    process.exit(1);
+  }
+  console.error(
+    `\n${errors.length} open licensing item(s). These do NOT fail the build (sc-19751) — they are the ` +
+      `worklist for the compliance pass. Re-run with --strict to gate on them deliberately.`,
+  );
 }
 
 console.log(
