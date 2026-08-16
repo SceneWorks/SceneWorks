@@ -349,12 +349,17 @@ pub fn minimax_h3_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
 // machine. Before the bump none of that was possible: at `014134e3` the crate was not in the tree
 // and there was no symbol to import.
 //
-// STILL A TRANSCRIPTION: [`MINIMAX_H3_SHARED_PROBED_DIRS`] and
-// [`MINIMAX_H3_AUDIO_VAE_CONFIG_FILES`]. The engine's probe list is a private array literal inside
-// `model::load`, not an exported constant, so there is nothing to import — binding it needs either
-// an upstream export or a real `load` of a fixture missing each path in turn (which needs weights).
-// That remainder stays recorded on sc-18650, because a comment in this file is not something a
-// pin-bump session is guaranteed to open.
+// STILL A TRANSCRIPTION: [`MINIMAX_H3_SHARED_PROBED_FILES`],
+// [`MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`] and [`MINIMAX_H3_AUDIO_VAE_CONFIG_FILES`]. The engine's
+// probe list is a private array literal inside `model::load`, not an exported constant, so there is
+// nothing to import — binding it needs either an upstream export or a real `load` of a fixture
+// missing each path in turn (which needs weights). That remainder stays recorded on sc-18650,
+// because a comment in this file is not something a pin-bump session is guaranteed to open.
+//
+// The file-level probes are ALSO the half most exposed to the pin moving under them, which is why
+// naming them here matters: sc-19558 replaced the directory probes with file probes precisely
+// because an interrupted download leaves a present-but-empty directory, and the engine's own list
+// is what decides which file proves a component landed.
 // ---------------------------------------------------------------------------
 
 /// The shared component FILES a MiniMax-H3 load opens under the snapshot it is handed as
