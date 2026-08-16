@@ -2572,7 +2572,7 @@ mod tests {
     }
 
     /// sc-18095: the stale margin is per-backend. The budget sits between the candle-widened and
-    /// mlx-widened peaks of the same 10 GiB cell, so grading an MLX lane with the (narrower) candle
+    /// MLX-widened peaks of the same 10 GiB cell, so grading an MLX lane with the (narrower) Candle
     /// margin — or with no margin — flips the first arm.
     #[test]
     fn mlx_stale_admission_uses_the_mlx_margin() {
@@ -2608,18 +2608,18 @@ mod tests {
                 reserved_headroom_gb: 0.0,
             })
         };
-        // candle widening: 10.2 GiB; mlx widening: 10.5 GiB. 10.3 GiB must NOT fit on mlx.
+        // Candle widening: 10.2 GiB; MLX widening: ~12.52 GiB. 11 GiB must NOT fit on MLX.
         assert!(
             matches!(
-                select_strategy(scope, &provider, budget(10.3), &[candidate]),
+                select_strategy(scope, &provider, budget(11.0), &[candidate]),
                 Selection::Reject { .. }
             ),
-            "10.3 GiB fits a candle-widened 10 GiB cell but must not fit the MLX-widened one"
+            "11 GiB fits a Candle-widened 10 GiB cell but must not fit the MLX-widened one"
         );
         let Selection::Selected { needed_gb, .. } =
-            select_strategy(scope, &provider, budget(11.0), &[candidate])
+            select_strategy(scope, &provider, budget(13.0), &[candidate])
         else {
-            panic!("the MLX-widened peak fits an 11 GiB budget");
+            panic!("the MLX-widened peak fits a 13 GiB budget");
         };
         let expected_widened_bytes =
             (raw_peak_bytes as f64 * (1.0 + MLX_STALE_MEASURED_MARGIN)).ceil();

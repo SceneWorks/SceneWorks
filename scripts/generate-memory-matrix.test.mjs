@@ -737,12 +737,13 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   );
   assert.ok(
     bounded.every((cell) =>
-      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
+      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v4") &&
       cell.evidence.staticImplementation.some((entry) =>
-        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs") ||
+        entry.source.includes("mlx_fit_gate.rs#evidence_admission_route"),
       ),
     ),
-    "historical bindings must not mask the pinned MLX provider contract",
+    "every bounded cell must resolve through either the pinned provider contract or exact admitted evidence",
   );
 
   const turboContract = manifest.models.find((model) => model.id === "z_image_turbo")
@@ -757,7 +758,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
 
   for (const cell of bounded) {
     const ranges = cell.strategyParameters.publishedRanges;
-    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512]);
+    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512, 448, 384, 320, 256]);
     assert.deepEqual(ranges.decodeOverlaps, [256, 64]);
     if (cell.rung !== "bounded_decode") {
       assert.deepEqual(ranges.attentionChunkSizes, [67108864]);
@@ -786,10 +787,25 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     (cell) => zImageIds.includes(cell.modelId) && cell.backend === "mlx",
   );
   const verified = allZImageMlx.filter((cell) => cell.state === "Verified");
-  assert.deepEqual(verified, [], "the d480 Z-Image records must remain historical at pin bf06");
-  assert.ok(
-    allZImageMlx.every((cell) => cell.evidence.currentEnvironmentVerification.length === 0),
-    "no historical Z-Image capture may be promoted across an exact inference-pin change",
+  const expectedVerified = [
+    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_attention",
+    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_decode",
+    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
+    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:resident",
+    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:staged_residency",
+  ];
+  assert.deepEqual(
+    verified.map((cell) => cell.id).sort(),
+    expectedVerified,
+    "only the freshly captured Z-Image Turbo q4 rungs may verify",
+  );
+  assert.deepEqual(
+    allZImageMlx
+      .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
+      .map((cell) => cell.id)
+      .sort(),
+    expectedVerified,
+    "current evidence must stay confined to the exact captured Z-Image tuples",
   );
   assert.ok(
     allZImageMlx
@@ -2604,21 +2620,35 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     "SC-18311 moves the Qwen provider closure, so every shipped capture is historical until recaptured",
   );
 
-  const evidenceOnlyZ = await buildMatrix({
+  const verifiedZ = (matrix) =>
+    matrix.cells.filter(
+      (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
+        cell.state === "Verified",
+    ).length;
+  assert.equal(
+    verifiedZ(shipped),
+    5,
+    "the five freshly captured Z-Image rungs must ship as Verified on their exact binding",
+  );
+
+  const manifestWithMismatchedZBinding = JSON.parse(stripJsoncComments(await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  )));
+  for (const binding of manifestWithMismatchedZBinding.models
+    .find((model) => model.id === "z_image_turbo").mlx.calibrations) {
+    binding.inferenceClosureDigest = "0".repeat(64);
+  }
+  const mismatchedBindingZ = await buildMatrix({
     publish: false,
     sourceOverrides: {
-      calibrationEvidence: await currentEvidenceFixture({
-        select: (record) => record.target.provider === "z_image_turbo",
-      }),
+      manifest: JSON.stringify(manifestWithMismatchedZBinding),
     },
   });
   assert.equal(
-    evidenceOnlyZ.cells.filter(
-      (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
-        cell.state === "Verified",
-    ).length,
+    verifiedZ(mismatchedBindingZ),
     0,
-    "current evidence cannot promote through a historical exact manifest binding",
+    "current evidence cannot promote through a manifest binding with a different closure identity",
   );
 
   // sc-17774: moving the PIN must no longer demote anything — that was the whole defect. Moving
@@ -2939,14 +2969,15 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, currently admits nothing: SC-18311 changes
-  // the shared gen-core contract and moves the Qwen and FLUX.2 provider closures, so their prior
-  // captures are historical until they are re-run. Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, now admits exactly the five freshly captured
+  // Z-Image rungs. SC-18311 still moves the Qwen and FLUX.2 provider closures, so their prior
+  // captures remain historical until they are re-run. Two facts keep this assertion useful:
   //
-  //   1. It is exact: no historical Qwen or FLUX.2 row may survive the closure change as current.
+  //   1. It is exact: only the new Z-Image capture may be current; no historical Qwen or FLUX.2 row
+  //      may survive the closure change as current.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
-  //      measured arm already admits it. The arm being empty therefore cannot elide anything.
+  //      measured arm already admits it. The arm therefore cannot uniquely admit or elide anything.
   //
   // Asserted as an exact set so another recapture flips this test rather than silently passing, and
   // the field's presence is asserted separately so a rename cannot make the arm quietly vanish.
@@ -2955,8 +2986,14 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
       .map((cell) => cell.id)
       .sort(),
-    [],
-    "the SC-18311 closure change must demote every prior Qwen and FLUX.2 capture to historical",
+    [
+      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_attention",
+      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_decode",
+      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:resident",
+      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:staged_residency",
+    ],
+    "only the fresh Z-Image capture may be current after the SC-18311 closure change",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),

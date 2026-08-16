@@ -421,6 +421,7 @@ impl CandleStrictControl for ZImageStrictControl {
             snapshot: self.snapshot.clone(),
             text_encoder: None,
             control: self.controlnet.clone(),
+            adapters: Vec::new(),
             // Base `z_image` (sc-8680) → the faithful undistilled control path (shift-6.0, ~50-step,
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,

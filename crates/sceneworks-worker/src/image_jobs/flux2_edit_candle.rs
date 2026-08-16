@@ -434,7 +434,10 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         "flux2_edit",
         0,
         move || {
-            let paths = Flux2EditPaths { root: flux2_base };
+            let paths = Flux2EditPaths {
+                root: flux2_base,
+                adapters: Vec::new(),
+            };
             let model = if is_dev {
                 match &memory_context {
                     Some(context) => Flux2Edit::load_dev_with_memory_context(
@@ -488,6 +491,10 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         steps: steps as usize,
                         guidance,
                         seed: seed as u64,
+                        enhance_prompt: false,
+                        enhance_max_tokens: None,
+                        enhance_temperature: None,
+                        prompt_enhancement: Default::default(),
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
                         preview: preview.clone(),

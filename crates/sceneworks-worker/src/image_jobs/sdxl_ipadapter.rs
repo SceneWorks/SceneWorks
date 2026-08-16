@@ -397,6 +397,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                 tokenizer_clip_l,
                 tokenizer_clip_bigg,
                 vae_fp16_fix,
+                adapters: Vec::new(),
             };
             let model = IpAdapterSdxl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))

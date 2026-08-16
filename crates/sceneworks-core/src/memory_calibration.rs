@@ -2921,6 +2921,8 @@ mod tests {
         // 768/1024 geometries.
         // SC-18353 adds thirteen physical MLX source sessions for the exact deferred Qwen bf16/q4
         // captures, without replacing the historical Qwen evidence they supersede for admission.
+        // SC-19753 adds five current-pin Z-Image q4 records, one for each ladder rung, while
+        // retaining the five historical Z-Image captures as provenance.
         // SC-16915 re-collects the MLX qwen_image and krea_2_turbo_control evidence at pin
         // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
         // superseded 7fbcb4a2/1244b82f/96b13b66 rows in place as history — a receipt cannot be
@@ -3130,7 +3132,7 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 65);
+        assert_eq!(complete_count, 70);
         let runtime_keys = bundle
             .records
             .iter()
@@ -3162,7 +3164,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
                 .count(),
-            54
+            58
         );
         assert_eq!(
             bundle
@@ -3170,7 +3172,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            30
+            31
         );
     }
 

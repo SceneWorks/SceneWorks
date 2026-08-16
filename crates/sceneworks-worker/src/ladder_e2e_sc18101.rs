@@ -1385,10 +1385,10 @@ fn load_shape_mirror_matches_the_documented_routes() {
 /// reproduces the exact token `tracing` writes into the event.
 ///
 /// The scenarios above grep for `estimate_margin={ESTIMATE_MARGIN}`. `tracing` records an `f64`
-/// field with `Display`, so `0.10` is emitted as `0.1` — a substring built with `{:.2}` would never
-/// match, and a substring built from a literal would silently stop matching if the policy moved.
-/// Building it from the constant with `{}` is correct only as long as both sides agree, which is
-/// what this asserts.
+/// field with `Display`, so a rounded substring would never match the corpus-derived policy token,
+/// and a substring built from a literal would silently stop matching if the policy moved. Building
+/// it from the constant with `{}` is correct only as long as both sides agree, which is what this
+/// asserts.
 #[test]
 fn margin_substrings_match_the_emitted_tracing() {
     use std::fmt::Write as _;
@@ -1396,10 +1396,16 @@ fn margin_substrings_match_the_emitted_tracing() {
     // Reproduce exactly how `tracing`'s field formatter renders the value the gate passes it.
     let mut rendered = String::new();
     write!(rendered, "{ESTIMATE_MARGIN}").expect("f64 formats");
-    assert_eq!(rendered, "0.1", "MLX estimate margin token drifted");
+    assert_eq!(
+        rendered, "0.5040734033902377",
+        "MLX estimate margin token drifted"
+    );
     rendered.clear();
     write!(rendered, "{STALE_MARGIN}").expect("f64 formats");
-    assert_eq!(rendered, "0.05", "MLX stale-measured margin token drifted");
+    assert_eq!(
+        rendered, "0.2520367016951188",
+        "MLX stale-measured margin token drifted"
+    );
 
     // And the constants really are the policy's, not a local copy that happens to agree.
     assert_eq!(

@@ -340,6 +340,7 @@ impl CandleStrictControl for Flux2StrictControl {
         let paths = Flux2ControlPaths {
             root: self.base.clone(),
             control: self.control.clone(),
+            adapters: Vec::new(),
         };
         let loaded = match &self.memory_context {
             Some(context) => Flux2Control::load_with_memory_context(

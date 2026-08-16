@@ -442,6 +442,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 flux_base,
                 ip_adapter: adapter_file,
                 image_encoder: encoder_dir,
+                adapters: Vec::new(),
             };
             let model =
                 IpAdapterFlux::load_with_memory(&paths, generation_memory).map_err(|error| {

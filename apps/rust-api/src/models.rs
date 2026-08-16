@@ -8580,12 +8580,12 @@ mod imported_lora_advertisement_tests {
     /// multi-phase surface, and only the families promise is being retracted.
     #[test]
     fn withdrawal_preserves_sibling_compatibility_keys() {
-        let mut object = entry("external_qwen", "qwen-image");
+        let mut object = entry("finetune_mage", "mage-flow");
         object.insert(
             "loraCompatibility".to_owned(),
-            json!({ "families": ["qwen-image"], "types": ["character", "style"] }),
+            json!({ "families": ["mage-flow"], "types": ["character", "style"] }),
         );
-        apply_imported_lora_advertisement_for_lanes(&mut object, false, true);
+        apply_imported_lora_advertisement_for_lanes(&mut object, true, false);
         assert!(withdrawn(&object));
         assert_eq!(
             object["loraCompatibility"]["types"],
