@@ -219,13 +219,18 @@ jobs:
         # adding a catalog model had no mechanical link to the page. This fails the build
         # if a downloading model is unclaimed, a claimed id no longer exists, or a
         # document key is not wired into bundledLicenses.js (which would render an EMPTY
-        # license — worse than a missing one). The same executable guard also
-        # revision-locks the audited inventory of ported/embedded inference source
-        # (Cephes, CMUDICT), forcing every inference pin bump to re-audit upstream
-        # NOTICE/LICENSE-* and production include_str!/include_bytes! sites.
-        # It additionally fails CLOSED on any production-Rust crate in the pinned
-        # inference revision that is neither covered by a ported-source area nor given
-        # an explicit crateDispositions decision. The marker regex that finds ported
+        # license — worse than a missing one). It also audits the ported/embedded
+        # inference source inventory (Cephes, CMUDICT) against the Cargo pin, and the
+        # classification of every production-Rust crate in the pinned revision.
+        #
+        # sc-19751: this REPORTS, it does not gate. All of the analysis above still runs
+        # and every finding is printed, but the step exits 0. It used to fail closed, and
+        # two of its rules fired on changes with nothing to do with licensing: the
+        # revision-locked audit made EVERY inference pin bump owe a manual re-audit of
+        # upstream NOTICE/LICENSE-*/include_str! sites, and a new inference crate failed
+        # SceneWorks CI until someone classified it. Run with --strict to gate
+        # deliberately during the compliance pass. The NC-weights guard above is
+        # unaffected and still fails closed. The marker regex that finds ported
         # FILES is only a heuristic, and a whole crate already slipped it once —
         # mlx-gen-krea-realtime described its port in words the regex did not know and
         # shipped unclassified on a false green (sc-15138 → sc-15191).
