@@ -2,7 +2,8 @@ use super::{
     flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible, image_request_mlx_eligible,
     instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible,
     sdxl_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job, z_image_mlx_eligible,
-    JobSnapshot, WorkerSnapshot, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
+    JobSnapshot, WorkerSnapshot, CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS,
+    VIDEO_MLX_ROUTED_MODELS,
 };
 use serde_json::{json, Map, Value};
 
@@ -1160,4 +1161,107 @@ fn wan_vace_fun_is_mlx_routed_and_serves_its_only_advertised_mode() {
         Some(&true),
         "Video Studio must enable replace_person for wan_2_2_vace_fun_14b"
     );
+}
+
+/// sc-19558 (epic 17137) — a CANDLE-ROUTED video model must have weights a Windows or Linux user
+/// can actually install.
+///
+/// This is the artifact half of `declaration ≠ enforcement ≠ reachability` (GH #2074), and it is the
+/// half nothing checked. The routing table decides which lane serves a request; the manifest decides
+/// what a user can obtain. Flip `candle_video_routed` for a model whose every download row is
+/// `platforms: ["macos"]` and the app routes the job to a lane that cannot fetch a single byte — the
+/// user sees a queued job and a download button that installs nothing.
+///
+/// REACH, stated so it is not taken on trust: this test CONSTRUCTS both sides it claims to compare.
+/// `CANDLE_VIDEO_ROUTED_MODELS` is the real derived constant from `VIDEO_MODEL_CAPS`, not a retyped
+/// list, and the manifest is the shipped `config/manifests/builtin.models.jsonc` parsed here — so a
+/// column flip on one side or a `platforms` edit on the other both reach this assertion.
+///
+/// A CO-REQUISITE ROW IS NOT ENOUGH. Co-requisites install ALONGSIDE a primary and never AS one
+/// (`is_co_requisite_download`), so a model whose only off-Mac rows are co-requisites still has no
+/// base checkpoint. The count below is of PRIMARY rows for exactly that reason.
+#[test]
+fn candle_video_routed_models_have_an_installable_off_mac_download() {
+    // Candle-routed ids with NO catalog entry at all. Mochi-1 is frozen and deliberately ships no
+    // weights lane, so there is nothing to install on any platform and no row to check. Enumerated
+    // rather than skipped silently, and the enumeration is asserted to be EXACT below, so a second
+    // entry-less candle model cannot join it by accident.
+    const NO_CATALOG_ENTRY: &[&str] = &["mochi_1"];
+
+    // Primary (non-co-requisite) download rows that survive `retain_downloads_for_os` for `os`: a
+    // row with no `platforms` is platform-agnostic and always applies.
+    fn primary_rows_on(model: &Value, os: &str) -> usize {
+        model["downloads"]
+            .as_array()
+            .map(|downloads| {
+                downloads
+                    .iter()
+                    .filter(|download| download["coRequisite"].as_bool() != Some(true))
+                    .filter(|download| match download["platforms"].as_array() {
+                        Some(platforms) => platforms.iter().any(|value| value.as_str() == Some(os)),
+                        None => true,
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(include_str!(
+        "../../../../../config/manifests/builtin.models.jsonc"
+    )))
+    .expect("builtin.models.jsonc parses");
+    let models = manifest["models"]
+        .as_array()
+        .expect("builtin.models.jsonc has a models array");
+    let entry = |id: &str| models.iter().find(|model| model["id"].as_str() == Some(id));
+
+    let mut without_entry: Vec<&str> = Vec::new();
+    for id in CANDLE_VIDEO_ROUTED_MODELS {
+        let Some(model) = entry(id) else {
+            without_entry.push(id);
+            continue;
+        };
+        for os in ["windows", "linux"] {
+            assert!(
+                primary_rows_on(model, os) > 0,
+                "{id} is candle-routed for video but has no primary download row installable on \
+                 {os} — flipping a candle column without an off-Mac artifact routes the job to a \
+                 lane that cannot obtain weights (sc-19558)"
+            );
+        }
+    }
+    assert_eq!(
+        without_entry, NO_CATALOG_ENTRY,
+        "the set of candle-routed video models with no catalog entry changed; a new one is not an \
+         exemption from this guard, it is a model nothing can install"
+    );
+
+    // ── The MiniMax-H3 pair: the precondition sc-19558 satisfied, DEMONSTRATED rather than asserted
+    // in prose. `minimax_h3`'s candle columns are still false (no measured ceiling, and
+    // `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is `#[cfg(target_os = "macos")]` end
+    // to end, so there is no dispatch arm), but the WEIGHTS half no longer blocks the flip.
+    let h3 = entry("minimax_h3").expect("minimax_h3 is in the builtin catalog");
+    for os in ["windows", "linux"] {
+        assert!(
+            primary_rows_on(h3, os) > 0,
+            "minimax_h3 must carry a primary download row installable on {os} — the raw upstream \
+             MiniMaxAI/MiniMax-H3 snapshot set (sc-19558). Without it the candle columns cannot be \
+             flipped, because `candle-gen-minimax-h3` reads that snapshot layout and nothing else \
+             serves it off-Mac"
+        );
+    }
+
+    // The reference partition is the deliberate opposite, and it must stay that way while candle
+    // default-denies `ref2va` at its conditioning allowlist: advertising off-Mac weights for a mode
+    // the only off-Mac engine refuses is the same defect pointing the other way.
+    let h3_ref = entry("minimax_h3_ref").expect("minimax_h3_ref is in the builtin catalog");
+    for os in ["windows", "linux"] {
+        assert_eq!(
+            primary_rows_on(h3_ref, os),
+            0,
+            "minimax_h3_ref must have NO {os} download row while `candle-gen-minimax-h3` refuses \
+             ref2va (sc-17157 ports `transformer_ref`). If that port has landed, add the rows AND \
+             the routing column in the same change, and update this assertion deliberately"
+        );
+    }
 }

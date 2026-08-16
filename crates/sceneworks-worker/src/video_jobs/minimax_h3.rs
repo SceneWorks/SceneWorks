@@ -79,6 +79,12 @@ pub(super) const MINIMAX_H3_ENGINE_ID: &str = "minimax_h3";
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_DIT_COMPONENT: &str = "transformer";
 
+// The staged-component key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads the PACKED, per-tier
+// text encoder from (sc-19120) is `mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR` — the same
+// constant `minimax_h3_text_encoder_dir` builds the root out of, so the key staged and the directory
+// probed cannot disagree. Absent ⇒ the provider falls back to `<spec.weights>/text_encoder`, the
+// dense upstream bf16 Qwen3-VL-32B.
+
 /// The SceneWorks rehost carrying the pre-quantized DiT tiers (both partitions, all three tiers).
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
@@ -166,6 +172,20 @@ pub(super) fn minimax_h3_tier_dir_is_complete(dir: &Path) -> bool {
         && sceneworks_core::mlx_tier_completeness::minimax_h3_ref_tier_complete(dir)
 }
 
+// sc-19558 x sc-19573 — THE SHARED PROBE LIST LIVES IN `sceneworks_core::mlx_tier_completeness`,
+// AND IT PROBES FILES.
+//
+// This module used to carry its own list (`MINIMAX_H3_SHARED_PROBES` /
+// `MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`) alongside a `has_packed_text_encoder` flag. sc-19573
+// moved the list to core so the manifest's download-coverage guard and the runtime floor read ONE
+// list; sc-19558 established that the list has to name FILES, because an interrupted co-requisite
+// download leaves the directory present and empty and a dir-level floor certifies it as complete.
+// Both survive: core keeps the tier-aware root resolution and gains the file-level probes plus
+// `minimax_h3_missing_shared_probes`, which is what lets the refusal below name what is absent.
+//
+// The `has_packed_text_encoder` flag is gone because `minimax_h3_text_encoder_dir` subsumes it: the
+// text encoder's ROOT moves with the tier rather than its necessity, so there is nothing left to
+// make conditional.
 /// Everything a MiniMax-H3 load needs, resolved as ONE unit — the two roots are in different repos
 /// and neither is usable alone, so producing them separately is how they drift.
 #[cfg(target_os = "macos")]
@@ -280,42 +300,36 @@ pub(super) fn resolve_minimax_h3_load(
             tier_root.display()
         )));
     };
-    // The shared floor is checked AFTER the tier, because one of its six paths — the text encoder —
-    // is only addressable once the tier is known (sc-19120 packs it per tier; see
+    // The shared floor is checked AFTER the tier (sc-19573), because one of its paths — the text
+    // encoder — is only addressable once the tier is known (sc-19120 packs it per tier; see
     // `minimax_h3_text_encoder_dir`). Checking it first is what made every q4/q8 install fail with a
     // shared-floor error naming `text_encoder/` under the upstream snapshot, a path those tiers are
     // correct not to have.
     let text_encoder_dir = sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
         &tier_root, &base_root, tier,
     );
-    if !sceneworks_core::mlx_tier_completeness::minimax_h3_shared_is_complete(
+    // ENUMERATED, not restated (sc-19558). The probes are FILES, so the check can say which one is
+    // absent — and it must, because the pre-sc-19558 message listed everything the floor expects
+    // whether one path was missing or all eight, which sends a user to re-download components they
+    // already have. Single-sourced from `mlx_tier_completeness` either way: that is what keeps this
+    // message honest when the engine's probe list changes.
+    let missing = sceneworks_core::mlx_tier_completeness::minimax_h3_missing_shared_probes(
         &base_root,
         &text_encoder_dir,
-    ) {
-        // Still single-sourced from the probe constants (that is what keeps this message honest when
-        // the engine's probe list changes), but JOINED INTO PROSE. Interpolating the arrays with
-        // `{:?}` put Rust debug literals — `["tokenizer", "vae", "audio_vae"]` — in front of a user
-        // in the Model Manager.
-        let shared_dirs = sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS
-            .map(|dir| format!("{dir}/"))
+    );
+    if !missing.is_empty() {
+        // JOINED INTO PROSE rather than interpolated with `{:?}`, which put Rust debug literals in
+        // front of a user in the Model Manager.
+        let missing = missing
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
             .join(", ");
-        let audio_vae_config =
-            sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES
-                .map(|file| {
-                    format!(
-                        "{}/{file}",
-                        sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR
-                    )
-                })
-                .join(", ");
         return Err(WorkerError::InvalidPayload(format!(
-            "{}: the shared MiniMax-H3 text encoder / tokenizer / VAEs are incomplete (expected \
-             {shared_dirs} and {audio_vae_config} under {}, plus the {tier} text encoder at {}). \
-             These are separate co-requisite downloads from the quality tiers — re-download \
-             MiniMax-H3 in the Model Manager.",
+            "{}: the shared MiniMax-H3 text encoder / tokenizer / VAEs are incomplete for the \
+             {tier} tier — missing {missing}. These are separate co-requisite downloads from the \
+             quality tiers — re-download MiniMax-H3 in the Model Manager.",
             request.model,
-            base_root.display(),
-            text_encoder_dir.display(),
         )));
     }
     Ok(MiniMaxH3Load {
@@ -323,12 +337,23 @@ pub(super) fn resolve_minimax_h3_load(
         dit_dir: tier_root.join(tier).join(MINIMAX_H3_DIT_COMPONENT),
         // `None` at bf16 leaves the provider on its own `<root>/text_encoder` fallback, which is
         // where the dense upstream component actually is — passing it explicitly would be the same
-        // path spelled twice.
+        // path spelled twice. Not `.filter(is_complete)`: the floor above already refused a torn
+        // packed encoder BY NAME, so there is nothing left to silently fall back from (sc-19558 —
+        // falling back would put a q4 render on the 53 GB dense conditioner, which is the sc-19506
+        // defect wearing a different hat).
         text_encoder_dir: (tier != "bf16").then_some(text_encoder_dir),
         quant: minimax_h3_tier_quant(tier),
         tier,
     })
 }
+
+// `minimax_h3_packed_te_is_complete` used to live here (sc-19506): `config.json` + a safetensors
+// index, the pair `resolve_text_encoder_dir` → `map_shards` actually reads, so a directory holding
+// only `config.json` — the sc-19517 failure shape — is rejected rather than half-loaded at the
+// provider. It is now `mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`, checked by the
+// shared floor above for WHICHEVER root the tier resolves to (packed at q4/q8, dense upstream at
+// bf16) rather than only for the packed one. That is the strictly larger check: the dense encoder
+// was previously never probed beyond `is_dir()`.
 
 /// Refuse a request whose CONDITIONING SHAPE does not match the catalog entry it was submitted
 /// against — the guard that keeps a job off the wrong checkpoint.
