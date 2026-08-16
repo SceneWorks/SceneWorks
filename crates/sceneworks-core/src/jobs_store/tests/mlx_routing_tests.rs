@@ -1301,12 +1301,17 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
             "minimax_h3 advertises {mode} and must serve it"
         );
     }
-    // Ref2VA on the `transformer_ref` partition — and NOT t2v/i2v/flf, which would load the wrong
-    // checkpoint for the request.
-    assert!(video_mode_is_mlx_eligible(
-        "minimax_h3_ref",
-        "reference_to_video"
-    ));
+    // Ref2VA on the `transformer_ref` partition is WITHHELD until sc-17157 — the pinned MLX
+    // provider does not declare `ConditioningKind::MultiReference`, which SceneWorks requires for
+    // `reference_to_video`, so advertising it made `dump-engine-capabilities` refuse to emit the
+    // runtime artifact for every model. See the `minimax_h3_ref` arm in `routing/mlx.rs`.
+    //
+    // Asserted as `false` rather than deleted, so the day the arm is restored this line goes red
+    // and has to be looked at, instead of the withdrawal quietly outliving its reason.
+    assert!(
+        !video_mode_is_mlx_eligible("minimax_h3_ref", "reference_to_video"),
+        "ref2va stays withheld until sc-17157 lands the MultiReference declaration"
+    );
     for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
         assert!(
             !video_mode_is_mlx_eligible("minimax_h3_ref", mode),
@@ -1355,11 +1360,9 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
             "first_last_frame",
             json!({ "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
         ),
-        (
-            "minimax_h3_ref",
-            "reference_to_video",
-            json!({ "referenceAssetIds": ["img-1"], "referenceAudioAssetIds": ["aud-1"] }),
-        ),
+        // `minimax_h3_ref` / `reference_to_video` is NOT in this list: its MLX declaration is
+        // withheld until sc-17157 (see the `minimax_h3_ref` arm in `routing/mlx.rs`), so the mlx
+        // worker deliberately does not claim it. Asserted explicitly below rather than dropped.
     ] {
         let mut payload = object(json!({ "model": model, "mode": mode }));
         payload.extend(object(extra));
@@ -1369,6 +1372,22 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
                 &video_generate_job(Value::Object(payload))
             ),
             "the mlx worker must claim a {model} / {mode} job"
+        );
+    }
+    // The withheld route, asserted as unclaimed so restoring the arm turns this red rather than
+    // letting the withdrawal outlive its reason (sc-17157).
+    {
+        let mut payload =
+            object(json!({ "model": "minimax_h3_ref", "mode": "reference_to_video" }));
+        payload.extend(object(
+            json!({ "referenceAssetIds": ["img-1"], "referenceAudioAssetIds": ["aud-1"] }),
+        ));
+        assert!(
+            !worker_supports_job(
+                &mlx_video_worker(),
+                &video_generate_job(Value::Object(payload))
+            ),
+            "ref2va stays unclaimed until sc-17157 lands the MultiReference declaration"
         );
     }
     // A Ref2VA job on the BASE partition is refused by the claim gate — the wrong-checkpoint case,
@@ -1387,7 +1406,11 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
             "minimax_h3",
             ["text_to_video", "image_to_video", "first_last_frame"].as_slice(),
         ),
-        ("minimax_h3_ref", ["reference_to_video"].as_slice()),
+        // NO served modes while ref2va is withheld until sc-17157 (see the `minimax_h3_ref` arm in
+        // `routing/mlx.rs`). `supported` stays TRUE below — asserted, not incidental: the row keeps
+        // `video_mlx_routed`, so `classify_video_gap` still does not print the false "no MLX
+        // engine" reason this test was written to catch. Only the per-mode tab is off.
+        ("minimax_h3_ref", &[] as &[&str]),
     ] {
         let support = model_mac_support(id, "video", None);
         assert!(
