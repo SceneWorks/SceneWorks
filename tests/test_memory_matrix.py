@@ -205,11 +205,18 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "imc-bfb890dff959eaf09183": "staged_residency",
         "imc-f5c3d06f30ebf3723f13": "bounded_transformer_residency",
     }
+    # sc-19721's pin bump (014134e3 -> 75d66db5) staled the original four, so the re-capture adds
+    # exactly one new record per (tier, resolution) pair and the historical rows stay. Eight rows,
+    # each pair appearing twice: a ragged shape here would mean a partial or duplicated ingest.
     expected_mlx_flux2_runtime = {
         "imc-747f54e1be89e30da943": ("q8", 768),
         "imc-9b235419ecbe0710da06": ("q8", 1024),
         "imc-b6537074420d51413b38": ("q4", 1024),
         "imc-f3badcb841c8707fd971": ("q4", 768),
+        "imc-51dd1b02e0d1c2ec6fa0": ("q8", 768),
+        "imc-421a1bb45e9c2f5d916c": ("q8", 1024),
+        "imc-8f2a6f6c75bee2ead9dd": ("q4", 1024),
+        "imc-d778d59acb0aae38dcbe": ("q4", 768),
     }
     candle_flux2_runtime = [
         run
