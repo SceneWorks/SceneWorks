@@ -5471,7 +5471,9 @@ fn ltx_canary_generation_request() -> GenerationRequest {
         seed: Some(LTX_CANARY_SEED),
         frames: Some(LTX_CANARY_FRAMES),
         fps: Some(LTX_CANARY_FPS),
-        video_mode: Some("no_audio".to_owned()),
+        // The provider's calibrated contract has no video-mode variant axis. Keep the production
+        // default A/V path instead of asking the memory scope to configure an unsupported variant.
+        video_mode: None,
         memory: Some(GenerationMemory {
             tile_vae_decode: true,
             decode_tile_edge: Some(LTX_CANARY_TILE_EDGE),
@@ -6430,12 +6432,12 @@ fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> 
         .get("_canary")
         .and_then(Value::as_object)
         .ok_or_else(|| "LTX safety canary requires planned._canary".to_owned())?;
-    if canary.get("videoMode").and_then(Value::as_str) != Some("no_audio")
+    if canary.get("videoMode").and_then(Value::as_str) != Some("default")
         || canary.get("fps").and_then(Value::as_u64) != Some(u64::from(LTX_CANARY_FPS))
         || canary.get("seed").and_then(Value::as_u64) != Some(LTX_CANARY_SEED)
     {
         return Err(format!(
-            "LTX safety canary requires no_audio, fps {LTX_CANARY_FPS}, seed {LTX_CANARY_SEED}"
+            "LTX safety canary requires the default A/V route, fps {LTX_CANARY_FPS}, seed {LTX_CANARY_SEED}"
         ));
     }
     let artifact = planned
@@ -6794,7 +6796,7 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
         },
     )?)?;
     let decode = PhaseMemory::capture();
-    if frames.len() != LTX_CANARY_FRAMES as usize || fps != LTX_CANARY_FPS || has_audio {
+    if frames.len() != LTX_CANARY_FRAMES as usize || fps != LTX_CANARY_FPS || !has_audio {
         return Err(format!(
             "LTX safety canary returned frames={}, fps={fps}, audio={has_audio}",
             frames.len()
@@ -6844,7 +6846,7 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
                 "frames": LTX_CANARY_FRAMES,
                 "fps": LTX_CANARY_FPS,
             },
-            "audio": false,
+            "audio": true,
         },
         "strategy": ltx_attested_strategy(request, &context.selection, &contract)?,
         "watchdog": {
@@ -8406,7 +8408,7 @@ mod ltx_tests {
                     "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
                 },
                 "_canary": {
-                    "videoMode": "no_audio",
+                    "videoMode": "default",
                     "fps": LTX_CANARY_FPS,
                     "seed": LTX_CANARY_SEED,
                 },
@@ -8447,7 +8449,7 @@ mod ltx_tests {
             (generated.width, generated.height, generated.frames),
             (LTX_CANARY_WIDTH, LTX_CANARY_HEIGHT, Some(LTX_CANARY_FRAMES))
         );
-        assert_eq!(generated.video_mode.as_deref(), Some("no_audio"));
+        assert_eq!(generated.video_mode, None);
         let memory = generated.memory.expect("bounded decode carrier");
         assert!(memory.tile_vae_decode);
         assert_eq!(memory.decode_tile_edge, Some(LTX_CANARY_TILE_EDGE));
@@ -8559,8 +8561,8 @@ mod ltx_tests {
             ("wrong overlap", |request| {
                 request["planned"]["strategy"]["parameters"]["decodeOverlap"] = json!(32)
             }),
-            ("audio enabled", |request| {
-                request["planned"]["_canary"]["videoMode"] = json!("default")
+            ("audio-suppressed variant", |request| {
+                request["planned"]["_canary"]["videoMode"] = json!("no_audio")
             }),
             ("ceiling drift", |request| {
                 request["planned"]["_watchdog"]["maxFootprintBytes"] =

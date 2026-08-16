@@ -2000,11 +2000,21 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "LTX_CANARY_FRAMES",
     "LTX_CANARY_TILE_EDGE",
     "LTX_CANARY_OVERLAP",
-    'Some("no_audio")',
+    'Some("default")',
     '"status": "diagnostic_canary_complete"',
     '"promotable": false',
     '"ingestible": false',
   ]) assert.ok(canary.includes(required), `canary must retain ${required}`);
+
+  const generationRequest = adapter.slice(
+    adapter.indexOf("fn ltx_canary_generation_request("),
+    adapter.indexOf("fn ltx_load_spec("),
+  );
+  assert.match(
+    generationRequest,
+    /video_mode: None/,
+    "the canary must stay on the provider contract's default A/V route",
+  );
 
   const limitsLifecycle = adapter.slice(
     adapter.indexOf("impl LtxCanaryLimits"),
