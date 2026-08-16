@@ -26,6 +26,27 @@ vi.mock("../api.js", async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn(async () => ({})) };
 });
 
+// sc-19574 — a switch that forces `audioOnlyReferenceSet` FALSE into the real validator, so the
+// OTHER guard on the same shape (`hasInputs`' r2v arm, which sc-19574 narrowed to require a VISUAL
+// reference) can be asserted on its own. The two are exactly co-extensive on the r2v arm — the
+// narrowing changes the answer only when audio is outgoing and no image or clip is, which is the
+// precise condition `audioOnlyReferenceSet` names — so through the screen neither can be observed
+// while the other holds. That is why re-widening `hasInputs` mutated silently, and why proving it
+// individually needs the other guard suppressed rather than a different fixture.
+//
+// Off by default and reset in `afterEach`, so every other test in this file runs the real thing.
+const validationOverride = vi.hoisted(() => ({ suppressAudioOnly: false }));
+vi.mock("../videoStudioValidation.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    videoGenerateValidation: (args) =>
+      actual.videoGenerateValidation(
+        validationOverride.suppressAudioOnly ? { ...args, audioOnlyReferenceSet: false } : args,
+      ),
+  };
+});
+
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 
@@ -112,6 +133,7 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
   afterEach(async () => {
     await unmountRoot(root, container);
     vi.clearAllMocks();
+    validationOverride.suppressAudioOnly = false;
   });
 
   async function render(context) {
@@ -299,13 +321,19 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(fieldLabelled("Reference audio")).toBeFalsy();
   });
 
-  it("lets an audio-only reference set submit, and sends the audio ids", async () => {
-    // sc-17159 fixed exactly this spelling in `validate_video_job`: r2v needs at least one
-    // reference of ANY kind, and an audio-only set is a shape Ref2VA serves. The studio kept its
-    // own image-only copy of the old rule, so the mode rendered but could not be submitted.
+  it("refuses an audio-only reference set with a reason, and submits it alongside an image", async () => {
+    // sc-19574. This test asserted the OPPOSITE until now, because `validate_video_job` accepted
+    // an audio-only set (sc-17159 widened its arm one list too far). The reference implementation
+    // settles it: diffusers `MiniMaxH3` documents `MiniMaxH3AudioReference` as "never on its own …
+    // It never reaches the conditioner", and `before_encoder.py` raises on
+    // `set(kinds) == {"audio"}`. The worker refused it all along; the Studio enabling Generate for
+    // it is how a user built a request the product presented as valid and was then told no.
+    //
+    // An ERROR, not the silent `inputs` requirement: the audio picker is visibly full, so an empty
+    // image zone beside it reads as optional. The user must be told the rule, not left to infer it.
     const context = baseContext({
       videoModels: [MINIMAX_REF],
-      assets: [asset("aud_1", "audio", "voice")],
+      assets: [asset("aud_1", "audio", "voice"), asset("img_1", "image", "portrait")],
     });
     await render(context);
     await click(modeTab("Reference → Video"));
@@ -325,13 +353,96 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
       ),
     );
 
+    const stillBlocked = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Render clip"),
+    );
+    expect(stillBlocked.disabled, "audio alone cannot condition the picture").toBe(true);
+    expect(
+      container.textContent,
+      "the refusal must SAY why — an empty image zone next to a full audio one does not",
+    ).toContain("An audio reference can't be the only reference");
+    expect(context.createVideoJob).not.toHaveBeenCalled();
+
+    // …and adding an image clears it, with BOTH lists reaching the payload. Without this leg the
+    // assertions above would pass on a studio that had stopped sending audio references at all.
+    await click(fieldLabelled("Reference images").querySelector("button"));
+    await click(
+      [...document.querySelectorAll(".asset-picker-card")].find((card) =>
+        card.textContent.includes("portrait"),
+      ),
+    );
+    await click(
+      [...document.querySelectorAll(".asset-picker-footer button")].find(
+        (b) => b.textContent.trim() === "Use Selection",
+      ),
+    );
+
     const ready = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
-    expect(ready.disabled, "an audio-only reference set is a shape Ref2VA serves").toBe(false);
+    expect(ready.disabled, "an image + audio reference set is the shape Ref2VA serves").toBe(false);
+    expect(container.textContent).not.toContain("An audio reference can't be the only reference");
     await click(ready);
     const payload = context.createVideoJob.mock.calls[0][0];
     expect(payload.mode).toBe("reference_to_video");
     expect(payload.referenceAudioAssetIds).toEqual(["aud_1"]);
-    expect(payload.referenceAssetIds).toEqual([]);
+    expect(payload.referenceAssetIds).toEqual(["img_1"]);
+  });
+
+  it("keeps `hasInputs` narrowed to a VISUAL r2v reference, with the audio-only refusal suppressed", async () => {
+    // sc-19574. The test above proves the PAIR; this one proves `hasInputs`' r2v arm ALONE.
+    //
+    // The two guards are exactly co-extensive on this arm — the narrowing changes the answer only
+    // when audio is outgoing and no image or clip is, which is precisely the condition
+    // `audioOnlyReferenceSet` names — so through the screen neither can be observed while the other
+    // holds, and re-widening `hasInputs` back to `referenceAssetIds.length >= 0` mutated SILENTLY.
+    // Suppressing the validator's arm is what makes the remaining one gradeable.
+    validationOverride.suppressAudioOnly = true;
+    const context = baseContext({
+      videoModels: [MINIMAX_REF],
+      assets: [asset("aud_1", "audio", "voice"), asset("img_1", "image", "portrait")],
+    });
+    await render(context);
+    await click(modeTab("Reference → Video"));
+
+    await click(fieldLabelled("Reference audio").querySelector("button"));
+    await click(
+      [...document.querySelectorAll(".asset-picker-card")].find((card) =>
+        card.textContent.includes("voice"),
+      ),
+    );
+    await click(
+      [...document.querySelectorAll(".asset-picker-footer button")].find(
+        (b) => b.textContent.trim() === "Use Selection",
+      ),
+    );
+
+    const blocked = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Render clip"),
+    );
+    expect(blocked.disabled, "`hasInputs` alone must refuse an audio-only r2v set").toBe(true);
+    // Non-vacuity in the direction that matters: the OTHER guard really is suppressed, so what is
+    // being graded above is `hasInputs` and not the validator arm leaking through.
+    expect(
+      container.textContent,
+      "the validator arm must be suppressed, or this test grades the wrong guard",
+    ).not.toContain("An audio reference can't be the only reference");
+
+    // …and the arm is not simply "always false for r2v": one visual reference admits it, still with
+    // the validator arm suppressed.
+    await click(fieldLabelled("Reference images").querySelector("button"));
+    await click(
+      [...document.querySelectorAll(".asset-picker-card")].find((card) =>
+        card.textContent.includes("portrait"),
+      ),
+    );
+    await click(
+      [...document.querySelectorAll(".asset-picker-footer button")].find(
+        (b) => b.textContent.trim() === "Use Selection",
+      ),
+    );
+    const ready = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Render clip"),
+    );
+    expect(ready.disabled, "a visual reference is what the arm requires").toBe(false);
   });
 
   it("does not strand an audio-reference refusal on a form that cannot clear it", async () => {

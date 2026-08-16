@@ -33,10 +33,10 @@ use sceneworks_core::image_request::{
     default_count as image_default_count, default_resolution as image_default_resolution,
 };
 use sceneworks_core::jobs_store::{
-    candle_supported, mac_capabilities, mac_rust_supported, model_mac_support,
-    video_request_is_claimable_by_any_lane, CreateJob, DuplicateJob, JobsStore, JobsStoreError,
-    MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision, StaleSweep,
-    UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    candle_supported, mac_capabilities, mac_rust_supported, model_candle_support,
+    model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
+    DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
+    RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,
@@ -63,8 +63,9 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    default_resolution, duration_limit_error, fps_limit_error, reference_limit_error,
-    requested_steps, resolve_duration, resolve_fps, steps_limit_error,
+    classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
+    reference_limit_error, requested_steps, resolve_duration, resolve_fps, steps_limit_error,
+    ReferenceSetVerdict,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -4263,27 +4264,45 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "video_to_video" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
             "Video to Video requires a source clip.",
         )),
-        // `reference_to_video` requires at least one reference of ANY kind, not specifically an
-        // IMAGE (sc-17159). Bernini was the only model serving this mode when the arm was written
-        // and its engine takes image references alone, so "at least one reference image" and "at
-        // least one reference" were the same sentence. MiniMax-H3 Ref2VA broke that identity: it
-        // conditions on images AND video clips AND audio clips, and sc-17149's acceptance is that
-        // all three modalities bind "individually and combined" — so an audio-only or clip-only
-        // reference set is a shape the model serves, and the image-only spelling 400'd it here,
-        // one layer above the per-model caps that admit it.
+        // `reference_to_video` requires at least one VISUAL reference — an image or a video clip.
+        // Audio references are admitted alongside them and never instead of them.
         //
-        // This gate exists so the worker never falls through to an unconditioned t2v render, and a
-        // non-empty reference set of any kind satisfies that. It does NOT loosen Bernini: its own
+        // Two corrections in one line. sc-17159 widened this from `reference_asset_ids.is_empty()`
+        // because Bernini, the only r2v model at the time, takes images alone, so "at least one
+        // reference image" and "at least one reference" were the same sentence — true for the
+        // clips MiniMax-H3 Ref2VA added, and WRONG for the audio it added at the same time.
+        //
+        // sc-19574 settled it against the reference implementation rather than by argument.
+        // diffusers `MiniMaxH3` (upstream PR #14355, `0.40.0.dev0 @ 7564fb01`) states the rule on
+        // `MiniMaxH3AudioReference` — "never on its own — an audio reference has to be paired with
+        // at least one image or video reference. It never reaches the conditioner and is encoded by
+        // the audio VAE alone" — and ENFORCES it in `before_encoder.py`:
+        //
+        //     if set(kinds) == {"audio"}:
+        //         raise ValueError("An audio reference has to be paired with at least one image or
+        //                           video reference and cannot be used on its own.")
+        //
+        // So the engine was right and this layer was wrong: an audio-only set leaves the visual
+        // conditioner with nothing to read, and the render it would produce is unconditioned. The
+        // worker refuses it too (sc-19508, `minimax_h3_validate_partition`); refusing it HERE is
+        // what makes the user find out at submission instead of after a queued job fails.
+        //
+        // The rule itself is `sceneworks_core::video_request::classify_reference_set`, which the
+        // MCP tool and the worker call too — one predicate, three layers, so they cannot drift back
+        // into disagreement. Only the WORDING is this layer's. It does NOT loosen Bernini: its own
         // conditioning assembly (`resolve_bernini_conditioning`, both lanes) still refuses an r2v
         // with no `referenceAssetIds`, naming bernini — the model-specific half of the requirement
         // belongs with the model, exactly like `limits.maxReferenceAssets`.
         "reference_to_video"
-            if payload.reference_asset_ids.is_empty()
-                && payload.source_clip_asset_ids.is_empty()
-                && payload.reference_audio_asset_ids.is_empty() =>
+            if classify_reference_set(
+                payload.reference_asset_ids.len(),
+                payload.source_clip_asset_ids.len(),
+                payload.reference_audio_asset_ids.len(),
+            ) != ReferenceSetVerdict::Conditionable =>
         {
             Err(ApiError::bad_request(
-                "Reference to Video requires at least one reference image, video clip or audio clip.",
+                "Reference to Video requires at least one reference image or video clip. Audio \
+                 references condition the soundtrack and cannot be the only reference.",
             ))
         }
         "reference_video_to_video" if payload.source_clip_asset_id.is_none() => Err(

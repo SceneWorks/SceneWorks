@@ -4751,6 +4751,23 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
         object.insert("macSupport".to_owned(), mac_support);
     }
+    // The off-Mac twin (sc-19570). Emitted on EVERY platform, exactly like `macSupport`: the client
+    // decides whether to act on it from `candleGatingActive`, and a block that appeared only on the
+    // platform it gates could never be asserted from a Mac test run — which is precisely how the
+    // off-Mac half of this defect stayed invisible for as long as it did. No `family` argument: the
+    // block carries the per-video-mode verdict, and video routing is id-keyed (route-by-family is
+    // an image-lane mechanism).
+    let candle_support = {
+        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+        let model_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        model_candle_support(id, model_type)
+    };
+    if let Ok(candle_support) = serde_json::to_value(candle_support) {
+        object.insert("candleSupport".to_owned(), candle_support);
+    }
     let mlx_status = if cfg!(target_os = "macos") {
         mlx_catalog_status(object, data_dir)
     } else {

@@ -509,6 +509,100 @@ describe("declared video capabilities are all offerable", () => {
     expect(videoModelUsable({ ...entry, macSupport: undefined }, offMac)).toBe(true);
   });
 
+  // sc-19570. THE OFF-MAC GATE, asserted with a FOREIGN-platform fixture.
+  //
+  // This is the same shape as the sc-19504 guard above, generalised: `capabilities` was the only
+  // thing between a Windows/Linux user and a tab whose every submission queued forever, for
+  // THIRTEEN advertised pairs rather than one. sc-19504 fixed its pair by withdrawing the
+  // capability, which is not available here — every pair below renders correctly on a Mac, so the
+  // manifest is right and the missing piece was a per-platform gate.
+  //
+  // The fixture is what makes this a real check. On the host these tests run on there is no
+  // off-Mac anything: `candleGatingActive` arrives from `GET /api/v1/capabilities/mac` and is
+  // false on a Mac, so every helper in candleGating.js is inert. Tagging the caps object with the
+  // foreign platform is what runs the branch.
+  it("an MLX-only video mode is not offered off-Mac, and is still offered on a Mac", () => {
+    // The per-model block the API now emits, in the shape `model_candle_support` serializes.
+    const candleSupport = (served) => ({
+      supported: served.length > 0,
+      features: { videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, served.includes(m)])) },
+    });
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, candleGatingActive: true, platform: "linux" };
+    const onMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" };
+
+    // LTX-2.3: candle serves `text_to_video` and nothing else, and the Mac serves all six.
+    const ltx = shipped.find((model) => model.id === "ltx_2_3");
+    expect(ltx, "ltx_2_3 is a shipped video model").toBeTruthy();
+    const ltxOffMac = { ...ltx, candleSupport: candleSupport(["text_to_video"]) };
+    const ltxOnMac = {
+      ...ltx,
+      macSupport: { supported: true, features: { videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, ltx.capabilities.includes(m)])) } },
+      candleSupport: candleSupport(["text_to_video"]),
+    };
+    for (const mode of [
+      "image_to_video",
+      "first_last_frame",
+      "extend_clip",
+      "video_bridge",
+      "replace_person",
+    ]) {
+      expect(
+        videoModelServesMode(ltxOffMac, mode, offMac),
+        `ltx_2_3 + ${mode} has no off-Mac lane and must not be offered there`,
+      ).toBe(false);
+      // …and is STILL offered on a Mac. Breaking the platform where it works, to fix the one where
+      // it does not, is the failure this leg exists to catch.
+      expect(
+        videoModelServesMode(ltxOnMac, mode, onMac),
+        `ltx_2_3 + ${mode} renders on a Mac and must stay offered there`,
+      ).toBe(true);
+    }
+    // The mode candle DOES serve is untouched, so the gate narrowed the tab list rather than the
+    // model — without this the assertions above would pass on a block that hid everything.
+    expect(videoModelServesMode(ltxOffMac, "text_to_video", offMac)).toBe(true);
+    expect(videoModelUsable(ltxOffMac, offMac)).toBe(true);
+
+    // A model with NO off-Mac lane at all disappears from the picker rather than showing every tab
+    // disabled: `wan_2_2_vace_fun_14b` advertises `replace_person` alone and candle does not route
+    // it, so `candleSupport.supported` is false.
+    const vaceFun = shipped.find((model) => model.id === "wan_2_2_vace_fun_14b");
+    const vaceOffMac = { ...vaceFun, candleSupport: candleSupport([]) };
+    expect(videoModelServesMode(vaceOffMac, "replace_person", offMac)).toBe(false);
+    expect(videoModelUsable(vaceOffMac, offMac)).toBe(false);
+    expect(downloadOffersFor([{ ...vaceOffMac, installState: "missing" }], videoModelUsable, offMac))
+      .toEqual([]);
+
+    // …and on a Mac, that same model is offered. Two platforms, two answers, one model.
+    const vaceOnMac = {
+      ...vaceFun,
+      macSupport: { supported: true, features: { videoModes: { replace_person: true } } },
+      candleSupport: candleSupport([]),
+    };
+    expect(videoModelServesMode(vaceOnMac, "replace_person", onMac)).toBe(true);
+    expect(videoModelUsable(vaceOnMac, onMac)).toBe(true);
+  });
+
+  // The switch itself: with `candleGatingActive` false — a Mac, or any client before the
+  // capabilities endpoint has answered — the block is inert even when it says `false`. A gate that
+  // read `candleSupport` unconditionally would hide Mac-served tabs on the Mac.
+  it("the candle block is inert until off-Mac gating is active", () => {
+    const model = {
+      type: "video",
+      capabilities: ["image_to_video"],
+      candleSupport: { supported: false, features: { videoModes: { image_to_video: false } } },
+    };
+    for (const inert of [
+      DEFAULT_MAC_CAPABILITIES,
+      { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" },
+    ]) {
+      expect(videoModelServesMode(model, "image_to_video", inert)).toBe(true);
+      expect(videoModelUsable(model, inert)).toBe(true);
+    }
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, candleGatingActive: true, platform: "win32" };
+    expect(videoModelServesMode(model, "image_to_video", offMac)).toBe(false);
+    expect(videoModelUsable(model, offMac)).toBe(false);
+  });
+
   it("both MiniMax-H3 partitions are usable in the Video Studio, each on its own modes", () => {
     // The regression this pins: the family installs on macOS ONLY, so if the server ever answers
     // `macSupport.supported: false` for it again (it did until sc-17159 added the VIDEO_MODEL_CAPS
