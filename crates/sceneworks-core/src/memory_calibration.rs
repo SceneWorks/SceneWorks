@@ -3084,7 +3084,10 @@ mod tests {
             .collect::<BTreeSet<_>>();
         // A re-capture ADDS evidence; the frozen history is retained verbatim, never rewritten.
         for id in &frozen_session_ids {
-            assert!(actual_session_ids.contains(id), "frozen session {id} is missing");
+            assert!(
+                actual_session_ids.contains(id),
+                "frozen session {id} is missing"
+            );
         }
         assert_eq!(
             bundle.source_sessions.len(),
@@ -3129,7 +3132,10 @@ mod tests {
                 .strip_prefix("docs/calibration/")
                 .and_then(|rest| rest.split_once('/'))
                 .unwrap_or_else(|| {
-                    panic!("{id}: receipt outside docs/calibration/<story>/: {}", session.source_path)
+                    panic!(
+                        "{id}: receipt outside docs/calibration/<story>/: {}",
+                        session.source_path
+                    )
                 });
             assert!(
                 story
@@ -3142,7 +3148,11 @@ mod tests {
                 story, "sc-18353",
                 "{id}: a re-capture receipt may not be filed under the frozen sc-18353 set"
             );
-            assert_eq!(file, format!("{id}.log"), "{id}: receipt is not the session's own log");
+            assert_eq!(
+                file,
+                format!("{id}.log"),
+                "{id}: receipt is not the session's own log"
+            );
             recapture_stories.insert(story);
             let target = session
                 .target
@@ -3164,9 +3174,15 @@ mod tests {
                     .get("chip")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                assert!(!chip.is_empty(), "{id}: MLX capture without a chip identity");
+                assert!(
+                    !chip.is_empty(),
+                    "{id}: MLX capture without a chip identity"
+                );
             }
-            assert!(session.hardware.memory_bytes > 0, "{id}: capture host reports no memory");
+            assert!(
+                session.hardware.memory_bytes > 0,
+                "{id}: capture host reports no memory"
+            );
         }
         assert_eq!(
             recapture_stories.len(),
