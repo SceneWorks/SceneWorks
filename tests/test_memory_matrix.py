@@ -45,9 +45,10 @@ def test_generated_memory_matrix_is_current_and_schema_valid():
 def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     matrix = load_matrix()
     assert matrix["summary"]["imageModels"] == 53
-    # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, so its former
-    # generic staged-route claim is intentionally absent from this census.
-    assert matrix["summary"]["mlxStagedStaticCoverage"] == 38
+    # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, and the current
+    # inference pin deliberately omits sequential offload from Bernini's descriptor. Neither lane
+    # may contribute a generic staged-route claim to this census.
+    assert matrix["summary"]["mlxStagedStaticCoverage"] == 37
     assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == 53
     assert len(matrix["models"]) == len(matrix["modelSlices"]) == 53
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
