@@ -110,7 +110,11 @@ against the full catalog for exactly that reason; passing a `{ id }` stub silent
 Two surfaces additionally decline to *offer* what they cannot gate: the Setup Wizard does not list a
 model requiring acknowledgment at all (it has no licence UI, and first-run bulk-queues what is
 ticked), and the Simple UI hands off to the Models screen rather than toasting a refusal the user
-could not act on.
+could not act on. That hand-off covers **both** row kinds: a model row on
+`licenseAcknowledgmentBlocked`, and a LoRA row on the borrowed
+`borrowedLicenseAcknowledgmentBlocked`. The LoRA half matters specifically because Simple renders
+`loraError` nowhere — `createLoraDownloadJob`'s own gate would return null and leave only "Could
+not start the … download", which is the dead end the hand-off exists to avoid.
 
 This flag is deliberately **decoupled from `gated`** (sc-17227). `gated` means "the download needs a
 Hugging Face credential"; `MiniMaxAI/MiniMax-H3` is a **public** repo, so before the decoupling the
