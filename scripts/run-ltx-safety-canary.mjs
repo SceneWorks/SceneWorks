@@ -19,6 +19,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const MAX_FOOTPRINT_BYTES = 53_347_146_863;
 export const MAX_RUNTIME_SECONDS = 1_800;
 export const CHILD_ATTESTATION_TIMEOUT_SECONDS = 30;
+export const CARGO_METADATA_TIMEOUT_MS = 15 * 60 * 1000;
 export const MIN_MEMORY_FREE_PERCENT = 70;
 export const MIN_SWAP_FREE_BYTES = 1024 ** 3;
 export const MIN_PREFLIGHT_FREE_BYTES = MAX_FOOTPRINT_BYTES * 2;
@@ -485,7 +486,7 @@ export async function inferenceCargoSource(
   const metadata = JSON.parse((await execFileAsync(cargo, [
     "metadata", "--locked", "--format-version", "1",
   ], {
-    cwd: ROOT, encoding: "utf8", env: cargoEnv, timeout: 5 * 60 * 1000,
+    cwd: ROOT, encoding: "utf8", env: cargoEnv, timeout: CARGO_METADATA_TIMEOUT_MS,
     maxBuffer: 50 * 1024 * 1024, signal,
   })).stdout);
   const packages = metadata.packages.filter((pkg) =>
