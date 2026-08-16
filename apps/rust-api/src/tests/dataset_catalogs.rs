@@ -28,7 +28,9 @@ fn catalog_scan_hook_test_lock() -> &'static TestSerializationLock {
         // the same work or the wedge detector fires on a legitimately slow
         // scan the budget still allows. Worst legitimate holder is
         // `status_retries_after_a_recovered_generation_exits_incomplete`:
-        // three 80_000-row idle waits plus two 60 s bounded meeting points.
+        // three 80_000-row idle waits (3 x 296 s) plus one 60 s bounded
+        // barrier wait plus 60 s slack for fixture-write, create/preflight
+        // (<=30 s) and request overhead = 1008 s.
         let worst_holder = 3 * catalog_scan_idle_budget(80_000) + Duration::from_secs(120);
         TestSerializationLock::with_max_hold("catalog_scan_hook_test_lock", worst_holder)
     })
@@ -2135,6 +2137,9 @@ async fn shutdown_during_contention_backoff_preserves_paused_resume_boundary() {
     )
     .await;
     assert_eq!(pause_status, StatusCode::OK, "{paused}");
+    // The pause lands almost immediately, so this wait-to-idle resolves in
+    // seconds; 100_000 is the fixture size, used here as a deliberately loose
+    // upper bound rather than a reflection of rows actually scanned.
     wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 100_000).await;
     let (_, durable_pause) = request(
         app.clone(),
