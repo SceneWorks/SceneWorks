@@ -102,30 +102,6 @@ fn krea_control_gate_tier(
     )
 }
 
-/// Build the provider-contract spec from the same artifact identity the strict-control loader receives.
-/// The fit ladder prices adapter bytes separately, but the contract still needs the exact ConvRot +
-/// adapter composition so it cannot authorize a strategy for a different load surface.
-fn krea_control_memory_spec(
-    base: &Path,
-    tier: &str,
-    convrot_dit: Option<&Path>,
-    adapters: &[AdapterSpec],
-) -> gen_core::LoadSpec {
-    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.to_path_buf()));
-    spec = match tier {
-        "q4" => spec.with_quant(gen_core::Quant::Q4),
-        "q8" | "int8-convrot" => spec.with_quant(gen_core::Quant::Q8),
-        _ => spec,
-    };
-    if let Some(convrot_dit) = convrot_dit {
-        spec.text_encoder = Some(gen_core::WeightsSource::File(convrot_dit.to_path_buf()));
-    }
-    if !adapters.is_empty() {
-        spec = spec.with_adapters(adapters.to_vec());
-    }
-    spec
-}
-
 /// Verify that the live request is inside sc-16013's exact rendered-device envelope: 1024² on sm_120,
 /// the pinned shipping base tier, and the pinned default control overlay. Custom/legacy artifacts and
 /// adapters may still run best-effort, but cannot inherit the calibrated hard-reject verdict.
@@ -506,26 +482,6 @@ pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictContr
 }
 
 impl KreaStrictControl {
-    /// Exact artifact set handed to the pinned inference provider. Factoring this out keeps the
-    /// ConvRot identity and its additive adapter stack inseparable at the final load boundary.
-    fn provider_paths(&self) -> runtime_cuda::providers::krea::Krea2ControlPaths {
-        runtime_cuda::providers::krea::Krea2ControlPaths {
-            root: self.base.clone(),
-            convrot_dit: self.convrot_dit.clone(),
-            native_dit: None,
-            control: self.control.clone(),
-            adapters: self.adapters.clone(),
-            // Tier integrity (sc-15799): the branch's tier is a function of the base tier, decided
-            // before the fit ladder runs and identical on every card.
-            branch_tier: self.branch_tier,
-            // Unchunked (full speed) by default; the fit ladder (sc-11745) forces query-row attention
-            // chunking only to bound the denoise activation peak on a constrained card — byte-identical.
-            chunk_attention: self.chunk_attention,
-            // Compatibility-only load field; request-scoped residency is authoritative.
-            offload_policy: gen_core::OffloadPolicy::Resident,
-        }
-    }
-
     /// Build this lane's bespoke request. Split out of [`CandleStrictControl::generate_one`] so the
     /// preview wiring is reachable without a loaded 20 GB provider — see
     /// `candle_strict_control_requests_carry_the_live_preview_sink` in `image_jobs::tests`, which
@@ -602,7 +558,23 @@ impl CandleStrictControl for KreaStrictControl {
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {
-        let paths = self.provider_paths();
+        let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
+            root: self.base.clone(),
+            convrot_dit: self.convrot_dit.clone(),
+            // The worker's control lane pairs the base snapshot (optionally an INT8-ConvRot DiT)
+            // with the pose overlay; the caller-owned native-mmdit DiT route is not plumbed here.
+            native_dit: None,
+            control: self.control.clone(),
+            adapters: self.adapters.clone(),
+            // Tier integrity (sc-15799): the branch's tier is a function of the base tier, decided
+            // before the fit ladder runs and identical on every card.
+            branch_tier: self.branch_tier,
+            // Unchunked (full speed) by default; the fit ladder (sc-11745) forces query-row attention
+            // chunking only to bound the denoise activation peak on a constrained card — byte-identical.
+            chunk_attention: self.chunk_attention,
+            // Compatibility-only load field; request-scoped residency is authoritative.
+            offload_policy: gen_core::OffloadPolicy::Resident,
+        };
         runtime_cuda::providers::krea::Krea2Control::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
         })
@@ -657,10 +629,13 @@ pub(super) async fn generate_candle_krea_control_stream(
     // User LoRA/LoKr adapters ride additively on the frozen base DiT (sc-11721 / candle-gen sc-11720):
     // resolved + path-confined by the shared helper (enforces MAX_JOB_LORAS + `normalize_app_managed_
     // lora_path`), then installed on the base at load — the pose control branch is never adapted.
-    // Pinned inference applies low-rank LoRA/LoKr residuals directly over the immutable ConvRot base
-    // projections as well as the dense/packed base. Keep the resolved stack intact for residency
-    // pricing and for `Krea2ControlPaths`; diff-patch compatibility remains provider-validated.
     let adapters = resolve_adapters(request, settings)?;
+    if convrot_dit.is_some() && !adapters.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Krea 2 INT8-ConvRot pose control does not support LoRA/LoKr or diff-patch adapters"
+                .to_owned(),
+        ));
+    }
     let adapter_bytes =
         gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
             .ok_or_else(|| {
@@ -774,7 +749,12 @@ pub(super) async fn generate_candle_krea_control_stream(
         .await?;
     }
 
-    let memory_spec = krea_control_memory_spec(&base, tier, convrot_dit.as_deref(), &adapters);
+    let mut memory_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()));
+    memory_spec = match tier {
+        "q4" => memory_spec.with_quant(gen_core::Quant::Q4),
+        "q8" | "int8-convrot" => memory_spec.with_quant(gen_core::Quant::Q8),
+        _ => memory_spec,
+    };
     let provider_memory_contract = crate::inference_runtime::media()
         .memory_strategy_contract(KREA_CONTROL_ENGINE_ID, &memory_spec)
         .ok()
@@ -1006,61 +986,6 @@ mod krea_control_tier_reconcile_tests {
             .as_object()
             .unwrap(),
         )
-    }
-
-    #[test]
-    fn convrot_adapter_stack_reaches_memory_contract_and_provider_paths() {
-        let base = PathBuf::from("/nonexistent/krea-bf16-surface");
-        let convrot = PathBuf::from("/nonexistent/krea-int8-convrot.safetensors");
-        let control = PathBuf::from("/nonexistent/krea-control.safetensors");
-        let adapter = AdapterSpec::new(
-            PathBuf::from("/nonexistent/character-lora.safetensors"),
-            0.75,
-            gen_core::AdapterKind::Lora,
-        );
-
-        let memory_spec = krea_control_memory_spec(
-            &base,
-            super::super::tier_resolver::INT8_CONVROT_TIER,
-            Some(&convrot),
-            std::slice::from_ref(&adapter),
-        );
-        assert!(matches!(memory_spec.quantize, Some(gen_core::Quant::Q8)));
-        assert!(matches!(
-            memory_spec.text_encoder.as_ref(),
-            Some(gen_core::WeightsSource::File(path)) if path == &convrot
-        ));
-        assert_eq!(memory_spec.adapters.len(), 1);
-        assert_eq!(memory_spec.adapters[0].path, adapter.path);
-
-        let provider = KreaStrictControl {
-            base: base.clone(),
-            convrot_dit: Some(convrot.clone()),
-            control: control.clone(),
-            adapters: vec![adapter.clone()],
-            branch_tier: Some(gen_core::Quant::Q8),
-            tile_vae_decode: false,
-            chunk_attention: true,
-            stage_residency: false,
-            prompt: "portrait".to_owned(),
-            width: 1024,
-            height: 1024,
-            steps: 8,
-            control_scale: 0.7,
-            text_style_gain: None,
-        };
-        let paths = provider.provider_paths();
-        assert_eq!(paths.root, base);
-        assert_eq!(paths.convrot_dit, Some(convrot));
-        assert_eq!(paths.control, control);
-        assert_eq!(paths.adapters.len(), 1);
-        assert_eq!(paths.adapters[0].path, adapter.path);
-        assert_eq!(paths.adapters[0].scale, 0.75);
-        assert!(matches!(
-            paths.adapters[0].kind,
-            gen_core::AdapterKind::Lora
-        ));
-        assert!(paths.chunk_attention);
     }
 
     #[test]

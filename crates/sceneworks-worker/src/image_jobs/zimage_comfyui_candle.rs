@@ -1,6 +1,6 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries, resolve_adapters,
+    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
     resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
     GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
     Value, WorkerError, WorkerResult,
@@ -147,18 +147,15 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 .to_owned(),
         )
     })?;
-    let adapters = resolve_adapters(request, settings)?;
-    let mut admission_paths = vec![
-        paths.transformer.as_path(),
-        paths.text_encoder.as_path(),
-        paths.vae.as_path(),
-    ];
-    admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
     admit_candle_base_floor(
         &request.model,
         "ComfyUI Z-Image",
         settings,
-        &admission_paths,
+        &[
+            paths.transformer.as_path(),
+            paths.text_encoder.as_path(),
+            paths.vae.as_path(),
+        ],
     )
     .await?;
 
@@ -166,6 +163,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
     let raw_settings = zimage_comfyui_raw_settings(request, steps);
+
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
@@ -188,7 +186,9 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 text_encoder,
                 vae,
                 tokenizer_dir,
-                adapters,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                Vec::new(),
             )
             .map_err(|error| {
                 WorkerError::Engine(format!("ComfyUI Z-Image load failed: {error}"))

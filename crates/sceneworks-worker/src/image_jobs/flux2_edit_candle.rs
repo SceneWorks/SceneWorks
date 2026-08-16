@@ -1,26 +1,13 @@
 use super::{
     admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
-    candle_conditioned_edit_work, consume_gen_events, drive_gen_items_reported, fit_engine_image,
-    load_reference_image, mlx_model, model_repo, pid_effective_dims, pid_output_tier,
-    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    resolve_pid_weights, resolve_quant, resolve_weights_dir, start_gen_stream, ApiClient,
-    CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PromptEnhance, Settings, Value,
-    WorkerError, WorkerResult,
+    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
+    model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
+    resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
+    Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    Path, PathBuf, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
-
-pub(super) fn flux2_edit_adapter_source_bytes(
-    adapters: &[gen_core::AdapterSpec],
-) -> WorkerResult<u64> {
-    gen_core::adapter_stack_resident_bytes(adapters, gen_core::AdapterResidencyMode::Additive)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "FLUX.2 edit cannot determine the resident size of the requested adapter stack."
-                    .to_owned(),
-            )
-        })
-}
 
 // Candle (Windows/CUDA) FLUX.2 image-edit route (sc-5487 klein, epic 5480; sc-7736 dev, epic 6564) —
 // Kontext-style reference-conditioned editing off-Mac via `runtime_cuda::providers::flux2::Flux2Edit`. FLUX.2-klein has
@@ -66,7 +53,8 @@ fn is_flux2_edit_candle_dev(model: &str) -> bool {
 }
 
 /// True for the Klein catalog family that shares the provider implementation. Keeping this
-/// separate from `flux2_dev` keeps family-specific loading behavior explicit.
+/// separate from `flux2_dev` makes the expanded reference-mode surface explicit and prevents the
+/// worker predicate from admitting modes the scheduler intentionally leaves unsupported on dev.
 fn is_flux2_edit_candle_klein(model: &str) -> bool {
     matches!(
         model,
@@ -88,26 +76,15 @@ pub(super) fn is_flux2_edit_candle_model(model: &str) -> bool {
 /// one concrete reference; otherwise it stays off the bespoke route and the generic Klein guard
 /// fails closed instead of silently rendering reference-free text-to-image.
 pub(super) fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
-    let supported_mode = (is_flux2_edit_candle_klein(&request.model)
-        || is_flux2_edit_candle_dev(&request.model))
-        && matches!(
+    let supported_mode = if is_flux2_edit_candle_klein(&request.model) {
+        matches!(
             request.mode.as_str(),
             "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
-        );
-    supported_mode
-        && flux2_edit_candle_pose_carrier_is_absent_or_empty(request)
-        && !flux2_edit_candle_reference_ids(request).is_empty()
-}
-
-/// The FLUX.2 edit provider consumes references but no pose controls. Missing/null/empty preserves
-/// ordinary character/reference edits; any non-empty or malformed pose carrier must stay off this
-/// lane so the control route can consume it or the worker can reject it explicitly.
-fn flux2_edit_candle_pose_carrier_is_absent_or_empty(request: &ImageRequest) -> bool {
-    match request.advanced.get("poses") {
-        None | Some(Value::Null) => true,
-        Some(Value::Array(poses)) => poses.is_empty(),
-        Some(_) => false,
-    }
+        )
+    } else {
+        is_flux2_edit_candle_dev(&request.model) && request.mode == "edit_image"
+    };
+    supported_mode && !flux2_edit_candle_reference_ids(request).is_empty()
 }
 
 /// Resolve the FLUX.2 base snapshot through the **shared** [`resolve_weights_dir`] — the same resolver
@@ -171,13 +148,6 @@ fn flux2_edit_candle_steps(request: &ImageRequest, default: u32) -> u32 {
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the family default
 /// (klein 1.0 / dev 4.0), clamped.
 fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
-    if let Some(value) = request.advanced.get("trueCfgScale").and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        return (value as f32).clamp(0.0, 30.0);
-    }
     resolve_advanced_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
 }
 
@@ -299,8 +269,6 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             "FLUX.2 reference-bearing mode requires a reference image".to_owned(),
         ));
     }
-    let adapters = resolve_adapters(request, settings)?;
-    let adapter_source_bytes = flux2_edit_adapter_source_bytes(&adapters)?;
     // The canonical Klein base is admitted exclusively by the exact shared selector below. The
     // legacy resident-only gate cannot model its bounded rungs and would reject constrained
     // requests before sequential offload/decode/attention/block choices are evaluated. Siblings
@@ -322,7 +290,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             &flux2_base,
             "FLUX.2 edit",
             evidence,
-            adapter_source_bytes,
+            0,
             false,
         )
         .await?;
@@ -361,7 +329,6 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     };
     let mut strategy_spec =
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux2_base.clone()))
-            .with_adapters(adapters.clone())
             .with_offload_policy(gen_core::OffloadPolicy::Sequential);
     strategy_spec.quantize = quant;
     let memory_provider = if is_dev {
@@ -383,7 +350,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
-        adapter_source_bytes,
+        0,
     );
     let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
         memory_provider,
@@ -406,7 +373,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         false,
         raw_budget,
         predicted_peak,
-        adapter_source_bytes,
+        0,
         gen_core::MemoryCacheState::Cold,
     )?;
     if request.model == "flux2_klein_9b" && memory_evaluation.is_none() {
@@ -457,10 +424,12 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     }
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
-    let work = candle_conditioned_edit_work(request);
+    let work: Vec<(i64, String)> = (0..request.count as usize)
+        .map(|index| (resolve_seed(request, index), request.prompt.clone()))
+        .collect();
     let total = work.len();
     let negative = request.negative_prompt.clone();
-    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "flux2_edit",
@@ -468,7 +437,9 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         move || {
             let paths = Flux2EditPaths {
                 root: flux2_base,
-                adapters,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                adapters: Vec::new(),
             };
             let model = if is_dev {
                 match &memory_context {
@@ -499,31 +470,31 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             Ok((model, references, memory_context))
         },
         move |(model, references, memory_context), tx, cancel| {
-            drive_gen_items_reported(
+            drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
                     let req = Flux2EditRequest {
-                        prompt: prompt.clone(),
+                        prompt,
                         negative: negative.clone(),
                         width,
                         height,
                         steps: steps as usize,
                         guidance,
                         seed: seed as u64,
+                        // Caption upsampling (sc-6135) is not threaded into this bespoke edit lane —
+                        // `PromptEnhance::from_advanced` is read only on the registry txt2img path.
+                        // Off + engine defaults keeps the prompt used verbatim, which is what this
+                        // lane has always done.
+                        enhance_prompt: false,
+                        enhance_max_tokens: None,
+                        enhance_temperature: None,
+                        prompt_enhancement: gen_core::PromptEnhancementSink::default(),
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
-                        enhance_prompt: enhance.enabled,
-                        enhance_max_tokens: enhance.max_tokens,
-                        enhance_temperature: enhance.temperature,
-                        prompt_enhancement: if enhance.enabled {
-                            prompt_enhancement.for_prompt(&prompt)
-                        } else {
-                            gen_core::PromptEnhancementSink::default()
-                        },
                         preview: preview.clone(),
                         cancel: cancel.clone(),
                     };
@@ -567,50 +538,4 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         asset_writes,
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn request(advanced: Value, manifest_guidance: Option<f64>) -> ImageRequest {
-        let mut value = json!({
-            "projectId": "p", "model": "flux2_dev", "mode": "character_image",
-            "prompt": "portrait", "referenceAssetId": "ref", "advanced": advanced
-        });
-        if let Some(guidance) = manifest_guidance {
-            value.as_object_mut().unwrap().insert(
-                "modelManifestEntry".to_owned(),
-                json!({ "guidanceScale": guidance }),
-            );
-        }
-        ImageRequest::from_payload(value.as_object().expect("image request object"))
-    }
-
-    #[test]
-    fn guidance_prefers_true_cfg_then_guidance_manifest_and_default() {
-        assert_eq!(
-            flux2_edit_candle_guidance(
-                &request(
-                    json!({ "trueCfgScale": 7.0, "guidanceScale": 2.0 }),
-                    Some(3.0)
-                ),
-                4.0,
-            ),
-            7.0
-        );
-        assert_eq!(
-            flux2_edit_candle_guidance(&request(json!({ "guidanceScale": 2.0 }), Some(3.0)), 4.0),
-            2.0
-        );
-        assert_eq!(
-            flux2_edit_candle_guidance(&request(json!({}), Some(3.0)), 4.0),
-            3.0
-        );
-        assert_eq!(
-            flux2_edit_candle_guidance(&request(json!({}), None), 4.0),
-            4.0
-        );
-    }
 }

@@ -4,11 +4,11 @@ use super::{
     safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use super::{
-    pose_entries, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
-    ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, PathBuf, Progress, QwenFunControl, QwenFunControlPaths,
-    QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
+    pose_entries, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
+    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, QwenFunControl, QwenFunControlPaths, QwenFunControlRequest, Settings, Value,
+    WorkerError, WorkerResult,
 };
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
@@ -337,7 +337,6 @@ pub(super) struct QwenStrictControl {
     steps: u32,
     guidance: f32,
     control_scale: f32,
-    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -352,7 +351,6 @@ pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictContr
         steps: 30,
         guidance: 4.0,
         control_scale: 1.0,
-        adapters: Vec::new(),
     }
 }
 
@@ -414,13 +412,11 @@ impl CandleStrictControl for QwenStrictControl {
     /// The Qwen-Image-2512 base tier dir + the packed 2512-Fun-Controlnet-Union overlay file, exactly
     /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
-        let mut overlays = vec![self.controlnet.as_path()];
-        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "Qwen-Image",
             "strict-pose ControlNet branch",
             &self.qwen_base,
-            &overlays,
+            &[&self.controlnet],
         ))
     }
 
@@ -428,7 +424,9 @@ impl CandleStrictControl for QwenStrictControl {
         let paths = QwenFunControlPaths {
             qwen_base: self.qwen_base.clone(),
             controlnet: self.controlnet.clone(),
-            adapters: self.adapters.clone(),
+            // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+            // performed.
+            adapters: Vec::new(),
         };
         QwenFunControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))
@@ -497,7 +495,6 @@ pub(super) async fn generate_candle_qwen_control_stream(
     let raw_settings =
         qwen_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
 
-    let adapters = resolve_adapters(request, settings)?;
     let provider = QwenStrictControl {
         qwen_base,
         controlnet,
@@ -508,7 +505,6 @@ pub(super) async fn generate_candle_qwen_control_stream(
         steps,
         guidance,
         control_scale,
-        adapters,
     };
 
     run_candle_strict_control(

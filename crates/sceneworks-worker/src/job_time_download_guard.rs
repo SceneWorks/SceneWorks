@@ -3404,14 +3404,46 @@ fn http_client_file_fetch_surfaces_are_registered() {
     }
 }
 
+/// Whether a literal genuinely spans a source line, given its full source slice (opening delimiter
+/// through closing delimiter) and whether it is a raw string.
+///
+/// A `\` at end of line is a **line-continuation escape**: `"one \<newline>    two"` is a
+/// single-line literal that rustfmt has wrapped, and its value carries no newline at all. Counting
+/// those as multi-line is what made [`the_literal_walkers_partition_every_scanned_file_correctly`]
+/// fire on `video_jobs/tests.rs` (sc-19721) with the walkers entirely correct: that file's assert
+/// messages are wrapped that way 100 times, against 2 real multi-line literals. The count is meant
+/// to detect a parity inversion, whose phantom literals absorb REAL CODE and therefore always take
+/// real newlines with them — never continuations — so excluding continuations sharpens the signal
+/// rather than weakening it. Measured over all 332 scanned files: the highest legitimate count falls
+/// from 102 to 59 (`core/catalog_store.rs`'s SQL schemas), while restoring the round-one
+/// char-literal defect still drives `prompt_refine_jobs.rs` to 181, `image_jobs/tests.rs` to 125 and
+/// this module to 112.
+///
+/// Raw strings have no escapes — `r#"a\<newline>b"#` really does span a line — so they are tested
+/// for a bare newline instead of walked.
+fn literal_spans_a_source_line(literal: &[u8], raw: bool) -> bool {
+    if raw {
+        return literal.contains(&b'\n');
+    }
+    let mut index = 0usize;
+    while index < literal.len() {
+        match literal[index] {
+            b'\\' => index += 2,
+            b'\n' => return true,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
 /// What the literal walkers made of one file: `(brace balance, paren balance, lowest brace depth,
-/// number of string literals containing a newline)`.
+/// number of string literals that span a source line)`.
 fn literal_partition_shape(code: &str) -> (i64, i64, i64, usize) {
     let bytes = code.as_bytes();
     let (mut brace, mut paren, mut floor, mut multiline) = (0i64, 0i64, 0i64, 0usize);
     let mut index = 0usize;
-    let note = |slice: &[u8], multiline: &mut usize| {
-        if slice.contains(&b'\n') {
+    let note = |slice: &[u8], raw: bool, multiline: &mut usize| {
+        if literal_spans_a_source_line(slice, raw) {
             *multiline += 1;
         }
     };
@@ -3428,7 +3460,7 @@ fn literal_partition_shape(code: &str) -> (i64, i64, i64, usize) {
         {
             if let Some((_, end)) = crate::architecture_tests::raw_string_parts(bytes, index) {
                 let end = end.min(bytes.len());
-                note(&bytes[index..end], &mut multiline);
+                note(&bytes[index..end], true, &mut multiline);
                 index = end;
                 continue;
             }
@@ -3436,7 +3468,7 @@ fn literal_partition_shape(code: &str) -> (i64, i64, i64, usize) {
         match bytes[index] {
             b'"' => {
                 let end = skip_string(bytes, index).min(bytes.len());
-                note(&bytes[index..end], &mut multiline);
+                note(&bytes[index..end], false, &mut multiline);
                 index = end;
                 continue;
             }
@@ -3474,24 +3506,27 @@ fn literal_partition_shape(code: &str) -> (i64, i64, i64, usize) {
 ///   absorbed into a phantom literal takes its delimiters with it. All 240 files balance exactly
 ///   with the walkers correct, and `core/session_log.rs` goes to `braces=-1` with them broken.
 /// * **COUNT of multi-line literals — the same "many short" fact, used as the detector instead of
-///   treated as an obstacle.** Real multi-line literals are few and long. Measured by this test's own
-///   walk over all 328 scanned files: 128 contain one at all, only 9 exceed 30, and only 3 exceed
-///   50 — 60 (`core/catalog_store.rs`), 54 (`core/jobs_store.rs`), 52 (`worker/video_jobs/tests.rs`),
-///   then 46, 39, 38, 37, 32, 31, 30. Broken `media_jobs.rs` produces **207**, three and a half times
-///   the highest legitimate count in the tree.
+///   treated as an obstacle.** Real multi-line literals are few and long. Counted by
+///   [`literal_spans_a_source_line`], which excludes the `\`-at-end-of-line continuation rustfmt
+///   puts in every wrapped assert message — see its doc for why counting those is what made this
+///   test fire on a correct walk (sc-19721), and for the measurement that the exclusion sharpens the
+///   detector rather than blunting it. Measured by this test's own walk over all 332 scanned files:
+///   the whole tree fits under 60 — 59 (`core/catalog_store.rs`'s SQL schemas), 50
+///   (`core/jobs_store.rs`), 40 (`rust-api/tests/catalog.rs`), 33 (`rust-api/tests/jobs.rs`), then
+///   13, 12, 6, 6, 5 — while `worker/video_jobs/tests.rs`, the file that tripped the old predicate
+///   at 102, sits at 2. Restoring the round-one char-literal defect produces **181**
+///   (`prompt_refine_jobs.rs`), 125 (`image_jobs/tests.rs`) and 112 (THIS module).
 ///
-///   THIS module is currently fifth-highest at 39 and has grown every round, its fixtures being
-///   multi-line source snippets. The failure message reports the real worst offender rather than
-///   trusting the number written here, so the ceiling can be re-judged from output instead of prose.
+///   The failure message reports the real worst offender rather than trusting the number written
+///   here, so the ceiling can be re-judged from output instead of prose.
 ///
 /// Measured deliberately BEFORE [`strip_cfg_test_items`], over every `.rs` file rather than only the
 /// production ones: `rustc` guarantees the whole file's shape, so keeping cfg-stripping out of the
 /// comparison leaves this a statement about the literal walkers alone.
 #[test]
 fn the_literal_walkers_partition_every_scanned_file_correctly() {
-    // Legitimate maximum is 60; the observed failure is 207. Sitting between them leaves 1.67x of
-    // room for a genuinely fixture-heavy new file — this module itself is at 39 and still growing —
-    // without leaving room for an inversion.
+    // Legitimate maximum is 59; the round-one defect reaches 181. Sitting between them leaves 1.69x
+    // of room for a genuinely fixture-heavy new file without leaving room for an inversion.
     const MAX_MULTILINE_LITERALS: usize = 100;
     let mut broken: Vec<String> = Vec::new();
     let mut scanned = 0usize;

@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
+    "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -193,6 +193,11 @@
     {
       "id": "mage_flow_turbo",
       "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "minimax_h3",
+      "modality": "video",
       "supportsPreview": false
     },
     {
