@@ -413,14 +413,18 @@ async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
 // neighbor's live probes can zero PEAK mid-measurement (via the draining reset) or
 // spuriously satisfy `peak > 1` — flakes that only surface on the slow hosted macos-26
 // runners (sc-17723). Same pattern as dataset_catalogs.rs's catalog_scan_hook_test_lock.
-fn catalog_probe_test_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+fn catalog_probe_test_lock() -> &'static TestSerializationLock {
+    static LOCK: std::sync::OnceLock<TestSerializationLock> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| TestSerializationLock::new("catalog_probe_test_lock"))
+}
+
+async fn lock_catalog_probes() -> TestSerializationGuard<'static> {
+    catalog_probe_test_lock().acquire().await
 }
 
 #[tokio::test]
 async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
-    let _probe_guard = catalog_probe_test_lock().lock().await;
+    let _probe_guard = lock_catalog_probes().await;
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -758,7 +762,7 @@ async fn concurrent_failed_estimate_is_shared_and_retries_after_negative_ttl_exp
 
 #[tokio::test]
 async fn models_catalog_starts_install_sweep_before_size_estimation_completes() {
-    let _probe_guard = catalog_probe_test_lock().lock().await;
+    let _probe_guard = lock_catalog_probes().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -820,7 +824,7 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
 
 #[tokio::test]
 async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
-    let _probe_guard = catalog_probe_test_lock().lock().await;
+    let _probe_guard = lock_catalog_probes().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");

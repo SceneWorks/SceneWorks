@@ -544,10 +544,13 @@ fn huggingface_repo_from_url(url: &str) -> Option<String> {
 /// bypass named, and a primary-only index would have missed it.
 ///
 /// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
-/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is `platforms:
-/// ["macos"]` — so an index built from the snapshot would be EMPTY on Linux/Windows and the gate
-/// would evaporate on exactly the hosts where the LAN-exposed jobs API (epic 4484) is most likely
-/// to be reachable. A licence requirement is not a platform capability.
+/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is platform-scoped: the
+/// MLX tiers and their co-requisites are `platforms: ["macos"]` and sc-19558's raw-snapshot set is
+/// `platforms: ["windows", "linux"]`. An index built from the snapshot would therefore see only the
+/// subset that survived the filter on the running host, and the gate would be keyed on a partial
+/// view of the repos an entry can actually fetch — on exactly the hosts where the LAN-exposed jobs
+/// API (epic 4484) is most likely to be reachable. A licence requirement is not a platform
+/// capability.
 async fn license_acknowledgment_repo_index(
     state: &AppState,
 ) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
@@ -5086,18 +5089,29 @@ mod model_size_concurrency_tests {
         // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
         // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
         // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
-        // `(repo, files)` still separates them and macOS gains exactly two: 86 → 88. Windows/Linux
-        // gain NOTHING and stay at 84: every MiniMax-H3 download row is `platforms: ["macos"]`
-        // (the candle lane has no H3 provider yet — sc-19008 → sc-17156), so
-        // `retain_downloads_for_os` empties both entries there and `model_download_context`
-        // yields `None`. That asymmetry is the point of running this loop per OS.
+        // `(repo, files)` still separates them and macOS gains exactly two. Windows/Linux gained
+        // NOTHING at the time: every MiniMax-H3 download row was `platforms: ["macos"]`, so
+        // `retain_downloads_for_os` emptied both entries there and `model_download_context` yielded
+        // `None`. That asymmetry is the point of running this loop per OS.
         //
-        // macOS 88 is this sync's three-way result, not either side's: the epic branch read 89
-        // (87 + 2 for the H3 pair) and main read 86 (87 − 1 for the AuraSR retirement). Both
-        // deltas apply, so 87 − 1 + 2 = 88. Neither conflict side was correct on its own.
+        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
+        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
+        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
+        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
+        // windows/linux gain exactly one. `minimax_h3_ref` deliberately gained no off-Mac row
+        // (candle default-denies `ref2va`), which is why that is +1 and not +2.
+        //
+        // THE NUMBERS BELOW ARE THE SYNC MERGE'S, not any single side's. Starting from the shared
+        // 87 / 84 / 84, four independent deltas all apply:
+        //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
+        //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
+        //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
+        //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
+        // giving 88 / 85 / 85. Each side read only its own pair and so read 86/84/84 (main) or
+        // 89/85/85 (epic); neither was right once both landed.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 88_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 88_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

@@ -961,21 +961,31 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     //
     // Every candle column is false, and that is a statement about the LANE rather than about VRAM.
     //
-    // sc-17156 landed a real candle t2va + fl2va generator (`candle-gen-minimax-h3`, registered in
-    // `candle-gen-catalog`) and gave `minimax_h3` a `candle` block, so the OLD reason for these
-    // columns — "there is no candle code" — no longer holds. They stay false for a different and
-    // still-sufficient reason: **there is nothing off-Mac to install.** Every download row is
-    // `platforms: ["macos"]` and the hosted tiers are MLX-packed by the MLX lane's `convert`, while
-    // the candle provider advertises `supported_quants: &[]`, has no tier loader, and reads a raw
-    // upstream `MiniMaxAI/MiniMax-H3` snapshot this catalog hosts no row for. Flipping a column here
-    // would route a job to a lane that cannot obtain weights — reachability without an artifact,
-    // which is the GH #2074 shape inverted.
+    // TWO of the three historical reasons are now DISCHARGED, and the columns still stay false on
+    // the third. Recorded as a ledger rather than rewritten in place, because each was cited as
+    // sufficient on its own and a reader needs to know which one is actually load-bearing today:
     //
-    // `minimax_h3_ref` additionally has no candle path at all: `ref2va` is default-denied at the
-    // provider's conditioning allowlist until sc-17157 ports `transformer_ref`.
+    //   * "there is no candle code" — DISCHARGED by sc-17156: `candle-gen-minimax-h3` is a real
+    //     end-to-end t2va + fl2va generator registered in `candle-gen-catalog`, and `minimax_h3`
+    //     carries a `candle` block.
+    //   * "there is nothing off-Mac to install" — DISCHARGED by sc-19558: `minimax_h3` now declares
+    //     a `platforms: ["windows", "linux"]` raw-snapshot download set (transformer + text encoder
+    //     + both VAEs + the FL2VA audio-VAE config triple, 144.6 GB from the public
+    //     `MiniMaxAI/MiniMax-H3` at the same pinned revision the macOS co-requisites use). That is
+    //     exactly the layout `REQUIRED_COMPONENT_DIRS` reads, so the weights are obtainable.
+    //     `candle_video_routed_models_have_an_installable_off_mac_download` binds this column to
+    //     that row set: flip it with no off-Mac row and the test goes red.
+    //   * **STILL OPEN, and why these stay false:** there is no candle DISPATCH ARM and no measured
+    //     ceiling. `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is
+    //     `#[cfg(target_os = "macos")]` end to end — `generate_minimax_h3` does not exist off-Mac —
+    //     and the manifest's `candle` block is `measured: false` with no `vramGbByTier` and no
+    //     `minMemoryGb`. Flipping a column today would route a job to a lane with weights and no
+    //     renderer, which is the GH #2074 shape inverted.
     //
-    // What flips these columns is a downloadable candle artifact plus the measured VRAM ceiling the
-    // `candle` block currently omits (`measured: false`) — not the existence of the generator.
+    // `minimax_h3_ref` is further behind still and its off-Mac gap is not merely unfinished: `ref2va`
+    // is DEFAULT-DENIED at the candle provider's conditioning allowlist until sc-17157 ports
+    // `transformer_ref`, which is why sc-19558 deliberately gave it no off-Mac download rows either.
+    //
     // Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
     VideoModelCaps::new("minimax_h3", true, false, false, false),
     VideoModelCaps::new("minimax_h3_ref", true, false, false, false),

@@ -19,9 +19,13 @@ use tower::ServiceExt as _;
 
 use super::support::*;
 
-fn catalog_scan_hook_test_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+fn catalog_scan_hook_test_lock() -> &'static TestSerializationLock {
+    static LOCK: OnceLock<TestSerializationLock> = OnceLock::new();
+    LOCK.get_or_init(|| TestSerializationLock::new("catalog_scan_hook_test_lock"))
+}
+
+async fn lock_catalog_scan_hook() -> TestSerializationGuard<'static> {
+    catalog_scan_hook_test_lock().acquire().await
 }
 
 async fn wait_for_catalog_scan_idle(
@@ -147,7 +151,7 @@ fn cached_materialization_record(
 
 #[tokio::test]
 async fn materialization_replaces_invalid_cache_deterministically_and_survives_catalog_deletion() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let catalog_root = temporary.path().join("materialize-catalog");
@@ -442,7 +446,7 @@ async fn materialization_replaces_invalid_cache_deterministically_and_survives_c
 
 #[tokio::test]
 async fn materialization_none_policy_allows_identical_verified_content() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let catalog_root = temporary.path().join("duplicate-catalog");
@@ -531,7 +535,29 @@ async fn materialization_none_policy_allows_identical_verified_content() {
 
 #[tokio::test]
 async fn timed_out_cache_verifier_cannot_overwrite_its_deterministic_replacement() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
+    timed_out_cache_verifier_case(Duration::ZERO).await;
+}
+
+/// sc-19764. Same case, but the staging verifier is stalled past the hooked
+/// candidate's budget so the budget expires BEFORE the `before_stage` meeting
+/// point — the ordering a loaded CI runner produces on its own.
+///
+/// The timeout signal used to be a two-party barrier wait taken on the
+/// materialization future's own thread, i.e. on the test's current-thread
+/// runtime. In this ordering the control side has not parked yet and can only
+/// get there by being polled by that same, now-blocked runtime: the test wedged
+/// permanently, still holding `catalog_scan_hook_test_lock`, and took every
+/// later user of that lock down with it. On PR #2346 that surfaced as 594 of
+/// 597 tests printing and then 21 silent minutes into the 30-minute
+/// `parity-rust` cap.
+#[tokio::test]
+async fn timed_out_cache_verifier_survives_a_budget_that_expires_before_the_stage_rendezvous() {
+    let _hook_guard = lock_catalog_scan_hook().await;
+    timed_out_cache_verifier_case(Duration::from_millis(400)).await;
+}
+
+async fn timed_out_cache_verifier_case(verifier_delay: Duration) {
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let catalog_root = temporary.path().join("late-cache-catalog");
@@ -580,7 +606,7 @@ async fn timed_out_cache_verifier_cannot_overwrite_its_deterministic_replacement
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
-    let control = crate::catalogs::install_catalog_cache_stage_test_hook();
+    let control = crate::catalogs::install_catalog_cache_stage_test_hook(verifier_delay);
     let materialization = tokio::spawn(async move {
         request(
             app,
@@ -1683,7 +1709,7 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
 
 #[tokio::test]
 async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 100_000);
@@ -1777,7 +1803,7 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
 
 #[tokio::test]
 async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
@@ -1902,7 +1928,7 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
 
 #[tokio::test]
 async fn transient_sqlite_contention_retries_and_completes_exactly() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 1_000);
@@ -1949,7 +1975,7 @@ async fn transient_sqlite_contention_retries_and_completes_exactly() {
 
 #[tokio::test]
 async fn exhausted_sqlite_contention_is_visible_and_actionable() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 10);
@@ -1996,7 +2022,7 @@ async fn exhausted_sqlite_contention_is_visible_and_actionable() {
 
 #[tokio::test]
 async fn shutdown_during_contention_backoff_preserves_paused_resume_boundary() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
@@ -2086,7 +2112,7 @@ async fn shutdown_during_contention_backoff_preserves_paused_resume_boundary() {
 
 #[tokio::test]
 async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoint() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 30_000);
@@ -2137,7 +2163,7 @@ async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoi
 
 #[tokio::test]
 async fn status_retries_after_a_recovered_generation_exits_incomplete() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 80_000);
@@ -2220,7 +2246,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
 
 #[tokio::test]
 async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 30_000);
@@ -2317,7 +2343,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
 
 #[tokio::test]
 async fn transient_prestart_read_lease_cannot_strand_scheduled_processing() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 1_000);
@@ -2769,7 +2795,7 @@ async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint(
 
 #[tokio::test]
 async fn resume_waits_through_long_prestart_lease_contention_and_completes() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 1_000);
@@ -2859,7 +2885,7 @@ async fn resume_waits_through_long_prestart_lease_contention_and_completes() {
 
 #[tokio::test]
 async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 100);
@@ -2979,7 +3005,7 @@ async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
 
 #[tokio::test]
 async fn new_appstate_recovers_after_shutdown_lease_contention_clears() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
@@ -3172,7 +3198,7 @@ async fn invalid_or_missing_persisted_recovery_plan_fails_once_without_launch_lo
 
 #[tokio::test]
 async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
@@ -3255,7 +3281,7 @@ async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
 
 #[tokio::test]
 async fn cancellation_while_waiting_for_global_scan_permit_is_restartable() {
-    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let _hook_guard = lock_catalog_scan_hook().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
