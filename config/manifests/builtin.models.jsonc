@@ -13166,11 +13166,15 @@
           "subdir": "vae",
           "files": ["vae/*"],
           "platforms": ["macos"],
-          // Dense bf16 in EVERY tier (the Wan precedent) — no `variant`, because this is a floor no
-          // tier shrinks. Say so here so nobody later "optimizes" a tier expecting it to move. Its
+          // Dense in EVERY tier (the Wan precedent) — no `variant`, because this is a floor no tier
+          // shrinks. Say so here so nobody later "optimizes" a tier expecting it to move. Its
           // decoder is a 36-layer TRANSFORMER, not a conv stack, which is why decode is unusually
           // expensive for a VAE.
-          "estimatedSizeBytes": 10415634127
+          // ⚠️ The published component is **F32, all 703 tensors** — not bf16. Earlier copy in this
+          // repository said "dense bf16", and the correction matters because it changes what a
+          // loader at f32 costs: loading it at f32 is a NO-OP CAST, not a doubling. Measured from
+          // the safetensors headers of `MiniMaxAI/MiniMax-H3@939557dc` (sc-19506).
+          "estimatedSizeBytes": 10415635127
         },
         {
           "provider": "huggingface",
@@ -13181,15 +13185,18 @@
           "subdir": "audio_vae",
           "files": ["audio_vae/*"],
           "platforms": ["macos"],
-          // 32 kHz stereo, 40 Hz token rate. Also dense in every tier.
+          // 32 kHz stereo, 40 Hz token rate. Also dense in every tier, and also **F32** (all 1087
+          // tensors) rather than bf16 — same correction as the video VAE above.
           "estimatedSizeBytes": 605431611
         },
-        // --- sc-19573: the two remaining paths `mlx-gen-minimax-h3::load` OPENS and the catalog did
-        // not declare. Both are tier-agnostic, both come from the same pinned upstream snapshot as
-        // the VAEs, and both are tiny — a `coRequisite` is a PRE-DOWNLOAD WEIGHTS FLOOR, so an entry
-        // that omits a probed path is declaring an install that cannot load. Their names are pinned
-        // against the runtime probe list by `minimax_h3_downloads_cover_every_path_the_loader_probes`
-        // in crates/sceneworks-core/src/builtin_manifests.rs, which reads
+        // --- sc-19558 / sc-19573: the two remaining paths `mlx-gen-minimax-h3::load` OPENS and the
+        // catalog did not declare. Both are tier-agnostic, both come from the same pinned upstream
+        // snapshot as the VAEs, and both are tiny — a `coRequisite` is a PRE-DOWNLOAD WEIGHTS FLOOR,
+        // so an entry that omits a probed path is declaring an install that cannot load. Their names
+        // are pinned against the runtime probe list from BOTH sides: by
+        // `minimax_h3_downloads_cover_every_path_the_loader_probes` in
+        // crates/sceneworks-core/src/builtin_manifests.rs and by
+        // `minimax_h3_macos_download_set_covers_every_probed_shared_file` in the worker, each reading
         // `mlx_tier_completeness::MINIMAX_H3_*` rather than a second hand-copied list.
         {
           "provider": "huggingface",
@@ -13198,6 +13205,17 @@
           "coRequisite": true,
           "componentId": "tokenizer",
           "subdir": "tokenizer",
+          // ⚠️ sc-19558 CORRECTION — THIS ROW DID NOT EXIST, AND ITS ABSENCE MADE THE WHOLE FAMILY
+          // UNLOADABLE ON A FRESH INSTALL. `mlx-gen-minimax-h3::load` probes
+          // `<root>/tokenizer/tokenizer.json` on every load, and
+          // `mlx_tier_completeness::minimax_h3_shared_is_complete` mirrors that probe AS A FILE — but
+          // no macOS row supplied the directory, so a manifest-driven install of ANY tier failed the
+          // gate before it reached the loader. `minimax_h3_macos_download_set_covers_every_probed_
+          // shared_file` binds the two together so a future probe added on one side goes red on the
+          // other.
+          //
+          // No `variant`: the tokenizer is dense and identical in every tier, so it is a floor no
+          // tier shrinks — the `video_vae` / `audio_vae` shape, not the per-tier `text_encoder` one.
           "files": ["tokenizer/*"],
           "platforms": ["macos"],
           // 4 files: tokenizer.json, tokenizer_config.json, vocab.json, merges.txt. Measured
@@ -13210,18 +13228,32 @@
           "repo": "MiniMaxAI/MiniMax-H3",
           "revision": "939557dc319dd91227e30195a763f272ba7f8765",
           "coRequisite": true,
-          "platforms": ["macos"],
-          // ⚠️ THREE FILES, NOT `FL2VA/audio_vae/*`. The directory also holds a 605,429,308 B
-          // `model.safetensors` that is the SAME audio VAE already fetched by the `audio_vae` row
-          // above, plus nine `.py` modules no Rust engine can execute — globbing it would double the
-          // audio VAE for 2,504 B of constructor arguments. No `componentId`: the engine opens these
-          // by path under `spec.weights`, the way the PiD-gemma / Wan-Lightning shared weights are
-          // fetched, rather than as a staged named component.
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // ⚠️ sc-19558 CORRECTION — the second half of the same gap. `load` probes all THREE of
+          // `FL2VA/audio_vae/{config.json,config.yaml,metadata.json}`, and both `decode_audio` and
+          // `load_audio_encoder` parse them for the audio VAE's constructor arguments; the
+          // repackaged root config carries none of them. No macOS row supplied them either.
+          //
+          // ONLY the three documents, NOT `FL2VA/audio_vae/*`. That glob would also pull
+          // `model.safetensors` — 605,429,308 B of audio-VAE weights that are a near-duplicate of
+          // the `audio_vae/` row above, which is where the MLX lane actually reads its weights
+          // (`Weights::from_dir(self.root.join("audio_vae"))`) — plus nine `.py` modules no Rust
+          // engine can execute, doubling the audio VAE for 2,504 B of constructor arguments. The
+          // off-Mac row below DOES glob the directory, because candle's `load_audio_vae` reads the
+          // component from there. Different engines, different read patterns, so different file
+          // lists rather than one copied twice.
+          //
+          // `componentId` IS declared here (sc-19558), unlike the pre-merge sc-19573 row: it pairs
+          // this with the `platforms: ["windows","linux"]` row of the same id below, exactly as the
+          // `text_encoder` / `video_vae` / `audio_vae` rows pair, so `install_state_for` tracks one
+          // component per platform rather than an unnamed by-path fetch on one side only.
           "files": [
             "FL2VA/audio_vae/config.json",
             "FL2VA/audio_vae/config.yaml",
             "FL2VA/audio_vae/metadata.json"
           ],
+          "platforms": ["macos"],
           // 1,973 + 91 + 440, measured at the pinned revision.
           "estimatedSizeBytes": 2504
         },
@@ -13272,8 +13304,131 @@
           "files": ["bf16/transformer_ref/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 66280569250
+        },
+
+        // ── THE OFF-MAC (candle) ARTIFACT SET — sc-19558 ────────────────────────────────────────
+        //
+        // WHAT THIS IS. `candle-gen-minimax-h3` reads a RAW UPSTREAM SNAPSHOT: its
+        // `REQUIRED_COMPONENT_DIRS` is `["text_encoder", "transformer", "vae", "audio_vae"]` off one
+        // root (`candle-gen-minimax-h3/src/model.rs`), plus the optional `FL2VA/audio_vae/` config
+        // triple its `load_audio_vae` prefers over the declared defaults. These five rows are that
+        // set, from MiniMax's OWN public repo at the SAME pinned revision the macOS co-requisites
+        // above already use. Nothing is re-hosted and nothing new has to be published.
+        //
+        // WHY NOT THE OTHER TWO OPTIONS — recorded so they are not re-litigated:
+        //   * A candle-packed REHOST was rejected twice over. It is an outward-facing publish (not
+        //     something this repository can land), and it would have no consumer if it existed:
+        //     the candle provider declares `supported_quants: &[]` and has no tier loader, so a
+        //     packed tier is bytes nothing would select.
+        //   * A candle TIER LOADER over the MLX-packed tiers (the Mochi `.scales`-detect
+        //     precedent) was rejected because it does not solve this problem. The tiers hold only
+        //     `transformer/` and `transformer_ref/` — the text encoder and both VAEs are NOT in
+        //     `SceneWorks/minimax-h3-mlx` at all and would still have to come from upstream — so a
+        //     tier loader would buy one component of five while adding engine work and a
+        //     real-weights validation run. It is also blocked on sc-19517: that repo publishes no
+        //     `q4/transformer_ref` and its `bf16/transformer/` is incomplete.
+        //
+        // ⚠️ WHAT THESE ROWS DO **NOT** DO. They make the weights OBTAINABLE off-Mac. They do not
+        // by themselves make the lane serve a job, and `VIDEO_MODEL_CAPS` still carries every candle
+        // column false for both partitions. TWO preconditions remain, and both are named here so
+        // the next reader does not mistake an artifact for a route:
+        //   1. the candle block's `measured: false` — there is no measured VRAM ceiling for this
+        //      lane (`vramGbByTier` / `minMemoryGb` are deliberately absent below); and
+        //   2. `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is `#[cfg(target_os =
+        //      "macos")]` end to end, so there is no candle dispatch arm to route to yet.
+        // `candle_video_routed_models_have_an_installable_off_mac_download`
+        // (crates/sceneworks-core/src/jobs_store/tests/mlx_routing_tests.rs) is the guard for the
+        // weights half: flip a candle column with no row here and it goes red.
+        //
+        // NO `variant` ON ANY OF THESE. The candle provider advertises `supported_quants: &[]`, so
+        // there is no tier axis off-Mac and a `variant` would advertise a choice nothing can honour.
+        // Sizes are EXACT `os.stat` totals over the pinned snapshot with symlinks dereferenced,
+        // measured 2026-08-15; they sum to 144,633,607,972 B (134.7 GiB).
+        //
+        // ⚠️ THE METHOD MATTERS, because the first pass got one row wrong. A hub snapshot dir holds
+        // repository content as SYMLINKS into `blobs/`; anything else in it is a local dropping.
+        // Only symlinked entries are counted here. A recursive walk that stats every regular file
+        // too swept a `__pycache__/` of 8 `*.cpython-314.pyc` files (43,291 B) into the
+        // `FL2VA/audio_vae` row — see that row below, which carries the correction. The stated total
+        // was 144,633,651,263 B for exactly that reason and is now the symlink-only figure.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "files": ["transformer/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 66280569250,
+          "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          // ⚠️ ALL FOURTEEN SHARDS, unlike the macOS bf16 row above, which omits shard 13. That
+          // omission is licensed by the MLX engine's own `TE_SHARDS` / `VISION_SHARD` read pattern;
+          // no equivalent has been established for `candle-gen-minimax-h3`, so this row fetches the
+          // whole component rather than inheriting a trim it cannot cite.
+          "files": ["text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 66726510529
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "video_vae",
+          "subdir": "vae",
+          "files": ["vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 10415635127
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "audio_vae",
+          "subdir": "audio_vae",
+          "files": ["audio_vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 605431611
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // The reference's OWN `from_pretrained` inputs — the `config.json` / `config.yaml` /
+          // `metadata.json` triple `load_audio_vae` reads when present. It falls back to declared
+          // defaults when absent, so this is not load-bearing for a render; it is fetched so the
+          // off-Mac lane constructs the audio VAE from the same documents the reference does rather
+          // than from a fallback. macOS has no such row because the MLX audio VAE does not read it.
+          "files": ["FL2VA/audio_vae/*"],
+          "platforms": ["windows", "linux"],
+          // 13 files. NOT 605,504,746 — that figure was a mis-measurement, corrected here: the
+          // measuring walk was recursive and swept up a local `__pycache__/` of 8 `*.pyc` files
+          // (43,291 B) that a Python import of the vendored `dac_*.py` modules had left in the
+          // snapshot dir hours after the download. Those are local droppings, not repository
+          // content — they are regular files, while every real snapshot entry is a symlink into
+          // `blobs/`. See the measurement note above the first row for the method that excludes
+          // them.
+          "estimatedSizeBytes": 605461455
         }
       ],
+      // ⚠️ NOT PLATFORM-SCOPED, and off-Mac it names a repo with no surviving rows (sc-19558).
+      // `paths` has no `platforms` axis — it is one value per entry — while the off-Mac primary
+      // above is `MiniMaxAI/MiniMax-H3`. On Windows/Linux this therefore points at the MLX rehost,
+      // which those platforms never fetch. INERT TODAY: nothing off-Mac reads it, because the candle
+      // columns in `VIDEO_MODEL_CAPS` are all false and there is no H3 arm in the candle ladder, so
+      // no off-Mac code path resolves this value. Recorded rather than silently left, because the
+      // change that flips a candle column must either scope this key or teach the off-Mac lane to
+      // resolve the upstream snapshot the way `resolve_minimax_h3_load` resolves the macOS one.
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
       },
@@ -13431,14 +13586,15 @@
       // `measured: false` is therefore load-bearing rather than decorative: it is the schema's own
       // way of saying this lane's ceilings are not evidence yet.
       //
-      // THE DOWNLOADS STAY `macos`-ONLY, and this block does not change that. The hosted tiers are
-      // MLX-packed by the MLX lane's `convert`, and the candle provider advertises
-      // `supported_quants: &[]` with no tier loader — it reads a raw upstream `MiniMaxAI/MiniMax-H3`
-      // snapshot instead, which this catalog hosts no row for. So there is nothing for a Windows or
-      // Linux user to install, which is why `VIDEO_MODEL_CAPS` still carries every candle column
-      // false for both partitions. A `candle` block is metadata about a backend; the routing catalog
-      // is the authority on which lane serves a request, and the two agree today that this one does
-      // not (GH #2074 — declaration is not reachability).
+      // ⚠️ THE DOWNLOADS ARE NO LONGER `macos`-ONLY — sc-19558 added the `platforms:
+      // ["windows", "linux"]` raw-snapshot set above, which is the layout this provider's
+      // `REQUIRED_COMPONENT_DIRS` reads. THE ROUTING COLUMNS DID NOT MOVE WITH THEM. A `candle`
+      // block is metadata about a backend; the routing catalog is the authority on which lane serves
+      // a request (GH #2074 — declaration is not reachability), and `VIDEO_MODEL_CAPS` still carries
+      // every candle column false for both partitions because the two open items above — no measured
+      // ceiling, and no candle dispatch arm in `crates/sceneworks-worker/src/video_jobs/
+      // minimax_h3.rs`, which is `#[cfg(target_os = "macos")]` end to end — are unchanged. Obtaining
+      // weights is a precondition of routing, not routing.
       "candle": {
         // Provable, and structural rather than requested: the provider pins
         // `OFFLOAD_POLICY = OffloadPolicy::Sequential` and ignores `spec.offload_policy` entirely,
@@ -13686,7 +13842,9 @@
           "subdir": "vae",
           "files": ["vae/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 10415634127
+          // Byte-identical to `minimax_h3`'s row — see it for the F32 correction and the
+          // measurement this figure comes from.
+          "estimatedSizeBytes": 10415635127
         },
         {
           "provider": "huggingface",
@@ -13699,8 +13857,8 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 605431611
         },
-        // sc-19573 — see `minimax_h3` for the derivations. These rows are byte-identical to that
-        // entry's, which is what keeps the shared floor a single download for the pair.
+        // sc-19558 / sc-19573 — see `minimax_h3` for the derivations. These rows are byte-identical
+        // to that entry's, which is what keeps the shared floor a single download for the pair.
         {
           "provider": "huggingface",
           "repo": "MiniMaxAI/MiniMax-H3",
@@ -13708,6 +13866,11 @@
           "coRequisite": true,
           "componentId": "tokenizer",
           "subdir": "tokenizer",
+          // sc-19558 CORRECTION, identical to `minimax_h3`'s new row — see it for why the absence
+          // of this row made a fresh install of EITHER entry fail `minimax_h3_shared_is_complete`
+          // before the loader was reached. Declared per entry because the download set is per
+          // catalog id: installing only Ref2VA must still bring every shared component the engine
+          // probes.
           "files": ["tokenizer/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 11492078
@@ -13717,12 +13880,17 @@
           "repo": "MiniMaxAI/MiniMax-H3",
           "revision": "939557dc319dd91227e30195a763f272ba7f8765",
           "coRequisite": true,
-          "platforms": ["macos"],
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // sc-19558 CORRECTION — same three documents, same reason. They matter MORE on this
+          // partition: ref2va is the only route that constructs `MiniMaxH3AudioVaeEncoder`, and
+          // `load_audio_encoder` parses this same triple for its geometry.
           "files": [
             "FL2VA/audio_vae/config.json",
             "FL2VA/audio_vae/config.yaml",
             "FL2VA/audio_vae/metadata.json"
           ],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 2504
         },
         // sc-19573 — THE SIBLING DiT PARTITION, mirrored. This entry's primary is `transformer_ref/`,
@@ -13758,6 +13926,12 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 66280569250
         }
+        // NO OFF-MAC ROWS HERE, and that is deliberate rather than an omission (sc-19558).
+        // `minimax_h3` gained a `platforms: ["windows", "linux"]` raw-snapshot set because
+        // `candle-gen-minimax-h3` implements t2va + fl2va. This partition is Ref2VA, and the candle
+        // provider DEFAULT-DENIES `ref2va` at its conditioning allowlist until sc-17157 ports
+        // `transformer_ref`, so an off-Mac row here would advertise weights for a mode the only
+        // off-Mac engine refuses. Add the rows in the same change that lands the port, not before.
       ],
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"

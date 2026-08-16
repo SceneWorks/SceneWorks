@@ -75,8 +75,12 @@ The repo-keyed half is what closes the generic queue route, which enqueues `job_
 payload with no catalog lookup between the request and Hugging Face. Its index is built from
 `downloads[].repo` across **every** entry declaring the flag, **including co-requisite rows** —
 MiniMax-H3's shared text encoder and both VAEs come from `MiniMaxAI/MiniMax-H3` itself — and from
-the **unfiltered** manifest, because every H3 download row is `platforms: ["macos"]` and an
-OS-filtered index would leave the gate absent on Linux and Windows. Repo keys are compared
+the **unfiltered** manifest, because every H3 download row is platform-scoped — the MLX tiers and
+their co-requisites to `["macos"]`, sc-19558's raw upstream snapshot set to `["windows", "linux"]` —
+so an OS-filtered index would only ever see the subset that survived `retain_downloads_for_os` on
+the running host. A licence requirement is not a platform capability, which is what
+`license_acknowledgment_repo_index` (`apps/rust-api/src/models.rs`) says at the seam. Repo keys are
+compared
 case-insensitively, and a trailing `.git` — the git-remote spelling of the same repository, which
 passes the worker's `validate_hf_repo_id` — is stripped before the comparison.
 
@@ -228,14 +232,16 @@ the model card (`.model-card-attribution`). §IV.2 requires the exact string *Mi
 hyphenated product name `MiniMax-H3` does not contain it, which is why the attribution is a separate
 field rather than an assumption about the model's display name.
 
-**This is not the whole obligation.** §IV.2 says "prominently display … on the user interface", and
-the Models card is one screen a user may never revisit after installing. The **generation
-surfaces** — Video Studio, the Simple UI's video studio, the queue and the asset detail view — are
-where the model is actually used, and they do not carry the attribution today. Landing it there is
-**sc-17161**'s work (the user-facing lane for the family), and it is a precondition for shipping,
-not an optional extra: until it lands, §IV.2 is discharged only on the Models screen. The manifest
-field is already the single source, so those surfaces read `model.ui.attribution` rather than
-hard-coding a second copy.
+**The Models card is not the whole obligation, and it is no longer the only place this renders.**
+§IV.2 says "prominently display … on the user interface", and the Models card is one screen a user
+may never revisit after installing. **sc-17161** landed the attribution on the generation surfaces
+too: `ModelAttribution` (`apps/web/src/components/ModelAttribution.jsx`) is rendered by Video Studio
+(`apps/web/src/screens/VideoStudio.jsx`), the Simple UI's video studio
+(`apps/web/src/simple/SimpleVideoStudio.jsx`), the queue
+(`apps/web/src/components/WorkerProgressCard.jsx`) and the asset detail view
+(`apps/web/src/components/assetPanels.jsx`). The manifest field is the single source — those
+surfaces read `model.ui.attribution` rather than hard-coding a second copy, which is what
+`apps/web/src/components/ModelAttribution.test.jsx` pins alongside the rendering itself.
 
 ### S5 — Upstream safety behaviour is not weakened
 
@@ -342,3 +348,26 @@ Two things remain, and neither is an engineering task:
    ticks the box is still not authorized. Whether SceneWorks ships the family publicly, ships it
    disabled by default, or does not ship it, is a ship/no-ship call that depends on item 1 and on
    any further answer from `api@minimax.io`.
+
+## Visibility in the user-facing lane, as shipped
+
+An earlier revision of this document ended with a blanket sentence — that nothing in the user-facing
+lane should advertise the family until item 2 is settled. **That sentence contradicted the shipped
+catalog and is deleted rather than qualified** (sc-19541). What shipped, and why:
+
+* **sc-17159** made both entries reachable on purpose. `minimax_h3` and `minimax_h3_ref` are rows in
+  `VIDEO_MODEL_CAPS` (`crates/sceneworks-core/src/jobs_store/routing/catalog.rs`), so a submitted job
+  is claimed by the MLX worker and answered rather than queued forever, and
+  `minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabilities`
+  (`crates/sceneworks-core/src/jobs_store/tests/mlx_routing_tests.rs`) pins exactly which modes each
+  partition serves and which it must refuse.
+* **The Models screen is where the family MUST be visible.** `licenseNotice` and the acknowledgment
+  checkbox are on that card (S1). A user cannot acknowledge a licence for a family they cannot see,
+  so hiding it would suppress the §V.2 notification rather than add a safeguard.
+* **Nothing in S1's enforcement depends on visibility either way.** The gate is fetch-time and
+  repo-keyed (`license_acknowledgment_repo_index`, `apps/rust-api/src/models.rs`;
+  `ensure_job_payload_license_acknowledged`, `apps/rust-api/src/jobs.rs`), so it refuses an
+  unacknowledged fetch of `MiniMaxAI/MiniMax-H3` whether or not any screen lists the model.
+
+Item 2 above is a ship/no-ship call on the *product*, and it is Michael's; it is not a claim this
+document may make on either side, and it is not carried by hiding a catalog row.
