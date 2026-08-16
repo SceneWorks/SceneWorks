@@ -1217,10 +1217,15 @@ pub(crate) fn write_comfy_wan_adapter(path: &std::path::Path) {
 /// Poll interval used while waiting on a [`TestSerializationLock`].
 const TEST_SERIALIZATION_POLL: Duration = Duration::from_secs(5);
 
-/// How long a SINGLE holder may own a [`TestSerializationLock`] before waiters
-/// declare it wedged. Nothing that takes one of these locks legitimately runs
-/// for minutes — the longest inner wait in the catalog suite is
-/// `wait_for_catalog_scan_idle`'s own 60 s cap.
+/// Default bound on how long a SINGLE holder may own a
+/// [`TestSerializationLock`] before waiters declare it wedged. Right for locks
+/// whose holders only perform short, fixed-bound waits. A lock whose holders
+/// legitimately hold across work-proportional budgets (sc-19801: the catalog
+/// scan-idle budget is derived from the row count and exceeds this for the
+/// heavy scans) must pass its own derived bound via
+/// [`TestSerializationLock::with_max_hold`] — otherwise the wedge detector
+/// fires on a merely slow, still-progressing holder, which is exactly the
+/// false-failure class the derived budgets exist to remove.
 const TEST_SERIALIZATION_MAX_HOLD: Duration = Duration::from_secs(300);
 
 /// A process-global lock that serializes tests sharing mutable global state,
@@ -1247,14 +1252,23 @@ const TEST_SERIALIZATION_MAX_HOLD: Duration = Duration::from_secs(300);
 /// other hand, is wedged by definition however slow the host is.
 pub(crate) struct TestSerializationLock {
     name: &'static str,
+    max_hold: Duration,
     lock: tokio::sync::Mutex<()>,
     held_since: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl TestSerializationLock {
     pub(crate) fn new(name: &'static str) -> Self {
+        Self::with_max_hold(name, TEST_SERIALIZATION_MAX_HOLD)
+    }
+
+    /// A lock whose holders legitimately hold across long, work-derived waits
+    /// declares its own hold bound, derived the same way as those waits — see
+    /// [`TEST_SERIALIZATION_MAX_HOLD`] for why the default would misfire there.
+    pub(crate) fn with_max_hold(name: &'static str, max_hold: Duration) -> Self {
         Self {
             name,
+            max_hold,
             lock: tokio::sync::Mutex::new(()),
             held_since: std::sync::Mutex::new(None),
         }
@@ -1290,11 +1304,12 @@ impl TestSerializationLock {
                         .map(|since| since.elapsed());
                     if let Some(held_for) = held_for {
                         assert!(
-                            held_for <= TEST_SERIALIZATION_MAX_HOLD,
+                            held_for <= self.max_hold,
                             "test serialization lock `{}` has been held by one test for {held_for:?} \
-                             (limit {TEST_SERIALIZATION_MAX_HOLD:?}) — that holder is wedged, and \
+                             (limit {:?}) — that holder is wedged, and \
                              every later user of the lock is stuck behind it",
-                            self.name
+                            self.name,
+                            self.max_hold
                         );
                     }
                 }
