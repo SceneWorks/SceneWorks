@@ -487,10 +487,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and run["record"]["target"]["tier"] == "bf16"
         and run["record"]["strategy"]["rung"] in {"resident", "staged_residency"}
     ]
-    # Six, not four: the two bf16 rows that were current at the old pin joined the four already-
-    # historical ones when `mlx:qwen_image`'s closure moved. The population grew because currency
-    # moved, not because anything about these records changed.
-    assert len(historical_qwen) == 6
+    # Eight, not six: sc-19721's pin bump moved `mlx:qwen_image`'s closure again, so the two rows
+    # that were current at 014134e3 joined the already-historical six. The population grows because
+    # currency moves, not because anything about these records changed.
+    assert len(historical_qwen) == 8
     # The six are two distinct populations, and flattening them would lose the distinction that
     # matters. Four carry the retired `-eager` fingerprint and still cannot bind. Two carry the shared
     # fingerprint and bind the bf16 cells SC-18353 restored, but remain historical and therefore
@@ -504,7 +504,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager": 4,
     }
     retained_bindings = [run for run in historical_qwen if run["binding"]["eligible"]]
-    assert len(retained_bindings) == 2
+    assert len(retained_bindings) == 4
     assert all(run["binding"]["reasons"] == [] for run in retained_bindings)
     assert {
         run["record"]["calibrationFingerprint"] for run in retained_bindings
@@ -518,14 +518,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         )
         for run in historical_qwen
     } == {("mlx", "bf16", "text_to_image", "none")}
-    # Three apiece rather than two: each rung gained its closure-superseded row alongside the two
-    # already-rejected `-eager` ones. Still symmetric across the two rungs, which is the property
-    # this pins — an asymmetry would mean one rung lost a record rather than changing currency.
+    # Four apiece now: each rung gained sc-19721's closure-superseded row on top of the previous
+    # three. Still symmetric across the two rungs, which is the property this pins — an asymmetry
+    # would mean one rung lost a record rather than changing currency.
     assert Counter(
         run["record"]["strategy"]["rung"] for run in historical_qwen
     ) == {
-        "resident": 3,
-        "staged_residency": 3,
+        "resident": 4,
+        "staged_residency": 4,
     }
 
 
