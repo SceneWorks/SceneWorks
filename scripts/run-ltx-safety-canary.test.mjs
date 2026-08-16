@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  CHILD_ATTESTATION_TIMEOUT_SECONDS,
   CanaryInterrupted,
   MAX_FOOTPRINT_BYTES,
   MAX_RUNTIME_SECONDS,
@@ -294,6 +295,8 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /Cargo inference source tree differs from the verified checkout/);
   assert.match(source, /response\?\.inferenceRevision !== expectedInferenceRevision/);
   assert.match(source, /--require-child-attestation/);
+  assert.equal(CHILD_ATTESTATION_TIMEOUT_SECONDS, 30);
+  assert.match(source, /--child-attestation-timeout", String\(CHILD_ATTESTATION_TIMEOUT_SECONDS\)/);
   assert.match(source, /event\.event === "child_attested"/);
   assert.match(source, /await chmod\(adapterDirectory, 0o500\)/);
   assert.match(source, /execFileAsync\("\/bin\/cp", \["-c", cloneSource, output\]/);
