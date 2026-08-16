@@ -979,6 +979,18 @@
   color: var(--text-muted);
 }
 
+/* The model's declared `ui.description` under the Model field (sc-17162). Muted, like
+   `.model-card-description` on the advanced Models card and unlike `.model-attribution`
+   immediately above it — the attribution is a licence obligation that must read prominently,
+   this is context about the model. Wraps: descriptions are full sentences (~300 characters
+   median across the catalog), so no ellipsis and no nowrap. */
+.su-model-desc {
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 /* Context, not a warning — so no border, no danger/warm tint. */
 .su-lora-hint {
   display: flex;

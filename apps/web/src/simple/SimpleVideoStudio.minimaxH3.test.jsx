@@ -176,6 +176,33 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     expect(hint.textContent).toContain("15s is refused");
   });
 
+  it("renders the model's declared description, not just its name (sc-17162)", async () => {
+    // `ui.description` had ONE reader in the whole app — the advanced Models screen's card. Simple's
+    // only route there is "Manage", which switches the SHELL, so a Simple user identified the model
+    // by NAME ALONE and never met the withheld-component disclosure the string carries: not the
+    // hosted Hailuo product, 2K unreachable, dense attention. Same gap and same fix as the duration
+    // hint above.
+    //
+    // Read back out of the DOM and compared against the MANIFEST string, not a typed literal, so
+    // copy edits travel and a description that renders empty is red. The two extra assertions pin
+    // the load-bearing halves of the disclosure specifically: a rewrite that keeps the field
+    // non-empty but drops what the withheld components cost would otherwise stay green.
+    await openVideo(baseContext());
+    const description = container.querySelector(".su-model-desc");
+    expect(description, "Simple must carry the model's description, not only its name").toBeTruthy();
+    expect(description.textContent).toBe(MINIMAX.ui.description);
+    expect(description.textContent).toContain("H3-Regenerate-2K");
+    expect(description.textContent).toContain("not the hosted Hailuo product");
+    // It must sit BELOW the licence attribution, which is an obligation to display prominently and
+    // outranks descriptive copy. Asserted by document order rather than by CSS.
+    const attribution = container.querySelector(".model-attribution");
+    expect(attribution, "the licence attribution must still render").toBeTruthy();
+    expect(
+      attribution.compareDocumentPosition(description) & Node.DOCUMENT_POSITION_FOLLOWING,
+      "the description must follow the licence attribution, not precede it",
+    ).toBeTruthy();
+  });
+
   it("sends the exact declared duration, not the rounded label", async () => {
     const context = baseContext();
     await openVideo(context);
