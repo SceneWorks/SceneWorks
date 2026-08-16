@@ -137,8 +137,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # production-deferred q8 records: complete 50 -> 52. SC-18218 then adds four real-weight,
     # Resident-only MLX FLUX.2 records (q4/q8 at 768/1024): runtime-complete 15 -> 19.
     # SC-18353 adds thirteen physical deferred-materialization Qwen bf16/q4 records without
-    # replacing the retained history: complete 52 -> 65.
-    assert records_by_status == {"complete": 65, "runtime_complete": 19}
+    # replacing the retained history: complete 52 -> 65. SC-19753 adds the five freshly captured
+    # Z-Image q4 rungs at the current provider closure: complete 65 -> 70.
+    assert records_by_status == {"complete": 70, "runtime_complete": 19}
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -185,15 +186,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ]
     # sc-16915 measured seventeen Full-complete runs at the then-live closure; those records are now
     # historical. SC-18237 and SC-18353 later added fifteen Qwen records at their then-live
-    # provider closure. SC-18306 advances the inference pin beyond that audited closure, so those
-    # records must also fail closed as historical until they are recaptured or compatibility is
-    # established by measurement.
+    # provider closure. SC-18306 advances beyond that audited closure, so those records fail closed
+    # as historical. SC-19753 then re-captures exactly five Z-Image records at the current closure.
     #
     # Pinned as an exact set AND an exact count, the same way it was when runs were current: a bare
     # `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
     # family's promotion mask another's demotion.
-    assert {run["semantics"] for run in full_runs} == {"historical"}
-    assert sum(1 for run in full_runs if run["semantics"] == "current") == 0
+    assert {run["semantics"] for run in full_runs} == {"current", "historical"}
+    assert sum(1 for run in full_runs if run["semantics"] == "current") == 5
     expected_candle_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
@@ -643,13 +643,12 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
+def test_current_z_image_capture_promotes_only_its_exact_five_rungs():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     # sc-16915 recaptured the Qwen and Krea MLX evidence at its then-current pin. SC-18306 advances
-    # the inference pin beyond every audited provider closure represented here, so all retained
-    # evidence must fail closed as historical. Z-Image was also not recaptured and remains the
-    # original subject of the per-model assertions below.
+    # beyond those audited provider closures, so their retained evidence fails closed as historical.
+    # SC-19753 re-captures only the exact five Z-Image q4 coordinates below at the current closure.
     #
     # Stated as the exact verified SET rather than as `== []`. A bare emptiness check stopped
     # being meaningful the moment anything was verified, and a count would let one model's
@@ -659,15 +658,15 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         for cell in matrix["cells"]
         if cell["state"] == "Verified"
     }
-    # SC-18237 and SC-18353 Qwen evidence is retained, but the provider closure moved again with
-    # SC-18306. No family may remain Verified merely because it was current at an older pin.
-    assert verified == set()
-    assert not [
-        cell
-        for cell in matrix["cells"]
-        if cell["state"] == "Verified" and cell["modelId"].startswith("z_image")
-    ], "Z-Image was not recaptured, so none of its cells may promote"
-    historical_z_image_turbo = [
+    # No historical family may remain Verified merely because it was current at an older pin.
+    assert verified == {
+        ("z_image_turbo", "mlx", "q4", "resident"),
+        ("z_image_turbo", "mlx", "q4", "staged_residency"),
+        ("z_image_turbo", "mlx", "q4", "bounded_decode"),
+        ("z_image_turbo", "mlx", "q4", "bounded_attention"),
+        ("z_image_turbo", "mlx", "q4", "bounded_transformer_residency"),
+    }
+    current_z_image_turbo = [
         cell
         for cell in matrix["cells"]
         if cell["modelId"] == "z_image_turbo"
@@ -675,13 +674,13 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         and cell["tier"] == "q4"
         and cell["mode"] == "text_to_image"
         and cell["overlay"] == "none"
-        and cell["evidence"]["historicalVerification"]
+        and cell["evidence"]["currentEnvironmentVerification"]
     ]
-    assert len(historical_z_image_turbo) == 5
+    assert len(current_z_image_turbo) == 5
     assert all(
-        cell["state"] == "Implemented/unverified"
-        and cell["evidence"]["currentEnvironmentVerification"] == []
-        for cell in historical_z_image_turbo
+        cell["state"] == "Verified"
+        and cell["evidence"]["currentEnvironmentVerification"]
+        for cell in current_z_image_turbo
     )
     historical_z_image = [
         cell
