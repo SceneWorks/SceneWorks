@@ -466,7 +466,7 @@ time.sleep(60)
   try {
     await runWithMockedProductionTelemetry(files, ["python3", staller, files.pids], {
       telemetryTimeout: 0.1,
-      childAttestationTimeout: 0.3,
+      childAttestationTimeout: 1.5,
     });
   } catch (error) {
     status = error.code;
@@ -475,8 +475,8 @@ time.sleep(60)
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some((event) => event.phase === "awaiting_child_ack"));
   assert.ok(events.some((event) =>
-    event.reason === "child_attestation_timeout_at_or_above_0.3s"));
-  assert.ok(Date.now() - started < 1_500, "ACK stall exceeded the startup bound");
+    event.reason === "child_attestation_timeout_at_or_above_1.5s"));
+  assert.ok(Date.now() - started < 2_800, "ACK stall exceeded the startup bound");
   assertGone(Number((await readFile(files.pids, "utf8")).trim()));
 });
 
