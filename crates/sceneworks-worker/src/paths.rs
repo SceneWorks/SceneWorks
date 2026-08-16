@@ -193,8 +193,13 @@ pub(crate) fn normalize_app_managed_model_path(
             roots.push(canonical);
         }
     }
-    let path = normalize_existing_or_absolute(Path::new(raw_path))?;
-    ensure_path_under(path, &roots, label)
+    sceneworks_core::model_artifacts::confine_artifact_path(Path::new(raw_path), &roots).map_err(
+        |_| {
+            WorkerError::InvalidPayload(format!(
+                "{label} must be inside an app-managed model directory."
+            ))
+        },
+    )
 }
 
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root

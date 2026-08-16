@@ -1795,10 +1795,7 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
 /// [`resolve_optional_component`] key off whether the manifest row *declares* a `revision` at all,
 /// which is a different question — a row declaring `"main"` is unpinned here but `Some` there.
 pub(crate) fn is_pinned_hf_revision(revision: &str) -> bool {
-    revision.len() == 40
-        && revision
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    sceneworks_core::model_artifacts::validate_immutable_revision(revision).is_ok()
 }
 
 /// Whether a convert job's declared source file is already materialized in the HF cache — the
@@ -2180,19 +2177,8 @@ pub(crate) fn resolve_optional_component(
 /// when every recorded file exists in one snapshot directory; a torn set returns `None` atomically.
 /// `model_id` narrows primary-model receipts, while the repo-wide fallback also covers co-requisite
 /// downloads whose marker directory is not known to the loader.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedArtifactIdentity {
-    pub(crate) repository: String,
-    pub(crate) revision: String,
-    pub(crate) variant: String,
-    pub(crate) fingerprint: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedArtifactProvenance {
-    pub(crate) identity: ResolvedArtifactIdentity,
-    pub(crate) fixed_artifact_tier: Option<String>,
-}
+pub(crate) type ResolvedArtifactIdentity = sceneworks_core::model_artifacts::ArtifactIdentity;
+pub(crate) type ResolvedArtifactProvenance = sceneworks_core::model_artifacts::ArtifactProvenance;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
