@@ -11293,8 +11293,18 @@ mod tests {
                 .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
                 .collect::<Vec<_>>(),
             vec![
+                ("flux2_dev", "flux2_dev", "bf16", 128),
+                ("flux2_dev", "flux2_dev_control", "q4", 64),
+                ("ideogram_4", "ideogram_4", "q8", 48),
+                ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
+                ("lens", "lens", "q8", 48),
+                ("sd3_5_large", "sd3_5_large", "q4", 48),
                 ("sd3_5_large", "sd3_5_large", "q8", 48),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48,),
+                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q4", 48),
+                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48),
+                ("sd3_5_medium", "sd3_5_medium", "bf16", 48),
+                ("sd3_5_medium", "sd3_5_medium", "q4", 48),
+                ("sd3_5_medium", "sd3_5_medium", "q8", 48),
             ],
             "the source-bound resident-only audit changed; update the recorded result, \
              not only this expectation: {flips:?}"
@@ -11373,7 +11383,7 @@ mod tests {
     /// Completeness mutation for the loophole found after the production-router rewrite. A
     /// zero-cell route is still part of the candidate inventory: replacing FLUX.1 Schnell with an
     /// already-declared Chroma entry must fail before deduplication, and simply deleting Schnell
-    /// must fail exact source-inventory equality even though the 32 Resident-only cells and two
+    /// must fail exact source-inventory equality even though the 32 Resident-only cells and 12
     /// flips are unchanged.
     #[cfg(target_os = "macos")]
     #[test]
