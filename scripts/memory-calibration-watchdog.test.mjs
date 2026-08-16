@@ -394,7 +394,7 @@ while True:
 `);
   await runWithMockedProductionTelemetry(files, ["python3", attester], {
     telemetryTimeout: 0.1,
-    childAttestationTimeout: 1,
+    childAttestationTimeout: 3,
   });
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   const waiting = events.filter((event) =>
