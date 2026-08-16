@@ -58,6 +58,45 @@ export function runtimeFreeFloor(memoryBytes) {
   return MIN_RUNTIME_FREE_BYTES + telemetryResolutionBytes(memoryBytes);
 }
 
+export function watchdogFailureSummary(status, eventBytes) {
+  let hardStopReason = null;
+  let validEvents = 0;
+  let malformed = false;
+  for (const line of eventBytes.trim() ? eventBytes.trim().split("\n") : []) {
+    try {
+      const event = JSON.parse(line);
+      validEvents += 1;
+      if (event?.event === "hard_stop" && typeof event.reason === "string"
+          && event.reason !== "") {
+        hardStopReason = event.reason;
+      }
+    } catch {
+      malformed = true;
+    }
+  }
+  let reason = "event_stream_unavailable";
+  if (hardStopReason !== null) {
+    reason = hardStopReason.replaceAll(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512);
+    if (malformed) reason += ";event_stream_malformed";
+  } else if (malformed) {
+    reason = "event_stream_malformed";
+  } else if (validEvents > 0) {
+    reason = "hard_stop_event_absent";
+  }
+  return `watchdog failed closed: code=${status.code} signal=${status.signal} reason=${reason}`;
+}
+
+export function preservePrimaryFailure(primary, cleanup) {
+  if (primary === null) return cleanup;
+  if (cleanup === null) return primary;
+  const error = primary instanceof Error ? primary : new Error(String(primary));
+  const cleanupMessage = cleanup instanceof Error ? cleanup.message : String(cleanup);
+  error.message += `; scratch cleanup failed: ${cleanupMessage
+    .replaceAll(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512)}`;
+  if (error.cause === undefined) error.cause = cleanup;
+  return error;
+}
+
 async function git(cwd, args, signal) {
   return (await execFileAsync("git", ["-C", cwd, ...args], {
     encoding: "utf8", signal,
@@ -344,6 +383,8 @@ export async function exactToolchain(scratch, signal) {
   if (!new RegExp(`^release: ${channel.replaceAll(".", "\\.")}$`, "m").test(version)) {
     fail(`resolved rustc does not match pinned channel ${channel}`);
   }
+  const privateTemp = path.join(scratch, "tmp");
+  await mkdir(privateTemp, { mode: 0o700 });
   return {
     cargo,
     channel,
@@ -354,7 +395,7 @@ export async function exactToolchain(scratch, signal) {
       CARGO_TARGET_DIR: path.join(scratch, "target"),
       CARGO_TERM_COLOR: "never",
       RUSTUP_TOOLCHAIN: channel,
-      TMPDIR: process.env.TMPDIR ?? tmpdir(),
+      TMPDIR: privateTemp,
     },
   };
 }
@@ -595,6 +636,7 @@ async function controller(argv) {
     process.on(signalName, handler);
   }
   let operationError = null;
+  let cleanupError = null;
   try {
     const { signal } = cancellation;
     const scratchDevice = (await stat(scratch, { bigint: true })).dev;
@@ -674,7 +716,10 @@ async function controller(argv) {
     });
     activeWatchdog = null;
     if (interruptedSignal !== null) throw new CanaryInterrupted(interruptedSignal);
-    if (status.code !== 0 || status.signal) fail(`watchdog failed closed: code=${status.code} signal=${status.signal}`);
+    if (status.code !== 0 || status.signal) {
+      const eventBytes = await readFile(eventsPath, "utf8").catch(() => "");
+      fail(watchdogFailureSummary(status, eventBytes));
+    }
     await assertAdapterIdentity(adapter, signal);
     assertInventory(
       await hashArtifactInventory(numericTierRoot, { signal }), numericTierInventory, "post-run q4",
@@ -757,13 +802,19 @@ async function controller(argv) {
   } catch (error) {
     operationError = error;
   } finally {
-    await cleanupCanaryScratch(scratch);
+    try {
+      await cleanupCanaryScratch(scratch);
+    } catch (error) {
+      cleanupError = error;
+    }
     for (const [signalName, handler] of Object.entries(signalHandlers)) {
       process.off(signalName, handler);
     }
   }
-  if (interruptedSignal !== null) throw new CanaryInterrupted(interruptedSignal);
-  if (operationError !== null) throw operationError;
+  const primaryError = interruptedSignal !== null
+    ? new CanaryInterrupted(interruptedSignal) : operationError;
+  const finalError = preservePrimaryFailure(primaryError, cleanupError);
+  if (finalError !== null) throw finalError;
 }
 
 try {
