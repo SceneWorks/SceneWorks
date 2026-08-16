@@ -45,21 +45,27 @@
       "name": "MiniMax-H3 (Hailuo 3.0)",
       "modality": "video",
       "story": 18664,
-      "catalogEntries": ["minimax_h3", "minimax_h3_ref"],
+      "catalogEntries": [
+        "minimax_h3",
+        "minimax_h3_ref"
+      ],
       "whyOutOfMatrix": "The memory matrix is image-only by construction: scripts/generate-memory-matrix.mjs builds from `manifest.models.filter((model) => model.type === \"image\")`, and `minimax_h3` / `minimax_h3_ref` are `\"type\": \"video\"`. Putting this family under `families` is not merely inert, it fails generation — assertRung4SurveyCoversEveryFamily runs the survey -> catalog direction too and throws `family SC-… carries a mlx verdict, but the catalog advertises no mlx entry in that family — the verdict reaches no cell (SC-15969)`, which was reproduced against this exact record before it was placed here. There is also no `familyGroup` id to key it by, because `familyGroup` throws on `minimax_h3`. So the honest shape is a record the generator validates and does not publish, keyed by the epic id, rather than a family row the ladder cannot express. One consequence has to be stated rather than left to be inferred: this record is NOT dated by the matrix's own `generatedFrom.inferenceRevision`. Every `inference:` path and every byte constant below resolves at 79f02e6d0eaca861a0698ee490b70daa7441e321, a descendant of the pinned 014134e3 at which neither `mlx-gen-minimax-h3` nor `candle-gen-minimax-h3` exists at all. Each backend carries that sha in `contractRevision`, which the generator requires; the corrected `notes[0]` prerequisite claim is separately anchored at 014134e3, where gen-core's contract constant does live.",
       "backends": {
         "mlx": {
-          "contractSupport": "missing",
+          "contractSupport": "implemented",
           "contractRevision": "79f02e6d0eaca861a0698ee490b70daa7441e321",
           "contractSource": "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
-          "contractReason": "Rung 4 is `MemoryStrategySupport::Missing`, NOT `StructurallyNotApplicable`, and the reason is the loader rather than the architecture: `LOAD_SHAPE = LoadShape::EagerMaterialization` because `MiniMaxH3Dit::load_dir` builds the whole 50-block stack, so rung 4's sole shared prerequisite `LoadShape::DeferredMaterialization` is unsatisfied. `lifecycle.transformer_window_materialization` is `false` for the same reason. sc-18662 is the story that changes it. Rungs 0 and 1 are `Implemented` — the staged phase order is structural in `generate_impl`, which releases each heavy component and drains the allocator cache before mapping the next.",
+          "contractReason": "sc-18662 landed both deferred loaders, so rung 4 is `MemoryStrategySupport::Implemented` on a `LoadShape::DeferredMaterialization` load and `Missing` on a resident one — the contract now honours the spec's shape (`resolved_load_shape`) instead of pinning `EagerMaterialization`, because `MiniMaxH3Dit::load_dir_deferred` and `MiniMaxH3TextEncoder::from_dir_deferred` both exist and are measured. `lifecycle.transformer_window_materialization` tracks the same resolved shape. The published domain is `transformer_window_sizes: [1]` and `transformer_window_components: [Both]`. The singleton is a MEASURED finding, not a default: `run_windowed` releases each block as it is consumed rather than at the window boundary, so even a 50-block all-covering plan holds one block at a time and window size never sets residency — 1.09x and 1.20x spread across [1,5,10,50] on two runs, against 8-22x below resident. This independently reproduces SC-15448's window-inert-above-1 finding on another family. `Both` rather than `Dit` because the conditioning stage is still the taller of the two at every tier even after sc-19120's packed encoder, and it is the larger absolute saving (47.26 GB against the DiT's 37.68 GB at bf16). One family-specific hazard is recorded in `inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/block_stream.rs`: `adaln_proj` is 39.3% of the DiT and sc-17145's precompute already consumes it once per request, so a denoise window must materialize block BODIES only — a window that re-read it would cost 26.02 GB per step and produce bit-identical output, which no equivalence test could catch. The once-per-request projection pass is windowed separately (`precompute_adaln_windowed`), because it is the larger of the two residencies and every prior adopter windows only the per-step walk.",
           "structuralApplicability": "partial",
           "derivedFrom": "stacks",
-          "nonWindowableStacks": ["vae.encoder", "audio_vae.decode"],
-          "implementation": "none",
+          "nonWindowableStacks": [
+            "vae.encoder",
+            "audio_vae.decode"
+          ],
+          "implementation": "shared-primitive",
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "No rung-4 window has ever run on this family on any backend, so there is no rung-3-composition vs rung-4-composition measurement to read — the axis this survey's `unmeasured` note says is the only one that decides the question. What IS measured is stage-attributed and belongs to no rung: the conditioning stage peaks at 53.07 GB (`CONDITIONING_STAGE_PEAK_BYTES`), and the DiT's denoise residency is 40.43 GB at bf16 against 11.63 GB at q4 (`DENOISE_RESIDENT_BF16_BYTES` / `DENOISE_RESIDENT_Q4_BYTES`). The earlier epic framing — that H3's peak is flat because it is activation-dominated, or set by denoise, so the quant tiers buy disk but not memory — is RETRACTED and must not be reproduced from this row. The flatness is an artifact of which stage takes the high-water mark first: the dense Qwen3-VL-32B text encoder runs before the DiT is mapped and `reset_peak_memory()` fires before `generate`, so the conditioning mark masks every later stage. Quantization is packed end to end on the DiT path and the 28.80 GB bf16 -> q4 delta is real."
+            "reason": "Both PHASE arms are now measured on real weights and are large — conditioning 53.07 -> 5.81 GB (9.13x) and denoise 39.58 -> 1.90 GB bf16 / 21.64 -> 1.58 GB q8 / 12.00 -> 1.36 GB q4 (20.82x / 13.73x / 8.85x), bit-identical output at every window on every arm and tier (`inference:crates/media/mlx-gen/mlx-gen-minimax-h3/tests/block_window_real.rs`, sc-18662). Both resident figures independently reproduce the provider's own stage constants from a different harness. But this axis asks about the REQUEST peak and this survey's own note says a static proxy will not do, so the finding stays `unmeasured` rather than being inferred from the phase envelope. What is missing is specifically an end-to-end `generate` on the deferred path: `MiniMaxH3::generate_impl` still builds both transformers resident, so nothing routes a whole render through the new loaders yet. The arithmetic the phase envelope implies — max(5.81, 1.90, 5.77 decode) against today's 52.80 — is a PREDICTION and is labelled as one. The earlier epic framing — that H3's peak is flat because it is activation-dominated, or set by denoise, so the quant tiers buy disk but not memory — remains RETRACTED and must not be reproduced from this row. The flatness was an artifact of which stage takes the high-water mark first: the dense Qwen3-VL-32B text encoder runs before the DiT is mapped and `reset_peak_memory()` fires before `generate`, so the conditioning mark masked every later stage. sc-18662's per-arm measurement is the direct refutation — the encoder's 53.07 GB is weight residency, and windowing it alone removes 47.26 GB."
           },
           "stacks": [
             {
@@ -197,7 +203,10 @@
           "contractReason": "Rung 4 is `MemoryStrategySupport::Missing` for the same load-shape reason as MLX — `LOAD_SHAPE = LoadShape::EagerMaterialization`, `MiniMaxH3Dit::load` builds the whole stack — plus a second one this backend has and MLX does not: `host_to_device_block_materialization` is `false` because there is no block-wise host->device path in the crate at all. `block_materialization` is answered anyway as `MemoryWindowMaterialization::DeviceFormatTransfer` and sc-18662 must re-verify it if a packed candle tier ever lands. Rung 1 is `Missing` too here, and `calibration` is `None`: this crate ships no pipeline and no text encoder (sc-17156), so there is nothing to stage and no fitted curve.",
           "structuralApplicability": "partial",
           "derivedFrom": "stacks",
-          "nonWindowableStacks": ["vae.encoder", "audio_vae.decode"],
+          "nonWindowableStacks": [
+            "vae.encoder",
+            "audio_vae.decode"
+          ],
           "implementation": "none",
           "requestPeak": {
             "finding": "unmeasured",
@@ -346,7 +355,9 @@
             "mage_flow",
             "mage_flow_turbo"
           ],
-          "implementedOverlays": ["none"],
+          "implementedOverlays": [
+            "none"
+          ],
           "strategyParameters": {
             "transformerWindowSize": 1,
             "transformerWindowComponent": "Dit"

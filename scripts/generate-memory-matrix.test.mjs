@@ -2301,11 +2301,34 @@ test("MiniMax-H3 is surveyed per stack, and the family verdict is derived from t
     // stacks needing a plan each, and a conv remainder that cannot be windowed at all.
     assert.equal(verdict.structuralApplicability, "partial");
     assert.equal(deriveOutOfMatrixApplicability(verdict.stacks), "partial");
-    assert.equal(verdict.implementation, "none");
+    // sc-18662 landed the MLX arm on the shared `gen_core::block_window` driver, so the two backends
+    // no longer agree here. Asserted per backend rather than loosened to "whatever it says": a
+    // backend-local reimplementation is the review failure SC-15792 records, so `shared-primitive`
+    // is the specific value that must hold once MLX claims an implementation at all.
+    assert.equal(
+      verdict.implementation,
+      backend === "mlx" ? "shared-primitive" : "none",
+    );
+    // Still `unmeasured` on BOTH backends after sc-18662, and deliberately: that story measured the
+    // two PHASE arms (9.13x on the encoder, 8.85-20.82x on the DiT across three tiers) but this axis
+    // asks about the REQUEST peak, and `generate_impl` does not yet route a whole render through the
+    // deferred loaders. The survey's own note says a static proxy will not do.
     assert.equal(verdict.requestPeak.finding, "unmeasured");
-    // The contract says Missing, not StructurallyNotApplicable, and the reason is the LOADER.
-    assert.equal(verdict.contractSupport, "missing");
-    assert.match(verdict.contractReason, /EagerMaterialization/);
+    if (backend === "mlx") {
+      // sc-18662 landed both deferred loaders, so the shape rung 4 requires is now satisfiable and
+      // the contract implements it on a `DeferredMaterialization` load.
+      assert.equal(verdict.contractSupport, "implemented");
+      assert.match(verdict.contractReason, /DeferredMaterialization/);
+      assert.match(verdict.contractReason, /transformer_window_sizes: \[1\]/);
+      // `Both`, not `Dit` — the encoder arm is the larger absolute saving and AC3 refuses a
+      // DiT-only result.
+      assert.match(verdict.contractReason, /Both/);
+    } else {
+      // Candle is untouched: the rung-3 lesson is that a verdict does not transfer across backends,
+      // and neither does an implementation.
+      assert.equal(verdict.contractSupport, "missing");
+      assert.match(verdict.contractReason, /EagerMaterialization/);
+    }
     assert.deepEqual(verdict.nonWindowableStacks, ["vae.encoder", "audio_vae.decode"]);
     assert.ok(verdict.stacks.every((stack) => stack.reason));
   }
@@ -2338,11 +2361,32 @@ test("the MiniMax-H3 record is validated on every generation, not merely stored"
   await surveyRejects((survey) => {
     h3(survey).backends.mlx.contractSupport = "structurally-not-applicable";
   }, /StructurallyNotApplicable while this survey names a windowable stack/);
+  // sc-18662 made this record `contractSupport: "implemented"`, and the guard below only applies
+  // when the contract does NOT implement rung 4 — so the non-implemented state is restored as the
+  // mutation's PRECONDITION and the deleted field stays the sole variable. The control arm proves
+  // the precondition alone does not reject, or these two would pass with the guard deleted.
+  const notImplemented = (survey) => {
+    h3(survey).backends.mlx.contractSupport = "missing";
+    h3(survey).backends.mlx.implementation = "none";
+  };
+  {
+    const control = await surveyFixture();
+    notImplemented(control);
+    await buildMatrix({
+      publish: false,
+      sourceOverrides: { rung4Survey: JSON.stringify(control) },
+    });
+  }
   await surveyRejects((survey) => {
+    notImplemented(survey);
     delete h3(survey).backends.mlx.contractReason;
   }, /record contractSource and contractReason/);
   await surveyRejects((survey) => {
-    h3(survey).backends.mlx.implementation = "shared-primitive";
+    // The guard fires only when the contract does NOT implement rung 4, which the MLX record now
+    // does (sc-18662) — so the mutation claims an implementation on the CANDLE arm, which is still
+    // `missing`. Same guard, same single variable, and it stays exercisable without weakening the
+    // MLX record.
+    h3(survey).backends.candle.implementation = "shared-primitive";
   }, /while the contract does not declare rung 4 Implemented/);
   await surveyRejects((survey) => {
     const stack = h3(survey).backends.mlx.stacks.find((entry) => entry.id === "audio_vae.decode");
@@ -2406,6 +2450,9 @@ test("every remaining out-of-matrix throw site is mutated on its own (sc-18664 r
   // `contractSource` deleted INDEPENDENTLY of `contractReason`. The guard is `!(reason && source)`,
   // so deleting only the reason (covered above) proves one conjunct and this proves the other.
   await surveyRejects((survey) => {
+    // Same precondition restoration as the `contractReason` twin above (sc-18662).
+    h3(survey).backends.mlx.contractSupport = "missing";
+    h3(survey).backends.mlx.implementation = "none";
     delete h3(survey).backends.mlx.contractSource;
   }, /record contractSource and contractReason/);
 
