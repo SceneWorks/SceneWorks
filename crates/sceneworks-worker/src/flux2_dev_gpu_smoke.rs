@@ -238,6 +238,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     let model = Flux2Edit::load_dev(
         &Flux2EditPaths {
             root: weights_dir.clone(),
+            adapters: Vec::new(),
         },
         Some(Quant::Q4),
     )
@@ -254,6 +255,10 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         steps,
         guidance: 4.0,
         seed: 42,
+        enhance_prompt: false,
+        enhance_max_tokens: None,
+        enhance_temperature: None,
+        prompt_enhancement: Default::default(),
         // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
         use_pid: false,
         preview: gen_core::PreviewSink::default(),
@@ -326,6 +331,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
         &Flux2ControlPaths {
             root: weights_dir.clone(),
             control: control.clone(),
+            adapters: Vec::new(),
         },
         Some(Quant::Q4),
     )

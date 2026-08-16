@@ -367,6 +367,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                 tokenizer_clip_l,
                 tokenizer_clip_bigg,
                 vae_fp16_fix,
+                adapters: Vec::new(),
             })
             .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the

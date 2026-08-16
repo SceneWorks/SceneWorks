@@ -336,6 +336,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             let paths = IpAdapterKolorsPaths {
                 kolors_base,
                 ip_adapter,
+                adapters: Vec::new(),
             };
             let model = IpAdapterKolors::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("Kolors IP-Adapter load failed: {error}"))

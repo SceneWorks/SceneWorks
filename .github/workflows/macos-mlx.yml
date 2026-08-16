@@ -553,11 +553,10 @@ jobs:
       # `dump-engine-capabilities` run already writes it. If this half fails while the mlx half
       # passes, lane-independence is what broke, not the dump.
       - name: Verify capabilities.mlx.json is a real dump, not a restamp
-        id: verify_capabilities
         run: |
           set -euo pipefail
-          scratch="$RUNNER_TEMP/backend-capability-facts-mlx"
-          mkdir -p "$scratch"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
           cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$scratch"
           if ! diff -u config/engine-capabilities/capabilities.mlx.json \
                      "$scratch/capabilities.mlx.json"; then
@@ -576,13 +575,6 @@ jobs:
                  "then (cd apps/web && npm run gen:preview-support)."
             exit 1
           fi
-      - name: Upload fresh MLX capability facts after a verification failure
-        if: ${{ failure() && github.event_name == 'workflow_dispatch' && steps.verify_capabilities.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mlx-capability-facts-${{ github.run_id }}
-          path: ${{ runner.temp }}/backend-capability-facts-mlx
-          if-no-files-found: error
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
