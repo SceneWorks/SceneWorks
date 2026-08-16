@@ -1403,10 +1403,13 @@ pub(crate) async fn delete_model(
     })))
 }
 
-/// The file scopes `model` claims inside `repo` — the union of every one of its download entries
-/// (quant tiers AND co-requisites) that points at `repo`. `None` when ANY of them declares no `files`
-/// filter: that is a claim on the WHOLE repo, which cannot be expressed as a scoped removal, so the
-/// caller keeps the blanket path removal rather than silently reclaiming less than the user asked for.
+/// The file scopes `model` OWNS inside `repo` — the union of its PRIMARY (non-co-requisite) download
+/// entries that point at `repo`. Co-requisite rows are deliberately excluded; see the comment on the
+/// filter below for why that is what makes this "owned" rather than merely "referenced".
+///
+/// `None` when ANY of those primaries declares no `files` filter: that is a claim on the WHOLE repo,
+/// which cannot be expressed as a scoped removal, so the caller keeps the blanket path removal rather
+/// than silently reclaiming less than the user asked for.
 fn model_repo_file_scopes(model: &Value, repo: &str) -> Option<Vec<String>> {
     let mut scopes = Vec::new();
     for download in model
@@ -1414,6 +1417,16 @@ fn model_repo_file_scopes(model: &Value, repo: &str) -> Option<Vec<String>> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        // Co-requisites are EXCLUDED, and that is what makes this "owned" rather than "referenced".
+        // A co-requisite may be shared by several models and is never removed by a model delete
+        // (the `coRequisite` schema note says so outright). sc-19573 made this load-bearing: both
+        // MiniMax-H3 entries now co-require the OTHER's DiT partition from the shared repo, so
+        // counting co-requisite rows here would make an entry claim its sibling's subtree as its own
+        // — and, symmetrically in `other_entries_repo_file_scopes`, retain its own. The two sets
+        // would cover everything, `selected && !retained` would never hold, and a whole-model delete
+        // would silently reclaim nothing. `delete_model_variant`'s `retained_files` already applies
+        // exactly this filter for exactly this reason.
+        .filter(|entry| !is_co_requisite_download(entry))
         .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
     {
         let files = string_array_field(download, "files");
@@ -1443,8 +1456,55 @@ fn model_repo_file_scopes(model: &Value, repo: &str) -> Option<Vec<String>> {
 /// that sibling needs. Nothing here is conditioned on the sibling being INSTALLED — an installed
 /// sibling is exactly the case that matters, and for a sibling that is absent every one of these
 /// patterns matches no file on disk, so retaining them costs the delete nothing.
-fn other_entries_repo_file_scopes(catalog: &[Value], model_id: &str, repo: &str) -> Vec<String> {
-    let mut scopes = Vec::new();
+///
+/// The two kinds are returned SEPARATELY, because the caller may only ever subtract from one of them.
+/// See [`SiblingRepoScopes`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SiblingRepoScopes {
+    /// Scopes a sibling entry claims as its OWN primary weights. These are the sc-19078 subject and
+    /// are NEVER subtracted from: the sibling is a separate installed model, and unlinking bytes it
+    /// names as its own primary download is precisely the data loss this function exists to prevent.
+    primaries: Vec<String>,
+    /// Scopes a sibling entry claims only as a CO-REQUISITE — a shared component, or (MiniMax-H3)
+    /// the deleted entry's own partition that the sibling's engine also opens. Overlap with the
+    /// deleted entry's own primaries is subtracted from THIS half only, so that "delete this model"
+    /// still frees the model's own weights instead of no-opping.
+    co_requisites: Vec<String>,
+}
+
+impl SiblingRepoScopes {
+    fn is_empty(&self) -> bool {
+        self.primaries.is_empty() && self.co_requisites.is_empty()
+    }
+
+    /// The retained set for [`remove_tier_artifacts`]: every sibling primary, untouched, plus the
+    /// co-requisite scopes that do NOT overlap `own_files`.
+    ///
+    /// Subtracting the overlap from the co-requisite half ONLY is the whole point of the split
+    /// (sc-19573 review). Subtracting it from the union instead collapses the retained set to `[]`
+    /// for every group whose sibling names the SAME primary `files` — `flux_dev`/`pulid_flux_dev`,
+    /// `z_image_turbo`/`z_image_edit`, `bernini`/`bernini_image`, `realvisxl`/`instantid_realvisxl`,
+    /// `qwen_image_edit_2511`/`_lightning`, `ideogram_4`/`ideogram_4_turbo` — and strips the shared
+    /// text-encoder/VAE out of the `anima_*` trio. `remove_tier_artifacts`'s `selected && !retained`
+    /// would then unlink the sibling's blobs with `permanent=true`: tens of GB, unrecoverable without
+    /// re-download, i.e. exactly the sc-19078 defect re-introduced.
+    fn retained_files(&self, own_files: &[String]) -> Vec<String> {
+        let mut retained = self.primaries.clone();
+        for file in &self.co_requisites {
+            if !own_files.contains(file) && !retained.contains(file) {
+                retained.push(file.clone());
+            }
+        }
+        retained
+    }
+}
+
+fn other_entries_repo_file_scopes(
+    catalog: &[Value],
+    model_id: &str,
+    repo: &str,
+) -> SiblingRepoScopes {
+    let mut scopes = SiblingRepoScopes::default();
     for entry in catalog
         .iter()
         .filter(|entry| entry.get("id").and_then(Value::as_str) != Some(model_id))
@@ -1456,9 +1516,14 @@ fn other_entries_repo_file_scopes(catalog: &[Value], model_id: &str, repo: &str)
             .flatten()
             .filter(|download| download.get("repo").and_then(Value::as_str) == Some(repo))
         {
+            let bucket = if is_co_requisite_download(download) {
+                &mut scopes.co_requisites
+            } else {
+                &mut scopes.primaries
+            };
             for file in string_array_field(download, "files") {
-                if !scopes.contains(&file) {
-                    scopes.push(file);
+                if !bucket.contains(&file) {
+                    bucket.push(file);
                 }
             }
         }
@@ -1501,9 +1566,29 @@ async fn remove_whole_model_artifacts(
             let own = model_repo_file_scopes(cleanup_source, &repo)?;
             (!siblings.is_empty()).then_some((repo, own, siblings))
         });
-    let Some((repo, own_files, sibling_files)) = shared else {
+    let Some((repo, own_files, sibling_scopes)) = shared else {
         return remove_owned_artifacts(all_paths, allowed_roots, permanent).await;
     };
+    // sc-19573 — a sibling may co-require THIS entry's own subtree, and then the retained set would
+    // cover everything the delete selected: `selected && !retained` would never hold and the user's
+    // explicit "delete this model" would silently reclaim zero bytes.
+    //
+    // Both MiniMax-H3 entries are in that shape now — each co-requires the other's DiT partition,
+    // because the engine opens both on every load. Removing the overlap resolves it in the honest
+    // direction: the delete does what it says, and the sibling entry's install state drops to
+    // incomplete + `repairAvailable`, which is the truth (it can no longer load) and is re-fetchable
+    // in one click. Retaining instead would leave a user who asked to free 56 GB with a no-op and no
+    // explanation.
+    //
+    // The subtraction applies to the CO-REQUISITE half ONLY ([`SiblingRepoScopes::retained_files`]).
+    // A sibling's PRIMARY scopes are never subtracted — six catalog groups pair two entries that name
+    // the IDENTICAL primary `files` in one repo, and subtracting there would empty the retained set
+    // and let this delete unlink the sibling's own weights.
+    //
+    // Computed AFTER the `is_empty` gate above, so an entry whose only sibling claim is an overlap
+    // still takes the SCOPED path rather than falling back to the blanket whole-repo removal that
+    // sc-19078 exists to prevent.
+    let sibling_files = sibling_scopes.retained_files(&own_files);
 
     let managed_dir = data_dir.join("models").join(safe_download_dir(&repo));
     let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
@@ -8344,18 +8429,88 @@ mod variant_delete_tests {
         let catalog = vec![model.clone(), sibling];
         assert_eq!(
             other_entries_repo_file_scopes(&catalog, "minimax_h3", "SceneWorks/minimax-h3-mlx"),
-            vec!["q4/transformer_ref/*".to_owned(), "shared/*".to_owned()]
+            SiblingRepoScopes {
+                primaries: vec!["q4/transformer_ref/*".to_owned()],
+                co_requisites: vec!["shared/*".to_owned()],
+            },
+            "the two kinds must stay SEPARATE — only the co-requisite half may be subtracted from"
         );
         // Viewed from the sibling, the base entry's scopes are the ones retained.
         assert_eq!(
             other_entries_repo_file_scopes(&catalog, "minimax_h3_ref", "SceneWorks/minimax-h3-mlx"),
-            vec!["q4/transformer/*".to_owned(), "q8/transformer/*".to_owned()]
+            SiblingRepoScopes {
+                primaries: vec!["q4/transformer/*".to_owned(), "q8/transformer/*".to_owned()],
+                co_requisites: Vec::new(),
+            }
         );
         // A repo only this entry claims has no sibling scopes at all — the discriminator that keeps
         // the blanket path in force for the entries that own their repo outright.
         assert!(
             other_entries_repo_file_scopes(&catalog, "minimax_h3", "MiniMaxAI/MiniMax-H3")
                 .is_empty()
+        );
+    }
+
+    /// The retained set may subtract the deleted entry's own scopes from the sibling's CO-REQUISITE
+    /// half only (sc-19573 review). Subtracting from the union destroys the sibling's weights.
+    #[test]
+    fn retained_files_never_subtracts_a_siblings_primary_scopes() {
+        // The flux_dev ↔ pulid_flux_dev shape, and five more groups like it: the sibling names the
+        // IDENTICAL primary `files`, because both entries really do load the same checkpoint. Every
+        // one of those scopes must survive. Subtracting from the union yields `[]`, and then
+        // `remove_tier_artifacts`'s `selected && !retained` unlinks the sibling's blobs with
+        // `permanent=true` — tens of GB, unrecoverable without re-download.
+        let own = vec!["q4/*".to_owned(), "q8/*".to_owned(), "bf16/*".to_owned()];
+        let shared = SiblingRepoScopes {
+            primaries: own.clone(),
+            co_requisites: Vec::new(),
+        };
+        assert_eq!(
+            shared.retained_files(&own),
+            own,
+            "an identically-scoped sibling primary must be retained IN FULL, not emptied"
+        );
+
+        // The anima trio: the sibling's primary is its own DiT, and the TE/VAE it shares with the
+        // deleted entry ride the deleted entry's own primary rows too. Both must be retained.
+        let anima_own = vec![
+            "split_files/diffusion_models/anima-base-v1.0.safetensors".to_owned(),
+            "split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned(),
+            "split_files/vae/qwen_image_vae.safetensors".to_owned(),
+        ];
+        let anima_sibling = SiblingRepoScopes {
+            primaries: vec![
+                "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors".to_owned(),
+                "split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned(),
+                "split_files/vae/qwen_image_vae.safetensors".to_owned(),
+            ],
+            co_requisites: Vec::new(),
+        };
+        assert!(
+            anima_sibling
+                .retained_files(&anima_own)
+                .contains(&"split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned()),
+            "the shared text encoder anima_aesthetic/anima_turbo still need must be retained"
+        );
+
+        // MiniMax-H3, unchanged by the split: the sibling's PRIMARY is `transformer_ref`, and its
+        // co-requisite claim on the deleted entry's own `transformer` is what gets subtracted, so
+        // "delete minimax_h3" still frees the DiT the user asked to free.
+        let mm_own = vec!["q4/transformer/*".to_owned()];
+        let mm_sibling = SiblingRepoScopes {
+            primaries: vec!["q4/transformer_ref/*".to_owned()],
+            co_requisites: vec![
+                "q4/transformer/*".to_owned(),
+                "q4/text_encoder/*".to_owned(),
+            ],
+        };
+        assert_eq!(
+            mm_sibling.retained_files(&mm_own),
+            vec![
+                "q4/transformer_ref/*".to_owned(),
+                "q4/text_encoder/*".to_owned()
+            ],
+            "the overlapping co-requisite is dropped; the sibling's primary and the shared TE stay"
         );
     }
 

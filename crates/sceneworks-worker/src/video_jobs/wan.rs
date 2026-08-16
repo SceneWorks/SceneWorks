@@ -1419,7 +1419,9 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         //   packed conditioner ships beside the DiT tiers in `SceneWorks/minimax-h3-mlx`, while the
         //   dense bf16 one comes from upstream, so it is the same different-repo problem the DiT
         //   has. Absent ⇒ `mlx-gen-minimax-h3` falls back to `<weights>/text_encoder`, the dense
-        //   upstream copy.
+        //   upstream copy. It does NOT read `LoadSpec::text_encoder` — that field has zero hits in
+        //   the whole engine crate, so staging there would resolve nothing and hard-error inside
+        //   the engine at the `config.json` probe.
         //
         // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
         // branched so adding a fourth cannot silently drop one.

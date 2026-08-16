@@ -1407,7 +1407,11 @@ fn record_frame_count_records_the_encoded_clip_not_the_request() {
 
     // A clip whose length matches NEITHER prediction — the shape sc-12318's stub probe produces
     // (asked for 151, returned 1). The record must follow the frames that exist.
-    let odd = EncodedClip { frames: 7, fps: 25 };
+    let odd = EncodedClip {
+        frames: 7,
+        fps: 25,
+        has_audio: false,
+    };
     let stamped = odd.record_frame_count(bernini_raw_settings(&bernini));
     assert_eq!(
         stamped["frameCount"],
@@ -1428,12 +1432,18 @@ fn record_frame_count_records_the_encoded_clip_not_the_request() {
     let clip = EncodedClip {
         frames: rendered,
         fps: 25,
+        has_audio: false,
     };
     let stamped = clip.record_frame_count(bernini_raw_settings(&bernini));
     assert_eq!(stamped["frameCount"], json!(149));
 
     // An already-stamped record is corrected, not duplicated (the stamp is the ONE writer).
-    let restamped = EncodedClip { frames: 5, fps: 25 }.record_frame_count(stamped);
+    let restamped = EncodedClip {
+        frames: 5,
+        fps: 25,
+        has_audio: false,
+    }
+    .record_frame_count(stamped);
     assert_eq!(restamped["frameCount"], json!(5));
 
     // A non-object carries no keys to correct and passes through rather than being wrapped.
@@ -1487,6 +1497,55 @@ fn encoded_clip_measures_the_file_not_the_request() {
     assert_eq!(clip.duration_seconds(), 2.0);
 }
 
+/// sc-19577: the asset records whether the mp4 got a SOUNDTRACK, measured off what was muxed.
+///
+/// The condition asserted here is the same one `encode_inner` branches on — `decoded.audio` — so
+/// the record and the mux cannot disagree. Both outcomes are driven from the SAME model id
+/// (`minimax_h3`), which is the point: a per-family lookup would badge the silent clip below, and
+/// asserting only the `true` case would pass against exactly that hardcode.
+#[test]
+fn asset_fact_records_the_soundtrack_that_was_actually_muxed() {
+    let frame = || RgbFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![0; 12],
+    };
+    let decoded = |audio: Option<AudioTrack>| DecodedVideo {
+        frames: vec![frame(), frame()],
+        fps: 24,
+        audio,
+        adapter_apply_reports: Vec::new(),
+    };
+    let track = AudioTrack {
+        samples: vec![0.0; 64],
+        sample_rate: 32_000,
+        channels: 2,
+    };
+
+    let with_audio = EncodedClip::measure(&decoded(Some(track)));
+    let silent = EncodedClip::measure(&decoded(None));
+    assert!(with_audio.has_audio);
+    assert!(
+        !silent.has_audio,
+        "a joint audio+video model that returned no audio must not claim a soundtrack"
+    );
+
+    // …and it reaches the asset fact, which is what `build_video_sidecar_parts` reads.
+    let request = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video",
+        "prompt": "a lighthouse keeper hums",
+    }));
+    let plan = VideoPlan::new(&request, Path::new("/tmp/project"));
+    let fact = |clip| video_asset_fact(&plan, 7, "mlx_minimax_h3", json!({}), None, clip);
+    assert_eq!(fact(with_audio)["hasAudio"], json!(true));
+    assert_eq!(
+        fact(silent)["hasAudio"],
+        json!(false),
+        "the key is emitted for a silent render too — absent means `recorded before sc-19577`, \
+         which is a different fact from `measured, and silent`"
+    );
+}
+
 /// The candle-lane half of [`no_raw_settings_builder_records_its_own_frame_count`] (sc-12371).
 /// Same invariant, different `#[cfg]`: these builders were the other half of the live bug —
 /// `candle_bernini` / `candle_scail2`(`_replace`) and `candle_wan_comfyui` (under an
@@ -1536,8 +1595,12 @@ fn no_candle_raw_settings_builder_records_its_own_frame_count() {
         );
     }
     // And the stamp still writes the clip's real length on this lane.
-    let stamped = EncodedClip { frames: 7, fps: 25 }
-        .record_frame_count(bernini_raw_settings(&req("bernini")));
+    let stamped = EncodedClip {
+        frames: 7,
+        fps: 25,
+        has_audio: false,
+    }
+    .record_frame_count(bernini_raw_settings(&req("bernini")));
     assert_eq!(stamped["frameCount"], json!(7));
 }
 
@@ -5699,6 +5762,7 @@ fn asset_fact_records_fit_and_multi_source_ids() {
     let clip = EncodedClip {
         frames: 81,
         fps: 16,
+        has_audio: false,
     };
     let fact = video_asset_fact(&plan, 5, "mlx_bernini", json!({}), None, clip);
     assert_eq!(fact["referenceClipAssetId"], json!("clip_ref"));
@@ -5729,6 +5793,7 @@ fn asset_fact_embeds_replacement_status_when_present() {
     let clip = EncodedClip {
         frames: 81,
         fps: 16,
+        has_audio: false,
     };
     let fact = video_asset_fact(&plan, 7, "mlx_wan_vace", json!({}), Some(status), clip);
     assert_eq!(fact["replacementStatus"]["replacementActive"], json!(true));
@@ -12268,6 +12333,24 @@ fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> te
         for partition in partitions {
             seed_minimax_h3_partition(&guard.path().join(tier), partition);
         }
+        // The PACKED per-tier text encoder (sc-19120). It exists in the rehost for q4 and q8 ONLY —
+        // bf16 reads the dense upstream component instead — so seeding it for every tier would hide
+        // the tier-dependent resolution `minimax_h3_text_encoder_dir` performs.
+        //
+        // BOTH probed files, off the shared constant (sc-19558): the floor checks `config.json` AND
+        // `model.safetensors.index.json`, and a fixture writing only the first would leave every
+        // packed-tier test asserting against a refusal instead of a resolve.
+        if matches!(*tier, "q4" | "q8") {
+            let text_encoder = guard
+                .path()
+                .join(tier)
+                .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
+            std::fs::create_dir_all(&text_encoder).expect("packed text encoder dir");
+            for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_PROBED_FILES
+            {
+                std::fs::write(text_encoder.join(file), "{}").expect("te probe");
+            }
+        }
     }
     guard
 }
@@ -12276,32 +12359,38 @@ fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> te
 /// `spec.weights` — the upstream repo's half of the install, which is a DIFFERENT download from the
 /// tiers.
 ///
-/// It writes the probed **files**, and derives which ones from
-/// [`super::minimax_h3::MINIMAX_H3_SHARED_PROBES`] plus the conditional
-/// [`super::minimax_h3::MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`] rather than restating a directory
-/// list. sc-19558 moved the completeness gate from `is_dir()` to `is_file()` precisely because an
-/// interrupted co-requisite download leaves the directory behind, so a directory-only fixture
-/// described an install the resolver now refuses — and a hand-copied file list here would drift from
-/// the gate the same way the catalog drifted from the loader.
+/// It writes the probed **FILES**, and derives which ones from
+/// `mlx_tier_completeness::minimax_h3_shared_probe_paths` rather than restating a directory list.
+/// sc-19558 moved the completeness gate from `is_dir()` to `is_file()` precisely because an
+/// interrupted co-requisite download leaves the directory behind — the `FL2VA/audio_vae/` case makes
+/// it concrete, since that directory exists as soon as any one of its thirteen entries lands — so a
+/// directory-only fixture described an install the resolver now refuses, and a hand-copied file list
+/// here would drift from the gate the same way the catalog drifted from the loader.
+///
+/// The DENSE upstream text encoder is seeded too. It is present only at bf16 in a real install, but
+/// harmless here: a q4 resolve reads the tier root instead and never looks at this path.
 #[cfg(target_os = "macos")]
 fn minimax_h3_base_root(prefix: &str) -> tempfile::TempDir {
     let guard = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
         .expect("temp dir");
-    for probe in super::minimax_h3::MINIMAX_H3_SHARED_PROBES
-        .iter()
-        .copied()
-        .chain(std::iter::once(
-            super::minimax_h3::MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE,
-        ))
-    {
-        let path = guard.path().join(probe);
-        std::fs::create_dir_all(path.parent().expect("a probe is a nested path"))
+    for probe in minimax_h3_base_root_probes(guard.path()) {
+        std::fs::create_dir_all(probe.parent().expect("a probe is a nested path"))
             .expect("component dir");
-        std::fs::write(&path, "{}").expect("probed file");
+        std::fs::write(&probe, "{}").expect("probed file");
     }
     guard
+}
+
+/// Every path `minimax_h3_base_root` writes: the shared floor plus the DENSE upstream text encoder,
+/// which is where `minimax_h3_text_encoder_dir` sends a bf16 resolve.
+#[cfg(target_os = "macos")]
+fn minimax_h3_base_root_probes(root: &Path) -> Vec<std::path::PathBuf> {
+    sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+        root,
+        &root.join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
+    )
 }
 
 /// A `JobSnapshot` for a MiniMax-H3 video job.
@@ -12954,20 +13043,29 @@ fn minimax_h3_tier_resolution_requires_both_dit_partitions() {
     );
 }
 
-/// sc-19558 — **a shared probe that is missing is refused BY NAME**, one probe at a time.
+/// sc-19558 — **a shared probe that is missing is refused BY NAME**, one probe at a time, with the
+/// probe's DIRECTORY left in place.
 ///
-/// The control is the whole point. `minimax_h3_base_root` now writes files rather than directories,
-/// so a fixture regression would silently turn every resolver test above into a test of the *first*
-/// gate it hits. This drives the same complete root, deletes exactly ONE probed file, and asserts
-/// the refusal names that file — then restores it and asserts the load resolves again. Deleting all
-/// of them at once would prove the SET is gated, not each member: a gate that checked only
-/// `vae/config.json` would pass that and still admit a snapshot with no tokenizer.
+/// 🔴 THE DIRECTORY STAYS. That is the whole defect: an interrupted co-requisite download leaves
+/// `vae/` (or `tokenizer/`, or the packed `q4/text_encoder/`) present and empty, so the sc-19573
+/// `is_dir()` floor read the install COMPLETE and the failure moved into the engine, past the only
+/// layer that could name it. Every mutation below is `remove_file`, and the parent directory is
+/// asserted to survive, so a regression to a directory probe cannot pass this test.
+///
+/// Deleting all of them at once would prove the SET is gated, not each member: a gate that checked
+/// only `vae/config.json` would pass that and still admit a snapshot with no tokenizer. The control
+/// resolve after each restore is equally load-bearing — without it a resolver that refused
+/// unconditionally would sweep clean.
+///
+/// Driven off `minimax_h3_shared_probe_paths` at the root the TIER resolves to (sc-19573), so the
+/// two probes that live under `<tier>/q4/text_encoder` are swept as well as the six under the
+/// upstream snapshot. A list restated here would drift from the gate the same way the catalog
+/// drifted from the loader.
 #[cfg(target_os = "macos")]
 #[test]
 fn minimax_h3_resolution_names_each_missing_shared_probe() {
     use crate::video_jobs::minimax_h3::{
-        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_SHARED_PROBES,
-        MINIMAX_H3_TIER_DIR_ENV, MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE,
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
     };
     let base = minimax_h3_base_root("mm_probe_base_");
     let req = minimax_h3_request("minimax_h3", json!({}));
@@ -12975,7 +13073,6 @@ fn minimax_h3_resolution_names_each_missing_shared_probe() {
         data_dir: base.path().join("unused-data-dir"),
         ..offline_settings()
     };
-    // No packed TE in the tier, so the conditional upstream text-encoder probe is live too.
     let tier = minimax_h3_tier_root(
         "mm_probe_tier_",
         &["q4"],
@@ -12999,29 +13096,49 @@ fn minimax_h3_resolution_names_each_missing_shared_probe() {
 
     resolve().expect("the control: a complete base root and a complete q4 tier resolve");
 
-    let probes: Vec<&str> = MINIMAX_H3_SHARED_PROBES
-        .iter()
-        .copied()
-        .chain(std::iter::once(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE))
-        .collect();
+    // `q4` is what an unqualified request resolves to, so this is the install the sweep describes.
+    let probes = sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+        base.path(),
+        &sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+            tier.path(),
+            base.path(),
+            "q4",
+        ),
+    );
     assert!(
-        probes.len() >= 7,
+        probes.len() >= 8,
         "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
         probes.len()
     );
-    for probe in probes {
-        let path = base.path().join(probe);
-        let saved = std::fs::read(&path).expect("the fixture wrote every probed file");
-        std::fs::remove_file(&path).expect("remove one probe");
+    // The packed text encoder must really be in the sweep, not merely assumed to be: it is the one
+    // probe that lives outside the upstream snapshot.
+    assert!(
+        probes
+            .iter()
+            .any(|probe| probe.starts_with(tier.path().join("q4"))),
+        "the q4 packed text encoder must be part of the shared floor: {probes:?}"
+    );
+
+    for probe in &probes {
+        let parent = probe.parent().expect("a probe is a nested path").to_owned();
+        let saved = std::fs::read(probe).expect("the fixture wrote every probed file");
+        std::fs::remove_file(probe).expect("remove one probe");
+        assert!(
+            parent.is_dir(),
+            "the mutation must leave {} behind — a directory probe would still pass",
+            parent.display()
+        );
         let message = resolve()
             .expect_err("a missing shared probe must be refused before the engine loads")
             .to_string();
         assert!(
-            message.contains(probe),
-            "the refusal must name `{probe}` rather than restating the whole list: {message}"
+            message.contains(&probe.display().to_string()),
+            "the refusal must name `{}` rather than restating the whole list: {message}",
+            probe.display()
         );
-        std::fs::write(&path, saved).expect("restore the probe");
-        resolve().unwrap_or_else(|e| panic!("restoring `{probe}` must resolve again: {e}"));
+        std::fs::write(probe, saved).expect("restore the probe");
+        resolve()
+            .unwrap_or_else(|e| panic!("restoring `{}` must resolve again: {e}", probe.display()));
     }
 }
 
@@ -13035,11 +13152,19 @@ fn minimax_h3_resolution_names_each_missing_shared_probe() {
 /// therefore still loaded the 53.07 GB dense conditioner: the largest component in the family, at
 /// full width, on the tier a user picked precisely because bf16 does not fit.
 ///
-/// Three cases, because the fallback has to survive: a tier WITH a packed TE stages it, a tier
-/// WITHOUT one (bf16, and any pre-sc-19120 install) resolves `None`, and a TORN one — the directory
-/// present but the index missing, which is what an interrupted download leaves behind and what
-/// sc-19517 found on the hosted `bf16/transformer/` — also resolves `None` rather than staging a
-/// directory the provider would fail to load.
+/// Three cases: a tier WITH a packed TE stages it, a tier WITHOUT one is REFUSED by name, and a
+/// TORN one — the directory present but the shard index missing, which is what an interrupted
+/// download leaves behind and what sc-19517 found on the hosted `bf16/transformer/` — is refused by
+/// name too, rather than staged for the provider to fail on.
+///
+/// ⚠️ CASES 1 AND 3 CHANGED SHAPE WHEN sc-19558 MET sc-19573, and the change is deliberate. sc-19506
+/// made a q4 tier with no usable packed encoder FALL BACK to `<weights>/text_encoder`. sc-19573 made
+/// the encoder's ROOT tier-dependent, and under that resolution a q4 install has no upstream
+/// `text_encoder/` to fall back TO — the co-requisite row is `variant: "bf16"`-scoped. So the
+/// fallback would have been to a path that is absent by design, producing a hard error inside the
+/// engine on `text_encoder/config.json`; and where it did resolve, it would put a q4 render on the
+/// 53 GB dense conditioner, which is the sc-19506 defect wearing a different hat. Refusing by name
+/// is the only outcome that is both loadable-or-actionable.
 #[cfg(target_os = "macos")]
 #[test]
 fn minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one() {
@@ -13068,41 +13193,47 @@ fn minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one(
         )
     };
 
-    // No packed TE in the tier subtree — a pre-sc-19120 install, and the bf16 tier permanently.
-    let bare = minimax_h3_tier_root("mm_te_bare_", &["q4"], &["transformer", "transformer_ref"]);
-    let load = resolve(bare.path()).expect("a complete q4 tier resolves");
-    assert_eq!(
-        load.te_dir, None,
-        "a tier with no packed text encoder must leave the provider on its upstream dense \
-         fallback, not stage a directory that is not there"
-    );
-
-    // The shipped shape: `config.json` + the shard index `convert.rs` writes for the component.
+    // The shipped shape: `config.json` + the shard index the rehost publishes for the component.
     let packed = minimax_h3_tier_root(
         "mm_te_packed_",
         &["q4"],
         &["transformer", "transformer_ref"],
     );
-    let te = packed.path().join("q4").join("text_encoder");
-    std::fs::create_dir_all(&te).expect("packed te dir");
-    std::fs::write(te.join("config.json"), "{}").expect("te config");
-    std::fs::write(te.join("model.safetensors.index.json"), "{}").expect("te index");
+    let te = packed
+        .path()
+        .join("q4")
+        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
     let load = resolve(packed.path()).expect("a complete q4 tier resolves");
     assert_eq!(
-        load.te_dir,
+        load.text_encoder_dir,
         Some(te.clone()),
         "a q4 tier that ships a packed text encoder must stage it — an unstaged one means the q4 \
          render loads the 53 GB dense conditioner and the tier buys nothing on it"
     );
 
-    // Torn: the directory exists, the index does not. Staging it would replace a working dense
-    // fallback with a load error, so completeness is probed rather than assumed from `is_dir()`.
+    // TORN: the directory exists, the index does not. Named, not silently swapped for a fallback.
     std::fs::remove_file(te.join("model.safetensors.index.json")).expect("remove te index");
-    let load = resolve(packed.path()).expect("a complete q4 tier still resolves");
-    assert_eq!(
-        load.te_dir, None,
-        "an interrupted packed-text-encoder download must fall back to the dense upstream copy \
-         rather than stage an unloadable directory"
+    assert!(te.is_dir(), "the mutation must leave the directory behind");
+    let message = resolve(packed.path())
+        .expect_err("an interrupted packed-text-encoder download must not resolve")
+        .to_string();
+    assert!(
+        message.contains(
+            &te.join("model.safetensors.index.json")
+                .display()
+                .to_string()
+        ),
+        "the refusal must name the missing shard index: {message}"
+    );
+
+    // ABSENT ENTIRELY — a pre-sc-19120 install. Same refusal, naming the config this time.
+    std::fs::remove_dir_all(&te).expect("drop the packed text encoder");
+    let message = resolve(packed.path())
+        .expect_err("a q4 tier with no packed text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains(&te.join("config.json").display().to_string()),
+        "the refusal must name the packed encoder the q4 tier is supposed to ship: {message}"
     );
 }
 
@@ -13114,14 +13245,17 @@ fn minimax_h3_resolution_names_the_missing_shared_components() {
         resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
     };
     let tiers = minimax_h3_tier_root("mm_shared_", &["q4"], &["transformer", "transformer_ref"]);
-    // A base root that exists but is missing `FL2VA/audio_vae/` — the audio VAE's constructor
-    // documents, which live ONLY in the FL2VA sources and which the loader probes explicitly.
+    // A base root holding every shared component DIRECTORY and not one of the files inside them —
+    // the shape an interrupted co-requisite download leaves behind, and the shape the sc-19573
+    // `is_dir()` floor certified as complete (sc-19558). `FL2VA/audio_vae/` is the case the
+    // assertion below names, because its constructor documents live ONLY in the FL2VA sources.
     let base = tempfile::Builder::new()
         .prefix("mm_torn_base_")
         .tempdir()
         .expect("temp dir");
-    for component in ["text_encoder", "tokenizer", "vae", "audio_vae"] {
-        std::fs::create_dir_all(base.path().join(component)).expect("component dir");
+    for probe in minimax_h3_base_root_probes(base.path()) {
+        std::fs::create_dir_all(probe.parent().expect("a probe is a nested path"))
+            .expect("component dir");
     }
     let req = minimax_h3_request("minimax_h3", json!({}));
     let settings = Settings {
@@ -13148,6 +13282,152 @@ fn minimax_h3_resolution_names_the_missing_shared_components() {
         "the error must name the component that is actually missing, since the tiers and the \
          shared components are separate downloads: {message}"
     );
+}
+
+/// sc-19573 — a PACKED-tier install has no upstream `text_encoder/`, and must still resolve.
+///
+/// sc-19120 made the Qwen3-VL-32B encoder a per-tier artifact: q4 and q8 read a packed copy hosted
+/// beside the DiT tiers, and their catalog rows are `variant`-scoped, so a q4 install never fetches
+/// the dense upstream component. The shared-completeness check probed `<base_root>/text_encoder`
+/// unconditionally, which meant EVERY q4 and q8 install was refused before it reached the engine,
+/// blaming the shared floor for a path that tier is correct not to have.
+///
+/// Asserted in both directions on purpose. A test that only proved q4 resolves would also pass if the
+/// text encoder had simply stopped being checked at all — so the bf16 half below proves the probe is
+/// still live, and the third block proves the packed encoder is load-bearing for q4 specifically.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolves_the_text_encoder_at_the_root_its_tier_actually_ships_it_in() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let tiers = minimax_h3_tier_root(
+        "mm_te_",
+        &["q4", "bf16"],
+        &["transformer", "transformer_ref"],
+    );
+    let base = minimax_h3_base_root("mm_te_base_");
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    // `mlxQuantize: 0` is the bf16 (dense) request — `resolve_mlx_dense_quant` maps <= 0 to `None`,
+    // which is what puts bf16 first in the tier order. Absent would mean q4.
+    let resolve = |tier_root: &Path, base_root: &Path, quantize: i64| {
+        let req = minimax_h3_request(
+            "minimax_h3",
+            json!({ "advanced": { "mlxQuantize": quantize } }),
+        );
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base_root.to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // q4 with the upstream text encoder DELETED — the exact on-disk shape a q4 install produces.
+    let q4_base = tempfile::Builder::new()
+        .prefix("mm_te_q4_base_")
+        .tempdir()
+        .expect("temp dir");
+    copy_dir_recursive(base.path(), q4_base.path());
+    std::fs::remove_dir_all(
+        q4_base
+            .path()
+            .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
+    )
+    .expect("drop the upstream text encoder");
+    let load = resolve(tiers.path(), q4_base.path(), 4)
+        .expect("a q4 install with only the packed text encoder must resolve");
+    assert_eq!(load.tier, "q4");
+    assert_eq!(
+        load.text_encoder_dir,
+        Some(tiers.path().join("q4").join("text_encoder")),
+        "the packed encoder must be STAGED, not merely downloaded — without this the 18.7 GB \
+         sc-19120 added is fetched and never opened"
+    );
+
+    // 🔴 REACHABILITY, not merely declaration (sc-19573 review). Asserting the SceneWorks-side
+    // struct field alone proves nothing about the engine: `mlx-gen-minimax-h3` resolves its text
+    // encoder ONLY from `spec.components["text_encoder"]` (`resolve_text_encoder_dir`), and
+    // `spec.text_encoder` — the LTX external-Gemma field — has ZERO references anywhere in that
+    // crate. Staged on the wrong field, a q4 job would fall through to `<weights>/text_encoder`,
+    // which a packed-tier install correctly does not have, and hard-error INSIDE the engine on the
+    // missing `text_encoder/config.json`. So assert the field the engine reads, on the built spec.
+    let spec = video_load_spec(&VideoGenInput {
+        engine_id: "minimax_h3",
+        model_dir: q4_base.path().to_path_buf(),
+        dit_component_dir: Some(load.dit_dir.clone()),
+        text_encoder_component_dir: load.text_encoder_dir.clone(),
+        ..VideoGenInput::default()
+    });
+    assert!(
+        matches!(
+            spec.components.get("text_encoder"),
+            Some(WeightsSource::Dir(dir)) if *dir == tiers.path().join("q4").join("text_encoder")
+        ),
+        "the packed encoder must land in components[\"text_encoder\"] — the only seam \
+         mlx-gen-minimax-h3 reads: {:?}",
+        spec.components
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "LoadSpec::text_encoder is the LTX seam and is never read by this engine; staging there \
+         moves the failure from before the engine to inside it: {:?}",
+        spec.text_encoder
+    );
+
+    // bf16 reads the dense upstream component and passes nothing on the spec: `None` is what leaves
+    // the provider on its own `<root>/text_encoder`, which is exactly where that component is.
+    let load = resolve(tiers.path(), base.path(), 0)
+        .expect("a bf16 install with the upstream text encoder resolves");
+    assert_eq!(load.tier, "bf16");
+    assert_eq!(load.text_encoder_dir, None);
+
+    // …and bf16 is genuinely REFUSED without it, so the probe is not merely skipped for that tier.
+    let message = resolve(tiers.path(), q4_base.path(), 0)
+        .expect_err("bf16 without the upstream text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains("text encoder"),
+        "the bf16 refusal must name the text encoder: {message}"
+    );
+
+    // The packed encoder is load-bearing for q4 in the same way — remove it and q4 stops resolving.
+    let torn_tiers =
+        minimax_h3_tier_root("mm_te_torn_", &["q4"], &["transformer", "transformer_ref"]);
+    std::fs::remove_dir_all(torn_tiers.path().join("q4").join("text_encoder"))
+        .expect("drop the packed encoder");
+    let message = resolve(torn_tiers.path(), q4_base.path(), 4)
+        .expect_err("q4 without the packed text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains("text encoder") && message.contains("q4"),
+        "the q4 refusal must name the tier's own encoder rather than the upstream one: {message}"
+    );
+}
+
+/// Copy `from` into `to` recursively — a fixture helper, not a general-purpose utility.
+#[cfg(target_os = "macos")]
+fn copy_dir_recursive(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("destination dir");
+    for entry in std::fs::read_dir(from).expect("readable source dir") {
+        let entry = entry.expect("readable entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir_recursive(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy file");
+        }
+    }
 }
 
 /// **The caller-side pin.** Drives the REAL arm end to end and asserts on what reached the engine.
@@ -13229,6 +13509,24 @@ fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_t
         "the tiered DiT must ride the components map: it lives in a different repo from the \
          shared components, and `weights` can only name one root"
     );
+    // 🔴 The packed per-tier text encoder (sc-19120), on the seam the ENGINE reads — asserted here,
+    // on the spec the arm actually built, rather than on the SceneWorks-side struct field.
+    // `mlx-gen-minimax-h3::resolve_text_encoder_dir` matches ONLY
+    // `spec.components.get("text_encoder")`; `spec.text_encoder` has zero references in that entire
+    // crate. Staged there instead, a q4 load falls through to `<weights>/text_encoder` — which this
+    // fixture's packed-tier base root does not have — and hard-errors inside the engine.
+    assert_eq!(
+        source_dir(spec.components.get("text_encoder")),
+        Some(tiers.path().join("q4").join("text_encoder")),
+        "the packed q4 text encoder must ride components[\"text_encoder\"], the only seam the \
+         engine resolves it from"
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "`LoadSpec::text_encoder` is LTX's external-Gemma seam and is never read by this engine: \
+         {:?}",
+        spec.text_encoder
+    );
     assert_eq!(
         spec.quantize,
         Some(Quant::Q4),
@@ -13289,14 +13587,22 @@ fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_t
 ///
 /// `minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one` pins the
 /// RESOLVER, and `video_load_spec_threads_text_encoder_dir` pins the `VideoGenInput` → `LoadSpec`
-/// mapping. Neither covers the ONE line between them — `text_encoder_component_dir: load.te_dir` in
+/// mapping. Neither covers the ONE line between them — `text_encoder_component_dir: load.text_encoder_dir` in
 /// `generate_minimax_h3_using` — and dropping that line was measured to leave both of those tests
 /// green while every q4 render silently went back to the 53 GB dense conditioner. This is the seam
 /// test that makes it red.
 ///
 /// Both directions, because only the positive one is a claim about the fix and only the negative one
 /// keeps the fallback honest: an absent key is what sends the provider to `<weights>/text_encoder`,
-/// which is CORRECT for the dense bf16 tier and for a pre-sc-19120 install.
+/// which is CORRECT for the dense bf16 tier.
+///
+/// The negative case is BF16, not "a q4 tier with the packed component deleted" (which is what it
+/// was before sc-19558 met sc-19573). Under the tier-aware root resolution a q4 install has no
+/// upstream `text_encoder/` to fall back TO — the co-requisite row is `variant: "bf16"`-scoped — so
+/// that shape is now REFUSED by the shared floor rather than resolved onto a fallback, and
+/// `minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one` is what pins the
+/// refusal. bf16 is the tier where an absent key is genuinely correct, so it is the one that keeps
+/// this direction non-vacuous.
 #[cfg(target_os = "macos")]
 #[test]
 fn generate_minimax_h3_using_stages_the_packed_text_encoder_onto_the_load_spec() {
@@ -13307,16 +13613,19 @@ fn generate_minimax_h3_using_stages_the_packed_text_encoder_onto_the_load_spec()
     let base = minimax_h3_base_root("mm_te_arm_base_");
     let request = minimax_h3_request("minimax_h3", json!({}));
 
-    // A tier that ships NO packed text encoder — the key must be absent so the provider falls back
-    // to the dense upstream copy under `spec.weights`.
+    // bf16 ships no packed text encoder — the key must be absent so the provider falls back to the
+    // dense upstream copy under `spec.weights`. `mlxQuantize: 0` is what selects the dense tier
+    // (`resolve_mlx_dense_quant` maps <= 0 to `None`); absent would mean q4.
     let bare = minimax_h3_tier_root(
         "mm_te_arm_bare_",
-        &["q4"],
+        &["bf16"],
         &["transformer", "transformer_ref"],
     );
+    let dense_request =
+        minimax_h3_request("minimax_h3", json!({ "advanced": { "mlxQuantize": 0 } }));
     let probe = ArmProbe::default();
-    drive_minimax_h3_arm(bare.path(), base.path(), &probe, &request)
-        .expect("a t2va job with a complete q4 tier and shared components runs");
+    drive_minimax_h3_arm(bare.path(), base.path(), &probe, &dense_request)
+        .expect("a t2va job with a complete bf16 tier and shared components runs");
     let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
     assert!(
         !spec.components.contains_key("text_encoder"),
@@ -13324,16 +13633,17 @@ fn generate_minimax_h3_using_stages_the_packed_text_encoder_onto_the_load_spec()
          selects the provider's `<weights>/text_encoder` fallback"
     );
 
-    // The same tier plus the packed component: `config.json` + the shard index `convert.rs` writes.
+    // A q4 tier, whose packed component `minimax_h3_tier_root` seeds with the shipped shape:
+    // `config.json` + the shard index. Both are load-bearing — the shared floor probes each.
     let packed = minimax_h3_tier_root(
         "mm_te_arm_packed_",
         &["q4"],
         &["transformer", "transformer_ref"],
     );
-    let te = packed.path().join("q4").join("text_encoder");
-    std::fs::create_dir_all(&te).expect("packed te dir");
-    std::fs::write(te.join("config.json"), "{}").expect("te config");
-    std::fs::write(te.join("model.safetensors.index.json"), "{}").expect("te index");
+    let te = packed
+        .path()
+        .join("q4")
+        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
     // A SECOND base root, not a reuse of the first: the shared video funnel caches the loaded
     // generator, and a second drive against the same `spec.weights` is served from that cache
     // without calling the loader at all — which would leave `probe.spec` empty and the assertion
@@ -13464,7 +13774,13 @@ fn generate_minimax_h3_using_refuses_a_wrong_partition_shape_before_loading() {
 ///
 /// Deliberately NOT `#[cfg(target_os = "macos")]`. The probe list is a fact about the manifest and
 /// the engine's own loop, and it is on the Linux lane that a macOS-only row is easiest to delete by
-/// accident. `MINIMAX_H3_SHARED_PROBES` is kept outside the platform fence for the same reason.
+/// accident. `mlx_tier_completeness` is an unfenced core module for the same reason.
+///
+/// Overlaps `minimax_h3_downloads_cover_every_path_the_loader_probes` (sceneworks-core) without
+/// duplicating it, and both are kept: core's asks the TIER-SCOPED question over every tier and both
+/// entries, including the DiT partitions; this one asks the PLATFORM-SCOPED question — that the
+/// `platforms: ["macos"]` rows against the upstream repo, and not the candle rows that happen to
+/// name the same paths, are what supply the MLX lane's shared floor.
 ///
 /// Mutation checks (each verified RED by construction of the assertion): delete either new row from
 /// either entry; narrow `"tokenizer/*"` to `"tokenizer/tokenizer_config.json"`; drop
@@ -13488,17 +13804,27 @@ fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
     let manifest: Value =
         serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
 
-    // Every probe, including the conditional text encoder: the upstream row is `variant: "bf16"`
-    // scoped, so a bf16 install DOES fall back to it and it must be declared somewhere.
-    let probes: Vec<&str> = super::minimax_h3::MINIMAX_H3_SHARED_PROBES
+    // Every probe of a BF16 install, snapshot-relative. bf16 is the tier whose text encoder comes
+    // from the upstream repo (`minimax_h3_text_encoder_dir` sends q4/q8 to the rehost instead), so
+    // it is the tier that makes this the complete upstream set — and the upstream `text_encoder`
+    // row IS `variant: "bf16"`-scoped, so it must be declared somewhere.
+    //
+    // Both roots EMPTY so the enumerator yields the relative spelling a `files` pattern is written
+    // in. Read from `mlx_tier_completeness` rather than restated: a second hand-copied list here
+    // would drift from the gate exactly the way the catalog drifted from the loader.
+    let empty = Path::new("");
+    let probes: Vec<String> =
+        sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+            empty,
+            &sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+                empty, empty, "bf16",
+            ),
+        )
         .iter()
-        .copied()
-        .chain(std::iter::once(
-            super::minimax_h3::MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE,
-        ))
+        .map(|probe| probe.to_string_lossy().into_owned())
         .collect();
     assert!(
-        probes.len() >= 7,
+        probes.len() >= 8,
         "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
         probes.len()
     );
@@ -13538,7 +13864,7 @@ fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
                     // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
                     // what stops `vae/*` from claiming `audio_vae/config.json`.
                     Some(prefix) => probe.starts_with(prefix),
-                    None => pattern == probe,
+                    None => *pattern == probe.as_str(),
                 });
             assert!(
                 covered,

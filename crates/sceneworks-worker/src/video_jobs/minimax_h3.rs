@@ -27,12 +27,17 @@ use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, Video
 //     [`minimax_h3_validate_partition`] exists: it is the only thing standing between a catalog id
 //     and a silently-wrong checkpoint.
 //
-//  3. **The load probes BOTH partitions.** `mlx-gen-minimax-h3::load` requires
-//     `{dit}/config.json` AND its sibling `{dit}/../transformer_ref/config.json`, because ref2va is
-//     a first-class task of the engine rather than an optional extra. The manifest ships the two
-//     partitions as SEPARATE downloads (`minimax_h3` pulls `q4/transformer/*`, `minimax_h3_ref`
-//     pulls `q4/transformer_ref/*`), so an install of either entry alone is not loadable —
-//     [`resolve_minimax_h3_load`] requires both and says which half is missing.
+//  3. **The load probes BOTH partitions**, so each entry DOWNLOADS both (sc-19573).
+//     `mlx-gen-minimax-h3::load` requires `{dit}/config.json` AND its sibling
+//     `{dit}/../transformer_ref/config.json`, because ref2va is a first-class task of the engine
+//     rather than an optional extra. Until sc-19573 the manifest shipped the two partitions as the
+//     PRIMARY downloads of two separate catalog entries, so installing either alone produced an
+//     install that could not load at all. Each entry now declares the sibling partition as a
+//     per-tier `coRequisite`, which is what a co-requisite means — a pre-download weights floor. The
+//     +18.78 GB (q4) that buys is not optional and never was; the pre-sc-19573 catalog comment
+//     arguing it should stay optional was reasoning from the premise that one partition could load
+//     on its own, which the engine has never allowed. [`resolve_minimax_h3_load`] still names which
+//     half is missing, because a torn download remains reachable.
 //
 //  4. **No guidance, no negative prompt.** The checkpoint is guidance-distilled: there is no
 //     unconditional branch anywhere in it. The manifest declares
@@ -40,15 +45,22 @@ use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, Video
 //     both fields, so this arm passes `None` for each rather than forwarding a knob the engine
 //     would refuse.
 //
-// Installed layout — the DiT is the ONE tiered component, and it lives in a DIFFERENT repo from
-// every shared component:
+// Installed layout — the DiT partitions and (since sc-19120) the text encoder are the TIERED
+// components, and they live in a DIFFERENT repo from the rest of the shared floor:
 //
-//     <tier root>/{q4,q8,bf16}/{transformer,transformer_ref}/   <- SceneWorks/minimax-h3-mlx
-//     <base root>/{text_encoder,tokenizer,vae,audio_vae,FL2VA}/ <- MiniMaxAI/MiniMax-H3 (coRequisite)
+//     <tier root>/{q4,q8}/{transformer,transformer_ref,text_encoder}/ <- SceneWorks/minimax-h3-mlx
+//     <tier root>/bf16/{transformer,transformer_ref}/                 <- SceneWorks/minimax-h3-mlx
+//     <base root>/{tokenizer,vae,audio_vae,FL2VA/audio_vae}/          <- MiniMaxAI/MiniMax-H3 (coReq)
+//     <base root>/text_encoder/                                       <- MiniMaxAI (bf16 tier ONLY)
 //
 // so `spec.weights` is the BASE root and the tier's `transformer/` is staged as the
 // [`MINIMAX_H3_DIT_COMPONENT`]. Handing the loader the tier root instead would fail on
-// `text_encoder/`, and handing it the base root alone would load the unquantized upstream DiT.
+// `tokenizer/`, and handing it the base root alone would load the unquantized upstream DiT.
+//
+// The TEXT ENCODER is the one shared component whose root moves with the tier (sc-19120): q4 and q8
+// read the packed encoder beside the DiT tiers, bf16 reads the dense upstream one. That is why the
+// probe list and the root resolution live together in
+// `sceneworks_core::mlx_tier_completeness` — see [`minimax_h3_text_encoder_dir`].
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real MLX MiniMax-H3 asset.
@@ -67,11 +79,11 @@ pub(super) const MINIMAX_H3_ENGINE_ID: &str = "minimax_h3";
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_DIT_COMPONENT: &str = "transformer";
 
-/// The staged-component key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads the PACKED,
-/// per-tier text encoder from (sc-19120). Absent ⇒ the provider falls back to
-/// `<spec.weights>/text_encoder`, the dense upstream bf16 Qwen3-VL-32B.
-#[cfg(target_os = "macos")]
-pub(super) const MINIMAX_H3_TE_COMPONENT: &str = "text_encoder";
+// The staged-component key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads the PACKED, per-tier
+// text encoder from (sc-19120) is `mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR` — the same
+// constant `minimax_h3_text_encoder_dir` builds the root out of, so the key staged and the directory
+// probed cannot disagree. Absent ⇒ the provider falls back to `<spec.weights>/text_encoder`, the
+// dense upstream bf16 Qwen3-VL-32B.
 
 /// The SceneWorks rehost carrying the pre-quantized DiT tiers (both partitions, all three tiers).
 #[cfg(target_os = "macos")]
@@ -159,74 +171,20 @@ pub(super) fn minimax_h3_tier_dir_is_complete(dir: &Path) -> bool {
         && sceneworks_core::mlx_tier_completeness::minimax_h3_ref_tier_complete(dir)
 }
 
-/// The files under the UPSTREAM snapshot root that `mlx-gen-minimax-h3::load` probes on EVERY load,
-/// whatever tier is selected and whatever is staged as a component.
-///
-/// Kept as a `const` outside the `cfg(target_os = "macos")` fence — and as the file paths rather
-/// than the directory names — for one reason: it is the list
-/// `minimax_h3_macos_download_set_covers_every_probed_shared_file` compares the shipped manifest
-/// against, and that test must run on every host. A directory-only list could not have caught the
-/// sc-19558 defect either way round, because the defect was a MISSING DOWNLOAD ROW and the check
-/// that finds those has to name files a `files` pattern can be matched against.
-///
-/// Mirrors the engine's own loop verbatim (`mlx-gen-minimax-h3/src/model.rs`, the
-/// `for (partition, probe) in [...]` block). `text_encoder/config.json` is deliberately NOT here —
-/// see [`MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`], which is conditional.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) const MINIMAX_H3_SHARED_PROBES: &[&str] = &[
-    "vae/config.json",
-    "audio_vae/config.json",
-    "tokenizer/tokenizer.json",
-    // The audio VAE's CONSTRUCTOR arguments live only in these three; the repackaged root config
-    // carries none of them, and both `decode_audio` and `load_audio_encoder` parse all three.
-    "FL2VA/audio_vae/config.json",
-    "FL2VA/audio_vae/config.yaml",
-    "FL2VA/audio_vae/metadata.json",
-];
-
-/// The upstream DENSE text encoder's probe — required only when the resolved tier stages no PACKED
-/// one (sc-19120). Split out of [`MINIMAX_H3_SHARED_PROBES`] because it is the one probe whose
-/// necessity depends on the install, and treating it as unconditional is what made the whole family
-/// unloadable: `resolve_co_requisites_for_tier` and the API's
-/// `model_co_requisite_downloads_for_variant` both pick exactly ONE row per `componentId`, and the
-/// upstream `text_encoder` row is `variant: "bf16"`-scoped — so a q4 or q8 install never fetches it
-/// and `<root>/text_encoder` does not exist there at all.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) const MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE: &str = "text_encoder/config.json";
-
-/// Whether `root` carries the SHARED components the loader probes under `spec.weights`. Every one
-/// of these is a `coRequisite` download from a DIFFERENT repo than the tiers, so a user can
-/// genuinely have a complete `q4/` and no tokenizer.
-///
-/// `has_packed_text_encoder` says whether the resolved tier staged a packed text encoder into
-/// `LoadSpec::components["text_encoder"]`. When it did, the provider's `resolve_text_encoder_dir`
-/// never looks under this root, so requiring `<root>/text_encoder` here would refuse a load that
-/// would have succeeded — and, because the upstream text-encoder row is `variant: "bf16"`-scoped,
-/// would refuse EVERY q4 and q8 install.
-///
-/// FILES, not `is_dir()`. An interrupted co-requisite download leaves the directory present and
-/// empty, and the engine probes files — so a directory check would pass a snapshot the loader then
-/// rejects, moving the failure past the point where this function can name it.
-#[cfg(target_os = "macos")]
-pub(super) fn minimax_h3_shared_is_complete(root: &Path, has_packed_text_encoder: bool) -> bool {
-    minimax_h3_missing_shared_probes(root, has_packed_text_encoder).is_empty()
-}
-
-/// The probes [`minimax_h3_shared_is_complete`] would fail on, in declaration order — so the refusal
-/// can name what is actually absent instead of restating the whole list.
-#[cfg(target_os = "macos")]
-pub(super) fn minimax_h3_missing_shared_probes(
-    root: &Path,
-    has_packed_text_encoder: bool,
-) -> Vec<&'static str> {
-    MINIMAX_H3_SHARED_PROBES
-        .iter()
-        .copied()
-        .chain((!has_packed_text_encoder).then_some(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE))
-        .filter(|probe| !root.join(probe).is_file())
-        .collect()
-}
-
+// sc-19558 x sc-19573 — THE SHARED PROBE LIST LIVES IN `sceneworks_core::mlx_tier_completeness`,
+// AND IT PROBES FILES.
+//
+// This module used to carry its own list (`MINIMAX_H3_SHARED_PROBES` /
+// `MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`) alongside a `has_packed_text_encoder` flag. sc-19573
+// moved the list to core so the manifest's download-coverage guard and the runtime floor read ONE
+// list; sc-19558 established that the list has to name FILES, because an interrupted co-requisite
+// download leaves the directory present and empty and a dir-level floor certifies it as complete.
+// Both survive: core keeps the tier-aware root resolution and gains the file-level probes plus
+// `minimax_h3_missing_shared_probes`, which is what lets the refusal below name what is absent.
+//
+// The `has_packed_text_encoder` flag is gone because `minimax_h3_text_encoder_dir` subsumes it: the
+// text encoder's ROOT moves with the tier rather than its necessity, so there is nothing left to
+// make conditional.
 /// Everything a MiniMax-H3 load needs, resolved as ONE unit — the two roots are in different repos
 /// and neither is usable alone, so producing them separately is how they drift.
 #[cfg(target_os = "macos")]
@@ -237,11 +195,21 @@ pub(super) struct MiniMaxH3Load {
     /// `<tier>/transformer` → the staged [`MINIMAX_H3_DIT_COMPONENT`]. Always the BASE partition,
     /// even for a ref2va job: the provider resolves `transformer_ref/` as this dir's sibling.
     pub(super) dit_dir: PathBuf,
-    /// `<tier>/text_encoder` → the staged [`MINIMAX_H3_TE_COMPONENT`], when the selected tier ships
-    /// a PACKED text encoder. `None` for the dense bf16 tier and for a q4/q8 install that predates
-    /// sc-19120's per-tier text-encoder co-requisite; the provider then falls back to
-    /// `<root>/text_encoder`, the dense upstream Qwen3-VL-32B.
-    pub(super) te_dir: Option<PathBuf>,
+    /// The PACKED per-tier text encoder (sc-19120), or `None` at bf16 where the dense upstream
+    /// `<root>/text_encoder` is what the provider falls back to.
+    ///
+    /// `Some` rides `LoadSpec::components["text_encoder"]` (via
+    /// [`VideoGenInput::text_encoder_component_dir`]), which is the seam the engine actually reads:
+    /// `mlx-gen-minimax-h3::resolve_text_encoder_dir` matches `spec.components.get("text_encoder")`
+    /// and otherwise falls back to `<weights>/text_encoder`. `LoadSpec::text_encoder` — the LTX
+    /// external-Gemma field — has ZERO references in that engine crate, so staging there would be a
+    /// silent no-op: on q4/q8 the fallback resolves a path those tiers correctly lack and the load
+    /// hard-errors inside the engine on the missing `text_encoder/config.json`.
+    ///
+    /// Without this staging the 18.7 GB (q4) / 33.7 GB (q8) packed encoder sc-19120 added to the
+    /// manifest is downloaded and never opened, and the render loads the 53 GB dense upstream
+    /// conditioner instead — the declared-but-unreachable shape rather than a saving.
+    pub(super) text_encoder_dir: Option<PathBuf>,
     /// The tier's baked-in quant, ASSERTED against the staged dir by the provider rather than
     /// applied — nothing quantizes at load. `None` for the dense bf16 tier.
     pub(super) quant: Option<Quant>,
@@ -300,20 +268,6 @@ pub(super) fn resolve_minimax_h3_load(
             })?
         }
     };
-    // The UNCONDITIONAL shared probes, checked before the tier scan so a missing co-requisite is
-    // named ahead of "no complete tier". The upstream text encoder is deliberately excluded here
-    // (`has_packed_text_encoder: true`) because whether it is needed at all depends on the tier
-    // that has not been chosen yet — it is checked below, once `te_dir` is known.
-    let missing = minimax_h3_missing_shared_probes(&base_root, true);
-    if !missing.is_empty() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{}: the shared MiniMax-H3 tokenizer / VAEs are incomplete under {} — missing \
-             {missing:?}. These are a separate co-requisite download from the quality tiers — \
-             re-download MiniMax-H3 in the Model Manager.",
-            request.model,
-            base_root.display()
-        )));
-    }
     let Some(tier) = order
         .iter()
         .copied()
@@ -345,59 +299,60 @@ pub(super) fn resolve_minimax_h3_load(
             tier_root.display()
         )));
     };
-    // sc-19120 / sc-19506 — STAGE THE PACKED TEXT ENCODER WHEN THE TIER SHIPS ONE.
-    //
-    // `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads `spec.components["text_encoder"]` and
-    // falls back to `<spec.weights>/text_encoder` when the key is absent. `spec.weights` is the
-    // UPSTREAM root, whose `text_encoder/` is the DENSE bf16 Qwen3-VL-32B — 53.07 GB resident,
-    // measured, and the largest single component in the family by a wide margin. sc-19120 published
-    // packed q4/q8 text encoders beside the DiT tiers and declared them as per-tier `coRequisite`
-    // rows, but nothing staged the directory, so a q4 render still loaded the dense conditioner and
-    // the tier bought nothing on the component that dominates the peak.
-    //
-    // PROBED, NOT ASSUMED, and the fallback is deliberate rather than lazy: the bf16 tier genuinely
-    // has no packed text encoder (its conditioner is the upstream one), and a q4/q8 install made
-    // before sc-19120 has the DiT subtree without it. Both must keep loading, so an absent directory
-    // resolves to `None` and the provider's upstream fallback — not to an error.
-    let te_dir = Some(tier_root.join(tier).join(MINIMAX_H3_TE_COMPONENT))
-        .filter(|dir| minimax_h3_packed_te_is_complete(dir));
-    // …and NOW the conditional probe. With no packed text encoder staged, the provider falls back
-    // to `<root>/text_encoder`, so that must exist — but the upstream row is `variant: "bf16"`
-    // scoped, so it is absent on a q4/q8 install by design. Requiring it before the tier was known
-    // is what refused every packed install (sc-19558).
-    if !minimax_h3_shared_is_complete(&base_root, te_dir.is_some()) {
+    // The shared floor is checked AFTER the tier (sc-19573), because one of its paths — the text
+    // encoder — is only addressable once the tier is known (sc-19120 packs it per tier; see
+    // `minimax_h3_text_encoder_dir`). Checking it first is what made every q4/q8 install fail with a
+    // shared-floor error naming `text_encoder/` under the upstream snapshot, a path those tiers are
+    // correct not to have.
+    let text_encoder_dir = sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+        &tier_root, &base_root, tier,
+    );
+    // ENUMERATED, not restated (sc-19558). The probes are FILES, so the check can say which one is
+    // absent — and it must, because the pre-sc-19558 message listed everything the floor expects
+    // whether one path was missing or all eight, which sends a user to re-download components they
+    // already have. Single-sourced from `mlx_tier_completeness` either way: that is what keeps this
+    // message honest when the engine's probe list changes.
+    let missing = sceneworks_core::mlx_tier_completeness::minimax_h3_missing_shared_probes(
+        &base_root,
+        &text_encoder_dir,
+    );
+    if !missing.is_empty() {
+        // JOINED INTO PROSE rather than interpolated with `{:?}`, which put Rust debug literals in
+        // front of a user in the Model Manager.
+        let missing = missing
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(WorkerError::InvalidPayload(format!(
-            "{}: the {tier} tier stages no packed text encoder, so the load falls back to the \
-             dense upstream one — and {} is missing. Re-download MiniMax-H3 in the Model Manager, \
-             or install a tier that ships its own text encoder.",
+            "{}: the shared MiniMax-H3 text encoder / tokenizer / VAEs are incomplete for the \
+             {tier} tier — missing {missing}. These are separate co-requisite downloads from the \
+             quality tiers — re-download MiniMax-H3 in the Model Manager.",
             request.model,
-            base_root
-                .join(MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE)
-                .display()
         )));
     }
     Ok(MiniMaxH3Load {
         root: base_root,
         dit_dir: tier_root.join(tier).join(MINIMAX_H3_DIT_COMPONENT),
-        te_dir,
+        // `None` at bf16 leaves the provider on its own `<root>/text_encoder` fallback, which is
+        // where the dense upstream component actually is — passing it explicitly would be the same
+        // path spelled twice. Not `.filter(is_complete)`: the floor above already refused a torn
+        // packed encoder BY NAME, so there is nothing left to silently fall back from (sc-19558 —
+        // falling back would put a q4 render on the 53 GB dense conditioner, which is the sc-19506
+        // defect wearing a different hat).
+        text_encoder_dir: (tier != "bf16").then_some(text_encoder_dir),
         quant: minimax_h3_tier_quant(tier),
         tier,
     })
 }
 
-/// Whether `dir` is a loadable PACKED MiniMax-H3 text encoder (sc-19120).
-///
-/// `config.json` + a safetensors index is the same shape `minimax_h3_tier_complete` requires of a
-/// DiT partition, and it is the pair `resolve_text_encoder_dir` → `map_shards` actually reads: the
-/// index names every shard, so a directory holding only `config.json` — the sc-19517 failure on the
-/// hosted `bf16/transformer/` — is rejected here rather than half-loaded at the provider.
-///
-/// A bare `is_dir()` would be the false green: an interrupted download leaves the directory present
-/// and empty, and staging it would replace a working dense fallback with a load error.
-#[cfg(target_os = "macos")]
-fn minimax_h3_packed_te_is_complete(dir: &Path) -> bool {
-    dir.join("config.json").is_file() && dir.join("model.safetensors.index.json").is_file()
-}
+// `minimax_h3_packed_te_is_complete` used to live here (sc-19506): `config.json` + a safetensors
+// index, the pair `resolve_text_encoder_dir` → `map_shards` actually reads, so a directory holding
+// only `config.json` — the sc-19517 failure shape — is rejected rather than half-loaded at the
+// provider. It is now `mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`, checked by the
+// shared floor above for WHICHEVER root the tier resolves to (packed at q4/q8, dense upstream at
+// bf16) rather than only for the packed one. That is the strictly larger check: the dense encoder
+// was previously never probed beyond `is_dir()`.
 
 /// Refuse a request whose CONDITIONING SHAPE does not match the catalog entry it was submitted
 /// against — the guard that keeps a job off the wrong checkpoint.
@@ -875,11 +830,14 @@ pub(super) async fn generate_minimax_h3_using(
         // `components["transformer"]`. See fact 4 in the module header.
         model_dir: load.root,
         dit_component_dir: Some(load.dit_dir),
-        // sc-19120 / sc-19506: the tier's PACKED text encoder when it ships one. `None` leaves the
-        // provider on its `<weights>/text_encoder` fallback — the dense upstream conditioner — which
-        // is correct for bf16 and for a pre-sc-19120 install, and wrong for a q4/q8 install that has
-        // one, because a q4 tier whose 53 GB conditioner stays dense is not a q4 render.
-        text_encoder_component_dir: load.te_dir,
+        // The packed q4/q8 encoder (sc-19120), staged as `components["text_encoder"]` — the only
+        // seam `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads. `None` at bf16 ⇒ the engine's
+        // own `<root>/text_encoder` fallback, which is where the dense upstream component is.
+        //
+        // NOT `text_encoder_dir`: that field lands in `LoadSpec::text_encoder`, which this engine
+        // never reads, so a q4/q8 job would fall back to a `<root>/text_encoder` those tiers do not
+        // have and hard-error inside the engine.
+        text_encoder_component_dir: load.text_encoder_dir,
         quant: load.quant,
         // sc-18726. Was an unconditional `Vec::new()`: every selected MiniMax-H3 LoRA was dropped
         // between the payload and the engine, so the turbo adapters sc-18725 catalogued could be
