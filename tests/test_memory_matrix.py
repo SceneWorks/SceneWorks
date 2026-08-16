@@ -378,23 +378,29 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of the
     # provider's compile closure. The two coincided while nothing had moved; they no longer do.
     #
-    # SC-18353 ran thirteen exact physical Qwen bf16/q4 records at 014134e3. Pin the immutable ids so
-    # unrelated live-pin evidence cannot silently enter this closed capture set; SC-18237's q8 pair
-    # remains current by provider closure even though it was measured at the prior pin.
+    # sc-19721 moved the pin to 75d66db5, so the live-pin set is now that re-capture's nineteen
+    # records rather than SC-18353's thirteen at 014134e3 — those are historical from here. Pin the
+    # immutable ids so unrelated live-pin evidence cannot silently enter this closed capture set.
     assert measured_at_live_pin == {
-        "imc-08e925c50d9c290ed53d",
-        "imc-0e00924d96eeaf12be17",
-        "imc-277c04656961710d29e0",
-        "imc-3c1d70abfcccd95ea119",
-        "imc-50508c995a8d49b70aa2",
-        "imc-5ea462dfe3101260a9b1",
-        "imc-8ca170a7a9c901993007",
-        "imc-8fce887b31583e05f5b5",
-        "imc-91c4f21972905626cbb2",
-        "imc-93989adacdb7a35156a7",
-        "imc-b0527097758ac66f381e",
-        "imc-b072c9b116a6a40d00e1",
-        "imc-ea87169a3ea1fd340791",
+        "imc-034f4ee6b25326bf8469",
+        "imc-27f49d510f459aaa0cc9",
+        "imc-3be162bcbe15f2955e9a",
+        "imc-3da38b0d88bbefc69973",
+        "imc-421a1bb45e9c2f5d916c",
+        "imc-4dfe5ab630fd6bc25803",
+        "imc-51dd1b02e0d1c2ec6fa0",
+        "imc-52bee882710e199db994",
+        "imc-8f2a6f6c75bee2ead9dd",
+        "imc-94b85b4d335afefd41cf",
+        "imc-b4ffa7e179d3102ad58b",
+        "imc-c396ea2ec856867d8ebc",
+        "imc-c46985e79e28a8f5e2dd",
+        "imc-d2d0d1fca0aef4dee689",
+        "imc-d778d59acb0aae38dcbe",
+        "imc-da75519dc939a5e7153f",
+        "imc-e999971a33258b0856fd",
+        "imc-eb9292564fb7cdd508de",
+        "imc-f3f892712d4dabcdcdd6",
     }
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
     # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
