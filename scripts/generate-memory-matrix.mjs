@@ -20,7 +20,7 @@ const OUTPUT_MD = "docs/generated/memory-matrix.md";
 const EXPECTED_IMAGE_COUNT = 53;
 // SC-18218 removed FLUX.2-dev from this census: the pinned MLX provider is eager/resident-only,
 // so counting its generic route as staged coverage would contradict the captured contract.
-const EXPECTED_MLX_STAGED_COUNT = 38;
+const EXPECTED_MLX_STAGED_COUNT = 37;
 // Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
 // execution/layout/quantization change that makes measurements unsafe must add or bump its key;
 // ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.

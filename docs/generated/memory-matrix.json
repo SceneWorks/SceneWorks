@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:48bd94066d3362060c56e2f6d01cf474932805413e710f07300de04a185e9979",
+    "sceneWorksRevision": "source-tree:c9468e4d6d16b3bf64f0daf49d4aab3a319b3d3c88402d54dce3dc76175fe961",
     "inferenceRevision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb",
     "sources": {
       "manifest": {
@@ -30,7 +30,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "08f4c291ab47a40b8f3f270a3be4122f3a3a8c8f06317b1bc202f6305d597bd9"
+        "sha256": "5116b585a403b62662ae9d1ab740606ee59a136a32856ddb059c278eec8f8701"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -132,11 +132,11 @@
     "publishedCells": 208,
     "elidedCells": 8932,
     "elidedByState": {
-      "Implemented/unverified": 3084,
-      "Missing": 5848
+      "Implemented/unverified": 3072,
+      "Missing": 5860
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
-    "mlxStagedStaticCoverage": 38,
+    "mlxStagedStaticCoverage": 37,
     "mlxStagedStaticCoverageDenominator": 53,
     "fullModels": 0,
     "calibrationRuns": 89,
@@ -5273,9 +5273,9 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 12,
+      "implemented": 0,
       "states": {
-        "Implemented/unverified": 12
+        "Missing": 12
       }
     },
     {

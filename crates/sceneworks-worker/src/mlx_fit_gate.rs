@@ -1136,10 +1136,10 @@ struct VerifiedGeometryAlternative {
 /// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
 /// admitted on.
 ///
-/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` (0.10)
-/// was derived to cover extrapolation error on top of same-closure re-capture variance
-/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already
-/// carries its own 0.05 drift allowance on the MEASURED path; stacking that drift under an
+/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` was
+/// derived to cover extrapolation error on top of same-closure re-capture variance
+/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already carries
+/// its own corpus-derived drift allowance on the MEASURED path; stacking that drift under an
 /// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
 /// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
 /// an extrapolated estimate.
@@ -7559,7 +7559,7 @@ mod tests {
 
         // At the LIVE closure the verdict forks on the digest pair, derived rather than
         // hardcoded: a fitted-curve estimate may extrapolate only from CLOSURE-CURRENT records
-        // (see `MeasuredRungBasis` — the 0.10 estimate margin was derived over same-closure
+        // (see `MeasuredRungBasis` — the estimate margin was derived over same-closure
         // re-capture variance and cannot also absorb closure drift). While the pose-control pair
         // is current the 60 GiB request admits the fitted rung; once the closure moves, the
         // records may keep serving their own measured cells behind the stale margin (sc-18095)
@@ -7852,7 +7852,7 @@ mod tests {
             // Preserve the shipped contract, composition, parameters and load shape while making
             // the pure selector arithmetic legible: a 6 GiB base consists of a 1 GiB conditioner
             // and 5 GiB DiT. With 6 GiB of request headroom, only the windowed composition fits an
-            // 8 GiB constrained host after the canonical 10% estimate margin.
+            // 11 GiB constrained host after the current corpus-derived estimate margin.
             contract.asset_facts.base_bytes = gib_to_bytes(6.0);
             contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
             contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
@@ -7922,7 +7922,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
-            fixture_budget(8.0),
+            fixture_budget(11.0),
             gib_to_bytes(12.0),
             0,
             &[],
@@ -8068,7 +8068,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
-            fixture_budget(8.0),
+            fixture_budget(11.0),
             gib_to_bytes(12.0),
             0,
             &[],
@@ -11135,7 +11135,7 @@ mod tests {
         );
         assert_eq!(
             cells.len(),
-            35,
+            32,
             "the source-derived Resident-only inventory changed; update the recorded audit result"
         );
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
@@ -11373,7 +11373,7 @@ mod tests {
     /// Completeness mutation for the loophole found after the production-router rewrite. A
     /// zero-cell route is still part of the candidate inventory: replacing FLUX.1 Schnell with an
     /// already-declared Chroma entry must fail before deduplication, and simply deleting Schnell
-    /// must fail exact source-inventory equality even though the 35 Resident-only cells and two
+    /// must fail exact source-inventory equality even though the 32 Resident-only cells and two
     /// flips are unchanged.
     #[cfg(target_os = "macos")]
     #[test]
@@ -13814,8 +13814,8 @@ mod tests {
     /// epic 10834). This exercises the LIVE registry, so it must see the force-linked `mlx_gen_*`
     /// providers — anchored (`use mlx_gen_* as _;` in `image_jobs`) only on macOS, the sole platform the
     /// MLX gate runs on. Off-Mac the image registry is empty, so this is macOS-gated exactly like the
-    /// `engines.rs` descriptor sweeps. At the pinned mlx-gen `45428fa` every image engine advertises the
-    /// bit, so every wired id resolves true through the shared registry query.
+    /// `engines.rs` descriptor sweeps. The assertions below mirror the capability bits of the
+    /// currently pinned providers, so the shared registry query stays the only source of truth.
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_supports_sequential_is_derived_from_the_registered_capability() {
@@ -13873,17 +13873,18 @@ mod tests {
             "boogu_image",
             "boogu_image_turbo",
             "boogu_image_edit",
-            "bernini",
         ] {
             assert!(
                 engine_supports_sequential(id),
-                "{id}: sc-10840 fan-out engine must be sequential-capable at mlx-gen 45428fa"
+                "{id}: sc-10840 fan-out engine must stay sequential-capable at the pinned inference revision"
             );
         }
-        // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
-        // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
-        // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
-        // BIT, not mere registry membership.
+        // REGISTERED engines that do NOT advertise the bit stay false. Bernini's pinned descriptor
+        // deliberately omits sequential offload, while sensenova's encoder is fused into a unified
+        // MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys nothing and
+        // Sequential would be a no-op that OOMs. This proves the query reads the descriptor BIT,
+        // not mere registry membership.
+        assert!(!engine_supports_sequential("bernini"));
         assert!(!engine_supports_sequential("sensenova_u1_8b"));
     }
 
