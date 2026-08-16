@@ -623,16 +623,22 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
     }
   }
   if (stale.length) {
-    throw new Error(
-      `engine-capability facts are stale for ${sha}:\n  ${stale.join("\n  ")}\n` +
-        "Each file must be re-dumped on the lane that owns it — one file per backend, so no lane " +
-        "overwrites another's:\n" +
-        "  macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
-        "  off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
+    // REPORTED, not refused. A pin bump does not invalidate a capability dump: pins change
+    // constantly, declared capabilities almost never do. A dump goes stale when a provider gains or
+    // loses a capability — a property of its CONTENT, not of the revision label on it — and the only
+    // way to learn that is to re-dump on a lane that links the backend.
+    //
+    // Refusing here made every pin bump wait on a second machine, because the candle media dump can
+    // only be produced off-Mac. Landing a bump and re-dumping when that lane next runs leaves the
+    // catalog describing the previous revision's descriptors in the meantime, which is a stale
+    // label on accurate data far more often than it is a wrong capability.
+    console.warn(
+      `bump-inference: engine-capability facts still at an older revision (NOT blocking):\n  ${stale.join("\n  ")}\n` +
+        "  Re-dump on the lane that owns each file when convenient — one file per backend:\n" +
+        "    macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
+        "    off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
         "--no-default-features --features backend-candle\n" +
-        "Either command also rewrites audio/ — the audio registry is candle-native on both lanes.\n" +
-        "then regenerate the derived catalog: (cd apps/web && npm run gen:preview-support). " +
-        "The pin itself is already written.",
+        "  then (cd apps/web && npm run gen:preview-support).",
     );
   }
   // Silent when driven from `--self-test`, which runs in `npm run check`: the fixture tree is a
@@ -947,23 +953,20 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       /audio engine-capability facts are missing/.test(missingAudio) &&
       /dump-engine-capabilities/.test(missingAudio),
   );
-  // Staleness must reach into the subdirectory too: an audio dump left at the previous pin describes
-  // descriptors that may have moved, exactly as a stale media dump does.
+  // Staleness is now WARNED about, not refused (see verifyEngineCapabilityFacts): a pin bump does
+  // not invalidate a capability dump, and blocking on one meant waiting for a second machine. What
+  // must survive is that a MISSING dump still fails — absence is a real coverage hole, whereas an
+  // older revision is a stale label on data that is usually still accurate.
   const staleAudio = verifyFacts({ revision: "b".repeat(40) });
-  check(
-    "a stale audio dump is reported, named by its subdirectory path",
-    !!staleAudio && /audio\/capabilities\.candle\.json/.test(staleAudio),
-  );
+  check("a stale audio dump no longer blocks the bump", staleAudio === null);
   const missingRuntime = verifyFacts({ runtime: false });
   check(
     "a missing rich runtime descriptor dump fails coverage",
     !!missingRuntime && /rich runtime descriptor facts are missing/.test(missingRuntime),
   );
+  // Same reasoning as the audio dump above: an older revision is warned about, not refused.
   const staleRuntime = verifyFacts({ runtimeRevision: "b".repeat(40) });
-  check(
-    "a stale rich runtime descriptor dump is reported by exact path",
-    !!staleRuntime && /runtime\/capabilities\.candle\.json/.test(staleRuntime),
-  );
+  check("a stale rich runtime descriptor dump no longer blocks the bump", staleRuntime === null);
   const narrowRuntime = verifyFacts({ narrowRuntime: true });
   check(
     "a narrow runtime projection without parity axes is refused",
