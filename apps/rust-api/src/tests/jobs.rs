@@ -8966,64 +8966,24 @@ async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
 /// the wrong outcome entirely and would leave a guard below passing for a reason that has nothing
 /// to do with platform.
 ///
-/// ALL TWENTY are listed, not a sample and not only the thirteen the story measured: the three
-/// mac-only-download families (`krea_realtime_14b`, `minimax_h3`, `minimax_h3_ref`) ride the same
-/// route, because "install state is not a reachability gate" is only an argument until the REST leg
-/// actually exercises it.
+/// The three mac-only-download families (`krea_realtime_14b`, `minimax_h3`, `minimax_h3_ref`) ride
+/// the same route as everything else, because "install state is not a reachability gate" is only an
+/// argument until the REST leg actually exercises it.
+///
+/// It listed ALL TWENTY when sc-19570 measured it. Syncing `main` into this epic branch gave
+/// thirteen of them a candle lane, so seven remain — and they are exactly the three mac-only
+/// families, which is why the paragraph above is now the whole rationale for the table rather than
+/// a footnote to it.
 fn mlx_only_stranded_pairs() -> Vec<(&'static str, Value)> {
     vec![
-        (
-            "ltx_2_3",
-            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
-        ),
-        (
-            "ltx_2_3",
-            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
-        ),
-        (
-            "ltx_2_3",
-            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
-        ),
-        (
-            "ltx_2_3",
-            json!({ "mode": "video_bridge", "sourceClipAssetId": "clip-1", "bridgeRightClipAssetId": "clip-2" }),
-        ),
-        (
-            "ltx_2_3",
-            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
-        ),
-        (
-            "ltx_2_3_eros",
-            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
-        ),
-        (
-            "ltx_2_3_eros",
-            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
-        ),
-        (
-            "ltx_2_3_eros",
-            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
-        ),
-        (
-            "ltx_2_3_eros",
-            json!({ "mode": "video_bridge", "sourceClipAssetId": "clip-1", "bridgeRightClipAssetId": "clip-2" }),
-        ),
-        (
-            "ltx_2_3_eros",
-            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
-        ),
-        (
-            "wan_2_2",
-            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
-        ),
-        (
-            "wan_2_2",
-            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
-        ),
-        (
-            "wan_2_2_vace_fun_14b",
-            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
-        ),
+        // THIRTEEN PAIRS WERE REMOVED HERE when `main` was synced into the epic branch: the
+        // `ltx_2_3` / `ltx_2_3_eros` five apiece, `wan_2_2`'s two keyframe shapes, and
+        // `wan_2_2_vace_fun_14b`'s `replace_person`. They were genuinely stranded on the epic
+        // branch; `main` ships the candle lanes that serve them, so they now belong to
+        // `candle_served_pairs` (two of them are asserted there) rather than here. Keeping them
+        // would have asserted that a served pair must TERMINATE off-Mac — the exact inversion of
+        // this guard. The same thirteen left `MLX_ONLY_ADVERTISED_PAIRS` in
+        // `routing/catalog.rs`, which is this table's core-side twin; the two must agree.
         // The seven pairs the story's measurement did NOT list, because those three families ship
         // `platforms: ["macos"]` downloads and it scoped itself to Windows/Linux-installable
         // models. They belong on the REST leg specifically: the whole argument for having an
@@ -9071,6 +9031,21 @@ fn candle_served_pairs() -> Vec<(&'static str, Value)> {
             json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
         ),
         ("ltx_2_3", json!({ "mode": "text_to_video" })),
+        // Two of the thirteen pairs that moved out of `mlx_only_stranded_pairs` when `main` was
+        // synced in: `candle_video_engine_id` resolves the LTX pair to `ltx_2_3_distilled`, which
+        // serves both of these adapter-free. Asserted on this side rather than merely deleted from
+        // the other, so the sync's claim — "these gained a lane" — is proved rather than assumed.
+        // The advanced three (extend / bridge / replacement) are deliberately NOT here: they are
+        // candle-served only with an IC-LoRA, so an adapter-free body would be refused at enqueue
+        // and would prove the opposite of what this table is for.
+        (
+            "ltx_2_3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
         (
             "wan_2_2_i2v_14b",
             json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
@@ -9115,11 +9090,16 @@ fn video_job_body(project_id: &str, model: &str, case: &Value) -> Value {
 async fn the_video_enqueue_contract_is_identical_on_every_platform() {
     let stranded = mlx_only_stranded_pairs();
     let served = candle_served_pairs();
+    // Was 20 when sc-19570 measured it. Syncing `main` into this epic branch gave thirteen of those
+    // pairs a real candle lane, so the stranded set is the seven mac-only-download pairs and the
+    // thirteen moved to `candle_served_pairs`. The guard is KEPT, not deleted, and kept EXACT: its
+    // job is to notice the table silently shrinking, which is still worth noticing — a drop below
+    // seven means a genuinely stranded pair stopped being covered.
     assert_eq!(
         stranded.len(),
-        20,
-        "the measured stranded set is twenty pairs — a shrunken table would narrow every guard \
-         that reads it"
+        7,
+        "the stranded set is the seven mac-only-download pairs — a shrunken table would narrow \
+         every guard that reads it"
     );
 
     for os in ["macos", "windows", "linux"] {
@@ -9323,6 +9303,9 @@ async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "windows").await;
 
+    // `krea_realtime_14b`, not `ltx_2_3`: syncing `main` gave the LTX pair a candle lane, so it is
+    // no longer stranded off-Mac and this test would assert `failed` on a job that is correctly
+    // `queued`. Krea Realtime has no candle generator at all and stays in the stranded set.
     let (status, created) = request(
         app.clone(),
         "POST",
@@ -9330,7 +9313,7 @@ async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
         json!({
             "projectId": project_id,
             "prompt": "a fox runs",
-            "model": "ltx_2_3",
+            "model": "krea_realtime_14b",
             "mode": "image_to_video",
             "sourceAssetId": "img-1",
         }),
@@ -9418,7 +9401,8 @@ async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
 ///
 /// The two must never be collapsed again, so this asserts them side by side on the SAME host:
 /// `wan_2_2_i2v_14b` + `first_last_frame` (no lane anywhere) is a 400 on macOS, Windows AND Linux
-/// with the same wording, while `ltx_2_3` + `image_to_video` (no lane HERE) is a 201 on all three.
+/// with the same wording, while `krea_realtime_14b` + `image_to_video` (no lane HERE) is a 201 on
+/// all three.
 /// A future edit that turns either into the other turns this red.
 #[tokio::test]
 async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_case() {
@@ -9462,6 +9446,8 @@ async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_
         );
 
         // NO LANE *HERE* → 201 on every platform, with the verdict on the job instead.
+        // `krea_realtime_14b` since the `main` sync: LTX gained a candle lane and so is served
+        // everywhere now, which would make this arm assert nothing about the platform case.
         let (status, body) = request(
             app.clone(),
             "POST",
@@ -9469,7 +9455,7 @@ async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_
             json!({
                 "projectId": project_id,
                 "prompt": "a fox runs",
-                "model": "ltx_2_3",
+                "model": "krea_realtime_14b",
                 "mode": "image_to_video",
                 "sourceAssetId": "img-1",
             }),
