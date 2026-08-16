@@ -24,6 +24,7 @@ import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
   Chips,
+  ModelDescription,
   RefinePanel,
   ReferenceTile,
   SheetSelect,
@@ -391,6 +392,9 @@ export function SimpleImageStudio() {
             }))}
             value={selectedModel?.name ?? selectedModel?.id ?? "No image model installed"}
           />
+          {/* sc-17162 — see the note in `studioParts.jsx`. `ui.description` had one reader in the
+              whole app (the advanced Models card), so Simple identified a model by NAME ALONE. */}
+          <ModelDescription model={selectedModel} />
           <SheetSelect
             kind="grid"
             label="Resolution"

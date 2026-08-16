@@ -61,12 +61,12 @@ mod prelude {
     #[allow(unused_imports)]
     pub(super) use super::{
         backend_label, cancel_requested_peek, check_cancel, faststart_mp4, fresh_asset_id,
-        heartbeat, huggingface_snapshot_dir, json, now_rfc3339, resolve_video_seed, run_ffmpeg,
-        safe_download_dir, shutdown_requested, task_join_error, update_job, video_progress,
-        write_poster_frame, ApiClient, AudioTrack, BTreeMap, CancelJoinGuard, DecodedVideo,
-        Duration, FfmpegContext, Instant, JobSnapshot, JobStatus, JsonObject, Path, PathBuf,
-        ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError,
-        WorkerResult, WorkerStatus, CANCEL_MESSAGE,
+        heartbeat, huggingface_snapshot_dir, json, now_rfc3339, picture_bound_seconds,
+        resolve_video_seed, run_ffmpeg, safe_download_dir, shutdown_requested, task_join_error,
+        update_job, video_progress, write_poster_frame, ApiClient, AudioTrack, BTreeMap,
+        CancelJoinGuard, DecodedVideo, Duration, FfmpegContext, Instant, JobSnapshot, JobStatus,
+        JsonObject, Path, PathBuf, ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value,
+        VideoRequest, WorkerError, WorkerResult, WorkerStatus, CANCEL_MESSAGE,
     };
     #[cfg(any(
         target_os = "macos",
@@ -1527,8 +1527,26 @@ async fn encode_inner(
     Ok(())
 }
 
+/// **The AV mux policy's one number**: the picture's own length in seconds, `frame_count / fps`,
+/// rendered to the microsecond for ffmpeg's `-t`. The picture is the exact quantity; the soundtrack
+/// and the container are fitted to it.
+///
+/// Extracted (sc-19549) so the two muxing call sites cannot drift into two spellings of the same
+/// rule: the generation mux [`audio_mux_args`] and the SeedVR2 upscale mux
+/// `seedvr2::seedvr2_audio_mux_args` (cfg-gated to the lanes that ship it, so it is named rather
+/// than linked). Their argument vectors legitimately differ — the upscale
+/// maps a source clip's optional audio and writes `+faststart` in the same pass — but the BOUND is
+/// one policy and is computed in exactly one place. The rationale, and the measurements behind the
+/// choice of `-t` over `-shortest` and over no flag at all, live on [`audio_mux_args`].
+///
+/// `fps.max(1)` mirrors `encode_inner`'s own clamp rather than dividing by zero.
+pub(crate) fn picture_bound_seconds(frame_count: usize, fps: u32) -> String {
+    let seconds = frame_count as f64 / f64::from(fps.max(1));
+    format!("{seconds:.6}")
+}
+
 /// The step-2 mux command: copy the encoded picture, encode the WAV as AAC, and **bound the file at
-/// the picture's own length** — `-t frame_count / fps`.
+/// the picture's own length** — [`picture_bound_seconds`].
 ///
 /// # Why `-t` and not `-shortest` (sc-19425)
 ///
@@ -1580,7 +1598,6 @@ fn audio_mux_args(
     frame_count: usize,
     fps: u32,
 ) -> Vec<String> {
-    let seconds = frame_count as f64 / f64::from(fps.max(1));
     vec![
         "ffmpeg".to_owned(),
         "-nostdin".to_owned(),
@@ -1594,7 +1611,7 @@ fn audio_mux_args(
         "-c:a".to_owned(),
         "aac".to_owned(),
         "-t".to_owned(),
-        format!("{seconds:.6}"),
+        picture_bound_seconds(frame_count, fps),
         // Explicit, though it is also ffmpeg's default for a multi-input command: the
         // container metadata — including the sc-15956 workflow tag written in step 1 —
         // comes from the VIDEO, never from the WAV. Stated because "the default happens to
@@ -1743,6 +1760,18 @@ struct EncodedClip {
     /// The framerate the file is encoded at. `decoded.fps.max(1)` — the SAME clamp `encode_inner`
     /// applies when it hands `-framerate` to ffmpeg, so the record matches the container.
     fps: u32,
+    /// Whether the mp4 carries an AAC soundtrack (sc-19577).
+    ///
+    /// `decoded.audio.is_some()` is the ONE condition `encode_inner` branches on to run the mux, so
+    /// this is the muxer's own predicate rather than a claim about the model: a MiniMax-H3 t2va job
+    /// whose pipeline returned no audio records `false` here, and an LTX render that did record
+    /// `true`. Reading it from the model id — the obvious shortcut for the app's first joint
+    /// audio+video family — would be a per-family hardcode that is wrong for exactly the renders a
+    /// user would most want to check.
+    ///
+    /// Measured here rather than after `encode_media` because `decoded` is MOVED into the encoder;
+    /// this is the last point at which the question can be asked at all.
+    has_audio: bool,
 }
 
 impl EncodedClip {
@@ -1751,6 +1780,7 @@ impl EncodedClip {
         Self {
             frames: decoded.frames.len(),
             fps: decoded.fps.max(1),
+            has_audio: decoded.audio.is_some(),
         }
     }
 
@@ -1831,6 +1861,12 @@ fn video_asset_fact(
         "encodedFrameCount": clip.frames,
         "encodedDuration": clip.duration_seconds(),
         "encodedFps": clip.fps,
+        // sc-19577 — whether this file has a soundtrack, measured off what was actually MUXED. It
+        // lands in the asset's `file` block beside the other measurements and is the only thing any
+        // audio indicator in the UI reads. Emitted unconditionally (never omitted for `false`), so an
+        // ABSENT key means "recorded before sc-19577" and a `false` means "measured, and silent" —
+        // two different facts that a presence check alone would conflate.
+        "hasAudio": clip.has_audio,
         "quality": request.quality,
         "family": plan.family,
         "seed": seed,
@@ -2270,5 +2306,8 @@ where
     ])
 }
 
+// `pub(crate)` so `media_jobs`' own ffmpeg-backed tests can reuse `tests::ffmpeg_reachable` —
+// the ONE place that turns "no ffmpeg on this lane" into an assert when the lane declared one
+// (sc-19549). A second copy of that predicate is a second way for a lane to silently skip.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

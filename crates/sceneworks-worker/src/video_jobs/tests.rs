@@ -1407,7 +1407,11 @@ fn record_frame_count_records_the_encoded_clip_not_the_request() {
 
     // A clip whose length matches NEITHER prediction — the shape sc-12318's stub probe produces
     // (asked for 151, returned 1). The record must follow the frames that exist.
-    let odd = EncodedClip { frames: 7, fps: 25 };
+    let odd = EncodedClip {
+        frames: 7,
+        fps: 25,
+        has_audio: false,
+    };
     let stamped = odd.record_frame_count(bernini_raw_settings(&bernini));
     assert_eq!(
         stamped["frameCount"],
@@ -1428,12 +1432,18 @@ fn record_frame_count_records_the_encoded_clip_not_the_request() {
     let clip = EncodedClip {
         frames: rendered,
         fps: 25,
+        has_audio: false,
     };
     let stamped = clip.record_frame_count(bernini_raw_settings(&bernini));
     assert_eq!(stamped["frameCount"], json!(149));
 
     // An already-stamped record is corrected, not duplicated (the stamp is the ONE writer).
-    let restamped = EncodedClip { frames: 5, fps: 25 }.record_frame_count(stamped);
+    let restamped = EncodedClip {
+        frames: 5,
+        fps: 25,
+        has_audio: false,
+    }
+    .record_frame_count(stamped);
     assert_eq!(restamped["frameCount"], json!(5));
 
     // A non-object carries no keys to correct and passes through rather than being wrapped.
@@ -1487,6 +1497,55 @@ fn encoded_clip_measures_the_file_not_the_request() {
     assert_eq!(clip.duration_seconds(), 2.0);
 }
 
+/// sc-19577: the asset records whether the mp4 got a SOUNDTRACK, measured off what was muxed.
+///
+/// The condition asserted here is the same one `encode_inner` branches on — `decoded.audio` — so
+/// the record and the mux cannot disagree. Both outcomes are driven from the SAME model id
+/// (`minimax_h3`), which is the point: a per-family lookup would badge the silent clip below, and
+/// asserting only the `true` case would pass against exactly that hardcode.
+#[test]
+fn asset_fact_records_the_soundtrack_that_was_actually_muxed() {
+    let frame = || RgbFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![0; 12],
+    };
+    let decoded = |audio: Option<AudioTrack>| DecodedVideo {
+        frames: vec![frame(), frame()],
+        fps: 24,
+        audio,
+        adapter_apply_reports: Vec::new(),
+    };
+    let track = AudioTrack {
+        samples: vec![0.0; 64],
+        sample_rate: 32_000,
+        channels: 2,
+    };
+
+    let with_audio = EncodedClip::measure(&decoded(Some(track)));
+    let silent = EncodedClip::measure(&decoded(None));
+    assert!(with_audio.has_audio);
+    assert!(
+        !silent.has_audio,
+        "a joint audio+video model that returned no audio must not claim a soundtrack"
+    );
+
+    // …and it reaches the asset fact, which is what `build_video_sidecar_parts` reads.
+    let request = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video",
+        "prompt": "a lighthouse keeper hums",
+    }));
+    let plan = VideoPlan::new(&request, Path::new("/tmp/project"));
+    let fact = |clip| video_asset_fact(&plan, 7, "mlx_minimax_h3", json!({}), None, clip);
+    assert_eq!(fact(with_audio)["hasAudio"], json!(true));
+    assert_eq!(
+        fact(silent)["hasAudio"],
+        json!(false),
+        "the key is emitted for a silent render too — absent means `recorded before sc-19577`, \
+         which is a different fact from `measured, and silent`"
+    );
+}
+
 /// The candle-lane half of [`no_raw_settings_builder_records_its_own_frame_count`] (sc-12371).
 /// Same invariant, different `#[cfg]`: these builders were the other half of the live bug —
 /// `candle_bernini` / `candle_scail2`(`_replace`) and `candle_wan_comfyui` (under an
@@ -1536,8 +1595,12 @@ fn no_candle_raw_settings_builder_records_its_own_frame_count() {
         );
     }
     // And the stamp still writes the clip's real length on this lane.
-    let stamped = EncodedClip { frames: 7, fps: 25 }
-        .record_frame_count(bernini_raw_settings(&req("bernini")));
+    let stamped = EncodedClip {
+        frames: 7,
+        fps: 25,
+        has_audio: false,
+    }
+    .record_frame_count(bernini_raw_settings(&req("bernini")));
     assert_eq!(stamped["frameCount"], json!(7));
 }
 
@@ -5699,6 +5762,7 @@ fn asset_fact_records_fit_and_multi_source_ids() {
     let clip = EncodedClip {
         frames: 81,
         fps: 16,
+        has_audio: false,
     };
     let fact = video_asset_fact(&plan, 5, "mlx_bernini", json!({}), None, clip);
     assert_eq!(fact["referenceClipAssetId"], json!("clip_ref"));
@@ -5729,6 +5793,7 @@ fn asset_fact_embeds_replacement_status_when_present() {
     let clip = EncodedClip {
         frames: 81,
         fps: 16,
+        has_audio: false,
     };
     let fact = video_asset_fact(&plan, 7, "mlx_wan_vace", json!({}), Some(status), clip);
     assert_eq!(fact["replacementStatus"]["replacementActive"], json!(true));
@@ -10694,6 +10759,24 @@ fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
     assert_eq!(args[t + 1], "5.166667");
     assert!(args.iter().any(|a| a == "-map_metadata"), "sc-15956 tag");
 
+    // INPUT IDENTITY (sc-19549, same gap as the SeedVR2 sibling below). `-map_metadata 0` names its
+    // input by INDEX, so "the sc-15956 tag comes from the VIDEO, never from the WAV" holds only
+    // while the encoded picture is the FIRST `-i`. Swapping the two leaves the assertion above
+    // green — `-map_metadata 0` is still present — while the tag is taken off the WAV instead, and
+    // the unmapped default stream selection changes under it. Pinned here because this half runs on
+    // every host and the measured half skips wherever ffmpeg is absent.
+    let inputs: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| arg.as_str() == "-i" && index + 1 < args.len())
+        .map(|(index, _)| args[index + 1].as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        ["/tmp/e.mp4", "/tmp/a.wav"],
+        "input 0 must be the encoded picture and input 1 the soundtrack: {args:?}"
+    );
+
     // Every legal MiniMax-H3 duration bounds at its own frame count. The NINE inexact rungs are
     // where that has content: at those the soundtrack's own grid length
     // (`round(frames / 24 · 40) · 800 / 32000`) is ±8.33 ms away, so a bound taken off the audio
@@ -10892,8 +10975,20 @@ fn probe_frame_count(path: &Path) -> Option<usize> {
         .and_then(|n| n.parse().ok())
 }
 
-/// One `-c copy -f null -` pass over `path`, returning ffmpeg's stderr. Shared by the two probes
+/// One decoding `-f null -` pass over `path`, returning ffmpeg's stderr. Shared by the two probes
 /// above so they read the same run's report rather than two.
+///
+/// The pass DECODES rather than stream-copying, and that is load-bearing rather than incidental.
+/// MEASURED on ffmpeg 6.1.1-3ubuntu5 (what `apt-get install ffmpeg` puts on `ubuntu-latest`, the
+/// runner this lane's `checks` job uses): under `-c copy` that build emits no `frame=` token at
+/// all — its stats line is `size=N/A time=00:00:01.87 bitrate=N/A speed=1.28e+03x` — so
+/// [`probe_frame_count`] parsed `None` and both measured mux tests died on their `expect`. Decoding
+/// restores the counter (`frame=   48`) there. ffmpeg 9.0.1 prints `frame=` either way, which is
+/// why this went unnoticed against the bundled 7.1 the sibling doc comments were measured on; the
+/// decoding form is the one that agrees across both.
+///
+/// Decoding also makes the count VFR-honest rather than a container claim — MEASURED on 6.1.1, the
+/// variable-rate fixture below reports `frame=   32` real frames.
 fn probe_stderr(path: &Path) -> Option<String> {
     let program = std::env::var("SCENEWORKS_FFMPEG")
         .ok()
@@ -10907,8 +11002,6 @@ fn probe_stderr(path: &Path) -> Option<String> {
             &path.display().to_string(),
             "-map",
             "0:v:0",
-            "-c",
-            "copy",
             "-f",
             "null",
             "-",
@@ -10916,6 +11009,299 @@ fn probe_stderr(path: &Path) -> Option<String> {
         .output()
         .ok()?;
     Some(String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// **The SeedVR2 upscale mux obeys the same AV policy as the generation mux (sc-19549).** sc-19425
+/// removed `-shortest` from the generation mux and left this one behind, on a SHIPPED path where the
+/// soundtrack being handed authority over the picture is the user's own source audio and the picture
+/// it truncates is the user's own upscaled footage.
+///
+/// Pure arg-shape, so it runs on every host including those with no ffmpeg; the behaviour it stands
+/// for is measured by
+/// [`the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent_source_audio`].
+#[test]
+fn the_seedvr2_upscale_mux_bounds_the_clip_at_the_picture_not_the_source_audio() {
+    let args = seedvr2_audio_mux_args(
+        Path::new("/tmp/upscaled.mp4"),
+        Path::new("/tmp/source.mp4"),
+        Path::new("/tmp/mux.mp4"),
+        48,
+        24,
+    );
+    assert!(
+        !args.iter().any(|a| a == "-shortest"),
+        "`-shortest` lets the user's own soundtrack shorten their own picture: {args:?}"
+    );
+    let t = args
+        .iter()
+        .position(|a| a == "-t")
+        .expect("the upscale mux must bound the output explicitly");
+    // 48 / 24 = 2 s exactly. Asserted as the literal string because the value ffmpeg is handed is
+    // what decides whether the tail frames survive.
+    assert_eq!(args[t + 1], "2.000000");
+    // …and it must be an OUTPUT option. `-t` written after the output path is a different (and
+    // inert) command; the bound has to sit before the file it bounds.
+    assert!(
+        t + 1 < args.len() - 1,
+        "the bound must precede the output path: {args:?}"
+    );
+
+    // ONE policy, not two spellings of it: the bound this path emits is byte-identical to the one
+    // the generation mux emits for the same picture. The inexact rungs are the ones with content —
+    // at 124/24 the two would diverge in the sixth decimal if either recomputed it its own way.
+    for (frames, fps) in [(48usize, 24u32), (124, 24), (345, 24), (151, 30), (9, 0)] {
+        let upscale =
+            seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), frames, fps);
+        let generation =
+            audio_mux_args(Path::new("e"), Path::new("a"), Path::new("m"), frames, fps);
+        let upscale_bound = &upscale[upscale.iter().position(|a| a == "-t").unwrap() + 1];
+        let generation_bound = &generation[generation.iter().position(|a| a == "-t").unwrap() + 1];
+        assert_eq!(
+            upscale_bound, generation_bound,
+            "{frames}@{fps}: the two mux paths must bound at the same number"
+        );
+    }
+
+    // Degenerate fps mirrors `encode_inner`'s own `.max(1)` clamp rather than dividing by zero.
+    let zero = seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), 9, 0);
+    assert_eq!(
+        zero[zero.iter().position(|a| a == "-t").unwrap() + 1],
+        "9.000000"
+    );
+
+    // INPUT IDENTITY, which every other claim here rests on and which nothing else here pins.
+    // `-map 0:v:0`, `-map 1:a:0?` and `-map_metadata 0` all name inputs by INDEX, so the bound
+    // being "read off the picture" is true only while the picture is the FIRST `-i` and the user's
+    // source is the SECOND. Swapping the two leaves every assertion above and below GREEN — the
+    // flag multiset is byte-identical — while ffmpeg maps the SOURCE's video, the PICTURE's audio,
+    // and takes the sc-15956 workflow tag off the user's own container. MEASURED with the bundled
+    // ffmpeg 7.1 on the exact fixture the sibling measured test builds: the swapped vector yields
+    // **50 frames at an advertised 2.08 s** where the correct one yields 48 at 2.00 s. Only a
+    // decoded frame count sees that, and that half skips wherever ffmpeg is absent — so input order
+    // is pinned HERE too, on the half that runs everywhere.
+    let inputs: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| arg.as_str() == "-i" && index + 1 < args.len())
+        .map(|(index, _)| args[index + 1].as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        ["/tmp/upscaled.mp4", "/tmp/source.mp4"],
+        "input 0 must be the upscaled picture and input 1 the user's source clip: {args:?}"
+    );
+
+    // The rest of the vector this story must not disturb: audio stays OPTIONAL (a silent source is
+    // not an error), the picture stays a straight copy, and the sc-15956 workflow tag keeps coming
+    // from input 0 rather than from the user's source container.
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-map".to_owned(), "1:a:0?".to_owned()]),
+        "source audio must stay optional: {args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-c:v".to_owned(), "copy".to_owned()]),
+        "the upscaled picture must not be re-encoded: {args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-map_metadata".to_owned(), "0".to_owned()]),
+        "sc-15956 tag must come from the upscaled video, not the source: {args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-movflags".to_owned(), "+faststart".to_owned()]),
+        "faststart must survive the mux: {args:?}"
+    );
+}
+
+/// The measured half of the guard above: run the REAL mux command over a real 48-frame picture and
+/// four real source clips, and decode the results back. Every frame must survive, and the container
+/// must advertise the duration it actually holds.
+///
+/// **Why 48 frames at 24 fps.** The defect has to be EXPRESSIBLE at the count chosen. MEASURED with
+/// the bundled ffmpeg 7.1 on this exact vector: a 2.000000 s picture against 1.99 s of source audio
+/// keeps all 48 frames even under `-shortest` — AAC pads out to a whole 1024-sample frame, so a
+/// deficit under ~21 ms is invisible and a probe built on one is inert while reporting green. At
+/// 1.5 s of audio the same command keeps **33 of 48** and advertises 1.51 s for the 1.375 s of
+/// picture it holds. The margin is what makes the defect reach the file, not the frame count on its
+/// own.
+///
+/// **Two axes, and they fail independently.** *Completeness* — every upscaled frame is in the file —
+/// is what `-shortest` breaks (short-audio case). *Truthfulness* — the container advertises the
+/// picture it holds — is what dropping the flag outright breaks (long-audio case: MEASURED 4.01 s of
+/// container around 2.00 s of picture, with all 48 frames present, so the count check alone is GREEN
+/// there). Neither assertion subsumes the other and both are needed.
+///
+/// 64x64 keeps four mux passes cheap; the policy is about timestamps, not pixels. Skips when no
+/// ffmpeg is reachable, like the sibling encode tests.
+#[tokio::test]
+async fn the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent_source_audio() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent_source_audio: no ffmpeg"
+        );
+        return;
+    }
+    let fps = 24u32;
+    let frames = 48usize;
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_seedvr2_mux_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
+
+    // Stand-in for what `encode_seedvr2_stream` writes: exactly `frames` pictures on a constant
+    // `-r fps` timebase, which is what that step produces by construction from the numbered PNG
+    // sequence — the property the bound is read off.
+    let upscaled = dir.join("upscaled.mp4");
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=24",
+            "-frames:v",
+            "48",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "24",
+        ]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .chain(std::iter::once(upscaled.display().to_string()))
+        .collect(),
+        None,
+    )
+    .await
+    .expect("build the upscaled picture fixture");
+    assert_eq!(
+        probe_frame_count(&upscaled),
+        Some(frames),
+        "the picture fixture must itself hold every frame before anything is muxed onto it"
+    );
+
+    /// Build a source clip: `audio_secs` of a sine (or no audio track at all), over a video stream
+    /// that is either 24 fps CFR or genuinely variable.
+    async fn write_source_clip(path: &Path, audio_secs: Option<f64>, variable: bool) {
+        let mut args: Vec<String> = vec![
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-t",
+            "3.0",
+            "-i",
+            "testsrc=size=64x64:rate=24",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        if let Some(secs) = audio_secs {
+            args.extend(
+                ["-f", "lavfi", "-t"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(std::iter::once(format!("{secs}")))
+                    .chain(
+                        [
+                            "-i",
+                            "sine=frequency=440:sample_rate=48000",
+                            "-map",
+                            "0:v",
+                            "-map",
+                            "1:a",
+                        ]
+                        .into_iter()
+                        .map(str::to_owned),
+                    ),
+            );
+        }
+        if variable {
+            // Keep an irregular subset of the source frames at their original presentation times.
+            args.extend(
+                [
+                    "-vf",
+                    "select='not(mod(n,3))+gt(mod(n,17),13)',setpts=PTS-STARTPTS",
+                    "-fps_mode",
+                    "vfr",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+        }
+        args.extend(
+            ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        if audio_secs.is_some() {
+            args.extend(["-c:a", "aac"].into_iter().map(str::to_owned));
+        }
+        args.push(path.display().to_string());
+        run_ffmpeg(args, None)
+            .await
+            .expect("build the source clip fixture");
+    }
+
+    // (label, audio seconds, variable frame rate). `None` audio is the `-map 1:a:0?` optionality
+    // this story must not break while bounding the file.
+    let cases: [(&str, Option<f64>, bool); 4] = [
+        ("audio_shorter", Some(1.5), false),
+        ("audio_longer", Some(4.0), false),
+        ("audio_shorter_vfr", Some(1.5), true),
+        ("audio_absent", None, false),
+    ];
+    let mut checked = 0;
+    for (label, audio_secs, variable) in cases {
+        let source = dir.join(format!("source_{label}.mp4"));
+        write_source_clip(&source, audio_secs, variable).await;
+        if variable {
+            // The VFR fixture must genuinely disagree with the picture's timebase, or the case is
+            // decoration. MEASURED: 32 frames advertised over 2.88 s — ~11 fps average against a
+            // 24 tbr declaration — so a bound taken off input 1 in any form would land elsewhere.
+            let source_frames = probe_frame_count(&source).expect("a decodable source frame count");
+            let source_seconds = probe_duration_seconds(&source).expect("a source duration");
+            assert!(
+                (source_seconds - source_frames as f64 / f64::from(fps)).abs() > 0.5,
+                "{label}: the source must not be 24 fps CFR ({source_frames} frames over \
+                 {source_seconds} s)"
+            );
+            assert_ne!(
+                source_frames, frames,
+                "{label}: the source must not happen to hold the picture's frame count"
+            );
+        }
+
+        let out = dir.join(format!("mux_{label}.mp4"));
+        run_ffmpeg(
+            seedvr2_audio_mux_args(&upscaled, &source, &out, frames, fps),
+            None,
+        )
+        .await
+        .expect("the source-audio passthrough mux");
+
+        let held = probe_frame_count(&out).expect("a decodable frame count");
+        // Measured against what the file ACTUALLY holds rather than what we asked for, which is
+        // what gives this assertion reach independent of the count check below: under `-shortest`
+        // the short-audio case advertises 1.51 s for 33 frames (1.375 s), so the same assertion
+        // written against `frames` would be green on the damaged file.
+        assert_duration_matches_picture(&out, held, fps);
+        assert_eq!(
+            held, frames,
+            "{label}: the muxed mp4 must hold every upscaled frame"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 4, "all four source shapes must be exercised");
 }
 
 #[tokio::test]
@@ -10945,19 +11331,60 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
     assert!(!media_path.exists());
 }
 
-fn ffmpeg_reachable() -> bool {
-    if let Ok(path) = std::env::var("SCENEWORKS_FFMPEG") {
-        if !path.trim().is_empty() && Path::new(&path).exists() {
-            return true;
-        }
-    }
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+/// Is a real ffmpeg reachable — `SCENEWORKS_FFMPEG`, or `ffmpeg` on PATH?
+///
+/// **The soft skip is for developer hosts and must never stay soft on a lane that means to run
+/// these tests (sc-19549).** A measured test that returns early prints one line and reports `ok` in
+/// 0.03 s, which is indistinguishable from a real green at a glance — so a CI lane with no ffmpeg
+/// silently guards nothing while looking exactly like a lane that guards everything. The convention
+/// was inherited from sc-19425, whose `the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration`
+/// carried a doc comment asserting "CI with ffmpeg runs it for real" that nothing enforced: MEASURED
+/// at the time of this change, no file under `.github/workflows/` installed ffmpeg or set
+/// `SCENEWORKS_FFMPEG`, and the bundled binary is gitignored (`.gitignore`, `apps/desktop/ffmpeg/`),
+/// so whether any of these tests ever ran rested entirely on the runner image.
+///
+/// The arg-shape halves do not substitute for the measured ones. MEASURED with the bundled ffmpeg
+/// 7.1 on the fixture the sibling tests build: swapping the two `-i` inputs produces **50 frames at
+/// an advertised 2.08 s** instead of 48 at 2.00 s, and every arg-shape assertion stays green across
+/// that swap because the flag multiset is identical. Only a decoded frame count sees it.
+///
+/// So a lane that declares a real ffmpeg sets `SCENEWORKS_REQUIRE_FFMPEG=1` (`.github/workflows/
+/// check.yml`, the `checks` job, which installs ffmpeg immediately before `npm run rust:check` —
+/// the job whose `cargo test` covers `sceneworks-worker` as a workspace default member). With it
+/// set, "no ffmpeg" is a FAILURE rather than a skip, so the install step being dropped, the binary
+/// being renamed, or the variable going missing turns the lane red instead of quiet. Hosts that
+/// never set it — a developer's laptop with no ffmpeg — skip exactly as before.
+pub(crate) fn ffmpeg_reachable() -> bool {
+    let reachable = if std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .is_some_and(|path| !path.trim().is_empty() && Path::new(&path).exists())
+    {
+        true
+    } else {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    };
+
+    assert!(
+        reachable || !ffmpeg_is_required(),
+        "SCENEWORKS_REQUIRE_FFMPEG is set, so this lane declares a real ffmpeg, but neither \
+         SCENEWORKS_FFMPEG nor `ffmpeg` on PATH resolves to one. The measured AV-mux tests would \
+         otherwise have skipped and reported `ok` (sc-19549)."
+    );
+    reachable
+}
+
+/// Does this lane promise a real ffmpeg? Set (to anything but empty or `0`) by the CI lanes that
+/// install one, which is what turns [`ffmpeg_reachable`]'s skip into a failure.
+pub(crate) fn ffmpeg_is_required() -> bool {
+    std::env::var("SCENEWORKS_REQUIRE_FFMPEG")
+        .ok()
+        .is_some_and(|flag| !matches!(flag.trim(), "" | "0"))
 }
 
 /// F-118: video upscale accepts only 2x and 4x. Any other factor is rejected with a clear error
@@ -12242,6 +12669,14 @@ fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> te
         for partition in partitions {
             seed_minimax_h3_partition(&guard.path().join(tier), partition);
         }
+        // The PACKED per-tier text encoder (sc-19120). It exists in the rehost for q4 and q8 ONLY —
+        // bf16 reads the dense upstream component instead — so seeding it for every tier would hide
+        // the tier-dependent resolution `minimax_h3_text_encoder_dir` performs.
+        if matches!(*tier, "q4" | "q8") {
+            let text_encoder = guard.path().join(tier).join("text_encoder");
+            std::fs::create_dir_all(&text_encoder).expect("packed text encoder dir");
+            std::fs::write(text_encoder.join("config.json"), "{}").expect("te config");
+        }
     }
     guard
 }
@@ -12249,16 +12684,35 @@ fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> te
 /// A shared/base snapshot root carrying every component `mlx-gen-minimax-h3::load` probes under
 /// `spec.weights` — the upstream repo's half of the install, which is a DIFFERENT download from the
 /// tiers.
+///
+/// The audio VAE's constructor documents are written as FILES, because that is what the loader opens
+/// and what `minimax_h3_shared_is_complete` checks since sc-19573: the `FL2VA/audio_vae/` directory
+/// exists as soon as any one of its thirteen entries lands, so a bare `create_dir_all` fixture would
+/// certify an install the engine cannot construct an audio VAE from.
 #[cfg(target_os = "macos")]
 fn minimax_h3_base_root(prefix: &str) -> tempfile::TempDir {
     let guard = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
         .expect("temp dir");
-    for component in ["text_encoder", "tokenizer", "vae", "audio_vae"] {
+    for component in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS {
         std::fs::create_dir_all(guard.path().join(component)).expect("component dir");
     }
-    std::fs::create_dir_all(guard.path().join("FL2VA").join("audio_vae")).expect("FL2VA dir");
+    // The dense upstream text encoder — present only at bf16 in a real install, but harmless here:
+    // a q4 resolve reads the tier root instead and never looks at this path.
+    std::fs::create_dir_all(
+        guard
+            .path()
+            .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
+    )
+    .expect("upstream text encoder dir");
+    let fl2va = guard
+        .path()
+        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR);
+    std::fs::create_dir_all(&fl2va).expect("FL2VA dir");
+    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
+        std::fs::write(fl2va.join(file), "{}").expect("audio vae constructor document");
+    }
     guard
 }
 
@@ -12968,7 +13422,7 @@ fn minimax_h3_resolution_names_the_missing_shared_components() {
         .prefix("mm_torn_base_")
         .tempdir()
         .expect("temp dir");
-    for component in ["text_encoder", "tokenizer", "vae", "audio_vae"] {
+    for component in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS {
         std::fs::create_dir_all(base.path().join(component)).expect("component dir");
     }
     let req = minimax_h3_request("minimax_h3", json!({}));
@@ -12996,6 +13450,152 @@ fn minimax_h3_resolution_names_the_missing_shared_components() {
         "the error must name the component that is actually missing, since the tiers and the \
          shared components are separate downloads: {message}"
     );
+}
+
+/// sc-19573 — a PACKED-tier install has no upstream `text_encoder/`, and must still resolve.
+///
+/// sc-19120 made the Qwen3-VL-32B encoder a per-tier artifact: q4 and q8 read a packed copy hosted
+/// beside the DiT tiers, and their catalog rows are `variant`-scoped, so a q4 install never fetches
+/// the dense upstream component. The shared-completeness check probed `<base_root>/text_encoder`
+/// unconditionally, which meant EVERY q4 and q8 install was refused before it reached the engine,
+/// blaming the shared floor for a path that tier is correct not to have.
+///
+/// Asserted in both directions on purpose. A test that only proved q4 resolves would also pass if the
+/// text encoder had simply stopped being checked at all — so the bf16 half below proves the probe is
+/// still live, and the third block proves the packed encoder is load-bearing for q4 specifically.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolves_the_text_encoder_at_the_root_its_tier_actually_ships_it_in() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let tiers = minimax_h3_tier_root(
+        "mm_te_",
+        &["q4", "bf16"],
+        &["transformer", "transformer_ref"],
+    );
+    let base = minimax_h3_base_root("mm_te_base_");
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    // `mlxQuantize: 0` is the bf16 (dense) request — `resolve_mlx_dense_quant` maps <= 0 to `None`,
+    // which is what puts bf16 first in the tier order. Absent would mean q4.
+    let resolve = |tier_root: &Path, base_root: &Path, quantize: i64| {
+        let req = minimax_h3_request(
+            "minimax_h3",
+            json!({ "advanced": { "mlxQuantize": quantize } }),
+        );
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base_root.to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // q4 with the upstream text encoder DELETED — the exact on-disk shape a q4 install produces.
+    let q4_base = tempfile::Builder::new()
+        .prefix("mm_te_q4_base_")
+        .tempdir()
+        .expect("temp dir");
+    copy_dir_recursive(base.path(), q4_base.path());
+    std::fs::remove_dir_all(
+        q4_base
+            .path()
+            .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
+    )
+    .expect("drop the upstream text encoder");
+    let load = resolve(tiers.path(), q4_base.path(), 4)
+        .expect("a q4 install with only the packed text encoder must resolve");
+    assert_eq!(load.tier, "q4");
+    assert_eq!(
+        load.text_encoder_dir,
+        Some(tiers.path().join("q4").join("text_encoder")),
+        "the packed encoder must be STAGED, not merely downloaded — without this the 18.7 GB \
+         sc-19120 added is fetched and never opened"
+    );
+
+    // 🔴 REACHABILITY, not merely declaration (sc-19573 review). Asserting the SceneWorks-side
+    // struct field alone proves nothing about the engine: `mlx-gen-minimax-h3` resolves its text
+    // encoder ONLY from `spec.components["text_encoder"]` (`resolve_text_encoder_dir`), and
+    // `spec.text_encoder` — the LTX external-Gemma field — has ZERO references anywhere in that
+    // crate. Staged on the wrong field, a q4 job would fall through to `<weights>/text_encoder`,
+    // which a packed-tier install correctly does not have, and hard-error INSIDE the engine on the
+    // missing `text_encoder/config.json`. So assert the field the engine reads, on the built spec.
+    let spec = video_load_spec(&VideoGenInput {
+        engine_id: "minimax_h3",
+        model_dir: q4_base.path().to_path_buf(),
+        dit_component_dir: Some(load.dit_dir.clone()),
+        text_encoder_component_dir: load.text_encoder_dir.clone(),
+        ..VideoGenInput::default()
+    });
+    assert!(
+        matches!(
+            spec.components.get("text_encoder"),
+            Some(WeightsSource::Dir(dir)) if *dir == tiers.path().join("q4").join("text_encoder")
+        ),
+        "the packed encoder must land in components[\"text_encoder\"] — the only seam \
+         mlx-gen-minimax-h3 reads: {:?}",
+        spec.components
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "LoadSpec::text_encoder is the LTX seam and is never read by this engine; staging there \
+         moves the failure from before the engine to inside it: {:?}",
+        spec.text_encoder
+    );
+
+    // bf16 reads the dense upstream component and passes nothing on the spec: `None` is what leaves
+    // the provider on its own `<root>/text_encoder`, which is exactly where that component is.
+    let load = resolve(tiers.path(), base.path(), 0)
+        .expect("a bf16 install with the upstream text encoder resolves");
+    assert_eq!(load.tier, "bf16");
+    assert_eq!(load.text_encoder_dir, None);
+
+    // …and bf16 is genuinely REFUSED without it, so the probe is not merely skipped for that tier.
+    let message = resolve(tiers.path(), q4_base.path(), 0)
+        .expect_err("bf16 without the upstream text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains("text encoder"),
+        "the bf16 refusal must name the text encoder: {message}"
+    );
+
+    // The packed encoder is load-bearing for q4 in the same way — remove it and q4 stops resolving.
+    let torn_tiers =
+        minimax_h3_tier_root("mm_te_torn_", &["q4"], &["transformer", "transformer_ref"]);
+    std::fs::remove_dir_all(torn_tiers.path().join("q4").join("text_encoder"))
+        .expect("drop the packed encoder");
+    let message = resolve(torn_tiers.path(), q4_base.path(), 4)
+        .expect_err("q4 without the packed text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains("text encoder") && message.contains("q4"),
+        "the q4 refusal must name the tier's own encoder rather than the upstream one: {message}"
+    );
+}
+
+/// Copy `from` into `to` recursively — a fixture helper, not a general-purpose utility.
+#[cfg(target_os = "macos")]
+fn copy_dir_recursive(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("destination dir");
+    for entry in std::fs::read_dir(from).expect("readable source dir") {
+        let entry = entry.expect("readable entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir_recursive(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy file");
+        }
+    }
 }
 
 /// **The caller-side pin.** Drives the REAL arm end to end and asserts on what reached the engine.
@@ -13076,6 +13676,24 @@ fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_t
         Some(tiers.path().join("q4").join("transformer")),
         "the tiered DiT must ride the components map: it lives in a different repo from the \
          shared components, and `weights` can only name one root"
+    );
+    // 🔴 The packed per-tier text encoder (sc-19120), on the seam the ENGINE reads — asserted here,
+    // on the spec the arm actually built, rather than on the SceneWorks-side struct field.
+    // `mlx-gen-minimax-h3::resolve_text_encoder_dir` matches ONLY
+    // `spec.components.get("text_encoder")`; `spec.text_encoder` has zero references in that entire
+    // crate. Staged there instead, a q4 load falls through to `<weights>/text_encoder` — which this
+    // fixture's packed-tier base root does not have — and hard-errors inside the engine.
+    assert_eq!(
+        source_dir(spec.components.get("text_encoder")),
+        Some(tiers.path().join("q4").join("text_encoder")),
+        "the packed q4 text encoder must ride components[\"text_encoder\"], the only seam the \
+         engine resolves it from"
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "`LoadSpec::text_encoder` is LTX's external-Gemma seam and is never read by this engine: \
+         {:?}",
+        spec.text_encoder
     );
     assert_eq!(
         spec.quantize,
