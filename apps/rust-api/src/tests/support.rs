@@ -1241,9 +1241,17 @@ impl TestSerializationLock {
     }
 
     pub(crate) async fn acquire(&self) -> TestSerializationGuard<'_> {
+        // ONE acquire future, pinned and re-polled. Wrapping `lock()` in a
+        // `timeout` per tick would instead DROP and rebuild it every tick, and a
+        // dropped `tokio::sync::Mutex` acquire loses its place in the semaphore's
+        // FIFO queue — which would trade a wedge detector for a starvation
+        // source. `select!` re-polls the pinned future without dropping it, so
+        // the queue position survives every tick.
+        let acquire = self.lock.lock();
+        tokio::pin!(acquire);
         loop {
-            match tokio::time::timeout(TEST_SERIALIZATION_POLL, self.lock.lock()).await {
-                Ok(guard) => {
+            tokio::select! {
+                guard = &mut acquire => {
                     *self
                         .held_since
                         .lock()
@@ -1254,7 +1262,7 @@ impl TestSerializationLock {
                         guard: Some(guard),
                     };
                 }
-                Err(_) => {
+                () = tokio::time::sleep(TEST_SERIALIZATION_POLL) => {
                     let held_for = self
                         .held_since
                         .lock()
