@@ -1846,17 +1846,12 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
     repo: &str,
     revision: &str,
 ) -> Option<PathBuf> {
-    if !is_pinned_hf_revision(revision) {
-        return None;
-    }
-    let dir = safe_join(
-        &huggingface_repo_cache_path(data_dir, repo)?.join("snapshots"),
-        revision,
-    )
-    .ok()?;
-    if !dir.is_dir() {
-        return None;
-    }
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let (_, dir) = resolver
+        .discover_source_snapshot(repo, Some(revision))
+        .ok()?;
     #[cfg(windows)]
     materialize_snapshot_hardlinks(&dir);
     Some(dir)
@@ -2706,9 +2701,11 @@ mod artifact_provenance_tests {
             ConvertSourceState::RepoNotCached
         );
 
+        let revision = "0123456789abcdef0123456789abcdef01234567";
         let snapshot = huggingface_repo_cache_path(data.path(), repo)
             .expect("cache")
-            .join("snapshots/rev-shared");
+            .join("snapshots")
+            .join(revision);
         std::fs::create_dir_all(snapshot.join("split_files/diffusion_models")).expect("dit dir");
         std::fs::write(snapshot.join(alpha), b"weights").expect("alpha weights");
         assert_eq!(
@@ -3231,7 +3228,10 @@ pub(crate) fn receipt_markers_read() -> usize {
 }
 
 fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
-    let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let repo_dir = resolver.source_library().repository_root(repo).ok()?;
     let snapshots = repo_dir.join("snapshots");
     // Prefer `refs/main`, but ONLY when the snapshot it names actually holds files. A polluted
     // `refs/main` — e.g. a test that clobbered it to an empty placeholder snapshot (sc-13834) —
@@ -3239,9 +3239,13 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
     // substitute for a correct `refs/main`: it distinguishes a materialized snapshot from an
     // empty/torn one, not dummy fixture weights from real ones.
     if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
-        let candidate = snapshots.join(rev.trim());
+        let revision = rev.trim();
+        let candidate = snapshots.join(revision);
         if snapshot_has_any_file(&candidate) {
-            return Some(candidate);
+            return resolver
+                .discover_source_snapshot(repo, Some(revision))
+                .ok()
+                .map(|(_, path)| path);
         }
     }
     // Fallback: the cached snapshot with the most files, so an empty/partial one never wins over a
@@ -3254,7 +3258,13 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
         .map(|path| (snapshot_file_count(&path), path))
         .filter(|(count, _)| *count > 0)
         .max_by_key(|(count, _)| *count)
-        .map(|(_, path)| path)
+        .and_then(|(_, path)| {
+            let revision = path.file_name()?.to_str()?;
+            resolver
+                .discover_source_snapshot(repo, Some(revision))
+                .ok()
+                .map(|(_, path)| path)
+        })
 }
 
 /// Short-circuiting presence probe for the hot `refs/main` path. Unlike
@@ -5788,7 +5798,9 @@ mod co_requisite_tests {
         let snapshots = repo_dir.join("snapshots");
 
         // The real, fully materialized snapshot …
-        let populated = snapshots.join("b88090c7");
+        let populated_revision = "b88090c7b88090c7b88090c7b88090c7b88090c7";
+        let empty_revision = "abc12300abc12300abc12300abc12300abc12300";
+        let populated = snapshots.join(populated_revision);
         std::fs::create_dir_all(populated.join("q8/transformer")).expect("populated tree");
         std::fs::write(
             populated.join("q8/transformer/diffusion_pytorch_model.safetensors"),
@@ -5796,11 +5808,12 @@ mod co_requisite_tests {
         )
         .expect("write real weight");
         // … alongside an EMPTY placeholder snapshot (tier dirs only, no files) …
-        std::fs::create_dir_all(snapshots.join("abc123/q8/transformer"))
+        std::fs::create_dir_all(snapshots.join(empty_revision).join("q8/transformer"))
             .expect("empty placeholder");
         // … with `refs/main` clobbered to point at the empty one.
         std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
-        std::fs::write(repo_dir.join("refs").join("main"), "abc123").expect("write refs/main");
+        std::fs::write(repo_dir.join("refs").join("main"), empty_revision)
+            .expect("write refs/main");
 
         let resolved = resolve_huggingface_snapshot_dir(data_dir.path(), repo)
             .expect("a populated snapshot exists, so resolution must succeed");
@@ -5811,7 +5824,8 @@ mod co_requisite_tests {
 
         // Sanity: a VALID `refs/main` (populated) is still honored on the fast path — the fallback
         // only engages when `refs/main` names an empty/absent snapshot.
-        std::fs::write(repo_dir.join("refs").join("main"), "b88090c7").expect("repoint refs/main");
+        std::fs::write(repo_dir.join("refs").join("main"), populated_revision)
+            .expect("repoint refs/main");
         assert_eq!(
             resolve_huggingface_snapshot_dir(data_dir.path(), repo).expect("still resolves"),
             populated,

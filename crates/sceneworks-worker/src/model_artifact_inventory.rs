@@ -20,8 +20,19 @@ pub enum ConsumerCategory {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConsumerResolution {
-    SharedContract { entrypoint: &'static str },
+    SharedContract {
+        entrypoint: TypedResolverEntrypoint,
+    },
     Unsupported { reason: &'static str },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TypedResolverEntrypoint {
+    WorkerSnapshot,
+    ManagedModelPath,
+    PinnedComponent,
+    ReceiptProvenance,
+    SourceLibrary,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,11 +94,12 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             Category::ImportedConverted,
         ],
         resolution: Resolution::SharedContract {
-            entrypoint: "model_jobs + paths artifact resolver seam",
+            entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &[
+            "crates/sceneworks-worker/src/video_jobs/mod.rs",
             "crates/sceneworks-worker/src/video_jobs/bernini.rs",
             "crates/sceneworks-worker/src/video_jobs/candle.rs",
             "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
@@ -100,49 +112,49 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         ],
         categories: &[Category::Video, Category::Primary, Category::CoRequisite],
         resolution: Resolution::SharedContract {
-            entrypoint: "model_jobs source/receipt resolver seam",
+            entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/audio_jobs.rs"],
         categories: &[Category::Audio, Category::Primary, Category::CoRequisite],
         resolution: Resolution::SharedContract {
-            entrypoint: "model_jobs co-requisite + paths runtime resolver seam",
+            entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/caption_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
-            entrypoint: "paths runtime resolver seam",
+            entrypoint: TypedResolverEntrypoint::ManagedModelPath,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/training_jobs.rs"],
         categories: &[Category::Training, Category::Primary, Category::LoraControl],
         resolution: Resolution::SharedContract {
-            entrypoint: "paths runtime resolver seam",
+            entrypoint: TypedResolverEntrypoint::ManagedModelPath,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/prompt_refine_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
-            entrypoint: "paths runtime resolver seam",
+            entrypoint: TypedResolverEntrypoint::ManagedModelPath,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/catalog_semantic_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
-            entrypoint: "paths runtime resolver seam",
+            entrypoint: TypedResolverEntrypoint::ManagedModelPath,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/dataset_analysis_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
-            entrypoint: "paths runtime resolver seam",
+            entrypoint: TypedResolverEntrypoint::ManagedModelPath,
         },
     },
     ModelConsumerInventoryEntry {
@@ -152,49 +164,56 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         ],
         categories: &[Category::CaptioningUtility, Category::OptionalComponent],
         resolution: Resolution::SharedContract {
-            entrypoint: "model_jobs pinned source resolver seam",
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/person_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::OptionalComponent],
         resolution: Resolution::SharedContract {
-            entrypoint: "downloads pinned component resolver seam",
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/pose_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::CoRequisite],
         resolution: Resolution::SharedContract {
-            entrypoint: "model_jobs pinned source resolver seam",
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/voice_register.rs"],
         categories: &[Category::Audio, Category::CoRequisite],
         resolution: Resolution::SharedContract {
-            entrypoint: "model_jobs pinned source resolver seam",
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/upscale_jobs.rs"],
         categories: &[Category::Image, Category::OptionalComponent],
         resolution: Resolution::SharedContract {
-            entrypoint: "downloads pinned component resolver seam",
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/engines.rs"],
         categories: &[Category::Primary, Category::CaptioningUtility],
         resolution: Resolution::SharedContract {
-            entrypoint: "hf_home typed source-library seam",
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/mlx_fit_gate.rs"],
         categories: &[Category::Primary, Category::ImportedConverted],
         resolution: Resolution::SharedContract {
-            entrypoint: "model_jobs receipt/provenance artifact resolver seam",
+            entrypoint: TypedResolverEntrypoint::ReceiptProvenance,
+        },
+    },
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/vram_gate.rs"],
+        categories: &[Category::Primary, Category::LoraControl],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::ManagedModelPath,
         },
     },
     ModelConsumerInventoryEntry {
@@ -206,21 +225,21 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             Category::ImportedConverted,
         ],
         resolution: Resolution::SharedContract {
-            entrypoint: "hf_home typed source-library + artifact inventory seam",
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["apps/rust-api/src/loras.rs"],
         categories: &[Category::LoraControl],
         resolution: Resolution::SharedContract {
-            entrypoint: "hf_home typed source-library + receipt resolver seam",
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
     ModelConsumerInventoryEntry {
         source_files: &["apps/rust-api/src/training.rs"],
         categories: &[Category::Training],
         resolution: Resolution::SharedContract {
-            entrypoint: "manifest + worker runtime resolver seam",
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
 ];
@@ -257,17 +276,41 @@ pub const EXPLICITLY_UNSUPPORTED_ARTIFACTS: &[ModelConsumerInventoryEntry] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quote::ToTokens;
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
-    const RESOLUTION_MARKERS: &[&str] = &[
+    const MODEL_ROOT_MARKERS: &[&str] = &[
+        "huggingface_hub_cache_dir(",
         "huggingface_repo_cache_path(",
         "huggingface_snapshot_dir(",
         "huggingface_pinned_snapshot_dir(",
         "huggingface_receipt_weights",
+        "model_source_library(",
         "resolve_app_managed_model_dir(",
         "normalize_app_managed_model_path(",
+        "normalize_app_managed_lora_path(",
         "resolve_hf_component_file(",
+        ".join(\"snapshots\")",
+        ".join(\"models--",
+    ];
+
+    const TYPED_CONSUMER_MARKERS: &[&str] = &[
+        "huggingface_repo_cache_path(",
+        "huggingface_snapshot_dir(",
+        "huggingface_pinned_snapshot_dir(",
+        "huggingface_receipt_weights",
+        "model_source_library(",
+        "resolve_app_managed_model_dir(",
+        "normalize_app_managed_model_path(",
+        "normalize_app_managed_lora_path(",
+        "resolve_hf_component_file(",
+    ];
+
+    const DIRECT_ROOT_MARKERS: &[&str] = &[
+        "huggingface_hub_cache_dir(",
+        ".join(\"snapshots\")",
+        ".join(\"models--",
     ];
 
     const INFRASTRUCTURE_SURFACES: &[(&str, &str)] = &[
@@ -306,6 +349,24 @@ mod tests {
         ("apps/rust-api/src/lib.rs", "API state and module wiring"),
     ];
 
+    // These exact modules are compiled only behind `cfg(all(test, target_os = "macos"))` and are
+    // ignored real-weight/build harnesses, never production runtime consumers. Keep the list exact:
+    // a newly added harness or production file must still be classified by this audit.
+    const TEST_ONLY_MODEL_SURFACES: &[&str] = &[
+        "crates/sceneworks-worker/src/bernini_tier_build.rs",
+        "crates/sceneworks-worker/src/footprint_measure.rs",
+        "crates/sceneworks-worker/src/ladder_e2e_sc18101.rs",
+        "crates/sceneworks-worker/src/mage_flow_q8_mlx_smoke.rs",
+        "crates/sceneworks-worker/src/pid_tier_mlx_smoke.rs",
+        "crates/sceneworks-worker/src/resolution_sweep.rs",
+        "crates/sceneworks-worker/src/sana_mlx_smoke.rs",
+        "crates/sceneworks-worker/src/sd3_5_mlx_smoke.rs",
+        "crates/sceneworks-worker/src/voiceclone_smoke.rs",
+        "crates/sceneworks-worker/src/wan_i2v_14b_tier_build.rs",
+        "crates/sceneworks-worker/src/wan_t2v_14b_tier_build.rs",
+        "crates/sceneworks-worker/src/wan_ti2v_5b_tier_build.rs",
+    ];
+
     fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(root).expect("read source directory") {
             let path = entry.expect("read source entry").path();
@@ -319,6 +380,65 @@ mod tests {
 
     fn is_test_surface(relative: &str) -> bool {
         relative.contains("/tests/") || relative.ends_with("/tests.rs")
+    }
+
+    fn item_attributes(item: &syn::Item) -> &[syn::Attribute] {
+        match item {
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::ExternCrate(item) => &item.attrs,
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::ForeignMod(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::TraitAlias(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Union(item) => &item.attrs,
+            syn::Item::Use(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn item_is_test_only(item: &syn::Item) -> bool {
+        item_attributes(item).iter().any(|attribute| {
+            attribute.path().is_ident("test")
+                || (attribute.path().is_ident("cfg")
+                    && attribute
+                        .meta
+                        .to_token_stream()
+                        .to_string()
+                        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                        .any(|token| token == "test"))
+        })
+    }
+
+    fn retain_production_items(items: &mut Vec<syn::Item>) {
+        items.retain_mut(|item| {
+            if item_is_test_only(item) {
+                return false;
+            }
+            if let syn::Item::Mod(module) = item {
+                if let Some((_, nested)) = &mut module.content {
+                    retain_production_items(nested);
+                }
+            }
+            true
+        });
+    }
+
+    fn production_rust_source(source: &str) -> String {
+        let mut syntax = syn::parse_file(source).expect("production source parses as Rust");
+        retain_production_items(&mut syntax.items);
+        syntax
+            .into_token_stream()
+            .to_string()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
     }
 
     #[test]
@@ -336,6 +456,7 @@ mod tests {
                 .to_string_lossy()
                 .replace('\\', "/");
             if is_test_surface(&relative)
+                || TEST_ONLY_MODEL_SURFACES.contains(&relative.as_str())
                 || INFRASTRUCTURE_SURFACES
                     .iter()
                     .any(|(surface, _)| *surface == relative)
@@ -343,7 +464,8 @@ mod tests {
                 continue;
             }
             let source = std::fs::read_to_string(&file).expect("read Rust source");
-            if !RESOLUTION_MARKERS
+            let source = production_rust_source(&source);
+            if !MODEL_ROOT_MARKERS
                 .iter()
                 .any(|marker| source.contains(marker))
             {
@@ -355,6 +477,26 @@ mod tests {
                 .count();
             if matches != 1 {
                 uncovered.push(format!("{relative} ({matches} inventory matches)"));
+                continue;
+            }
+            let direct = DIRECT_ROOT_MARKERS
+                .iter()
+                .filter(|marker| source.contains(**marker))
+                .copied()
+                .collect::<Vec<_>>();
+            if !direct.is_empty() {
+                uncovered.push(format!(
+                    "{relative} constructs a model root directly via {direct:?}"
+                ));
+                continue;
+            }
+            if !TYPED_CONSUMER_MARKERS
+                .iter()
+                .any(|marker| source.contains(marker))
+            {
+                uncovered.push(format!(
+                    "{relative} has a model root but no typed resolver entrypoint"
+                ));
             }
         }
         assert!(
@@ -387,7 +529,7 @@ mod tests {
         let mut seen = BTreeSet::new();
         for entry in PRODUCTION_MODEL_CONSUMERS {
             match entry.resolution {
-                Resolution::SharedContract { entrypoint } => assert!(!entrypoint.trim().is_empty()),
+                Resolution::SharedContract { .. } => {}
                 Resolution::Unsupported { .. } => {
                     panic!("production consumer unexpectedly marked unsupported")
                 }
@@ -412,5 +554,117 @@ mod tests {
         assert!(INFRASTRUCTURE_SURFACES
             .iter()
             .all(|(surface, reason)| !surface.is_empty() && !reason.is_empty()));
+        assert!(TEST_ONLY_MODEL_SURFACES
+            .iter()
+            .all(|surface| repository.join(surface).is_file()));
+        let worker_lib = std::fs::read_to_string(repository.join("crates/sceneworks-worker/src/lib.rs"))
+            .expect("read worker module declarations");
+        let worker_syntax = syn::parse_file(&worker_lib).expect("worker lib parses as Rust");
+        for surface in TEST_ONLY_MODEL_SURFACES {
+            let module_name = Path::new(surface)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("test-only surface has a Rust module name");
+            let declaration = worker_syntax.items.iter().find(|item| {
+                matches!(item, syn::Item::Mod(module) if module.ident == module_name)
+            });
+            assert!(
+                declaration.is_some_and(item_is_test_only),
+                "{surface} must remain behind an exact test-only module declaration"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_entrypoints_are_compiled_contract_implementations_not_labels() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let implementations = [
+            (
+                TypedResolverEntrypoint::WorkerSnapshot,
+                "crates/sceneworks-worker/src/model_jobs.rs",
+                &["ModelArtifactResolver::new(", "discover_source_snapshot("][..],
+            ),
+            (
+                TypedResolverEntrypoint::ManagedModelPath,
+                "crates/sceneworks-worker/src/paths.rs",
+                &["model_artifacts::confine_artifact_path("][..],
+            ),
+            (
+                TypedResolverEntrypoint::PinnedComponent,
+                "crates/sceneworks-worker/src/downloads.rs",
+                &["huggingface_pinned_snapshot_dir("][..],
+            ),
+            (
+                TypedResolverEntrypoint::ReceiptProvenance,
+                "crates/sceneworks-worker/src/model_jobs.rs",
+                &[
+                    "model_artifacts::ArtifactIdentity",
+                    "model_artifacts::ArtifactProvenance",
+                ][..],
+            ),
+            (
+                TypedResolverEntrypoint::SourceLibrary,
+                "crates/sceneworks-core/src/hf_home.rs",
+                &["ArtifactSourceLibrary", "model_source_library(data_dir)"][..],
+            ),
+        ];
+        let used = PRODUCTION_MODEL_CONSUMERS
+            .iter()
+            .filter_map(|entry| match entry.resolution {
+                Resolution::SharedContract { entrypoint } => Some(entrypoint),
+                Resolution::Unsupported { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let implemented = implementations
+            .iter()
+            .map(|(entrypoint, _, _)| *entrypoint)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(used, implemented);
+        for (entrypoint, source_file, required_markers) in implementations {
+            let source = std::fs::read_to_string(repository.join(source_file))
+                .expect("read typed entrypoint source");
+            for marker in required_markers {
+                assert!(
+                    source.contains(marker),
+                    "{entrypoint:?} no longer proves typed resolution via {marker:?} in {source_file}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_scan_rejects_direct_roots_but_ignores_exact_cfg_test_items() {
+        let source = r#"
+            fn production_loader(root: &std::path::Path) {
+                let _ = root.join("snapshots");
+            }
+
+            mod nested {
+                #[cfg(
+                    all(test, unix)
+                )]
+                mod tests {
+                    fn fixture(root: &std::path::Path) {
+                        let _ = root.join("models--Fixture--only").join("snapshots");
+                    }
+                }
+            }
+        "#;
+        let production = production_rust_source(source);
+        assert!(production.contains("join(\"snapshots\")"));
+        assert!(!production.contains("Fixture"));
+
+        let only_test = r#"
+            #[cfg(test)]
+            mod tests {
+                fn fixture(root: &std::path::Path) {
+                    let _ = root.join("snapshots");
+                }
+            }
+        "#;
+        let production = production_rust_source(only_test);
+        assert!(DIRECT_ROOT_MARKERS
+            .iter()
+            .all(|marker| !production.contains(marker)));
     }
 }

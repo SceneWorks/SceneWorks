@@ -176,9 +176,12 @@ pub(crate) fn normalize_app_managed_model_path(
     // matching `normalize_app_managed_lora_path` (same roots).
     let data_dir = normalized_data_dir(settings)?;
     let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
+    let hf_cache = normalize_absolute_path(source_library.root())?;
+    let canonical_hf_cache = normalize_existing_or_absolute(source_library.root())?;
     let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
     // Additionally admit the operator's external model roots (epic 10451 / sc-10668). Phase 1
     // widened only the LoRA lane; Phase 2 reads an external ComfyUI **base** model's component
@@ -195,9 +198,7 @@ pub(crate) fn normalize_app_managed_model_path(
     }
     sceneworks_core::model_artifacts::confine_artifact_path(Path::new(raw_path), &roots).map_err(
         |_| {
-            WorkerError::InvalidPayload(format!(
-                "{label} must be inside an app-managed model directory."
-            ))
+            WorkerError::InvalidPayload(format!("{label} must be inside an app-managed directory."))
         },
     )
 }
@@ -226,9 +227,12 @@ pub(crate) fn normalize_app_managed_lora_path(
 ) -> WorkerResult<PathBuf> {
     let data_dir = normalized_data_dir(settings)?;
     let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
+    let hf_cache = normalize_absolute_path(source_library.root())?;
+    let canonical_hf_cache = normalize_existing_or_absolute(source_library.root())?;
     let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
     // Both the lexical and canonical form of each external root, matching the posture
     // above: `resolved` is canonical, and a canonical path never `starts_with` a
@@ -242,8 +246,12 @@ pub(crate) fn normalize_app_managed_lora_path(
         }
     }
     let normalized = normalize_absolute_path(path)?;
-    let resolved = normalize_existing_or_absolute(&normalized)?;
-    let confined = ensure_path_under(resolved, &roots, "LoRA path")?;
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(&normalized, &roots)
+        .map_err(|_| {
+            WorkerError::InvalidPayload(
+                "LoRA path must be inside an app-managed directory.".to_owned(),
+            )
+        })?;
     Ok(loadable_confined_lora_path(&normalized, confined))
 }
 

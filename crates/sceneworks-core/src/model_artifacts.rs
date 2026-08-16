@@ -7,8 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const MODEL_ARTIFACT_CONTRACT_VERSION: u32 = 1;
 
@@ -371,29 +372,68 @@ impl ResolvedModelArtifact {
         .map_err(|error| ArtifactContractError(format!("cannot encode artifact key: {error}")))?;
         Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
     }
+}
 
-    /// Runtime-only lease acquisition seam. Catalog/status callers receive immutable resolution
-    /// values but never call this and therefore never stamp usage.
-    pub fn acquire_runtime_lease(
-        self: &Arc<Self>,
-    ) -> Result<ActiveArtifactLease, ArtifactContractError> {
-        self.validate()?;
-        Ok(ActiveArtifactLease {
-            artifact: Arc::clone(self),
-            state: Some(Arc::new(LeaseState)),
-        })
+/// Shared runtime lease accounting for eviction/materialization policy. Resolvers that share this
+/// value observe one active count; immutable catalog resolution never touches it.
+#[derive(Clone, Debug, Default)]
+pub struct ActiveArtifactLeaseRegistry {
+    active: Arc<Mutex<BTreeMap<String, usize>>>,
+}
+
+impl ActiveArtifactLeaseRegistry {
+    pub fn active_lease_count(&self, cache_key: &str) -> usize {
+        *lock_unpoisoned(&self.active).get(cache_key).unwrap_or(&0)
+    }
+
+    pub fn is_active(&self, cache_key: &str) -> bool {
+        self.active_lease_count(cache_key) != 0
+    }
+
+    pub fn active_cache_keys(&self) -> Vec<String> {
+        lock_unpoisoned(&self.active).keys().cloned().collect()
+    }
+
+    fn acquire(&self, cache_key: &str) {
+        *lock_unpoisoned(&self.active)
+            .entry(cache_key.to_owned())
+            .or_default() += 1;
+    }
+
+    fn release(&self, cache_key: &str) {
+        let mut active = lock_unpoisoned(&self.active);
+        let remove = match active.get_mut(cache_key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if remove {
+            active.remove(cache_key);
+        }
     }
 }
 
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Debug)]
-struct LeaseState;
+struct LeaseState {
+    registry: ActiveArtifactLeaseRegistry,
+    cache_key: String,
+}
 
 /// RAII lifetime guard for one runtime use. Dropping an unmarked lease is merely a release; only
 /// `mark_success` crosses the promotion boundary used by later cache stories.
 #[derive(Debug)]
 pub struct ActiveArtifactLease {
     artifact: Arc<ResolvedModelArtifact>,
-    state: Option<Arc<LeaseState>>,
+    state: Option<LeaseState>,
 }
 
 impl ActiveArtifactLease {
@@ -402,14 +442,27 @@ impl ActiveArtifactLease {
     }
 
     pub fn mark_success(mut self) -> PromotionCandidate {
-        let _ = self.state.take();
-        PromotionCandidate {
+        let candidate = PromotionCandidate {
             cache_key: self
                 .artifact
                 .cache_key()
                 .expect("a leased artifact has already passed contract validation"),
             identity: self.artifact.identity.clone(),
             closure: self.artifact.closure.clone(),
+        };
+        // Success is deliberately separate from release. Taking the state here releases the
+        // active count only after the promotion candidate has been formed.
+        if let Some(state) = self.state.take() {
+            state.registry.release(&state.cache_key);
+        }
+        candidate
+    }
+}
+
+impl Drop for ActiveArtifactLease {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            state.registry.release(&state.cache_key);
         }
     }
 }
@@ -435,15 +488,73 @@ pub struct ArtifactSourceLibrary {
 #[derive(Clone, Debug)]
 pub struct ModelArtifactResolver {
     source_library: ArtifactSourceLibrary,
+    lease_registry: ActiveArtifactLeaseRegistry,
 }
 
 impl ModelArtifactResolver {
     pub fn new(source_library: ArtifactSourceLibrary) -> Self {
-        Self { source_library }
+        Self {
+            source_library,
+            lease_registry: ActiveArtifactLeaseRegistry::default(),
+        }
+    }
+
+    pub fn with_lease_registry(
+        source_library: ArtifactSourceLibrary,
+        lease_registry: ActiveArtifactLeaseRegistry,
+    ) -> Self {
+        Self {
+            source_library,
+            lease_registry,
+        }
     }
 
     pub fn source_library(&self) -> &ArtifactSourceLibrary {
         &self.source_library
+    }
+
+    pub fn lease_registry(&self) -> &ActiveArtifactLeaseRegistry {
+        &self.lease_registry
+    }
+
+    /// Resolve only the immutable source snapshot identity and location. This is the typed
+    /// behavior-preserving migration seam for legacy runtime loaders that still assemble their
+    /// concrete component closure at a higher layer.
+    pub fn discover_source_snapshot(
+        &self,
+        repository: &str,
+        revision: Option<&str>,
+    ) -> Result<(ArtifactIdentity, PathBuf), ArtifactContractError> {
+        self.source_library.discover_snapshot(repository, revision)
+    }
+
+    /// Resolve a configured ref name (for example `main`) to its immutable snapshot identity.
+    /// The returned contract never retains the mutable name.
+    pub fn discover_source_reference(
+        &self,
+        repository: &str,
+        reference: &str,
+    ) -> Result<(ArtifactIdentity, PathBuf), ArtifactContractError> {
+        self.source_library
+            .discover_snapshot_reference(repository, reference)
+    }
+
+    /// Runtime-only lease acquisition. Catalog/status callers resolve artifacts but do not call
+    /// this boundary, so discovery cannot stamp usage.
+    pub fn acquire_runtime_lease(
+        &self,
+        artifact: &Arc<ResolvedModelArtifact>,
+    ) -> Result<ActiveArtifactLease, ArtifactContractError> {
+        artifact.validate()?;
+        let cache_key = artifact.cache_key()?;
+        self.lease_registry.acquire(&cache_key);
+        Ok(ActiveArtifactLease {
+            artifact: Arc::clone(artifact),
+            state: Some(LeaseState {
+                registry: self.lease_registry.clone(),
+                cache_key,
+            }),
+        })
     }
 
     pub fn resolve_source(
@@ -522,6 +633,28 @@ impl ArtifactSourceLibrary {
         Ok(self.root.join(format!("models--{safe}")))
     }
 
+    /// Typed compatibility seam for maintenance code that already holds a repository root rather
+    /// than its logical repo id. The root must be one direct `models--*` child of this library.
+    pub fn snapshots_root_from_repository_root(
+        &self,
+        repository_root: &Path,
+    ) -> Result<PathBuf, ArtifactContractError> {
+        let library_root = canonical_or_absolute(&self.root)?;
+        let repository_root = canonical_or_absolute(repository_root)?;
+        let is_repository = repository_root.parent() == Some(library_root.as_path())
+            && repository_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("models--") && name.len() > "models--".len());
+        if !is_repository {
+            return Err(ArtifactContractError(format!(
+                "artifact repository root {} is not a direct source-library repository",
+                repository_root.display()
+            )));
+        }
+        Ok(repository_root.join("snapshots"))
+    }
+
     /// Compatibility entry for the historic cross-language repository slug contract. New typed
     /// resolution uses [`Self::repository_root`]; the old path-returning facade retains its exact
     /// slug behavior while still entering this source-library seam.
@@ -573,6 +706,32 @@ impl ArtifactSourceLibrary {
             ArtifactIdentity::pinned(repository, revision, "default")?,
             snapshot,
         ))
+    }
+
+    pub fn discover_snapshot_reference(
+        &self,
+        repository: &str,
+        reference: &str,
+    ) -> Result<(ArtifactIdentity, PathBuf), ArtifactContractError> {
+        if validate_immutable_revision(reference).is_ok() {
+            return self.discover_snapshot(repository, Some(reference));
+        }
+        validate_relative_path(Path::new(reference), "artifact source reference")?;
+        if Path::new(reference).components().count() != 1 {
+            return Err(ArtifactContractError(format!(
+                "artifact source reference {reference:?} is not a confined ref name"
+            )));
+        }
+        let repo_root = self.repository_root(repository)?;
+        let revision = std::fs::read_to_string(repo_root.join("refs").join(reference))
+            .map_err(|error| {
+                ArtifactContractError(format!(
+                    "cannot resolve {repository} ref {reference:?}: {error}"
+                ))
+            })?
+            .trim()
+            .to_owned();
+        self.discover_snapshot(repository, Some(&revision))
     }
 }
 
@@ -691,7 +850,44 @@ fn canonical_or_absolute(path: &Path) -> Result<PathBuf, ArtifactContractError> 
             Component::Normal(value) => absolute.push(value),
         }
     }
-    Ok(absolute)
+
+    // Canonicalize the deepest existing ancestor, then append only its missing tail. Falling back
+    // to the wholly lexical path would let `root/link/missing` pass a prefix check even when
+    // `link` is an in-root symlink to a directory outside `root`.
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = ancestor.file_name() else {
+                    return Err(ArtifactContractError(format!(
+                        "cannot resolve path {}: {error}",
+                        path.display()
+                    )));
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = ancestor.parent() else {
+                    return Err(ArtifactContractError(format!(
+                        "cannot resolve path {}: {error}",
+                        path.display()
+                    )));
+                };
+                ancestor = parent;
+            }
+            Err(error) => {
+                return Err(ArtifactContractError(format!(
+                    "cannot resolve path {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
 }
 
 fn rebase_under(root: &Path, relative: &Path) -> Result<PathBuf, ArtifactContractError> {
@@ -795,6 +991,9 @@ mod tests {
     #[test]
     fn incomplete_artifact_cannot_acquire_a_runtime_lease() {
         let root = tempfile::tempdir().unwrap();
+        let resolver = ModelArtifactResolver::new(
+            ArtifactSourceLibrary::new(root.path().join("source")).unwrap(),
+        );
         let identity = ArtifactIdentity::pinned("SceneWorks/model", REV, "q8").unwrap();
         let artifact = Arc::new(ResolvedModelArtifact {
             schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
@@ -810,7 +1009,7 @@ mod tests {
             completeness: ArtifactCompleteness::Incomplete,
             availability: ArtifactAvailability::Available,
         });
-        assert!(artifact.acquire_runtime_lease().is_err());
+        assert!(resolver.acquire_runtime_lease(&artifact).is_err());
     }
 
     #[test]
@@ -871,8 +1070,8 @@ mod tests {
             from_source.cache_key().unwrap(),
             from_local.cache_key().unwrap()
         );
-        let candidate = Arc::new(from_local)
-            .acquire_runtime_lease()
+        let candidate = resolver
+            .acquire_runtime_lease(&Arc::new(from_local))
             .unwrap()
             .mark_success();
         assert_eq!(candidate.cache_key, from_source.cache_key().unwrap());
@@ -882,5 +1081,60 @@ mod tests {
             from_source.validate().is_err(),
             "usable-stale still requires its exact closure"
         );
+    }
+
+    #[test]
+    fn shared_registry_observes_multiple_leases_drop_and_success_separately() {
+        let source = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        std::fs::write(local.path().join("model.safetensors"), b"model").unwrap();
+        let registry = ActiveArtifactLeaseRegistry::default();
+        let resolver = ModelArtifactResolver::with_lease_registry(
+            ArtifactSourceLibrary::new(source.path()).unwrap(),
+            registry.clone(),
+        );
+        let artifact = Arc::new(
+            resolver
+                .resolve_local(
+                    ArtifactIdentity::pinned("SceneWorks/model", REV, "q8").unwrap(),
+                    ResolvedBundleClosure::new(vec![primary("", "model.safetensors")]).unwrap(),
+                    local.path().to_owned(),
+                    ArtifactAvailability::Available,
+                )
+                .unwrap(),
+        );
+        let cache_key = artifact.cache_key().unwrap();
+
+        let first = resolver.acquire_runtime_lease(&artifact).unwrap();
+        let second = resolver.clone().acquire_runtime_lease(&artifact).unwrap();
+        assert_eq!(registry.active_lease_count(&cache_key), 2);
+        assert_eq!(registry.active_cache_keys(), vec![cache_key.clone()]);
+
+        drop(first);
+        assert_eq!(registry.active_lease_count(&cache_key), 1);
+        let candidate = second.mark_success();
+        assert_eq!(candidate.cache_key, cache_key);
+        assert!(!registry.is_active(&cache_key));
+        assert!(registry.active_cache_keys().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebase_rejects_missing_tail_beneath_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+        let closure =
+            ResolvedBundleClosure::new(vec![primary("escape/missing", "weights.safetensors")])
+                .unwrap();
+
+        assert!(closure.rebased_paths(root.path()).is_err());
+        assert!(confine_artifact_path(
+            &root.path().join("escape/missing/weights.safetensors"),
+            &[root.path().to_owned()]
+        )
+        .is_err());
     }
 }

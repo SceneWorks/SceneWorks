@@ -1270,9 +1270,10 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     let repo_dir =
         huggingface_repo_cache_path(&temp_dir.path().join("data"), "Test/lora-install-probe")
             .expect("repo cache path");
+    let revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
-    std::fs::write(repo_dir.join("refs").join("main"), "rev1").expect("write refs/main");
-    let snapshot = repo_dir.join("snapshots").join("rev1");
+    std::fs::write(repo_dir.join("refs").join("main"), revision).expect("write refs/main");
+    let snapshot = repo_dir.join("snapshots").join(revision);
     std::fs::create_dir_all(&snapshot).expect("create snapshot");
     std::fs::write(snapshot.join("cached.safetensors"), b"").expect("write adapter");
 
@@ -3583,9 +3584,13 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
         r#"{ "schemaVersion": 1, "presets": [] }"#,
     )
     .expect("user presets writes");
+    let stale_revision = "1111111111111111111111111111111111111111";
+    let current_revision = "2222222222222222222222222222222222222222";
     let stale_cache_file = temp_dir
             .path()
-            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/aaa111/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots")
+            .join(stale_revision)
+            .join("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
     std::fs::create_dir_all(
         stale_cache_file
             .parent()
@@ -3595,7 +3600,9 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
     std::fs::write(&stale_cache_file, b"stale-lora").expect("stale lora cache writes");
     let cache_file = temp_dir
             .path()
-            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/zzz999/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots")
+            .join(current_revision)
+            .join("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
     std::fs::create_dir_all(cache_file.parent().expect("cache file has parent"))
         .expect("hf cache creates");
     std::fs::write(&cache_file, b"lora").expect("lora cache writes");
@@ -3604,7 +3611,7 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
             .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/refs/main");
     std::fs::create_dir_all(refs_main.parent().expect("refs main has parent"))
         .expect("refs dir creates");
-    std::fs::write(&refs_main, b"zzz999").expect("refs main writes");
+    std::fs::write(&refs_main, current_revision).expect("refs main writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
