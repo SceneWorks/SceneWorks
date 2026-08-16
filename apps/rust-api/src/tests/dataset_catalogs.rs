@@ -21,7 +21,17 @@ use super::support::*;
 
 fn catalog_scan_hook_test_lock() -> &'static TestSerializationLock {
     static LOCK: OnceLock<TestSerializationLock> = OnceLock::new();
-    LOCK.get_or_init(|| TestSerializationLock::new("catalog_scan_hook_test_lock"))
+    LOCK.get_or_init(|| {
+        // The default 300 s hold bound was sized against the old flat 60 s
+        // scan-idle cap. This lock's holders wait on work-derived budgets
+        // (`catalog_scan_idle_budget`), so its hold bound must be derived from
+        // the same work or the wedge detector fires on a legitimately slow
+        // scan the budget still allows. Worst legitimate holder is
+        // `status_retries_after_a_recovered_generation_exits_incomplete`:
+        // three 80_000-row idle waits plus two 60 s bounded meeting points.
+        let worst_holder = 3 * catalog_scan_idle_budget(80_000) + Duration::from_secs(120);
+        TestSerializationLock::with_max_hold("catalog_scan_hook_test_lock", worst_holder)
+    })
 }
 
 async fn lock_catalog_scan_hook() -> TestSerializationGuard<'static> {
