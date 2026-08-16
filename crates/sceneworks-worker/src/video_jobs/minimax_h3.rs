@@ -492,9 +492,11 @@ pub(super) fn minimax_h3_available(request: &VideoRequest, settings: &Settings) 
 /// 2. the conditioning shape does not match the entry's DiT partition;
 /// 3. the weights are unprovisioned or torn.
 ///
-/// The order is deliberate: at the current pin every MiniMax-H3 job stops at (1) with the same
-/// honest reason a user got before, and an unprovisioned install after the pin bump stops at (3)
-/// with the resolver's precise error — which is exactly the substitution sc-19508 asked for
+/// The order is deliberate. Before sc-19721's pin bump every MiniMax-H3 job stopped at (1) with
+/// the same honest reason a user got before; at the current pin (`75d66db5`, the first revision
+/// that registers `mlx_gen_minimax_h3` — see `jobs_store/routing/mlx.rs`) the descriptor is
+/// present, (1) passes with no code change here, and an unprovisioned install stops at (3) with
+/// the resolver's precise error — which is exactly the substitution sc-19508 asked for
 /// ("an unprovisioned install must still fail loudly").
 #[cfg(target_os = "macos")]
 pub(super) fn ensure_minimax_h3_renderable(

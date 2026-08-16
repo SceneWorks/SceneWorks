@@ -103,6 +103,19 @@ describe("referenceLimitError", () => {
     expect(message).toContain("takes no reference audio clips");
   });
 
+  it("agrees in number: a single over-cap selection reads as singular", () => {
+    // Audio caps at 3 (and t2v at 0), so one selected file is an ordinary path — the refusal must
+    // not read "1 are selected. Remove them" (sc-17137 review B2).
+    const t2v = referenceCaps(minimaxH3);
+    const singular = referenceLimitError({ modelName: minimaxH3.name, caps: t2v, audio: 1 });
+    expect(singular).toContain("but 1 is selected. Remove it,");
+    expect(singular).not.toContain("are selected");
+    const plural = referenceLimitError({ modelName: minimaxH3.name, caps: t2v, audio: 2 });
+    expect(plural).toContain("but 2 are selected. Remove them,");
+    const overCap = referenceLimitError({ modelName, caps, images: caps.images + 2 });
+    expect(overCap).toContain(`but ${caps.images + 2} are selected. Remove 2.`);
+  });
+
   it("refuses a combined over-selection in which every individual list fits", () => {
     // 9 + 3 + 3 = 15 files: each picker is exactly at its own cap, and only the combined ceiling
     // can refuse it. This is the assertion the per-list checks structurally cannot make.

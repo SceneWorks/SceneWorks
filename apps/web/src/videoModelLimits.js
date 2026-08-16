@@ -52,6 +52,13 @@ export function referenceCaps(model) {
   };
 }
 
+// A count phrased as its own clause so the refusal reads grammatically at 1 ("1 is selected")
+// as well as at many ("3 are selected") — the audio picker caps at 3, so the singular case is
+// an ordinary path, not an edge.
+function selectedClause(count) {
+  return count === 1 ? "1 is selected" : `${count} are selected`;
+}
+
 /**
  * The refusal for a reference selection over what the model declares, or `null` to admit —
  * the client half of `reference_limit_error`.
@@ -71,15 +78,15 @@ export function referenceLimitError({ modelName, caps, images = 0, clips = 0, au
   ]) {
     if (count > cap) {
       return cap === 0
-        ? `${model} takes no ${noun}, but ${count} are selected. Remove them, or choose a model that conditions on ${noun}.`
-        : `${model} takes up to ${cap} ${noun}, but ${count} are selected. Remove ${count - cap}.`;
+        ? `${model} takes no ${noun}, but ${selectedClause(count)}. Remove ${count === 1 ? "it" : "them"}, or choose a model that conditions on ${noun}.`
+        : `${model} takes up to ${cap} ${noun}, but ${selectedClause(count)}. Remove ${count - cap}.`;
     }
   }
   if (caps.combined === null || caps.combined === undefined) return null;
   const total = images + clips + audio;
   if (total <= caps.combined) return null;
   return (
-    `${model} takes up to ${caps.combined} reference files in total, but ${total} are selected ` +
+    `${model} takes up to ${caps.combined} reference files in total, but ${selectedClause(total)} ` +
     `(${images} reference images + ${clips} video clips + ${audio} audio clips). ` +
     `Remove ${total - caps.combined}.`
   );
@@ -88,9 +95,13 @@ export function referenceLimitError({ modelName, caps, images = 0, clips = 0, au
 /**
  * The Steps floor a model declares (`limits.hardMinSteps`, sc-19426), or 1 when it declares none.
  *
- * MiniMax-H3's scheduler grid is `linspace(1, 0, steps)` and the terminal 0 is a grid point, so a
- * 1-step request is a schedule with nothing between its ends — unrenderable, and REFUSED rather
- * than quietly raised to 2. The form has to know that before it lets the value be typed.
+ * The unit is MODEL EVALUATIONS (NFE): MiniMax-H3's engine builds `linspace(1, 0, steps + 1)`,
+ * appending the terminal 0 itself, so `steps: 1` is a legal 2-point grid that renders — as noise,
+ * a single Euler jump from pure randomness. The declared floor of 2 is therefore a PRODUCT
+ * judgement (the corrected sc-18726 account in the manifest's `hardMinSteps` comment; the earlier
+ * "steps drive steps-1 evaluations, so 1 is unrenderable" reading described diffusers'
+ * `num_inference_steps`, not this key). Either way it is REFUSED rather than quietly raised, and
+ * the form has to know the floor before it lets the value be typed.
  */
 export function minStepsForModel(model) {
   const declared = model?.limits?.hardMinSteps;

@@ -1926,14 +1926,19 @@ export function VideoStudio() {
                 makes it reachable). Gated on the declared cap alone — it defaults to 0, so the
                 picker appears only for a model that says it conditions on audio. Uses the plain
                 AssetPickerField with categories hidden, the same shape Audio Studio's reference
-                voice uses: the media pickers' All/Images/Video tabs carry no audio bucket. */}
+                voice uses: the media pickers' All/Images/Video tabs carry no audio bucket.
+                `importAsset` + `mediaKind` give it the same local-file import the image/clip
+                pickers above carry (sc-17137 review B3): a project with no audio assets would
+                otherwise offer an empty grid with no way in. */}
             {showAudioReferences ? (
               <AssetPickerField
                 assets={audioAssets}
                 buttonLabel="Select audio"
                 changeLabel="Edit audio"
                 emptyLabel={`No reference audio selected (up to ${refCaps.audio})`}
+                importAsset={importAsset}
                 label="Reference audio"
+                mediaKind="audio"
                 multiple
                 onChange={setReferenceAudioAssetIds}
                 showCategories={false}
@@ -2490,10 +2495,11 @@ export function VideoStudio() {
                   </select>
                 ) : (
                   /* The `min` floor is the MODEL's, not a blanket 1 (sc-19426 / sc-17161).
-                     MiniMax-H3's scheduler grid is `linspace(1, 0, steps)` with the terminal 0 as a
-                     grid point, so a 1-step request has nothing between its ends and is REFUSED
-                     rather than raised — the form has to say so instead of letting it be typed and
-                     then 400'd at enqueue. `hardMinSteps` and `limits.steps` are INDEPENDENT axes
+                     MiniMax-H3 declares 2: the unit is model evaluations (NFE — the engine appends
+                     the terminal sigma itself), and a 1-evaluation schedule is a single Euler jump
+                     from pure noise, so the floor is the corrected sc-18726 product judgement,
+                     REFUSED rather than raised — the form has to say so instead of letting it be
+                     typed and then 400'd at enqueue. `hardMinSteps` and `limits.steps` are INDEPENDENT axes
                      (sc-19502): the floor bounds an open range, the menu enumerates a closed set,
                      and this branch is the one a model reaches when it declares no menu — so the
                      floor still has to be honoured here even though the pinned/menu cases above
