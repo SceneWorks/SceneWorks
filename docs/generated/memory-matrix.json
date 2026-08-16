@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:3ffe0db8bdc15fd3c616fdc645940b4bf16f4a041201c40dfc7610e80903d13a",
+    "sceneWorksRevision": "source-tree:48bd94066d3362060c56e2f6d01cf474932805413e710f07300de04a185e9979",
     "inferenceRevision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "9d82e3268328ca91ccc6b12da49bca9558be40f4357fb2a3fbee4f80913b32c3"
+        "sha256": "74da9e2c43818dd180bc24a97e647a5f86dcabaefe8b7b0cd4d6832c7cf6e160"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -23053,7 +23053,11 @@
             2048,
             768,
             640,
-            512
+            512,
+            448,
+            384,
+            320,
+            256
           ],
           "decodeOverlaps": [
             256,
@@ -23144,7 +23148,11 @@
             2048,
             768,
             640,
-            512
+            512,
+            448,
+            384,
+            320,
+            256
           ],
           "decodeOverlaps": [
             256,
@@ -23233,7 +23241,11 @@
             2048,
             768,
             640,
-            512
+            512,
+            448,
+            384,
+            320,
+            256
           ],
           "decodeOverlaps": [
             256,

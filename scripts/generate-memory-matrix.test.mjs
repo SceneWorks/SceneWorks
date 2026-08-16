@@ -758,7 +758,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
 
   for (const cell of bounded) {
     const ranges = cell.strategyParameters.publishedRanges;
-    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512]);
+    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512, 448, 384, 320, 256]);
     assert.deepEqual(ranges.decodeOverlaps, [256, 64]);
     if (cell.rung !== "bounded_decode") {
       assert.deepEqual(ranges.attentionChunkSizes, [67108864]);
