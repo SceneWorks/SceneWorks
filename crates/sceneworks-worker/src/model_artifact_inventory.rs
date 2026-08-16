@@ -404,16 +404,133 @@ mod tests {
     }
 
     fn item_is_test_only(item: &syn::Item) -> bool {
-        item_attributes(item).iter().any(|attribute| {
-            attribute.path().is_ident("test")
-                || (attribute.path().is_ident("cfg")
-                    && attribute
-                        .meta
-                        .to_token_stream()
-                        .to_string()
-                        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                        .any(|token| token == "test"))
-        })
+        if item_attributes(item)
+            .iter()
+            .any(|attribute| attribute.path().is_ident("test"))
+        {
+            return true;
+        }
+
+        let predicates = item_attributes(item)
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("cfg"))
+            .map(|attribute| attribute.parse_args::<syn::Meta>())
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(predicates) = predicates else {
+            // A predicate the audit cannot classify remains production-visible so malformed or
+            // newly introduced syntax cannot hide a root constructor.
+            return false;
+        };
+        if predicates.is_empty() {
+            return false;
+        }
+        let expression = CfgExpression::All(
+            predicates
+                .iter()
+                .map(CfgExpression::from_meta)
+                .collect(),
+        );
+        expression.requires_test()
+    }
+
+    #[derive(Clone, Debug)]
+    enum CfgExpression {
+        Test,
+        Atom(String),
+        All(Vec<Self>),
+        Any(Vec<Self>),
+        Not(Box<Self>),
+    }
+
+    impl CfgExpression {
+        fn from_meta(meta: &syn::Meta) -> Self {
+            match meta {
+                syn::Meta::Path(path) if path.is_ident("test") => Self::Test,
+                syn::Meta::List(list)
+                    if list.path.is_ident("all") || list.path.is_ident("any") =>
+                {
+                    let nested = list
+                        .parse_args_with(
+                            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                        )
+                        .map(|items| items.iter().map(Self::from_meta).collect::<Vec<_>>());
+                    match nested {
+                        Ok(items) if list.path.is_ident("all") => Self::All(items),
+                        Ok(items) => Self::Any(items),
+                        Err(_) => Self::Atom(normalized_meta(meta)),
+                    }
+                }
+                syn::Meta::List(list) if list.path.is_ident("not") => {
+                    let nested = list
+                        .parse_args_with(
+                            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                        )
+                        .ok();
+                    match nested.as_ref().and_then(|items| {
+                        (items.len() == 1).then(|| Self::from_meta(&items[0]))
+                    }) {
+                        Some(item) => Self::Not(Box::new(item)),
+                        None => Self::Atom(normalized_meta(meta)),
+                    }
+                }
+                _ => Self::Atom(normalized_meta(meta)),
+            }
+        }
+
+        fn collect_atoms(&self, atoms: &mut BTreeSet<String>) {
+            match self {
+                Self::Test => {}
+                Self::Atom(atom) => {
+                    atoms.insert(atom.clone());
+                }
+                Self::All(items) | Self::Any(items) => {
+                    for item in items {
+                        item.collect_atoms(atoms);
+                    }
+                }
+                Self::Not(item) => item.collect_atoms(atoms),
+            }
+        }
+
+        fn evaluate(&self, test: bool, atoms: &[String], assignment: u64) -> bool {
+            match self {
+                Self::Test => test,
+                Self::Atom(atom) => atoms
+                    .binary_search(atom)
+                    .is_ok_and(|index| assignment & (1_u64 << index) != 0),
+                Self::All(items) => items
+                    .iter()
+                    .all(|item| item.evaluate(test, atoms, assignment)),
+                Self::Any(items) => items
+                    .iter()
+                    .any(|item| item.evaluate(test, atoms, assignment)),
+                Self::Not(item) => !item.evaluate(test, atoms, assignment),
+            }
+        }
+
+        fn requires_test(&self) -> bool {
+            let mut atoms = BTreeSet::new();
+            self.collect_atoms(&mut atoms);
+            let atoms = atoms.into_iter().collect::<Vec<_>>();
+            // Real cfg expressions in these sources are small. If that changes, retain the item in
+            // the production scan rather than accepting an exponential audit or hiding code.
+            if atoms.len() > 20 {
+                return false;
+            }
+            let satisfiable = |test| {
+                (0..(1_u64 << atoms.len()))
+                    .any(|assignment| self.evaluate(test, &atoms, assignment))
+            };
+            satisfiable(true) && !satisfiable(false)
+        }
+    }
+
+    fn normalized_meta(meta: &syn::Meta) -> String {
+        meta.to_token_stream()
+            .to_string()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
     }
 
     fn retain_production_items(items: &mut Vec<syn::Item>) {
@@ -639,6 +756,33 @@ mod tests {
                 let _ = root.join("snapshots");
             }
 
+            #[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+            fn mixed_any_is_production() { let _ = "mixed_any_is_production"; }
+
+            #[cfg(not(test))]
+            fn explicit_non_test_is_production() { let _ = "explicit_non_test_is_production"; }
+
+            #[cfg(all(target_os = "macos", feature = "backend-candle"))]
+            fn target_and_feature_are_production() { let _ = "target_and_feature_are_production"; }
+
+            #[cfg(custom_predicate(test))]
+            fn unsupported_cfg_stays_visible() { let _ = "unsupported_cfg_stays_visible"; }
+
+            #[cfg(all(test, target_os = "macos"))]
+            fn all_requires_test() { let _ = "all_requires_test"; }
+
+            #[cfg(all(
+                any(test, target_os = "macos"),
+                not(all(test, feature = "never"))
+            ))]
+            fn nested_has_production_assignment() { let _ = "nested_has_production_assignment"; }
+
+            #[cfg(all(
+                any(test, all(feature = "same", not(feature = "same"))),
+                not(not(test))
+            ))]
+            fn nested_requires_test() { let _ = "nested_requires_test"; }
+
             mod nested {
                 #[cfg(
                     all(test, unix)
@@ -653,6 +797,13 @@ mod tests {
         let production = production_rust_source(source);
         assert!(production.contains("join(\"snapshots\")"));
         assert!(!production.contains("Fixture"));
+        assert!(production.contains("mixed_any_is_production"));
+        assert!(production.contains("explicit_non_test_is_production"));
+        assert!(production.contains("target_and_feature_are_production"));
+        assert!(production.contains("unsupported_cfg_stays_visible"));
+        assert!(production.contains("nested_has_production_assignment"));
+        assert!(!production.contains("all_requires_test"));
+        assert!(!production.contains("nested_requires_test"));
 
         let only_test = r#"
             #[cfg(test)]
@@ -666,5 +817,14 @@ mod tests {
         assert!(DIRECT_ROOT_MARKERS
             .iter()
             .all(|marker| !production.contains(marker)));
+
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let image_jobs = std::fs::read_to_string(
+            repository.join("crates/sceneworks-worker/src/image_jobs.rs"),
+        )
+        .expect("read mixed production/test image resolver");
+        let production = production_rust_source(&image_jobs);
+        assert!(production.contains("resolve_adapter_file"));
+        assert!(production.contains("normalize_app_managed_lora_path"));
     }
 }
