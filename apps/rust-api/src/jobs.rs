@@ -480,9 +480,14 @@ async fn validate_raw_job_payload(
     // different `job_type`. `/loras/import` applies the SAME predicate on its own typed route
     // (`queue_lora_import_job`) — it fetches whatever repo the caller names and never consults the
     // LoRA catalog for it, so what the catalog happens to declare has no bearing on what that route
-    // can reach. `/loras/:id/download` needs no gate of its own: it resolves the repo FROM the
-    // catalog entry named by the path id and 404s an id the catalog does not contain, so a caller
-    // cannot point it at a repo.
+    // can reach. `/loras/:id/download` now applies the SAME predicate on its own typed route too
+    // (`create_lora_download_job`, `apps/rust-api/src/loras.rs`). The reasoning previously recorded
+    // here for exempting it — that it resolves the repo FROM the catalog entry named by the path id
+    // and 404s an unknown id, so "a caller cannot point it at a repo" — answered a different
+    // question, and sc-17227 overturned it: who CHOOSES the repo is not who is bound by its licence.
+    // A catalog LoRA whose `source.repo` names a repo a `requiresLicenseAcknowledgment` model
+    // declares was fetched there with no acknowledgment, while the identical `lora_download` job
+    // posted to THIS route was answered 403 — the asymmetry, not the reachability, was the defect.
     //
     // `model_convert` is here because it is a fetching job type too, and less obviously so: it
     // names no `repo`, but `resolve_convert_plan`'s LTX arm hands the payload's `baseRepo` to
