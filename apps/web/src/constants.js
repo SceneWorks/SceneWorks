@@ -868,8 +868,11 @@ const seededFallbackModels = [
       hardMinDuration: 5.1667,
       hardMaxDuration: 14.375,
       recommendedMaxDuration: 14.375,
-      // The scheduler needs two sigma grid points to have one evaluation between them, so a 1-step
-      // request is refused rather than raised (sc-19426).
+      // MODEL EVALUATIONS (NFE), not sigma grid points — the engine appends the terminal 0 itself,
+      // so 1 evaluation is a legal 2-point grid that renders, as a single Euler jump from pure
+      // noise. 2 is the smallest schedule with an intermediate sigma, so the floor is a product
+      // judgement, and it is refused rather than raised (sc-19426, corrected sc-18726). See the
+      // manifest's `hardMinSteps` comment for the full account.
       hardMinSteps: 2,
       fps: [24],
       maxPixels: 1032192,
