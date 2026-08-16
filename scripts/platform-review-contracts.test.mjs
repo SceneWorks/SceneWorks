@@ -599,7 +599,9 @@ test("the Rust gate verifies the generated docs derived from Rust sources", asyn
     assert.match(scripts["check:rust-derived-docs"], new RegExp(`\\b${sub}\\b`), sub);
   }
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  assert.match(scripts.check, /\bcheck:rust-derived-docs\b/);
+  // sc-19758 removed the `npm run check` arm of this. That chain was 18 steps of pin-keyed gates
+  // and is now the unit tests alone; the derived-docs check keeps its two other entry points, the
+  // `rust:check` gate above and the pre-push hook below, both of which still run it.
   // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
   assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
