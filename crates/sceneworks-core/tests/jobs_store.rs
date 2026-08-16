@@ -3916,10 +3916,17 @@ fn candle_stranded_sweep_partitions_and_is_noop_when_off() {
 #[test]
 fn platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately() {
     let store = store("platform-unreachable-offmac");
+    // `krea_realtime_14b`, not `ltx_2_3`. This test needs a pair that is MLX-claimable and
+    // candle-unclaimable, and sc-19570 originally used LTX because that held on the epic branch.
+    // Syncing `main` gave the LTX pair a real candle lane (`candle_video_engine_id` resolves it to
+    // `ltx_2_3_distilled`), so the old pair is now candle-SERVED and the sweep is correctly inert on
+    // it — the assertion below would fail for the right reason. Krea Realtime has no
+    // `candle-gen-krea-realtime` at all, so it is still MLX-only; it is one of the seven pairs left
+    // in `MLX_ONLY_ADVERTISED_PAIRS` after that same sync.
     let job = job_of(
         &store,
         JobType::VideoGenerate,
-        json!({ "model": "ltx_2_3", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
     );
 
     // macOS FIRST, on the very same job: the MLX engine renders this pair, so the sweep must be
@@ -3965,7 +3972,9 @@ fn platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately() {
         );
     }
     assert!(
-        error.contains("ltx_2_3") && error.contains("image_to_video") && error.contains("windows"),
+        error.contains("krea_realtime_14b")
+            && error.contains("image_to_video")
+            && error.contains("windows"),
         "the reason names the model, the mode and the host: {error}"
     );
     assert_eq!(
@@ -4049,10 +4058,14 @@ fn platform_sweep_never_touches_a_non_video_or_candle_served_job() {
 
     // …and the sweep is not simply inert: an unreachable job in the SAME store, on the same pass,
     // is still failed. Without this arm every assertion above would pass on a no-op.
+    // Krea Realtime rather than LTX, for the reason spelled out in
+    // `platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately`: syncing `main` gave the LTX
+    // pair a candle lane, so an LTX job is no longer stranded off-Mac and this arm would assert a
+    // no-op — the precise failure it exists to prevent.
     let stranded = job_of(
         &store,
         JobType::VideoGenerate,
-        json!({ "model": "ltx_2_3", "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2", "prompt": "p" }),
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
     );
     let failed = store
         .fail_platform_unreachable_jobs("windows")
