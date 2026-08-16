@@ -1106,14 +1106,6 @@ function main(argv) {
   }
   const records = readRecords();
   const pin = inferencePin(readFileSync(path.join(repoRoot, "Cargo.toml"), "utf8"));
-  if (records.inferenceRevision !== pin) {
-    process.stderr.write(
-      `${RECORDS_PATH} is keyed to ${records.inferenceRevision?.slice(0, 9) ?? "(unset)"} but ` +
-        `Cargo pins ${pin.slice(0, 9)}. Re-run: node scripts/rung4-contract-prerequisites.mjs ` +
-        "--repo <inference> --write\n",
-    );
-    process.exit(1);
-  }
   const repoIndex = argv.indexOf("--repo");
   if (repoIndex === -1) {
     process.stderr.write(
@@ -1123,6 +1115,14 @@ function main(argv) {
     process.exit(2);
   }
   const repo = path.resolve(argv[repoIndex + 1]);
+  // `--write` is handled BEFORE the staleness guard below, and re-keys the records to the current
+  // pin. Both halves are required for a pin bump to be resolvable at all: the guard used to run
+  // first and exit 1 while telling the operator to run `--write`, which the guard itself made
+  // unreachable — and `--write` only ever rewrote the derived fields, never `inferenceRevision`, so
+  // even reaching it left the records keyed to the old revision and the guard still firing. The
+  // first pin bump after these records landed (sc-17137's main sync, 014134e30 → 0e4adc6f0) is what
+  // exposed it; re-deriving is the whole point of the flag, so it must not be gated on the records
+  // already agreeing with the pin.
   if (argv.includes("--write")) {
     for (const family of Object.values(records.families)) {
       for (const [backend, record] of Object.entries(family.backends)) {
@@ -1132,9 +1132,18 @@ function main(argv) {
         record.stagedResidencySupport = derived.stagedResidencySupport;
       }
     }
+    records.inferenceRevision = pin;
     writeFileSync(path.join(repoRoot, RECORDS_PATH), `${JSON.stringify(records, null, 2)}\n`);
-    process.stdout.write(`wrote ${RECORDS_PATH}\n`);
+    process.stdout.write(`wrote ${RECORDS_PATH} keyed to ${pin.slice(0, 9)}\n`);
     return;
+  }
+  if (records.inferenceRevision !== pin) {
+    process.stderr.write(
+      `${RECORDS_PATH} is keyed to ${records.inferenceRevision?.slice(0, 9) ?? "(unset)"} but ` +
+        `Cargo pins ${pin.slice(0, 9)}. Re-run: node scripts/rung4-contract-prerequisites.mjs ` +
+        "--repo <inference> --write\n",
+    );
+    process.exit(1);
   }
   const failures = compareRecords(records, repo);
   if (failures.length) {

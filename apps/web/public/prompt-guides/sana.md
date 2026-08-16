@@ -2,7 +2,7 @@
 
 ## Best For
 
-Fast, efficient 1024×1024 text-to-image. SANA 1600M is NVIDIA's Linear-DiT model — a 1.6B linear-attention transformer paired with a deep-compression 32× DC-AE autoencoder and a Gemma-2 instruction text encoder. It uses **real classifier-free guidance** (positive *and* negative prompt) and renders quickly with a comfortably small memory footprint.
+Fast, efficient 1024×1024 text-to-image and reference-guided image-to-image. SANA 1600M is NVIDIA's Linear-DiT model — a 1.6B linear-attention transformer paired with a deep-compression 32× DC-AE autoencoder and a Gemma-2 instruction text encoder. It uses **real classifier-free guidance** (positive *and* negative prompt) and renders quickly with a comfortably small memory footprint.
 
 Distributed under the NVIDIA Open Model License (non-commercial / research use only).
 
@@ -36,6 +36,7 @@ Name the medium (photo, oil painting, 3D render), the mood, and the lighting (go
 - **Guidance**: ~4.5. Lower for more natural/varied results, higher for stricter prompt adherence.
 - **Resolution**: native 1024×1024; width and height must be multiples of 32 (the DC-AE compression factor).
 - **Negative prompt**: supported — use it to remove unwanted elements or artifacts.
+- **Image reference**: add one reference image for non-edit img2img. Reference strength defaults to **0.5**; higher values retain more of the source structure, while **0** uses the normal txt2img path.
 
 ## Notes
 

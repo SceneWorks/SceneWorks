@@ -298,21 +298,69 @@ async fn submit_video_job_round_trips_reference_mode_with_every_reference_kind()
     let _ = harness.client.cancel().await;
 }
 
-/// The audio-only leg, over the wire. sc-17159 fixed the image-only spelling of this rule in
-/// `validate_video_job` precisely because Ref2VA serves an audio-only reference set; a tool that
-/// refused it would put the old bug back one layer up, where the API can no longer see it.
+/// The audio-only leg, over the wire (sc-19574). sc-17161 asserted the OPPOSITE here, because
+/// `validate_video_job` accepted an audio-only set at the time. The reference implementation
+/// settles it: diffusers `MiniMaxH3` documents `MiniMaxH3AudioReference` as "never on its own …
+/// It never reaches the conditioner", and `before_encoder.py` raises on `set(kinds) == {"audio"}`.
+///
+/// The tool, the API and the worker now share one predicate
+/// (`sceneworks_core::video_request::classify_reference_set`), so this pins the tool's end of it
+/// through the whole `tools/call` path — the middle step the unit tests cannot see — and that NO
+/// job reaches the API for a shape three layers down would reject.
 #[tokio::test]
-async fn submit_video_job_reference_mode_accepts_an_audio_only_set_and_refuses_an_empty_one() {
+async fn submit_video_job_reference_mode_refuses_an_audio_only_set_and_an_empty_one() {
     let harness = harness(vec![]).await;
 
+    for (label, arguments) in [
+        (
+            "audio-only",
+            json!({
+                "projectId": "p1",
+                "prompt": "a voice in an empty warehouse",
+                "mode": "reference",
+                "model": "minimax_h3_ref",
+                "referenceAudioAssetIds": ["aud_1"]
+            }),
+        ),
+        (
+            "no references at all",
+            json!({ "projectId": "p1", "prompt": "x", "mode": "reference" }),
+        ),
+    ] {
+        let outcome = harness
+            .client
+            .call_tool(
+                CallToolRequestParams::new("submit_video_job")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await;
+        match outcome {
+            Err(_) => {}
+            Ok(result) => assert_eq!(
+                result.is_error,
+                Some(true),
+                "a {label} reference call must not look like success: {result:?}"
+            ),
+        }
+    }
+    assert!(
+        harness.submitted.lock().unwrap().is_empty(),
+        "no job may reach the API for a reference set with nothing to condition the picture on"
+    );
+
+    // …and audio ALONGSIDE an image is the shape the checkpoint actually serves, so it goes through
+    // with the audio ids intact. Without this leg the assertions above would be satisfied by a tool
+    // that had simply stopped forwarding `referenceAudioAssetIds` at all.
     let result = harness
         .client
         .call_tool(
             CallToolRequestParams::new("submit_video_job").with_arguments(
                 json!({
                     "projectId": "p1",
-                    "prompt": "a voice in an empty warehouse",
+                    "prompt": "the woman from <Picture 1> with the voice from <Audio 1>",
                     "mode": "reference",
+                    "model": "minimax_h3_ref",
+                    "referenceAssetIds": ["img_1"],
                     "referenceAudioAssetIds": ["aud_1"]
                 })
                 .as_object()
@@ -321,38 +369,136 @@ async fn submit_video_job_reference_mode_accepts_an_audio_only_set_and_refuses_a
             ),
         )
         .await
-        .expect("an audio-only reference set is a shape the model serves");
+        .expect("an image + audio reference set is a shape the model serves");
     assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
-    assert_eq!(
-        harness.submitted.lock().unwrap()[0]["referenceAudioAssetIds"],
-        json!(["aud_1"])
-    );
+    let submitted = harness.submitted.lock().unwrap().clone();
+    assert_eq!(submitted.len(), 1, "only the valid call reaches the API");
+    assert_eq!(submitted[0]["mode"], "reference_to_video");
+    assert_eq!(submitted[0]["referenceAssetIds"], json!(["img_1"]));
+    assert_eq!(submitted[0]["referenceAudioAssetIds"], json!(["aud_1"]));
 
-    // …and a reference call with nothing to condition on never reaches the API.
-    let outcome = harness
-        .client
-        .call_tool(
-            CallToolRequestParams::new("submit_video_job").with_arguments(
-                json!({ "projectId": "p1", "prompt": "x", "mode": "reference" })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-        .await;
-    match outcome {
-        Err(_) => {}
-        Ok(result) => assert_eq!(
-            result.is_error,
-            Some(true),
-            "a referenceless reference call must not look like success: {result:?}"
+    let _ = harness.client.cancel().await;
+}
+
+/// **THE WIRE-BODY PROOF (sc-19576).** Each of the five modes this tool could not reach is driven
+/// through the REAL MCP client to the recorded body the API would have received.
+///
+/// The unit tests pin the mapper; this pins the whole path an agent takes — `tools/call` →
+/// `Parameters<SubmitVideoJobArgs>` deserialization → the mapper → `POST /api/v1/video/jobs`. That
+/// middle step is where a field that exists on the struct but is unreachable over the wire hides,
+/// and `ads2v` needed exactly such a field: `referenceClipAssetId` did not exist on the args at
+/// all, so no combination of the old arguments could have produced a payload
+/// `validate_video_job` accepts. "The tool names the mode" is not reachability; `submitted[0]` is.
+#[tokio::test]
+async fn submit_video_job_round_trips_the_five_modes_that_had_no_mcp_surface() {
+    let harness = harness(vec![]).await;
+
+    // (wire mode, tool arguments, the body keys that must survive the trip).
+    let cases: Vec<(&str, Value, Value)> = vec![
+        (
+            "video_to_video",
+            json!({
+                "projectId": "p1",
+                "prompt": "the same street at night",
+                "mode": "video_to_video",
+                "model": "bernini",
+                "sourceClipAssetId": "clip_1"
+            }),
+            json!({ "sourceClipAssetId": "clip_1" }),
         ),
+        (
+            "reference_video_to_video",
+            json!({
+                "projectId": "p1",
+                "prompt": "the woman from <Picture 1> in this clip",
+                "mode": "reference_video_to_video",
+                "model": "bernini",
+                "sourceClipAssetId": "clip_1",
+                "referenceAssetIds": ["img_1", "img_2"]
+            }),
+            json!({
+                "sourceClipAssetId": "clip_1",
+                "referenceAssetIds": ["img_1", "img_2"]
+            }),
+        ),
+        (
+            "multi_video_to_video",
+            json!({
+                "projectId": "p1",
+                "prompt": "blend these",
+                "mode": "multi_video_to_video",
+                "model": "bernini",
+                "sourceClipAssetIds": ["clip_1", "clip_2", "clip_3"]
+            }),
+            json!({ "sourceClipAssetIds": ["clip_1", "clip_2", "clip_3"] }),
+        ),
+        (
+            "ads2v",
+            json!({
+                "projectId": "p1",
+                "prompt": "restyle the ad",
+                "mode": "ads2v",
+                "model": "bernini",
+                "sourceClipAssetId": "clip_1",
+                "referenceClipAssetId": "clip_ref",
+                "referenceAssetIds": ["img_1"]
+            }),
+            // `referenceClipAssetId` is THE FIELD THAT DID NOT EXIST. If it is dropped anywhere
+            // between the JSON schema and the body, `validate_video_job` 400s with "requires a
+            // reference video" and the mode is named-but-unreachable.
+            json!({
+                "sourceClipAssetId": "clip_1",
+                "referenceClipAssetId": "clip_ref",
+                "referenceAssetIds": ["img_1"]
+            }),
+        ),
+        (
+            "animate_character",
+            json!({
+                "projectId": "p1",
+                "prompt": "the character dances",
+                "mode": "animate_character",
+                "model": "scail2_14b",
+                "sourceClipAssetId": "clip_drive",
+                "referenceAssetIds": ["img_character"]
+            }),
+            json!({
+                "sourceClipAssetId": "clip_drive",
+                "referenceAssetIds": ["img_character"]
+            }),
+        ),
+    ];
+
+    for (index, (mode, arguments, expected)) in cases.into_iter().enumerate() {
+        let result = harness
+            .client
+            .call_tool(
+                CallToolRequestParams::new("submit_video_job")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("`{mode}` must submit: {error}"));
+        assert_ne!(result.is_error, Some(true), "`{mode}` errored: {result:?}");
+
+        let submitted = harness.submitted.lock().unwrap().clone();
+        assert_eq!(submitted.len(), index + 1, "`{mode}` reached the API");
+        let body = &submitted[index];
+        assert_eq!(
+            body["mode"], mode,
+            "`{mode}` must submit its own wire mode: {body}"
+        );
+        let expected = expected.as_object().expect("expected keys object");
+        assert!(
+            !expected.is_empty(),
+            "`{mode}` must assert at least one key"
+        );
+        for (key, value) in expected {
+            assert_eq!(
+                body[key], *value,
+                "`{mode}`: {key} must reach the API: {body}"
+            );
+        }
     }
-    assert_eq!(
-        harness.submitted.lock().unwrap().len(),
-        1,
-        "only the valid call may reach the API"
-    );
 
     let _ = harness.client.cancel().await;
 }

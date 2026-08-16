@@ -2,6 +2,8 @@
 use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, VideoGenInput};
+#[cfg(target_os = "macos")]
+use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
 
 // ---------------------------------------------------------------------------
 // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-19508): a joint audio+video family that emits video AND
@@ -79,6 +81,12 @@ pub(super) const MINIMAX_H3_ENGINE_ID: &str = "minimax_h3";
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_DIT_COMPONENT: &str = "transformer";
 
+// The staged-component key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads the PACKED, per-tier
+// text encoder from (sc-19120) is `mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR` — the same
+// constant `minimax_h3_text_encoder_dir` builds the root out of, so the key staged and the directory
+// probed cannot disagree. Absent ⇒ the provider falls back to `<spec.weights>/text_encoder`, the
+// dense upstream bf16 Qwen3-VL-32B.
+
 /// The SceneWorks rehost carrying the pre-quantized DiT tiers (both partitions, all three tiers).
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
@@ -118,10 +126,11 @@ pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
 /// string** — so nothing in this module needs the provider to be importable at compile time. What
 /// it does need is for the id to be PRESENT in the registry, which is exactly what this reads.
 ///
-/// Deriving it beats asserting it: at the current pin (`014134e3`) the descriptor is absent and the
-/// refusal fires; the moment sc-18650 lands a bundle that registers `minimax_h3`, the descriptor
-/// appears and this arm goes live with **no code change**. A hard-coded revision string could only
-/// have gone stale.
+/// Deriving it beat asserting it, and sc-19721 is the proof: at `014134e3` the descriptor was
+/// absent and this refusal fired, and when the pin moved to `75d66db5` the descriptor appeared and
+/// the arm went live with **no code change here**. A hard-coded revision string would have gone
+/// stale instead — which is exactly what happened to every prose citation of the old pin around
+/// it.
 ///
 /// The same `media_descriptor(...).is_none()` idiom already gates the not-in-this-bundle branches
 /// of `mlx_fit_gate`, so this is the established way to ask the question.
@@ -165,6 +174,20 @@ pub(super) fn minimax_h3_tier_dir_is_complete(dir: &Path) -> bool {
         && sceneworks_core::mlx_tier_completeness::minimax_h3_ref_tier_complete(dir)
 }
 
+// sc-19558 x sc-19573 — THE SHARED PROBE LIST LIVES IN `sceneworks_core::mlx_tier_completeness`,
+// AND IT PROBES FILES.
+//
+// This module used to carry its own list (`MINIMAX_H3_SHARED_PROBES` /
+// `MINIMAX_H3_UPSTREAM_TEXT_ENCODER_PROBE`) alongside a `has_packed_text_encoder` flag. sc-19573
+// moved the list to core so the manifest's download-coverage guard and the runtime floor read ONE
+// list; sc-19558 established that the list has to name FILES, because an interrupted co-requisite
+// download leaves the directory present and empty and a dir-level floor certifies it as complete.
+// Both survive: core keeps the tier-aware root resolution and gains the file-level probes plus
+// `minimax_h3_missing_shared_probes`, which is what lets the refusal below name what is absent.
+//
+// The `has_packed_text_encoder` flag is gone because `minimax_h3_text_encoder_dir` subsumes it: the
+// text encoder's ROOT moves with the tier rather than its necessity, so there is nothing left to
+// make conditional.
 /// Everything a MiniMax-H3 load needs, resolved as ONE unit — the two roots are in different repos
 /// and neither is usable alone, so producing them separately is how they drift.
 #[cfg(target_os = "macos")]
@@ -279,42 +302,36 @@ pub(super) fn resolve_minimax_h3_load(
             tier_root.display()
         )));
     };
-    // The shared floor is checked AFTER the tier, because one of its six paths — the text encoder —
-    // is only addressable once the tier is known (sc-19120 packs it per tier; see
+    // The shared floor is checked AFTER the tier (sc-19573), because one of its paths — the text
+    // encoder — is only addressable once the tier is known (sc-19120 packs it per tier; see
     // `minimax_h3_text_encoder_dir`). Checking it first is what made every q4/q8 install fail with a
     // shared-floor error naming `text_encoder/` under the upstream snapshot, a path those tiers are
     // correct not to have.
     let text_encoder_dir = sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
         &tier_root, &base_root, tier,
     );
-    if !sceneworks_core::mlx_tier_completeness::minimax_h3_shared_is_complete(
+    // ENUMERATED, not restated (sc-19558). The probes are FILES, so the check can say which one is
+    // absent — and it must, because the pre-sc-19558 message listed everything the floor expects
+    // whether one path was missing or all eight, which sends a user to re-download components they
+    // already have. Single-sourced from `mlx_tier_completeness` either way: that is what keeps this
+    // message honest when the engine's probe list changes.
+    let missing = sceneworks_core::mlx_tier_completeness::minimax_h3_missing_shared_probes(
         &base_root,
         &text_encoder_dir,
-    ) {
-        // Still single-sourced from the probe constants (that is what keeps this message honest when
-        // the engine's probe list changes), but JOINED INTO PROSE. Interpolating the arrays with
-        // `{:?}` put Rust debug literals — `["tokenizer", "vae", "audio_vae"]` — in front of a user
-        // in the Model Manager.
-        let shared_dirs = sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS
-            .map(|dir| format!("{dir}/"))
+    );
+    if !missing.is_empty() {
+        // JOINED INTO PROSE rather than interpolated with `{:?}`, which put Rust debug literals in
+        // front of a user in the Model Manager.
+        let missing = missing
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
             .join(", ");
-        let audio_vae_config =
-            sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES
-                .map(|file| {
-                    format!(
-                        "{}/{file}",
-                        sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR
-                    )
-                })
-                .join(", ");
         return Err(WorkerError::InvalidPayload(format!(
-            "{}: the shared MiniMax-H3 text encoder / tokenizer / VAEs are incomplete (expected \
-             {shared_dirs} and {audio_vae_config} under {}, plus the {tier} text encoder at {}). \
-             These are separate co-requisite downloads from the quality tiers — re-download \
-             MiniMax-H3 in the Model Manager.",
+            "{}: the shared MiniMax-H3 text encoder / tokenizer / VAEs are incomplete for the \
+             {tier} tier — missing {missing}. These are separate co-requisite downloads from the \
+             quality tiers — re-download MiniMax-H3 in the Model Manager.",
             request.model,
-            base_root.display(),
-            text_encoder_dir.display(),
         )));
     }
     Ok(MiniMaxH3Load {
@@ -322,12 +339,23 @@ pub(super) fn resolve_minimax_h3_load(
         dit_dir: tier_root.join(tier).join(MINIMAX_H3_DIT_COMPONENT),
         // `None` at bf16 leaves the provider on its own `<root>/text_encoder` fallback, which is
         // where the dense upstream component actually is — passing it explicitly would be the same
-        // path spelled twice.
+        // path spelled twice. Not `.filter(is_complete)`: the floor above already refused a torn
+        // packed encoder BY NAME, so there is nothing left to silently fall back from (sc-19558 —
+        // falling back would put a q4 render on the 53 GB dense conditioner, which is the sc-19506
+        // defect wearing a different hat).
         text_encoder_dir: (tier != "bf16").then_some(text_encoder_dir),
         quant: minimax_h3_tier_quant(tier),
         tier,
     })
 }
+
+// `minimax_h3_packed_te_is_complete` used to live here (sc-19506): `config.json` + a safetensors
+// index, the pair `resolve_text_encoder_dir` → `map_shards` actually reads, so a directory holding
+// only `config.json` — the sc-19517 failure shape — is rejected rather than half-loaded at the
+// provider. It is now `mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`, checked by the
+// shared floor above for WHICHEVER root the tier resolves to (packed at q4/q8, dense upstream at
+// bf16) rather than only for the packed one. That is the strictly larger check: the dense encoder
+// was previously never probed beyond `is_dir()`.
 
 /// Refuse a request whose CONDITIONING SHAPE does not match the catalog entry it was submitted
 /// against — the guard that keeps a job off the wrong checkpoint.
@@ -345,8 +373,11 @@ pub(super) fn resolve_minimax_h3_load(
 /// * `minimax_h3_ref` (`transformer_ref/`) takes references and NO keyframes.
 /// * Keyframes AND references together are refused upstream by `MiniMaxH3Task::resolve`; refused
 ///   here too, so the user gets a SceneWorks-worded reason before anything loads.
-/// * An audio-only reference set is refused: the vision tower is the reference conditioner, so it
-///   would leave the visual stream unconditioned. The engine refuses it — this refuses it first.
+/// * An audio-only reference set is refused: an audio reference never reaches the reference
+///   conditioner (upstream `before_encoder.py` raises on `set(kinds) == {"audio"}`), so it would
+///   leave the visual stream unconditioned. sc-19574 lifted that rule into
+///   [`classify_reference_set`] so the API and the MCP tool refuse the identical shape — this is no
+///   longer the only layer holding the opinion, it is the last one.
 ///
 /// Not a duplicate of the API's `reference_limit_error` (sc-17160): that bounds HOW MANY references
 /// each entry accepts (the base entry declares 0/0/0). This bounds the SHAPE, and it is the layer a
@@ -370,35 +401,56 @@ pub(super) fn minimax_h3_validate_partition(request: &VideoRequest) -> WorkerRes
     }
     let is_reference_partition = request.model == "minimax_h3_ref";
     if is_reference_partition {
-        if !has_references {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: reference-to-video requires at least one reference (referenceAssetIds, \
-                 sourceClipAssetIds or referenceAudioAssetIds). A request with none would denoise \
-                 on the base MiniMax-H3 checkpoint, which is not the one this model loads.",
-                request.model
-            )));
-        }
-        if image_refs + clip_refs == 0 {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: an audio-only reference set leaves the visual stream unconditioned — \
-                 MiniMax-H3 conditions references through its vision tower, so at least one image \
-                 or video reference must accompany the audio.",
-                request.model
-            )));
+        // sc-19574: both refusals now come off the SHARED verdict
+        // (`sceneworks_core::video_request::classify_reference_set`) that the API's
+        // `validate_video_job` and the MCP tool's `reference` arm also read, so the three layers
+        // cannot drift back into disagreeing about which sets are legal. Only the wording is the
+        // worker's — an engine-side reason names the checkpoint, which a user-facing 400 should not.
+        match classify_reference_set(image_refs, clip_refs, audio_refs) {
+            ReferenceSetVerdict::Conditionable => {}
+            ReferenceSetVerdict::Empty => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{}: reference-to-video requires at least one reference (referenceAssetIds, \
+                     sourceClipAssetIds or referenceAudioAssetIds). A request with none would \
+                     denoise on the base MiniMax-H3 checkpoint, which is not the one this model \
+                     loads.",
+                    request.model
+                )));
+            }
+            ReferenceSetVerdict::AudioOnly => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{}: an audio-only reference set leaves the visual stream unconditioned — an \
+                     audio reference never reaches the reference conditioner, so at least one image \
+                     or video reference must accompany the audio.",
+                    request.model
+                )));
+            }
         }
         // `Conditioning::ReferenceVideo` — the ONLY variant that carries a reference clip's own
-        // frame rate — arrives with the sc-18650 pin bump. It is genuinely absent from the pinned
-        // gen-core, so this shape cannot be built here yet. Refuse it by name rather than
-        // downgrading it to `Conditioning::VideoClip`: the engine deliberately does NOT advertise
-        // `VideoClip` (it has no in-context clip mechanism), so that substitution would be refused
-        // as `Unsupported` after the load — or, worse, silently accepted by some future provider as
-        // a completely different mechanism. Tracked as the sc-19508 follow-up.
+        // frame rate.
+        //
+        // 🔴 THE REASON FOR THIS REFUSAL CHANGED AT sc-19721, AND THE MESSAGE HAD TO CHANGE WITH IT.
+        // It used to say the variant "arrives with the inference pin bump (sc-18650)", which was
+        // true at `014134e3`: gen-core had no such variant. The pin is now `75d66db5`, where
+        // `Conditioning::ReferenceVideo { frames, fps, audio }` EXISTS and MiniMax-H3's descriptor
+        // ADVERTISES `ConditioningKind::ReferenceVideo`. Both halves of the old reason are gone.
+        //
+        // What is missing is on THIS side: nothing in the worker decodes a source clip into
+        // `Vec<Image>` + its own fps + its own `AudioTrack` for this arm — no call site in the repo
+        // constructs the variant at all. That is a SceneWorks feature slice (the sc-19508
+        // follow-up), not a pin. The refusal stands, honestly stated, until it is built.
+        //
+        // Still refused BY NAME rather than downgraded to `Conditioning::VideoClip`: the engine
+        // deliberately does NOT advertise `VideoClip` (it has no in-context clip mechanism), so
+        // that substitution would be refused as `Unsupported` after the load — or, worse, silently
+        // accepted by some future provider as a completely different mechanism.
         if clip_refs > 0 {
             return Err(WorkerError::InvalidPayload(format!(
-                "{}: video references are not renderable in this build — the conditioning variant \
-                 that carries a reference clip's own frame rate arrives with the inference pin \
-                 bump (sc-18650). Image and audio references render now; remove the \
-                 sourceClipAssetIds entries, or wait for the pin. No output was produced.",
+                "{}: video references are not renderable in this build — the engine accepts them, \
+                 but SceneWorks does not yet decode a reference clip into the frames, frame rate \
+                 and soundtrack the conditioning carries (sc-19508 follow-up). Image and audio \
+                 references render now; remove the sourceClipAssetIds entries. No output was \
+                 produced.",
                 request.model
             )));
         }

@@ -40,9 +40,11 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, WeightsSource};
+use gen_core::{Conditioning, GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource};
 
-use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
+use super::smoke_support::{
+    env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
+};
 
 /// Resolve the SenseNova variant → engine id + its shipped defaults (steps/guidance).
 ///
@@ -223,5 +225,64 @@ fn sensenova_candle_gpu_smoke() {
         "{engine_id} render looks degenerate (std {std:.2}) — possible NaN / all-black decode \
          (check CUDA_COMPUTE_CAP=120 and that SENSENOVA_DIR is a complete tier dir)"
     );
+
+    // sc-18476 conditioned-image acceptance: same model/prompt/seed/shape, materially different
+    // reference pixels. This drives both registered Reference and MultiReference shapes and proves
+    // conditioning changes pixels rather than silently falling through to T2I.
+    let reference_a = Image {
+        width: w,
+        height: h,
+        pixels: vec![32; (w * h * 3) as usize],
+    };
+    let reference_b = Image {
+        width: w,
+        height: h,
+        pixels: (0..(w * h * 3)).map(|i| (i % 251) as u8).collect(),
+    };
+    let render_conditioned = |conditioning, true_cfg| {
+        let mut conditioned = req.clone();
+        conditioned.conditioning = conditioning;
+        conditioned.true_cfg = Some(true_cfg);
+        match generator
+            .generate(&conditioned, &mut |_| {})
+            .expect("SenseNova conditioned generate")
+        {
+            GenerationOutput::Images(mut images) => images.pop().expect("conditioned image"),
+            other => panic!("expected Images output, got {other:?}"),
+        }
+    };
+    let singular_a = render_conditioned(
+        vec![Conditioning::Reference {
+            image: reference_a.clone(),
+            strength: None,
+        }],
+        1.0,
+    );
+    let singular_b = render_conditioned(
+        vec![Conditioning::Reference {
+            image: reference_b.clone(),
+            strength: None,
+        }],
+        1.0,
+    );
+    let singular_cfg = render_conditioned(
+        vec![Conditioning::Reference {
+            image: reference_a.clone(),
+            strength: None,
+        }],
+        1.5,
+    );
+    let multi = render_conditioned(
+        vec![Conditioning::MultiReference {
+            images: vec![reference_a, reference_b],
+        }],
+        1.5,
+    );
+    assert!(mean_abs_frame_delta(&singular_a, &singular_b) > 0.25);
+    assert!(mean_abs_frame_delta(&singular_a, &singular_cfg) > 0.25);
+    assert!(mean_abs_frame_delta(&singular_a, &multi) > 0.25);
+    save_png(&singular_a, &out_dir.join("sensenova_reference_a.png"));
+    save_png(&singular_b, &out_dir.join("sensenova_reference_b.png"));
+    save_png(&multi, &out_dir.join("sensenova_multi_reference.png"));
     println!("[smoke] DONE: {engine_id} render coherent at {steps} steps");
 }

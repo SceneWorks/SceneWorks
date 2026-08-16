@@ -544,13 +544,16 @@ fn huggingface_repo_from_url(url: &str) -> Option<String> {
 /// bypass named, and a primary-only index would have missed it.
 ///
 /// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
-/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is `platforms:
-/// ["macos"]` — so an index built from the snapshot would be EMPTY on Linux/Windows and the gate
-/// would evaporate on exactly the hosts where the LAN-exposed jobs API (epic 4484) is most likely
-/// to be reachable. A licence requirement is not a platform capability.
+/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is platform-scoped: the
+/// MLX tiers and their co-requisites are `platforms: ["macos"]` and sc-19558's raw-snapshot set is
+/// `platforms: ["windows", "linux"]`. An index built from the snapshot would therefore see only the
+/// subset that survived the filter on the running host, and the gate would be keyed on a partial
+/// view of the repos an entry can actually fetch — on exactly the hosts where the LAN-exposed jobs
+/// API (epic 4484) is most likely to be reachable. A licence requirement is not a platform
+/// capability.
 async fn license_acknowledgment_repo_index(
     state: &AppState,
-) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+) -> Result<std::collections::BTreeMap<String, LicenseAcknowledgmentSource>, ApiError> {
     let (models, _) = merged_model_manifest_entries(state).await?;
     let mut index = std::collections::BTreeMap::new();
     for model in models {
@@ -560,6 +563,11 @@ async fn license_acknowledgment_repo_index(
         let Some(model_id) = model.get("id").and_then(Value::as_str) else {
             continue;
         };
+        let model_name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(model_id)
+            .to_owned();
         for download in model
             .get("downloads")
             .and_then(Value::as_array)
@@ -573,10 +581,88 @@ async fn license_acknowledgment_repo_index(
             else {
                 continue;
             };
-            index.entry(key).or_insert_with(|| model_id.to_owned());
+            index
+                .entry(key)
+                .or_insert_with(|| LicenseAcknowledgmentSource {
+                    model_id: model_id.to_owned(),
+                    model_name: model_name.clone(),
+                });
         }
     }
     Ok(index)
+}
+
+/// The catalog entry whose licence acknowledgment covers a fetch of some repo. The NAME travels
+/// with the id because the surfaces that have to explain the requirement — the LoRA rows on the
+/// Models screen — have no licence copy of their own and must point the user at the model card
+/// that does.
+#[derive(Clone)]
+pub(crate) struct LicenseAcknowledgmentSource {
+    pub(crate) model_id: String,
+    pub(crate) model_name: String,
+}
+
+/// Client-visible keys naming the model whose licence acknowledgment covers a catalog row that is
+/// not itself a model (sc-17227). Written onto LoRA catalog rows by `list_loras`.
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY: &str = "licenseAcknowledgmentModelId";
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY: &str = "licenseAcknowledgmentModelName";
+
+/// Stamp each catalog row whose Hugging Face source repo is licence-gated with the model that
+/// gates it (sc-17227), so a client can raise the SAME acknowledgment gate it raises on a model
+/// and send the assertion the server now requires.
+///
+/// Without this, `create_lora_download_job`'s repo-keyed gate is unsatisfiable from the shipped UI:
+/// the row carries nothing that says an acknowledgment is needed, `createLoraDownloadJob` sends no
+/// `licenseAcknowledged`, and the click yields a bare 403 with no checkbox anywhere to clear it.
+///
+/// Derived here rather than authored in `builtin.loras.jsonc` on purpose. A manifest flag is a
+/// second copy of a fact the model manifest already states, and the two drift; this reads the one
+/// source. It is also the only form that is correct on every host — the index is built from the
+/// UNFILTERED model manifest, so it does not evaporate on a platform where the gating model's
+/// download rows are filtered out, which is exactly where a client-side re-derivation would fail.
+///
+/// Applied at the CATALOG-READ door (`list_loras`) and not inside `lora_catalog`, which the
+/// per-job-create validation sweep also calls (sc-8819): the annotation is for rendering, and the
+/// enforcement path resolves the repo itself.
+pub(crate) async fn annotate_license_acknowledgment_sources(
+    state: &AppState,
+    rows: &mut [Value],
+    repo_of: impl Fn(&Value) -> Option<String>,
+) -> Result<(), ApiError> {
+    let keyed: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(position, row)| {
+            repo_of(row)
+                .as_deref()
+                .and_then(huggingface_repo_key)
+                .map(|key| (position, key))
+        })
+        .collect();
+    if keyed.is_empty() {
+        return Ok(());
+    }
+    let index = license_acknowledgment_repo_index(state).await?;
+    if index.is_empty() {
+        return Ok(());
+    }
+    for (position, key) in keyed {
+        let Some(source) = index.get(key.as_str()) else {
+            continue;
+        };
+        let Some(object) = rows[position].as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY.to_owned(),
+            Value::String(source.model_id.clone()),
+        );
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY.to_owned(),
+            Value::String(source.model_name.clone()),
+        );
+    }
+    Ok(())
 }
 
 /// The license-acknowledgment refusal for a request that named its weights by REPO (sc-17227).
@@ -619,15 +705,16 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
         return Ok(());
     }
     let index = license_acknowledgment_repo_index(state).await?;
-    let Some((requested, model_id)) = candidates
+    let Some((requested, source)) = candidates
         .iter()
-        .find_map(|(named, key)| index.get(key.as_str()).map(|model_id| (named, model_id)))
+        .find_map(|(named, key)| index.get(key.as_str()).map(|source| (named, source)))
     else {
         return Ok(());
     };
     if acknowledged {
         return Ok(());
     }
+    let model_id = &source.model_id;
     Err(ApiError {
         status: StatusCode::FORBIDDEN,
         detail: format!(
@@ -734,12 +821,58 @@ pub(crate) async fn create_model_download_job(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
+    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
+    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
+    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
+    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
+    let selected_variant = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let co_requisites =
+        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref());
+
+    // The REPO-keyed half of the same gate (sc-17227). The check above is keyed on the catalog id
+    // in the PATH, so it fires only when the entry that id names declares
+    // `requiresLicenseAcknowledgment` itself. Every other door — `POST /api/v1/jobs`,
+    // `/models/import`, `/loras/import` — is keyed on the repo the request will FETCH, resolved
+    // against `license_acknowledgment_repo_index`. That asymmetry left two doors onto one set of
+    // weights: an entry that does not carry the flag but whose `downloads` name a repo a flagged
+    // entry declares would have been fetched here while the generic queue answered 403 for the same
+    // repo. Shared co-requisite rows are exactly that shape, and the manifest already uses it.
+    //
+    // Unreachable in the shipped catalog today — every restricted repo reference lives inside an
+    // entry that carries the flag, and the manifest audit's
+    // `test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself` keeps it that way —
+    // but that is a property of the current manifest, not of this route. An
+    // ADDITION, not a replacement: the id check above keeps its own refusal text, which names the
+    // model the caller asked for rather than the repo that supplies it.
+    let queued_repos: Vec<String> = std::iter::once(&download)
+        .chain(co_requisites.iter())
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let queued_repos: Vec<Option<&str>> = queued_repos
+        .iter()
+        .map(|repo| Some(repo.as_str()))
+        .collect();
+    ensure_license_acknowledged_for_source(
+        &state,
+        &queued_repos,
+        None,
+        payload.license_acknowledged,
+    )
+    .await?;
+
     let job_payload = build_model_download_job_payload(
         &model,
         &model_id,
         &download,
         requested_variant,
         true,
+        payload.license_acknowledged,
         &state.settings.data_dir,
     )?;
 
@@ -753,24 +886,14 @@ pub(crate) async fn create_model_download_job(
     // is a different artifact than the model's primary checkpoint and must not be reconciled
     // against the model's family.
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
-    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
-    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
-    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
-    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
-    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
-    let selected_variant = download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    for co_requisite in
-        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref())
-    {
+    for co_requisite in &co_requisites {
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
-            &co_requisite,
+            co_requisite,
             None,
             false,
+            payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
         create_generation_job(
@@ -830,6 +953,7 @@ fn build_model_download_job_payload(
     download: &Value,
     explicit_variant: Option<&str>,
     include_family: bool,
+    license_acknowledged: bool,
     data_dir: &FsPath,
 ) -> Result<JsonObject, ApiError> {
     let repo = required_string_field(download, "repo")?.to_owned();
@@ -862,13 +986,21 @@ fn build_model_download_job_payload(
     insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
     // Record the acknowledgment ON the job (sc-17227). `create_model_download_job` — the only
     // non-test caller — has already refused the request unless the caller asserted it, so reaching
-    // here for a `requiresLicenseAcknowledgment` model means the assertion was made. Writing it
-    // into the payload is what keeps RETRY and DUPLICATE working: those re-run
-    // `validate_raw_job_payload` over the stored payload, and the repo-keyed gate there would
-    // otherwise refuse a download the typed route had already authorized. Co-requisites carry it
-    // too — `MiniMaxAI/MiniMax-H3` is itself a co-requisite repo, and it is the one the review's
-    // bypass named.
-    if model_requires_license_acknowledgment(model) {
+    // here for a gated fetch means the assertion was made. Writing it into the payload is what
+    // keeps RETRY and DUPLICATE working: those re-run `validate_raw_job_payload` over the stored
+    // payload, and the repo-keyed gate there would otherwise refuse a download the typed route had
+    // already authorized. Co-requisites carry it too — `MiniMaxAI/MiniMax-H3` is itself a
+    // co-requisite repo, and it is the one the review's bypass named.
+    //
+    // Keyed on the FLAG OR the caller's own assertion, not on the flag alone. The two gates in
+    // `create_model_download_job` do not fire on the same predicate: the id gate reads the entry's
+    // flag, while the repo gate reads the repos the job will queue. For the shape the repo gate
+    // exists to catch — an entry with NO flag whose download names a repo a flagged entry declares
+    // — a flag-keyed stamp writes nothing, and the RETRY of that authorized download is then
+    // refused by the repo gate over its own stored `repo`. `license_acknowledged` is the caller's
+    // assertion carried verbatim, so the stamp records exactly what was asserted rather than
+    // re-deriving it from a predicate that already disagreed once.
+    if model_requires_license_acknowledgment(model) || license_acknowledged {
         job_payload.insert(
             LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
             Value::Bool(true),
@@ -1071,6 +1203,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             None,
             true,
+            false,
             data.path(),
         )
         .expect("primary payload");
@@ -1084,6 +1217,7 @@ mod memory_calibration_job_payload_tests {
             "fixture-model",
             &download(),
             None,
+            false,
             false,
             data.path(),
         )
@@ -1104,6 +1238,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             client.variant.as_deref(),
             true,
+            false,
             data.path(),
         )
         .expect("uncalibrated payload");
@@ -3733,6 +3868,69 @@ mod download_receipt_tests {
             }
         }
     }
+
+    /// The live SCAIL-2 manifest must give off-Mac users the dense shared package and the catalog's
+    /// install badge must enforce the exact provider-required six-file layout. This binds product
+    /// advertisement, Model Manager filtering, and worker loadability without duplicating weights.
+    #[test]
+    fn scail2_shared_bf16_package_is_installable_off_macos_and_fails_closed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let original = builtin_models_entry("scail2_14b");
+
+        for os in ["windows", "linux"] {
+            let mut model = original.clone();
+            retain_downloads_for_os(&mut model, os);
+            let downloads = model["downloads"].as_array().unwrap();
+            assert_eq!(downloads.len(), 1, "{os} must expose one installable tier");
+            assert_eq!(downloads[0]["variant"], "bf16");
+            assert_eq!(downloads[0]["files"], json!(["bf16/*"]));
+            assert_eq!(model_download(&model).unwrap()["variant"], "bf16");
+        }
+
+        let mut model = original;
+        retain_downloads_for_os(&mut model, "windows");
+        let download = model_download(&model).unwrap();
+        let repo = download["repo"].as_str().unwrap();
+        let revision = download["revision"].as_str().unwrap();
+        let tier = huggingface_repo_cache_path(data.path(), repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join("bf16");
+        std::fs::create_dir_all(&tier).unwrap();
+
+        std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+        let partial =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!partial.installed);
+        assert!(partial.cache_incomplete);
+        assert!(
+            partial
+                .missing_required_files
+                .iter()
+                .any(|file| file.contains("bf16") && file.contains("incomplete")),
+            "got {:?}",
+            partial.missing_required_files
+        );
+
+        for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
+            std::fs::write(tier.join(file), b"").unwrap();
+        }
+        let installed =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(installed.installed);
+        assert!(!installed.cache_incomplete);
+
+        std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+        let torn = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!torn.installed, "a provider-required file was removed");
+        assert!(torn.cache_incomplete);
+
+        let description = model["ui"]["description"].as_str().unwrap();
+        assert!(description.contains("Candle on NVIDIA Windows/Linux"));
+        assert!(!description.contains("macOS native MLX only"));
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A
@@ -4048,6 +4246,7 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         "anima" => Some(tc::anima_tier_complete),
         "boogu" => Some(tc::boogu_tier_complete),
         "sana" => Some(tc::sana_tier_complete),
+        "scail2" => Some(tc::scail2_tier_complete),
         // sc-14432: the SenseNova-U1 turnkeys ship a FLAT unified tier (backbone + config at the tier
         // root, no `model_index.json`), so without a predicate a torn tier read `installed` and then
         // failed at load — "complete but unloadable", with re-downloading the only (useless) repair.
@@ -4495,20 +4694,21 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 }
 
 /// Withdraw a synthesized LoRA advertisement that no lane on THIS deployment can honour (the
-/// sc-15328 class, reopened by sc-14135 for imported Krea 2).
+/// sc-15328 class).
 ///
 /// An imported / fine-tuned image model has no manifest row: `apply_model_manifest_defaults`
 /// synthesizes `loraCompatibility.families = [family]` from the family token alone. For some
-/// families that is a promise nothing keeps — an imported Krea 2 checkpoint on a candle host (the
-/// candle single-file entrypoint takes no adapters, sc-14135) and a Mage-Flow fine-tune on any host.
+/// families that is a promise nothing keeps — currently a Mage-Flow fine-tune on either native
+/// backend. Imported Krea 2 used to be another case, but both native single-file entrypoints now
+/// accept adapters (sc-18480), so its synthesized advertisement remains intact.
 /// Left standing, the picker offers adapters, `validate_lora_specs_for_model` passes, the job is
 /// created, and NO worker claims it: it sits on "Waiting for an available GPU worker" forever, with
 /// no error and no terminal state. That is strictly worse than a rejection.
 ///
 /// Applied HERE — on the catalog projection every read goes through — rather than baked into the
 /// stored manifest at import time, because the verdict is a property of the DEPLOYMENT, not of the
-/// checkpoint: the same imported Krea 2 file legitimately takes LoRAs on macOS/MLX and cannot on
-/// candle. A stored strip would be wrong on one of the two platforms the moment the data dir moved.
+/// checkpoint. Keeping this a deployment projection also makes future backend-specific capability
+/// changes safe when a data dir moves between platforms.
 ///
 /// 🔴 The withdrawal is an EXPLICIT EMPTY `families` array, never `remove("loraCompatibility")`.
 /// Removing the key is a no-op: `families_from_value_chain` (lib.rs) falls back to the top-level
@@ -4520,13 +4720,11 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 /// permissive and keep offering every LoRA.
 /// Binds [`apply_imported_lora_advertisement_for_lanes`] to the lanes THIS build can run: macOS
 /// ships the in-process MLX worker and no candle engine; Windows/Linux/Docker ship candle and no
-/// MLX. Mirrors the worker's own `KREA_IMPORTED_SUPPORTS_ADAPTERS` cfg split, so the advertisement
-/// and the claim gate agree.
+/// MLX. The verdict is derived from the same per-lane request gates the scheduler uses, so the
+/// advertisement and claim behavior stay aligned.
 ///
 /// The lane split is a ONE-LINE binding here and a parameter below precisely so the behaviour is
-/// testable on both lanes from either platform: the reported bug (imported Krea 2 + LoRA) only
-/// exists on the candle lane, which a macOS dev box can never reach, and a `cfg!` buried inside the
-/// logic would have left it covered by nothing but the developer's own OS.
+/// testable on both lanes from either platform.
 fn apply_imported_lora_advertisement(object: &mut JsonObject) {
     let mlx_lane = cfg!(target_os = "macos");
     apply_imported_lora_advertisement_for_lanes(object, mlx_lane, !mlx_lane);
@@ -4615,6 +4813,23 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     };
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
         object.insert("macSupport".to_owned(), mac_support);
+    }
+    // The off-Mac twin (sc-19570). Emitted on EVERY platform, exactly like `macSupport`: the client
+    // decides whether to act on it from `candleGatingActive`, and a block that appeared only on the
+    // platform it gates could never be asserted from a Mac test run — which is precisely how the
+    // off-Mac half of this defect stayed invisible for as long as it did. No `family` argument: the
+    // block carries the per-video-mode verdict, and video routing is id-keyed (route-by-family is
+    // an image-lane mechanism).
+    let candle_support = {
+        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+        let model_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        model_candle_support(id, model_type)
+    };
+    if let Ok(candle_support) = serde_json::to_value(candle_support) {
+        object.insert("candleSupport".to_owned(), candle_support);
     }
     let mlx_status = if cfg!(target_os = "macos") {
         mlx_catalog_status(object, data_dir)
@@ -5013,17 +5228,39 @@ mod model_size_concurrency_tests {
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
         //
+        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
+        // each gain its exact pinned download context while macOS keeps the same one.
+        //
+        // sc-18481 retired AuraSR from the installable catalog because every production backend
+        // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
+        // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
+        //
         // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
         // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
         // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
-        // `(repo, files)` still separates them and macOS gains exactly two: 87 → 89. Windows/Linux
-        // gain NOTHING and stay at 84: every MiniMax-H3 download row is `platforms: ["macos"]`
-        // (the candle lane has no H3 provider yet — sc-19008 → sc-17156), so
-        // `retain_downloads_for_os` empties both entries there and `model_download_context`
-        // yields `None`. That asymmetry is the point of running this loop per OS.
+        // `(repo, files)` still separates them and macOS gains exactly two. Windows/Linux gained
+        // NOTHING at the time: every MiniMax-H3 download row was `platforms: ["macos"]`, so
+        // `retain_downloads_for_os` emptied both entries there and `model_download_context` yielded
+        // `None`. That asymmetry is the point of running this loop per OS.
+        //
+        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
+        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
+        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
+        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
+        // windows/linux gain exactly one. `minimax_h3_ref` deliberately gained no off-Mac row
+        // (candle default-denies `ref2va`), which is why that is +1 and not +2.
+        //
+        // THE NUMBERS BELOW ARE THE SYNC MERGE'S, not any single side's. Starting from the shared
+        // 87 / 84 / 84, four independent deltas all apply:
+        //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
+        //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
+        //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
+        //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
+        // giving 88 / 85 / 85. Each side read only its own pair and so read 86/84/84 (main) or
+        // 89/85/85 (epic); neither was right once both landed.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 89_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 88_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -8573,11 +8810,7 @@ mod variant_delete_tests {
 /// Lane-parameterized coverage for the imported-model LoRA advertisement withdrawal.
 ///
 /// These drive `apply_imported_lora_advertisement_for_lanes` directly rather than through the
-/// platform-bound wrapper, so BOTH deployment topologies are exercised on every CI platform. That
-/// is the whole point: the reported bug (imported Krea 2 + LoRA queuing forever) exists only on the
-/// candle lane, which a macOS developer machine can never reach — an earlier revision of this
-/// change asserted the macOS shape unconditionally and went red on the Linux parity lane, covering
-/// the actual bug nowhere.
+/// platform-bound wrapper, so BOTH deployment topologies are exercised on every CI platform.
 #[cfg(test)]
 mod imported_lora_advertisement_tests {
     use super::*;
@@ -8598,42 +8831,34 @@ mod imported_lora_advertisement_tests {
             && object["loraCompatibility"]["supported"] == json!(false)
     }
 
-    /// THE REPORTED BUG, on the lane it actually happens on. A candle host cannot load adapters
-    /// into an imported Krea 2 single-file checkpoint (sc-14135), so the advertisement must be
-    /// withdrawn there — and must survive untouched on macOS, where MLX genuinely serves it.
+    /// Both native imported Krea 2 single-file loaders take adapters. Neither platform projection
+    /// may withdraw the synthesized family promise now that each scheduler gate can claim it.
     #[test]
-    fn imported_krea_2_withdraws_on_candle_and_is_untouched_on_mlx() {
-        let mut on_candle = entry("user_kreamania_variant5", "krea_2");
-        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
-        assert!(
-            withdrawn(&on_candle),
-            "a candle host must not advertise adapters it cannot load: {on_candle:?}"
-        );
-
-        let mut on_mlx = entry("user_kreamania_variant5", "krea_2");
-        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
-        assert!(
-            on_mlx.get("loraCompatibility").is_none(),
-            "MLX serves imported Krea 2 LoRAs — withdrawing there would break a working surface"
-        );
+    fn imported_krea_2_advertisement_survives_on_both_native_lanes() {
+        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
+            let mut object = entry("user_kreamania_variant5", "krea_2");
+            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
+            assert!(
+                object.get("loraCompatibility").is_none(),
+                "{lane} serves imported Krea 2 LoRAs; withdrawing would hide a working surface: \
+                 {object:?}"
+            );
+        }
     }
 
-    /// Mage-Flow refuses adapters on every backend, so the MLX lane withdraws. On candle it is not
-    /// in `CANDLE_ROUTED_FAMILIES` at all — the model renders nothing there, LoRA or not — so this
-    /// projection has no opinion and leaves the entry alone rather than papering over a whole-model
-    /// routing gap with a LoRA-shaped message.
+    /// Generated Mage-Flow full fine-tunes render plain text-to-image on both native backends, but
+    /// both provider seams reject adapters. Each projection must therefore withdraw only the LoRA
+    /// promise while preserving the now-routable model itself.
     #[test]
-    fn mage_flow_withdraws_on_mlx_and_abstains_where_the_model_is_unroutable() {
-        let mut on_mlx = entry("finetune_9f3c", "mage-flow");
-        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
-        assert!(withdrawn(&on_mlx), "{on_mlx:?}");
-
-        let mut on_candle = entry("finetune_9f3c", "mage-flow");
-        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
-        assert!(
-            on_candle.get("loraCompatibility").is_none(),
-            "no candle Mage engine exists, so there is no adapter promise to withdraw"
-        );
+    fn mage_flow_withdraws_adapters_on_both_native_lanes() {
+        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
+            let mut object = entry("finetune_9f3c", "mage-flow");
+            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
+            assert!(
+                withdrawn(&object),
+                "{lane} renders generated Mage t2i but cannot load adapters: {object:?}"
+            );
+        }
     }
 
     /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
@@ -8658,19 +8883,29 @@ mod imported_lora_advertisement_tests {
         }
     }
 
-    /// The withdrawal must not clobber sibling keys — `loraCompatibility.types` drives the
-    /// multi-phase surface, and only the families promise is being retracted.
+    /// A supported advertisement is byte-preserved, while a real withdrawal changes only the
+    /// adapter verdict and keeps sibling compatibility metadata intact.
     #[test]
-    fn withdrawal_preserves_sibling_compatibility_keys() {
-        let mut object = entry("user_kreamania_variant5", "krea_2");
-        object.insert(
-            "loraCompatibility".to_owned(),
-            json!({ "families": ["krea-2"], "types": ["character", "style"] }),
-        );
-        apply_imported_lora_advertisement_for_lanes(&mut object, false, true);
-        assert!(withdrawn(&object));
+    fn support_and_withdrawal_preserve_sibling_compatibility_keys() {
+        let compatibility =
+            json!({ "families": ["krea-2"], "supported": true, "types": ["character", "style"] });
+        let mut supported = entry("user_kreamania_variant5", "krea_2");
+        supported.insert("loraCompatibility".to_owned(), compatibility.clone());
+        apply_imported_lora_advertisement_for_lanes(&mut supported, false, true);
         assert_eq!(
-            object["loraCompatibility"]["types"],
+            supported["loraCompatibility"], compatibility,
+            "Candle's supported Krea adapter family and sibling keys must remain untouched"
+        );
+
+        let mut withdrawn_entry = entry("finetune_9f3c", "mage-flow");
+        withdrawn_entry.insert(
+            "loraCompatibility".to_owned(),
+            json!({ "families": ["mage-flow"], "supported": true, "types": ["character", "style"] }),
+        );
+        apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, false, true);
+        assert!(withdrawn(&withdrawn_entry));
+        assert_eq!(
+            withdrawn_entry["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
     }

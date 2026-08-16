@@ -707,6 +707,37 @@ mod tests {
         }
     }
 
+    /// A fresh Eros install must carry the external Gemma encoder required by both native backends.
+    #[test]
+    fn eros_fresh_install_provisions_the_shared_gemma_encoder() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value = serde_json::from_str(&stripped).expect("manifest parses");
+        let eros = manifest["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|model| model["id"] == "ltx_2_3_eros")
+            .expect("Eros model");
+        let gemma = eros["downloads"]
+            .as_array()
+            .expect("downloads")
+            .iter()
+            .find(|download| {
+                download["repo"] == "SceneWorks/ltx-2.3-mlx" && download["coRequisite"] == true
+            })
+            .expect("Eros must install the shared Gemma bundle on a clean machine");
+        assert_eq!(gemma["files"], serde_json::json!(["gemma/*"]));
+        assert_eq!(gemma["revision"].as_str().map(str::len), Some(40));
+        for platform in ["macos", "windows", "linux"] {
+            assert!(
+                gemma["platforms"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == platform)),
+                "Gemma co-requisite must provision {platform}"
+            );
+        }
+    }
+
     /// A full 40-char lowercase-hex commit SHA — the only revision shape the F-029 pin
     /// authority accepts (`^[0-9a-f]{40}$`, mirrored from model-manifest.schema.json).
     fn is_full_sha_revision(revision: &str) -> bool {
@@ -1330,41 +1361,61 @@ mod tests {
         }
     }
 
-    /// Every path a MiniMax-H3 load OPENS, expressed as a snapshot-relative path prefix, for `tier`.
+    /// Every path a MiniMax-H3 load OPENS, expressed snapshot-relative, for `tier`.
     ///
     /// Read entirely from `mlx_tier_completeness` — the same constants
     /// `minimax_h3_shared_is_complete` and `resolve_minimax_h3_load` gate on at job time. A second
     /// hand-copied list here would drift from the runtime check exactly the way the catalog drifted
     /// from it before sc-19573, which is the whole defect this guard exists to prevent.
+    ///
+    /// The shared half arrives as FILES since sc-19558, so the coverage test below is now asking the
+    /// stronger question: not "does some row fetch into `vae/`" but "does some row fetch
+    /// `vae/config.json`". [`minimax_h3_pattern_covers`] is what keeps a directory glob a legitimate
+    /// answer to a file-level question.
     fn minimax_h3_probed_paths(tier: &str) -> Vec<String> {
         use crate::mlx_tier_completeness as tc;
         let mut paths = Vec::new();
         // Both DiT partitions, under the TIER root. Not one of them — the engine opens
-        // `transformer/config.json` and `transformer_ref/config.json` on every load.
+        // `transformer/config.json` and `transformer_ref/config.json` on every load. These stay
+        // DIRECTORY-level: the shard set is index-driven and varies per tier, so the manifest
+        // question is "does a row fetch into this partition", which is what a `files` pattern says.
         for (_, partition) in tc::MINIMAX_H3_PARTITIONS {
             paths.push(format!("{tier}/{partition}"));
         }
-        // The text encoder, at the root this tier actually reads it from (sc-19120). Both roots are
-        // EMPTY here so the resolver yields the snapshot-relative remainder — `q4/text_encoder` for a
-        // packed tier, plain `text_encoder` for bf16 — which is the form a manifest `files` pattern
-        // is written in. Passing a real root would produce an absolute path no pattern can match, and
-        // passing the tier as the root would double it.
-        paths.push(
-            tc::minimax_h3_text_encoder_dir(
-                std::path::Path::new(""),
-                std::path::Path::new(""),
-                tier,
-            )
-            .to_string_lossy()
-            .into_owned(),
-        );
-        for component in tc::MINIMAX_H3_SHARED_PROBED_DIRS {
-            paths.push(component.to_owned());
-        }
-        for file in tc::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
-            paths.push(format!("{}/{file}", tc::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR));
+        // The shared floor and the tier's text encoder, straight off the runtime enumerator. Both
+        // roots are EMPTY so the resolver yields the snapshot-relative remainder —
+        // `q4/text_encoder/config.json` for a packed tier, plain `text_encoder/config.json` for
+        // bf16 — which is the form a manifest `files` pattern is written in. Passing a real root
+        // would produce an absolute path no pattern can match, and passing the tier as the root
+        // would double it.
+        let empty = std::path::Path::new("");
+        for probe in tc::minimax_h3_shared_probe_paths(
+            empty,
+            &tc::minimax_h3_text_encoder_dir(empty, empty, tier),
+        ) {
+            paths.push(probe.to_string_lossy().into_owned());
         }
         paths
+    }
+
+    /// Whether a manifest `files` pattern fetches `probed`.
+    ///
+    /// Three ways, and each is load-bearing:
+    /// * the pattern NAMES the path (`FL2VA/audio_vae/config.json`);
+    /// * the pattern fetches INTO it (`q4/transformer/*` covers the `q4/transformer` partition).
+    ///   Prefix-matched on a trailing `/` so `q4/transformer/*` cannot be read as covering
+    ///   `q4/transformer_ref` — the exact confusion `minimax_h3_ref` being a PREFIX EXTENSION of
+    ///   `minimax_h3` invites;
+    /// * the pattern is a directory GLOB the path falls under (`vae/*` covers `vae/config.json`).
+    ///   Required since sc-19558 made the shared probes files. The glob's own trailing `/` is
+    ///   retained for the same prefix reason — it is what stops `vae/*` claiming
+    ///   `audio_vae/config.json`.
+    fn minimax_h3_pattern_covers(pattern: &str, probed: &str) -> bool {
+        pattern == probed
+            || pattern.starts_with(&format!("{probed}/"))
+            || pattern
+                .strip_suffix('*')
+                .is_some_and(|prefix| prefix.ends_with('/') && probed.starts_with(prefix))
     }
 
     /// The snapshot-relative paths `entry`'s downloads FETCH for `tier` — every non-co-requisite row
@@ -1401,13 +1452,9 @@ mod tests {
         minimax_h3_probed_paths(tier)
             .into_iter()
             .filter(|probed| {
-                // A pattern covers a probed path when it names the path itself (`FL2VA/audio_vae/…`)
-                // or fetches into it (`q4/transformer/*`). Prefix-matched on a trailing `/` so
-                // `q4/transformer/*` cannot be read as covering `q4/transformer_ref` — the exact
-                // confusion `minimax_h3_ref` being a PREFIX EXTENSION of `minimax_h3` invites.
                 !declared
                     .iter()
-                    .any(|pattern| pattern == probed || pattern.starts_with(&format!("{probed}/")))
+                    .any(|pattern| minimax_h3_pattern_covers(pattern, probed))
             })
             .collect()
     }
@@ -1443,37 +1490,56 @@ mod tests {
         }
 
         // MUTATION, one probed path at a time: removing the file PATTERNS that fetch a single path
-        // must make THAT path — and only that path — the reported gap. Per pattern rather than per
-        // row, because the three `FL2VA/audio_vae/` documents share one row: deleting the row would
-        // move three paths at once and prove only that the guard notices a big hole. Deleting
-        // everything at once would prove even less.
+        // must make THAT path a reported gap, and must not move any probe those patterns did not
+        // fetch. Per pattern rather than per row, because the three `FL2VA/audio_vae/` documents
+        // share one row: deleting the row would move three paths at once and prove only that the
+        // guard notices a big hole. Deleting everything at once would prove even less.
+        //
+        // ⚠️ NOT `assert_eq!(gaps, vec![probed])` any more, and the change is forced by sc-19558
+        // rather than a loosening. The shared probes are FILES now, and one directory glob can be
+        // the only pattern fetching several of them — `q4/text_encoder/*` is the sole supplier of
+        // BOTH `q4/text_encoder/config.json` and `q4/text_encoder/model.safetensors.index.json`, so
+        // removing it legitimately opens two gaps. The confinement assertion below is what keeps
+        // that from becoming a licence for side effects: every reported gap must be a path a
+        // REMOVED pattern fetched.
         for id in ["minimax_h3", "minimax_h3_ref"] {
             for tier in ["q4", "q8", "bf16"] {
                 for probed in minimax_h3_probed_paths(tier) {
                     let mut mutated = entry(id);
-                    let mut removed = 0usize;
+                    let mut removed: Vec<String> = Vec::new();
                     for download in mutated["downloads"]
                         .as_array_mut()
                         .expect("downloads array")
                     {
                         let files = download["files"].as_array_mut().expect("files array");
-                        let before = files.len();
                         files.retain(|file| {
                             let file = file.as_str().expect("file pattern");
-                            !(file == probed || file.starts_with(&format!("{probed}/")))
+                            if minimax_h3_pattern_covers(file, &probed) {
+                                removed.push(file.to_owned());
+                                return false;
+                            }
+                            true
                         });
-                        removed += before - files.len();
                     }
                     assert!(
-                        removed > 0,
+                        !removed.is_empty(),
                         "{id} @ {tier}: nothing fetched {probed}, so the mutation is vacuous"
                     );
-                    assert_eq!(
-                        minimax_h3_unfetched_paths(&mutated, tier),
-                        vec![probed.clone()],
-                        "{id} @ {tier}: removing the patterns that fetch {probed} must report \
-                         exactly that path as unfetched"
+                    let gaps = minimax_h3_unfetched_paths(&mutated, tier);
+                    assert!(
+                        gaps.contains(&probed),
+                        "{id} @ {tier}: removing the patterns that fetch {probed} ({removed:?}) \
+                         must report it as unfetched, and reported {gaps:?}"
                     );
+                    for gap in &gaps {
+                        assert!(
+                            removed
+                                .iter()
+                                .any(|pattern| minimax_h3_pattern_covers(pattern, gap)),
+                            "{id} @ {tier}: {gap} was reported unfetched but no removed pattern \
+                             ({removed:?}) fetched it — the mutation had a side effect"
+                        );
+                    }
                 }
             }
         }

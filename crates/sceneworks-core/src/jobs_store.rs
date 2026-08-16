@@ -36,11 +36,17 @@ pub(crate) use routing::mlx::*;
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
     candle_routed_image_models, imported_image_model_lora_advertisement, mac_capabilities,
-    model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
+    model_candle_support, model_mac_support, video_job_type_for_mode, MacCapabilities,
+    ModelCandleSupport, MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, mac_rust_supported, video_request_is_claimable_by_any_lane,
-    UnsupportedReason, NATIVE_CONVERTERS,
+    video_request_is_claimable_on_platform, UnsupportedReason, NATIVE_CONVERTERS,
+};
+pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
+pub use routing::{
+    canonical_video_route_probe, video_backend_mode_supported,
+    video_mode_conditioning_requirements, video_ui_modes,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &[
@@ -2033,6 +2039,84 @@ impl JobsStore {
         Ok(failed)
     }
 
+    /// **The platform-reachability sweep (sc-19570).** Fails, terminal, every queued video job
+    /// whose (model, mode) pair no lane that can exist on `host_os` will ever claim.
+    ///
+    /// This is where the platform-conditional refusal lives, and the reason it lives HERE rather
+    /// than at `POST /api/v1/video/jobs`: an HTTP contract is not platform-dependent. The route
+    /// answers `201` for the same body on every host; what varies is the job's *execution outcome*,
+    /// which is inherently a property of the machine. sc-19570 shipped the refusal as a `400` first
+    /// and that was ruled out — the published surface must not differ by OS.
+    ///
+    /// It closes the real defect, which is not "the request was accepted" but "the job never
+    /// terminates": an MLX-only pair submitted off-Mac sat `queued` / "Waiting for an available
+    /// worker." with no error and no terminal state, forever. None of the four existing sweeps
+    /// rescues it. [`Self::fail_stranded_candle_jobs`] returns early the moment ANY live candle
+    /// worker exists — and one normally does; the job is unclaimable, not unserved. Its `mlx` twin
+    /// is `mlx_required`-gated and inert off-Mac. Both `fail_unsupported_*` sweeps default to
+    /// **warn**. So the job fell through all four.
+    ///
+    /// **No flag and no grace window,** unlike every sweep above it. Unreachability is structural
+    /// rather than transient: no worker capable of claiming the job can register on this OS at all,
+    /// so there is no window to wait out, and gating it behind a rollout switch would leave the
+    /// hang in place for every default deployment — which is exactly the state sc-19570 found. On
+    /// macOS it is inert by construction ([`video_request_is_claimable_on_platform`] returns `true`
+    /// there unconditionally), so no Mac-served pair is touched.
+    ///
+    /// Scoped to the four video job types via [`video_job_is_platform_unreachable`] — the same
+    /// range `create_video_job` enqueues — so it can never reach an image, training or upscale job.
+    /// Returns the jobs it failed so the caller can emit the structured event and publish updates.
+    pub fn fail_platform_unreachable_jobs(
+        &self,
+        host_os: &str,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        // Cheap exit on the platform where this can never fire, before taking the write lock.
+        if matches!(host_os, "macos" | "darwin") {
+            return Ok(Vec::new());
+        }
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_unix_seconds();
+
+        let mut statement = transaction.prepare(
+            "
+            select * from jobs
+             where status = 'queued'
+             order by created_at asc
+            ",
+        )?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        drop(statement);
+
+        let now_text = format_unix_seconds(now);
+        let mut failed_ids = Vec::new();
+        for job in candidates {
+            if !video_job_is_platform_unreachable(&job, host_os) {
+                continue;
+            }
+            let error = platform_unreachable_error(&job, host_os);
+            transaction.execute(
+                "
+                update jobs
+                   set status = 'failed',
+                       stage = 'failed',
+                       message = 'This mode has no backend on this platform.',
+                       error = ?2,
+                       completed_at = ?1,
+                       updated_at = ?1,
+                       worker_id = null
+                 where id = ?3 and status = 'queued'
+                ",
+                params![now_text, error, job.id],
+            )?;
+            failed_ids.push(job.id.clone());
+        }
+        let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
+        transaction.commit()?;
+        Ok(failed)
+    }
+
     /// Off-Mac "candle-unsupported" enforce sweep (sc-5502, epic 5483) — the Windows/Linux twin of
     /// [`Self::fail_unsupported_mlx_jobs`]. When `candle_required` AND `enforce`, fails every queued
     /// job the candle/CUDA flow can't run ([`candle_supported`] returns `Err`) terminal with a
@@ -3801,8 +3885,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
             return false;
         }
-        // Video upscale (epic 4811 / sc-4816): the mlx worker runs the native SeedVR2 engine
-        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; this is mac-only by construction.
+        // Video upscale (epic 4811 / sc-4816): the MLX worker runs the native SeedVR2 engine
+        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; Candle owns the same SeedVR2-only
+        // contract off-Mac.
         if matches!(job.job_type, JobType::VideoUpscale) && !video_upscale_job_is_mlx_eligible(job)
         {
             return false;
@@ -3830,13 +3915,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         return false;
     }
     // Candle (Windows/CUDA) lane (epic 3672 image sc-3678; epic 5095 image families sc-5096 + video
-    // sc-5097): the candle worker advertises `image_generate` (+ `video_generate` once video engines
-    // are wired) and serves gated, narrow **txt2img / txt2video-only** lanes. It must refuse every
-    // other shape — a non-candle family, or a conditioned (img2img/edit/reference/inpaint/pose/
-    // i2v/extend/bridge/replace) / LoRA request — so unsupported work remains queued unless another
-    // capable native worker registers. Identified by the `candle` marker capability (not `gpu_id`,
-    // which is a real CUDA index here). When candle is disabled the marker is absent and this is inert,
-    // so production routing is unchanged until the lane is turned on.
+    // sc-5097): the candle worker advertises broad image/video job capabilities, then the route
+    // predicates narrow them to concrete per-family base, conditioned, adapter, and control lanes.
+    // It must refuse every model/request-shape/tier/adapter combination those predicates do not own,
+    // so unsupported work remains queued unless another capable native worker registers. Identified
+    // by the `candle` marker capability (not `gpu_id`, which is a real CUDA index here). When candle
+    // is disabled the marker is absent and this is inert.
     if worker_is_candle(worker) {
         // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
         // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
@@ -3849,6 +3933,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit)
             && !(image_job_is_candle_eligible(job) || image_job_candle_pose_reject(job))
         {
+            return false;
+        }
+        if matches!(job.job_type, JobType::ImageDetail) && !image_detail_native_eligible(job) {
             return false;
         }
         // The candle worker advertises only the base `video_generate` (txt2video); refuse the

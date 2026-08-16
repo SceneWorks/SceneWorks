@@ -46,101 +46,22 @@ use runtime_macos as platform_runtime;
 use platform_runtime::providers::wan::config::{MAX_AREA_14B, MAX_AREA_5B, SIZE_MULTIPLE_14B};
 use serde_json::Value;
 
-/// This crate's own `Cargo.toml` — the file that declares the `runtime-*` pin `platform_runtime`
-/// resolves to. Embedded at compile time rather than read from disk so the tripwire below reads
-/// exactly the manifest this test binary was built from, not whatever happens to be on disk when
-/// it runs.
-const WORKER_MANIFEST: &str = include_str!("../Cargo.toml");
-
-/// The dependency `platform_runtime` aliases on this lane — the one whose `providers` module
-/// decides what is importable here, and therefore the one whose `rev` the
-/// [`PinnedAreaCap::NotInThePinnedBundle`] claim is scoped to.
-#[cfg(target_os = "macos")]
-const PLATFORM_RUNTIME_DEP: &str = "runtime-macos";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const PLATFORM_RUNTIME_DEP: &str = "runtime-cuda";
-
-/// The inference revision [`PinnedAreaCap::NotInThePinnedBundle`] was DERIVED AGAINST. At this
-/// commit the platform catalog's `providers` module carries no `minimax_h3` re-export (mlx:
-/// `mlx-gen-catalog/src/lib.rs`; candle: its sibling), so there is no
-/// `platform_runtime::providers::minimax_h3::config` to import and no const to tie to.
-///
-/// **That is a claim about ONE revision, so it is asserted against one** — see the tripwire in
-/// [`manifest_max_pixels_matches_the_pinned_engine_area_cap`]. Nothing else in this file can
-/// notice the provider arriving on its own: [`expected_max_pixels`] is a `match` on id that
-/// imports no MiniMax const, and the `only_counted` set is unchanged by a pin bump — so without
-/// a mechanism, sc-18650's bump lands GREEN and both `maxPixels` stay untied forever.
-///
-/// Rust has no stable "import it if it exists" (`cfg_accessible` is unstable), so the pin stands
-/// in for the provider: it MUST move for the provider to become importable. This half is broad —
-/// it fires even if inference renames the module — but it can be discharged by re-stamping this
-/// constant, so it is paired with [`minimax_h3_arrival_tripwire`], which cannot.
-const REV_WITHOUT_MINIMAX_H3: &str = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
-
-/// The `rev = "…"` a Cargo manifest pins `dep` to.
-///
-/// Panics rather than returning an `Option`: a manifest restructure that moved or renamed the pin
-/// would otherwise make this silently unfindable and retire the tripwire, which is precisely the
-/// coverage-shrinks-quietly failure this file exists to prevent.
-fn pinned_inference_rev<'a>(manifest: &'a str, dep: &str) -> &'a str {
-    let line = manifest
-        .lines()
-        .map(str::trim)
-        .find(|line| {
-            line.strip_prefix(dep)
-                .is_some_and(|rest| rest.trim_start().starts_with('='))
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "`{dep}` is no longer declared as a `<name> = …` dependency in \
-                 sceneworks-worker's Cargo.toml — the inference pin this guard scopes its \
-                 MiniMax-H3 claim to cannot be located (sc-17158)"
-            )
-        });
-    line.split_once("rev = \"")
-        .and_then(|(_, rest)| rest.split_once('"'))
-        .map(|(rev, _)| rev)
-        .unwrap_or_else(|| panic!("`{dep}` declares an inference `rev = \"…\"` (line: {line})"))
-}
-
-/// The COMPILE-TIME half of the same tripwire: this module stops compiling the moment the pinned
-/// bundle grows `providers::minimax_h3`.
-///
-/// The [`REV_WITHOUT_MINIMAX_H3`] assertion is broad — it fires on any pin move, including a
-/// rename or restructure that a name-based probe would miss — but it is *dischargeable*: someone
-/// can wave a bump through by re-stamping the constant without looking. This half cannot be
-/// discharged that way, because it is not an assertion at all. It is name resolution. Two glob
-/// imports supplying `minimax_h3` make the name ambiguous at its use site (E0659), so when the
-/// real provider lands next to the stand-in below, THIS FILE STOPS COMPILING, and the only way
-/// forward is to delete the stand-in and map both ids to `PinnedAreaCap::Pinned(…)` read from
-/// `providers::minimax_h3::config::CANVAS_MAX_PIXELS` — the sc-18650 conversion.
-///
-/// `MAX_AREA_14B` is re-read through the platform glob deliberately: it keeps that import
-/// load-bearing, so `unused_imports` can never flag (and tempt someone into deleting) the half
-/// that makes the collision possible.
-#[allow(dead_code)] // Exists for name resolution; nothing here is meant to be read at runtime.
-mod minimax_h3_arrival_tripwire {
-    /// Stand-in for the provider that is NOT in the pinned bundle. Its only job is to collide with
-    /// the real one when it arrives; the value is never used, and is 0 so it could not be mistaken
-    /// for a tie.
-    mod not_in_the_pinned_bundle {
-        pub mod minimax_h3 {
-            pub mod config {
-                pub const CANVAS_MAX_PIXELS: u64 = 0;
-            }
-        }
-    }
-
-    use self::not_in_the_pinned_bundle::*;
-    use super::platform_runtime::providers::*;
-
-    /// Proves the platform glob resolves, and keeps it used (see the module note).
-    const _PINNED_BUNDLE_REACHED: u64 = wan::config::MAX_AREA_14B as u64;
-
-    /// Ambiguous — and therefore a hard compile error — as soon as the pinned bundle also supplies
-    /// `minimax_h3`.
-    const _MINIMAX_H3_STILL_ABSENT: u64 = minimax_h3::config::CANVAS_MAX_PIXELS;
-}
+// MiniMax-H3's enforced area budget, read off the pinned provider's own `pipeline.rs` (sc-19721).
+//
+// Until the pin moved to the sc-17137 inference feature head this crate had no
+// `providers::minimax_h3` to import, so both MiniMax ids sat in a third
+// `PinnedAreaCap::NotInThePinnedBundle` state guarded by a pair of tripwires: a
+// `REV_WITHOUT_MINIMAX_H3` assertion that went red on any pin move, and an
+// `minimax_h3_arrival_tripwire` module whose two glob imports made the name ambiguous (E0659) the
+// moment the real provider landed. Both fired on this bump; both are deleted here rather than
+// re-stamped, because the conversion they demanded — tie both ids to the engine const — is now
+// possible and is done below. That is the whole of the sc-18650 conversion this file describes.
+//
+// The const lives in `pipeline`, not `config`: the stand-in module's `config::CANVAS_MAX_PIXELS`
+// path was a guess that was never compiled against the real provider. Both backends declare the
+// identical `pub const CANVAS_MAX_PIXELS: u32 = 768 * 1344`, so one mapping serves both lanes,
+// exactly like the wan consts above.
+use platform_runtime::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
 
 /// Every video model in the shipped `builtin.models.jsonc`. A model added or removed without
 /// updating this list trips the count guard in each test, so the check cannot silently stop
@@ -157,8 +78,8 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
     "bernini",
     "scail2_14b",
     "krea_realtime_14b",
-    // MiniMax-H3, both partitions (epic 17137, sc-17158). Neither is tie-able YET — see
-    // [`PinnedAreaCap::NotInThePinnedBundle`].
+    // MiniMax-H3, both partitions (epic 17137, sc-17158). Both are now tied to the pinned
+    // engine's own `CANVAS_MAX_PIXELS` (sc-19721).
     "minimax_h3",
     "minimax_h3_ref",
 ];
@@ -166,30 +87,20 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
 /// What this guard can say about one model's `limits.maxPixels`.
 ///
 /// The two-state `Option<u64>` this used to be conflated "the manifest must declare exactly this
-/// pinned value" with "the manifest must declare nothing", and had no way to express the third
-/// case sc-17158 introduced: a model whose engine **is not in the pinned inference bundle at all**,
-/// so there is no const to tie to and `None` would assert the opposite of the truth.
+/// pinned value" with "the manifest must declare nothing", so both states are named.
 ///
-/// Naming it is the point. A literal quietly returned as `Some(1_032_192)` would look tied and be
-/// a fiction — exactly the failure mode sc-12409 exists to prevent — so the third state is
-/// explicit, carries the id of the story that closes it, and the test says out loud which models
-/// it is currently only counting rather than checking.
+/// A third state, `NotInThePinnedBundle`, existed between sc-17158 and sc-19721 for a model whose
+/// engine was not compiled into the pinned `runtime-*` bundle at all — there was no const to tie
+/// to, and `None` would have asserted the opposite of the truth. MiniMax-H3 was its only
+/// inhabitant, and the sc-19721 pin bump made the provider importable, so the state is gone rather
+/// than left standing with nothing in it. Re-introduce it (with its tripwire pair) only for a
+/// model that is genuinely absent from the bundle; never as a way to skip a tie that is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PinnedAreaCap {
     /// The manifest must declare exactly this value, read from the pinned engine's own const.
     Pinned(u64),
     /// The engine has no `maxPixels`-expressible area cap, so the manifest must NOT invent one.
     EngineHasNone,
-    /// The engine is not compiled into the pinned `runtime-*` bundle, so nothing here can be
-    /// verified against it. The manifest value is still guarded — by `ENGINE_GEOMETRY`'s literals
-    /// in `sceneworks-core` and by that crate's `minimax_h3_over_cap_canvas_is_refit_onto_the_area_budget`
-    /// — just not against the shipping binary.
-    ///
-    /// This state is only ever true OF A REVISION, so it is never left to a comment to enforce.
-    /// Two mechanisms re-open the question — [`REV_WITHOUT_MINIMAX_H3`], asserted the moment the
-    /// pin moves, and [`minimax_h3_arrival_tripwire`], which fails to COMPILE the moment the
-    /// provider is importable. Without them the state would outlive its own premise in silence.
-    NotInThePinnedBundle,
 }
 
 /// The pinned engine area cap a video model's `limits.maxPixels` must equal. Derived from the
@@ -210,19 +121,11 @@ enum PinnedAreaCap {
 ///   is `None` (key absent) like ltx/svd. This is the axis where "inherit the family's cap"
 ///   would have been wrong.
 ///
-/// * `minimax_h3` / `minimax_h3_ref` declare a real, enforced area budget
-///   (`CANVAS_MAX_PIXELS = 1_032_192 = 768 × 1344`, wired by sc-17152) — but the MiniMax-H3
-///   provider is **not in the pinned inference bundle**: SceneWorks still pins `014134e3…` and
-///   sc-18650 owns the bump, which needs an off-Mac candle capability dump. There is no
-///   `providers::minimax_h3::config` to import, so this guard can only COUNT these two, not check
-///   them, and says so with [`PinnedAreaCap::NotInThePinnedBundle`] rather than transcribing the
-///   number and pretending it is tied. **sc-18650's pin bump must convert both to `Pinned(…)`**
-///   sourced from the engine const — that conversion is the whole reason this state is named.
-///   Nothing in THIS function can force that conversion: it is a `match` on id importing no
-///   MiniMax const, so its arm reads identically before and after the provider lands. What forces
-///   it is [`minimax_h3_arrival_tripwire`] (stops compiling when the provider is importable) and
-///   the [`REV_WITHOUT_MINIMAX_H3`] assertion in
-///   [`manifest_max_pixels_matches_the_pinned_engine_area_cap`] (red on the pin bump).
+/// * `minimax_h3` / `minimax_h3_ref` both validate against the H3 pipeline's own
+///   [`CANVAS_MAX_PIXELS`] (`768 × 1344 = 1_032_192`, wired by sc-17152). Tied since sc-19721 moved
+///   the inference pin onto the sc-17137 feature head, which is the commit that first put
+///   `providers::minimax_h3` in the bundle. Both partitions share one DiT geometry and therefore
+///   one budget — `minimax_h3_ref` differs only in what its checkpoint conditions on.
 ///
 /// An unmapped id panics: adding a video model is a deliberate act that must derive its own cap
 /// from its engine, never inherit one by default.
@@ -235,7 +138,7 @@ fn expected_max_pixels(id: &str) -> PinnedAreaCap {
         | "scail2_14b" => PinnedAreaCap::Pinned(MAX_AREA_14B as u64),
         "wan_2_2" => PinnedAreaCap::Pinned(MAX_AREA_5B as u64),
         "ltx_2_3" | "ltx_2_3_eros" | "svd" | "krea_realtime_14b" => PinnedAreaCap::EngineHasNone,
-        "minimax_h3" | "minimax_h3_ref" => PinnedAreaCap::NotInThePinnedBundle,
+        "minimax_h3" | "minimax_h3_ref" => PinnedAreaCap::Pinned(u64::from(CANVAS_MAX_PIXELS)),
         other => panic!(
             "video model {other:?} is not mapped to a pinned engine area cap — derive its \
              MAX_AREA_* from that model's engine `config.rs` and add it to \
@@ -264,11 +167,14 @@ fn expected_max_pixels(id: &str) -> PinnedAreaCap {
 /// none. It therefore joins the ltx / svd / mochi "engine lives in another crate" group and stays
 /// covered by `ENGINE_GEOMETRY`'s literal until sc-12587 extends the pinned tie to those crates.
 ///
-/// **MiniMax-H3 (sc-17158) falls in the untied `_` arm for two independent reasons**, and both
-/// have to hold for that to be right: its `SIZE_MULTIPLE = 32` is not `SIZE_MULTIPLE_14B`, and its
-/// engine is not in the pinned bundle at all (see [`PinnedAreaCap::NotInThePinnedBundle`]). It
-/// declares no `requiresDimensionsMultipleOf` — 32 IS core's default floor — so "not tied" and
-/// "declares nothing" agree here, which is why this needs no third state the way the area cap did.
+/// **MiniMax-H3 (sc-17158) stays in the untied `_` arm** even now that sc-19721's pin bump makes
+/// its engine importable, because the reason that survives is the load-bearing one: its
+/// `SPATIAL_STRIDE = 32` is not `SIZE_MULTIPLE_14B`, and it declares no
+/// `requiresDimensionsMultipleOf` at all — 32 IS core's default floor. `Some(n)` here means
+/// "assert the manifest declares exactly `n`", so tying it would demand a key the manifest
+/// deliberately omits. "Not tied" and "declares nothing" agree here, which is why this axis never
+/// needed the third state the area cap did. sc-12587 owns turning this into an
+/// engine-stride-equals-core-default assertion for the whole untied group at once.
 fn pinned_stride(id: &str) -> Option<u64> {
     match id {
         "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "wan_2_2_vace_fun_14b" | "bernini" => {
@@ -330,64 +236,20 @@ fn shipped_video_limits() -> std::collections::HashMap<String, Value> {
 /// manifest, or bump the `runtime-*` pin without the manifest) and this goes RED.
 #[test]
 fn manifest_max_pixels_matches_the_pinned_engine_area_cap() {
-    let mut only_counted: Vec<String> = Vec::new();
     for (id, limits) in shipped_video_limits() {
         let declared = limits.get("maxPixels").and_then(Value::as_u64);
         let want = match expected_max_pixels(&id) {
             PinnedAreaCap::Pinned(cap) => Some(cap),
             PinnedAreaCap::EngineHasNone => None,
-            PinnedAreaCap::NotInThePinnedBundle => {
-                // Not skipped silently: assert the manifest DOES declare a budget (an absent one
-                // would be a real regression this guard would otherwise wave through), then record
-                // the id so the list below stays honest about what is unchecked.
-                assert!(
-                    declared.is_some(),
-                    "{id}: declares no `limits.maxPixels`. Its engine is not in the pinned bundle \
-                     so the value cannot be tied here, but an area budget must still be declared \
-                     — see sceneworks-core's ENGINE_GEOMETRY."
-                );
-                only_counted.push(id.clone());
-                continue;
-            }
         };
         assert_eq!(
             declared, want,
             "{id}: manifest `limits.maxPixels` disagrees with the PINNED engine's area cap \
-             (this backend: MAX_AREA_14B={MAX_AREA_14B}, MAX_AREA_5B={MAX_AREA_5B}). The catalog \
-             and the `runtime-*` tag in Cargo.toml must move together — see sc-12409."
+             (this backend: MAX_AREA_14B={MAX_AREA_14B}, MAX_AREA_5B={MAX_AREA_5B}, \
+             CANVAS_MAX_PIXELS={CANVAS_MAX_PIXELS}). The catalog and the `runtime-*` tag in \
+             Cargo.toml must move together — see sc-12409."
         );
     }
-
-    // WHICH models are counted but not checked, pinned as a value rather than left implicit, so
-    // the untied set cannot grow by accident. Note what this alone does NOT do: a pin bump does
-    // not change this set, so it cannot notice MiniMax-H3 becoming tie-able. The assertion below
-    // and `minimax_h3_arrival_tripwire` are what cover that. A guard that quietly shrinks its own
-    // coverage is the thing sc-12409 was written about.
-    only_counted.sort();
-    assert_eq!(
-        only_counted,
-        vec!["minimax_h3".to_owned(), "minimax_h3_ref".to_owned()],
-        "the set of video models whose area cap cannot be tied to the pinned engine changed"
-    );
-
-    // ...and WHEN that was true. `PinnedAreaCap::NotInThePinnedBundle` is a fact about a revision,
-    // not a permanent property, so it is asserted against the revision it was derived from —
-    // `expected_max_pixels` imports no MiniMax const and the set above is pin-invariant, so
-    // without this a bump lands GREEN and both `maxPixels` stay untied indefinitely behind a
-    // comment claiming otherwise. This half catches the bump even if inference renames the
-    // module; `minimax_h3_arrival_tripwire` catches the arrival even if someone re-stamps
-    // `REV_WITHOUT_MINIMAX_H3` without looking. Neither alone is enough.
-    assert_eq!(
-        pinned_inference_rev(WORKER_MANIFEST, PLATFORM_RUNTIME_DEP),
-        REV_WITHOUT_MINIMAX_H3,
-        "the `{PLATFORM_RUNTIME_DEP}` pin moved, so `PinnedAreaCap::NotInThePinnedBundle` for \
-         minimax_h3 / minimax_h3_ref is no longer a derived fact — it is an unverified leftover. \
-         Re-derive it: if this bundle now exposes `providers::minimax_h3`, map both ids to \
-         `PinnedAreaCap::Pinned(...)` sourced from that provider's own `config::CANVAS_MAX_PIXELS` \
-         and drop them from the `only_counted` set above (sc-18650 owns the bump). If it still \
-         does not, re-stamp `REV_WITHOUT_MINIMAX_H3` to the new rev — deliberately, having \
-         actually looked."
-    );
 }
 
 /// For the wan 14B grid-16 family, `limits.requiresDimensionsMultipleOf` must equal the engine's
@@ -410,4 +272,124 @@ fn manifest_dimension_multiple_matches_the_pinned_engine_stride() {
              the `runtime-*` tag in Cargo.toml must move together — see sc-12409."
         );
     }
+}
+
+/// Every MiniMax-H3 resolution the catalog ADVERTISES must fit the pinned engine's per-edge
+/// ceiling, not just its area budget (sc-19721).
+///
+/// **This is the guard the 21:9 caveat was standing in for.** `1536x672` is 1,032,192 px — byte for
+/// byte what `1344x768` is — so it always satisfied `CANVAS_MAX_PIXELS`, and every area-based check
+/// in this repo passed it while the engine refused it: MiniMax-H3 bounds each EDGE independently,
+/// and that ceiling used to sit below 1536. For two stories the only thing standing between the
+/// catalog and a canvas the engine rejects was a prose caveat in the manifest and the prompt guide,
+/// with a JS test asserting the caveat's WORDING. inference #640 raised the ceiling and sc-19721's
+/// pin bump brought it here, so the caveat is discharged — and rather than delete the coverage with
+/// it, the claim is re-expressed as the thing it should always have been: a comparison against the
+/// engine.
+///
+/// `max_size` is read off the REGISTERED descriptor rather than `pipeline::MAX_CANVAS_EDGE`, because
+/// the descriptor field is what `gen_core::validate_request` actually enforces; the const is only
+/// what the provider chose to build it from. They agree at this pin, and that agreement is asserted
+/// here so neither can be substituted for the other by accident.
+#[test]
+fn advertised_minimax_h3_resolutions_fit_the_pinned_engine_edge_cap() {
+    let descriptor = crate::inference_runtime::media_descriptor("minimax_h3")
+        .expect("the pinned bundle registers minimax_h3 (sc-19721)");
+    let max_edge = u64::from(descriptor.capabilities.max_size);
+    assert_eq!(
+        max_edge,
+        u64::from(platform_runtime::providers::minimax_h3::pipeline::MAX_CANVAS_EDGE),
+        "the descriptor's enforced max_size and the pipeline const have diverged; this guard must \
+         follow the one the request validator reads"
+    );
+    assert!(
+        max_edge > u64::from(CANVAS_MAX_PIXELS).isqrt(),
+        "a per-edge cap at or below the square root of the area budget would make the area budget \
+         unreachable — if that is ever true the model's geometry story has changed, not this test"
+    );
+
+    let mut checked = 0_usize;
+    for (id, limits) in shipped_video_limits() {
+        if !id.starts_with("minimax_h3") {
+            continue;
+        }
+        let resolutions = limits
+            .get("resolutions")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{id} advertises a limits.resolutions list"));
+        assert!(!resolutions.is_empty(), "{id}: empty resolutions list");
+        for entry in resolutions {
+            let (width, height) = match entry {
+                Value::Object(map) => (
+                    map.get("width").and_then(Value::as_u64),
+                    map.get("height").and_then(Value::as_u64),
+                ),
+                Value::String(text) => {
+                    let (w, h) = text
+                        .split_once('x')
+                        .unwrap_or_else(|| panic!("{id}: unparseable resolution {text:?}"));
+                    (w.trim().parse().ok(), h.trim().parse().ok())
+                }
+                other => panic!("{id}: unexpected resolution entry {other}"),
+            };
+            let (Some(width), Some(height)) = (width, height) else {
+                panic!("{id}: resolution entry has no width/height: {entry}");
+            };
+            assert!(
+                width.max(height) <= max_edge,
+                "{id}: advertises {width}x{height}, whose long edge exceeds the PINNED engine's \
+                 per-edge cap ({max_edge}). The area budget does NOT settle this — the engine \
+                 bounds each edge independently. Either the catalog got ahead of the engine or the \
+                 pin moved behind the catalog; they must move together (sc-17152 / sc-19721)."
+            );
+            assert!(
+                width * height <= u64::from(CANVAS_MAX_PIXELS),
+                "{id}: advertises {width}x{height}, over the engine's area budget"
+            );
+            checked += 1;
+        }
+    }
+    // The loop must have had something to check: a renamed key or an entry shape this parser skips
+    // would otherwise make the whole guard a vacuous pass.
+    assert!(
+        checked >= 10,
+        "expected both MiniMax-H3 partitions to advertise their full bucket list; checked only \
+         {checked} resolutions"
+    );
+}
+
+/// The MiniMax-H3 install-integrity mirror in `sceneworks-core` is bound to the engine's own
+/// component names (sc-19721).
+///
+/// `mlx_tier_completeness` transcribed `transformer` / `transformer_ref` / `text_encoder` by READING
+/// the engine source, and said so: at the old pin `mlx-gen-minimax-h3` was not in the tree, so there
+/// was no symbol to import and nothing could go red when the engine renamed one. The recorded
+/// obligation was to bind them once the pin carried the crate. It does now, so they are bound —
+/// `sceneworks-core` cannot depend on an inference crate, so the tie lives here, in the worker,
+/// where the pinned bundle is already in scope.
+#[test]
+fn minimax_h3_component_names_are_the_pinned_engines_own() {
+    use platform_runtime::providers::minimax_h3::model as engine;
+    use sceneworks_core::mlx_tier_completeness::MINIMAX_H3_PARTITIONS;
+    #[cfg(target_os = "macos")]
+    use sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR;
+
+    assert_eq!(
+        MINIMAX_H3_PARTITIONS,
+        [
+            ("minimax_h3", engine::BASE_DIT_PARTITION),
+            ("minimax_h3_ref", engine::REFERENCE_DIT_PARTITION),
+        ],
+        "the install-integrity mirror's DiT partition dirs must be the engine's own constants — a \
+         rename upstream has to red here, not at load time on a user's machine"
+    );
+    // The staged text-encoder dir has a `pub const` on MLX (`TEXT_ENCODER_COMPONENT`) but not on
+    // candle: `candle-gen-minimax-h3::model` spells it as a bare `"text_encoder"` literal inside a
+    // private `REQUIRED_COMPONENT_DIRS`, so there is no symbol to bind to on that lane.
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        MINIMAX_H3_TEXT_ENCODER_DIR,
+        engine::TEXT_ENCODER_COMPONENT,
+        "the staged text-encoder component name is the engine's, not a transcription"
+    );
 }

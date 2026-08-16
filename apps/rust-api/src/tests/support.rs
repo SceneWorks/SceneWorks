@@ -169,6 +169,22 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mlx_enforce_unsupported: false,
         candle_required: false,
         candle_enforce_unsupported: false,
+        // Pinned to macOS rather than `std::env::consts::OS`, so the suite judges the SAME platform
+        // on every lane. The two lanes that run it disagree — `parity-rust` is `ubuntu-latest`, the
+        // hosted workspace job is macOS — and reading the runner made every video assertion here
+        // mean something different depending on which one executed it.
+        //
+        // sc-19570's per-mode reachability verdict no longer changes a STATUS CODE (an HTTP
+        // contract is not platform-dependent; the route answers 201 everywhere), so this pin is no
+        // longer load-bearing for the seven admission tests it was introduced for. It still matters
+        // for the JOB state those tests observe: off-Mac an MLX-only pair comes back terminal
+        // `failed` rather than `queued`, which is correct behaviour and a moving target for a test
+        // asserting mode admission. Pinning keeps that variable out of tests that are not about it.
+        //
+        // This cannot weaken the Mac lane: there `std::env::consts::OS` is already "macos", so the
+        // value is unchanged. The off-Mac guards do not rely on this default — they set a FOREIGN
+        // OS explicitly through `shipped_manifest_app_on_os`, which is what gives them their reach.
+        host_os: "macos".to_owned(),
         trust_loopback: false,
         // Placeholder for oneshot tests (the MCP self-client never dials it);
         // the live-listener MCP tests overwrite it with the bound address.
@@ -580,6 +596,10 @@ pub(crate) async fn submit_full_finetune_job(
     let mut config = target["defaults"].clone();
     config["triggerWord"] = json!("auroraStyle");
     config["advanced"]["networkType"] = json!("full");
+    if let Some(full_config) = target["defaults"]["advanced"]["fullFinetuneConfig"].as_object() {
+        config["advanced"]["mixedPrecision"] = full_config["mixedPrecision"].clone();
+        config["advanced"]["gradientCheckpointing"] = full_config["gradientCheckpointing"].clone();
+    }
     // The full-tune memory envelope scales with the training resolution; keep the submit gate
     // out of the way so this test is about registration, not about the gate (which sc-14056 pins).
     config["resolution"] = json!(256);
@@ -1192,4 +1212,111 @@ pub(crate) fn write_comfy_wan_adapter(path: &std::path::Path) {
     .map(|key| (*key).to_owned())
     .collect();
     write_test_safetensors_with_keys(path, &keys);
+}
+
+/// Poll interval used while waiting on a [`TestSerializationLock`].
+const TEST_SERIALIZATION_POLL: Duration = Duration::from_secs(5);
+
+/// How long a SINGLE holder may own a [`TestSerializationLock`] before waiters
+/// declare it wedged. Nothing that takes one of these locks legitimately runs
+/// for minutes — the longest inner wait in the catalog suite is
+/// `wait_for_catalog_scan_idle`'s own 60 s cap.
+const TEST_SERIALIZATION_MAX_HOLD: Duration = Duration::from_secs(300);
+
+/// A process-global lock that serializes tests sharing mutable global state,
+/// with a wedge detector attached.
+///
+/// `tokio::sync::Mutex` is the right primitive for the mutual exclusion itself:
+/// the guard is held across `.await`, so a blocking mutex would trip
+/// `clippy::await_holding_lock`, and tokio's semaphore hands the permit on
+/// through a `Waker` that simply unparks the next test's thread, which works
+/// fine across the dozens of independent per-test runtimes in this crate.
+///
+/// What it does NOT give you is any signal when a holder never releases. libtest
+/// prints no line at all for a test that never returns, so one wedged holder
+/// silently takes every later user of the lock with it and the whole binary just
+/// goes quiet — which is how sc-19764 reached CI, as a CANCELLED 30-minute
+/// `parity-rust` job that named no failing test (PR #2346: 594 of 597 tests
+/// printed, then 21 idle minutes).
+///
+/// The detector deliberately bounds the **hold**, not the acquire. These locks
+/// serialize ~19 tests apiece, so a bound on the acquire would scale with the
+/// queue and fire on a merely slow runner — measured here: a loaded host took
+/// 303 s for the module, which a 300 s acquire bound turned into a false
+/// failure. A single holder that has owned the lock for five minutes, on the
+/// other hand, is wedged by definition however slow the host is.
+pub(crate) struct TestSerializationLock {
+    name: &'static str,
+    lock: tokio::sync::Mutex<()>,
+    held_since: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl TestSerializationLock {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            lock: tokio::sync::Mutex::new(()),
+            held_since: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub(crate) async fn acquire(&self) -> TestSerializationGuard<'_> {
+        // ONE acquire future, pinned and re-polled. Wrapping `lock()` in a
+        // `timeout` per tick would instead DROP and rebuild it every tick, and a
+        // dropped `tokio::sync::Mutex` acquire loses its place in the semaphore's
+        // FIFO queue — which would trade a wedge detector for a starvation
+        // source. `select!` re-polls the pinned future without dropping it, so
+        // the queue position survives every tick.
+        let acquire = self.lock.lock();
+        tokio::pin!(acquire);
+        loop {
+            tokio::select! {
+                guard = &mut acquire => {
+                    *self
+                        .held_since
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(std::time::Instant::now());
+                    return TestSerializationGuard {
+                        owner: self,
+                        guard: Some(guard),
+                    };
+                }
+                () = tokio::time::sleep(TEST_SERIALIZATION_POLL) => {
+                    let held_for = self
+                        .held_since
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .map(|since| since.elapsed());
+                    if let Some(held_for) = held_for {
+                        assert!(
+                            held_for <= TEST_SERIALIZATION_MAX_HOLD,
+                            "test serialization lock `{}` has been held by one test for {held_for:?} \
+                             (limit {TEST_SERIALIZATION_MAX_HOLD:?}) — that holder is wedged, and \
+                             every later user of the lock is stuck behind it",
+                            self.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct TestSerializationGuard<'a> {
+    owner: &'a TestSerializationLock,
+    guard: Option<tokio::sync::MutexGuard<'a, ()>>,
+}
+
+impl Drop for TestSerializationGuard<'_> {
+    fn drop(&mut self) {
+        // Clear the hold stamp BEFORE releasing, so the next holder's stamp
+        // cannot be wiped by this drop.
+        *self
+            .owner
+            .held_since
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        drop(self.guard.take());
+    }
 }

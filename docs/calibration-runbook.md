@@ -529,9 +529,19 @@ node scripts/memory-calibration-harness.mjs run \
   --inference-repo /abs/path/to/inference \
   --raw-log-dir /abs/path/OUTSIDE/the/repo/raw-receipts \
   --source-path-prefix docs/calibration/<story-or-campaign> \
-  --resume docs/generated/memory-calibration-evidence.json \
   --output /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
 ```
+
+> **No `--resume` here, and RUN `plan` FIRST.** This recipe used to pass
+> `--resume docs/generated/memory-calibration-evidence.json`, which silently no-ops the most common
+> reason to be reading this runbook. `--resume` suppresses cases that were already ATTEMPTED, judged
+> on repository identity with the closure digest deliberately stripped from both sides — so a record
+> staled by an inference pin bump still counts as attempted, and `run --resume` captures nothing
+> while exiting 0. Measured on sc-19721: `plan --resume` returned 0 of the 7 fixtures the bump had
+> just demoted; without it, all 7 resolved, for 19 cases. Both CI lanes omit `--resume` from `run`.
+> Always `plan` both ways before holding an exclusive GPU window — the diff between the two fixture
+> lists IS your re-capture set. See
+> [memory-calibration-harness.md](memory-calibration-harness.md) for the mechanism.
 
 Then schema-check the raw bundle before doing anything else:
 
@@ -552,7 +562,12 @@ Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
   sweep can be resumed by pointing `--resume` at the partial output and re-running. Only schema-valid
   `complete` records suppress their executed passing cases; a gated or candidate record suppresses a
   repeated *attempt* only when its logical case, harness version, repository receipts and hardware
-  probe all match.
+  probe all match. **That is its ONLY correct use: resuming an interrupted sweep of the same
+  revision.** Suppression is blind to the closure digest in both directions
+  (`operationallyAttemptedLogicalIds`), by design — it decides whether to re-run a multi-hour
+  capture, not whether the evidence is current. So it must never be used to re-capture evidence a
+  pin bump staled: those records still read as attempted. For a re-capture, omit it on `run` and
+  pass it on `ingest`, where it means the merge BASE instead.
 
 ### 6b. Through the guarded dispatch
 

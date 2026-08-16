@@ -6,6 +6,7 @@ import {
   configReseedDecision,
   configValidation,
   mergeCustomizedConfigDraft,
+  timestepTypeOptionsForTarget,
   trainingConfigSnapshot,
 } from "./trainingConfig.js";
 
@@ -32,6 +33,26 @@ const target = {
   },
   limits: { networkTypes: ["lora", "lokr"] },
 };
+
+it("scopes the SD3 timestep extensions without dropping the shared uniform mode", () => {
+  expect(timestepTypeOptionsForTarget({ kernel: "anima_lora" })).toEqual([
+    "sigmoid",
+    "linear",
+    "uniform",
+    "weighted",
+  ]);
+  expect(timestepTypeOptionsForTarget({ kernel: "mage_flow_lora" })).not.toContain(
+    "logit_normal",
+  );
+  expect(timestepTypeOptionsForTarget({ kernel: "sd3_lora" })).toEqual([
+    "sigmoid",
+    "linear",
+    "uniform",
+    "weighted",
+    "default",
+    "logit_normal",
+  ]);
+});
 
 const dataset = { id: "ds-1", version: 3, name: "Kelsie" };
 
@@ -143,6 +164,42 @@ describe("trainingConfigSnapshot", () => {
     const draft = configDraftFromTarget(target, dataset, ["auto"]);
     const snap = snapshot({ ...draft, networkType: "lokr", decomposeFactor: "" });
     expect(snap.config.advanced).not.toHaveProperty("decomposeFactor");
+  });
+
+  it("uses the platform-effective full-finetune contract without changing MLX defaults", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    const mlx = snapshot({
+      ...draft,
+      networkType: "full",
+      precision: "bf16",
+      gradientCheckpointing: true,
+    });
+    expect(mlx.config.advanced.networkType).toBe("full");
+    expect(mlx.config.advanced.mixedPrecision).toBe("bf16");
+    expect(mlx.config.advanced.gradientCheckpointing).toBe(true);
+
+    const candleTarget = {
+      ...target,
+      defaults: {
+        ...target.defaults,
+        advanced: {
+          ...target.defaults.advanced,
+          fullFinetuneConfig: {
+            mixedPrecision: "f32",
+            gradientCheckpointing: false,
+          },
+        },
+      },
+    };
+    const candle = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, networkType: "full", precision: "bf16", gradientCheckpointing: true },
+      selectedPreset: null,
+      selectedTarget: candleTarget,
+    });
+    expect(candle.config.advanced.mixedPrecision).toBe("f32");
+    expect(candle.config.advanced.gradientCheckpointing).toBe(false);
+    expect(candle.config.advanced).not.toHaveProperty("fullFinetuneConfig");
   });
 
   it("derives sample prompts from the trigger word", () => {

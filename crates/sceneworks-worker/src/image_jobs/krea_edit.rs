@@ -7,9 +7,9 @@
 // tower). Conditions on one source (`Conditioning::Reference`) or two in FIXED order
 // — image 1 (required) + image 2 (optional) (`Conditioning::MultiReference`, epic 10871
 // P1.3); either image can be a person. One output per requested count, each an edit of
-// the same source(s) under the instruction prompt. Krea is MLX-only, so this is the only
-// Krea edit path (the candle mirror is a separate slice, P1.2/P2.2 + the sc-11085 seam
-// registration). Mirrors
+// the same source(s) under the instruction prompt. This file owns the MLX path; the native Candle
+// mirror is implemented separately in `krea_edit_candle.rs` and registered at the sc-11085 seam.
+// Mirrors
 // `generate_flux2_edit_stream`'s blocking-thread + streamed-events shape and reuses
 // `consume_gen_events`.
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_os = "macos")]
 use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};
+use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
 
 #[test]
 fn video_jobs_remains_split_into_real_engine_modules() {
@@ -229,10 +229,11 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "Candle-shared VACE imports must not pull in macOS-only generation symbols"
     );
     assert!(
-        test_imports.contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};")
+        test_imports
+            .contains("use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};")
             && !test_imports
                 .contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, vace::*, wan::*};"),
-        "Candle tests must import the LTX helpers without the unused VACE family glob"
+        "Candle tests must import the shared LTX/SCAIL helpers without the unused VACE family glob"
     );
     for dispatch in [
         "generate_candle_video",
@@ -251,6 +252,95 @@ use serde_json::json;
 
 fn request(value: Value) -> VideoRequest {
     VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+}
+
+/// Both SCAIL modes carry the model path and one-shot admission together into the shared generator.
+/// The generator cache, not these request arms, decides warm versus cold under its single-owner
+/// transaction; keeping the plan structural prevents either mode from regressing to a racy external
+/// peek/check or an unconditionally gated warm hit.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
+    const SOURCE: &str = include_str!("candle.rs");
+    assert_eq!(
+        SOURCE.matches("scail2_cold_load_plan(").count(),
+        3,
+        "one owner function and exactly two production callers must exist"
+    );
+    let animate = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2(")
+        .expect("animate arm")
+        .1
+        .split_once("/// Resolve a candle SCAIL-2 `replace_person`")
+        .expect("animate arm boundary")
+        .0;
+    let replace = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2_replace(")
+        .expect("replace arm")
+        .1
+        .split_once("/// Resolve the candle Wan-VACE diffusers snapshot dir")
+        .expect("replace arm boundary")
+        .0;
+    for (name, arm) in [("animate_character", animate), ("replace_person", replace)] {
+        assert!(
+            arm.contains("let Scail2ColdLoadPlan {")
+                && arm.contains("model_dir,")
+                && arm.contains("admission,"),
+            "{name} must keep the resolved model path and cold admission together"
+        );
+        let input = arm
+            .split_once("let input = VideoGenInput {")
+            .expect("engine input")
+            .1;
+        assert!(
+            input.contains("model_dir,"),
+            "{name} must use the planned model path"
+        );
+        assert!(
+            input.contains("cold_load_admission: Some(admission),"),
+            "{name} must hand admission to the cache cold-miss seam"
+        );
+        assert!(
+            !input.contains("model_dir: resolve_candle_scail2_model_dir"),
+            "{name} must not retain an ungated resolver bypass"
+        );
+    }
+
+    let wan = include_str!("wan.rs");
+    assert!(
+        wan.contains("Some(admission) => {")
+            && wan.contains("let cold_load_cancel = cancel.clone();")
+            && wan.contains(
+                "with_cached_generator_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
+            ),
+        "the shared video path must bind SCAIL admission and the same request cancel flag at the generator-cache seam"
+    );
+    let cache = include_str!("../generator_cache.rs");
+    assert!(
+        cache.contains("run_cached_with_access_after_cold_evict("),
+        "generator cache must use the serialized evict/admit/load transaction"
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn scail2_cold_admission_uses_a_fresh_bounded_probe_without_blocking_the_request_runtime() {
+    const CANDLE: &str = include_str!("candle.rs");
+    const GPU: &str = include_str!("../gpu.rs");
+    assert!(CANDLE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    let helper = GPU
+        .split_once("pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(")
+        .expect("fresh blocking NVIDIA helper")
+        .1
+        .split_once("/// Apple-Silicon unified-memory")
+        .expect("helper boundary")
+        .0;
+    assert!(helper.contains("tokio::runtime::Builder::new_current_thread()"));
+    assert!(helper.contains("query_gpu_utilization(gpu_id)"));
+    assert!(
+        !helper.contains("tokio::runtime::Handle::current()"),
+        "the cache OS thread must not block the request's Tokio runtime"
+    );
 }
 
 #[test]
@@ -2825,7 +2915,9 @@ fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() 
         },
     );
 
-    let (_decoded, adapter, _raw_settings) = out.expect("the candle mochi arm runs to completion");
+    let (_decoded, adapter, _raw_settings, status) =
+        out.expect("the candle mochi arm runs to completion");
+    assert!(status.is_none(), "plain generation has no mode status");
     assert_eq!(
         probe.engine_frames(),
         151,
@@ -5190,6 +5282,10 @@ fn wan_lightning_subdir_is_canonical_for_fetch_and_resolution() {
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx_bundle_revision_is_pinned_commit_not_main() {
+    assert_eq!(
+        LTX_BUNDLE_REVISION, "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "the LTX pin must name the first revision that contains bf16/ (sc-18853)"
+    );
     assert_ne!(
         LTX_BUNDLE_REVISION, "main",
         "LTX q8 bundle must pin a fixed revision"
@@ -5205,6 +5301,48 @@ fn ltx_bundle_revision_is_pinned_commit_not_main() {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "the pinned revision must be lowercase hex"
     );
+}
+
+/// The Models-screen install and generation-time tier fetch are two entry points into the same
+/// bundle. Every LTX row must therefore use the worker pin, and the bf16 row must request the
+/// directory that exists at that pin (sc-18853).
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_bundle_manifest_rows_match_the_worker_pin() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    let model = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"].as_str() == Some("ltx_2_3"))
+        .expect("ltx_2_3 present in the builtin catalog");
+    let downloads = model["downloads"]
+        .as_array()
+        .expect("ltx_2_3 declares downloads");
+
+    assert_eq!(downloads.len(), 4, "gemma plus q4/q8/bf16 rows");
+    for download in downloads {
+        assert_eq!(download["repo"].as_str(), Some(LTX_BUNDLE_REPO));
+        assert_eq!(
+            download["revision"].as_str(),
+            Some(LTX_BUNDLE_REVISION),
+            "manifest and on-demand fetches must populate the same snapshot"
+        );
+    }
+    let bf16 = downloads
+        .iter()
+        .find(|download| download["variant"].as_str() == Some("bf16"))
+        .expect("bf16 tier row");
+    assert_eq!(bf16["files"], json!(["bf16/*"]));
 }
 
 // sc-8828 (F-026): `resolve_video_route` is the extracted native (MLX) dispatch decision — the
@@ -5270,12 +5408,42 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         CandleVideoRoute::Stub,
     );
 
-    // Enabled: `replace_person` on the candle SCAIL-2 model → the SCAIL-2 replacement variant;
-    // any other replace-capable model → candle Wan-VACE.
+    // Enabled: each native replacement family keeps its exact provider.
     settings.backend_candle_enabled = true;
     assert_eq!(
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
+    );
+    let vace_fun = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&vace_fun, &settings),
+        CandleVideoRoute::ReplacePersonWanVaceFun,
+    );
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        for mode in ["replace_person", "extend_clip", "video_bridge"] {
+            let native = request(json!({ "projectId": "p", "model": model, "mode": mode }));
+            assert_eq!(
+                resolve_candle_video_route(&native, &settings),
+                CandleVideoRoute::CandleVideo,
+                "{model} {mode} must stay on the native LTX provider",
+            );
+            assert_eq!(
+                runtime_descriptor_engine_ids(model, mode),
+                vec!["ltx_2_3_distilled"],
+                "runtime facts must report the same native LTX engine",
+            );
+        }
+    }
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
+        vec!["wan2_2_vace_fun_14b"],
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2", "replace_person"),
+        vec!["wan_vace"],
+        "generic Wan replacement must describe the single-expert VACE route, not the base TI2V provider",
     );
     let extend = request(json!({
         "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
@@ -5284,6 +5452,62 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&extend, &settings),
         CandleVideoRoute::WanVaceExtendBridge,
     );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
+    let mut settings = Settings::from_env();
+    settings.backend_candle_enabled = true;
+
+    let replacement = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&replacement, &settings),
+        CandleVideoRoute::ReplacePersonWanVaceFun,
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
+        vec!["wan2_2_vace_fun_14b"],
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2", "replace_person"),
+        vec!["wan_vace"],
+        "generic Wan replacement must describe the single-expert VACE route, not the base TI2V provider",
+    );
+
+    for mode in ["text_to_video", "extend_clip", "video_bridge"] {
+        let unsupported = request(json!({
+            "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": mode,
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&unsupported, &settings),
+            CandleVideoRoute::Stub,
+            "VACE-Fun {mode} must not cross-route to a base or single-expert VACE engine",
+        );
+        assert!(
+            runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", mode).is_empty(),
+            "VACE-Fun {mode} must expose no dispatch descriptor",
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_vace_fun_attaches_fail_closed_sequential_cold_admission() {
+    const SOURCE: &str = include_str!("candle.rs");
+    let arm = SOURCE
+        .split_once("async fn generate_candle_wan_vace_engine(")
+        .expect("shared VACE engine")
+        .1
+        .split_once("/// Windows/CUDA candle Wan-VACE `extend_clip`")
+        .expect("VACE engine boundary")
+        .0;
+    assert!(arm.contains("vace_fun_cold_load_admission("));
+    assert!(arm.contains("cold_load_admission,"));
+    assert!(SOURCE.contains("wan_vace_fun_sequential_weight_bytes("));
+    assert!(SOURCE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
 }
 
 /// sc-10997 (epic 6562): the candle Bernini VIDEO lane routes t2v + every editing/reference/
@@ -6532,6 +6756,88 @@ fn scail2_engine_id_maps_only_the_scail2_family() {
     assert_eq!(scail2_engine_id(""), None);
 }
 
+/// The off-Mac resolver must consume the exact pinned bf16 tier that Model Manager installs, and it
+/// must use the provider-owned completeness predicate rather than a weaker worker-side sentinel.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    assert_eq!(
+        sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES,
+        runtime_cuda::providers::scail2::SHARED_TIER_FILES,
+        "API/MLX completeness and the pinned candle provider must require identical package files"
+    );
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_shared_")
+        .tempdir()
+        .expect("temp dir");
+    let tier = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
+        .expect("repo cache path")
+        .join("snapshots")
+        .join(SCAIL2_REVISION)
+        .join("bf16");
+    std::fs::create_dir_all(&tier).unwrap();
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+
+    // A directory or one plausible tensor is not an install. Missing any provider-required file
+    // must keep routing closed and name Model Manager as the repair path.
+    std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+    let error = resolve_managed_candle_scail2_model_dir(&settings)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Model Manager"), "got: {error}");
+    assert!(error.contains("bf16"), "got: {error}");
+
+    for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+        std::fs::write(tier.join(file), b"").unwrap();
+    }
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        tier
+    );
+
+    std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+}
+
+/// Existing manually assembled candle snapshots remain a compatibility fallback, but only when the
+/// provider accepts their complete legacy component shape.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_preserves_complete_legacy_layout_only() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_legacy_")
+        .tempdir()
+        .expect("temp dir");
+    let legacy = data.path().join("models").join("candle").join("scail2");
+    for component in ["transformer", "text_encoder", "vae", "clip", "tokenizer"] {
+        std::fs::create_dir_all(legacy.join(component)).unwrap();
+    }
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+
+    std::fs::write(legacy.join("tokenizer/tokenizer.json"), b"").unwrap();
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        legacy
+    );
+}
+
 /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),
 /// `mlxQuantize` opts up to Q8 or down to bf16 (`<= 0`), parsing a JSON number or string. The
 /// bf16 snapshot is ~47 GB so a missing control NEVER means bf16. Mirrors the Bernini quant test.
@@ -7269,7 +7575,7 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
     std::fs::create_dir_all(&dir).unwrap();
-    for file in SCAIL2_TIER_FILES {
+    for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
 }
@@ -8873,6 +9179,251 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
     assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
 }
 
+/// A pre-hotfix install keeps q4/q8 in the old snapshot while bf16 lands in the bumped snapshot.
+/// The requested tier must win across revisions; otherwise a bf16 request silently runs q8.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    let cache = tempfile::tempdir().expect("temp cache");
+    let snapshots = cache.path().join("snapshots");
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    let bumped = snapshots.join(LTX_BUNDLE_REVISION);
+    write_complete_ltx_dir(&old.join("q4"));
+    write_complete_ltx_dir(&old.join("q8"));
+    write_complete_ltx_dir(&bumped.join("bf16"));
+
+    assert_eq!(
+        ltx_bundle_subdir(&old, &["bf16", "q8", "q4"]).as_deref(),
+        Some(old.join("q8").as_path()),
+        "precondition: a single-snapshot lookup downgrades bf16 to q8"
+    );
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&old, &["bf16", "q8", "q4"]).as_deref(),
+        Some(bumped.join("bf16").as_path()),
+        "bf16 in a sibling revision must beat q8 in the selected revision"
+    );
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&bumped, &["q4", "q8"]).as_deref(),
+        Some(old.join("q4").as_path()),
+        "the default tier remains reachable in the pre-hotfix snapshot"
+    );
+
+    write_complete_ltx_dir(&bumped.join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&old, &["q4"]).as_deref(),
+        Some(bumped.join("q4").as_path()),
+        "the immutable current pin wins when both compatible revisions contain the tier"
+    );
+
+    let unrelated = snapshots.join("ffffffffffffffffffffffffffffffffffffffff");
+    write_complete_ltx_dir(&unrelated.join("bf16"));
+    std::fs::remove_file(bumped.join("bf16/vocoder.safetensors")).unwrap();
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&unrelated, &["bf16", "q8", "q4"]).as_deref(),
+        Some(old.join("q8").as_path()),
+        "an arbitrary cached revision must never bypass the immutable pin or its proven parent"
+    );
+
+    let flat = tempfile::tempdir().expect("flat cache");
+    write_complete_ltx_dir(&flat.path().join("sibling").join("bf16"));
+    write_complete_ltx_dir(&flat.path().join("selected").join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&flat.path().join("selected"), &["bf16", "q8", "q4"])
+            .as_deref(),
+        Some(flat.path().join("selected").join("q4").as_path()),
+        "legacy flat layouts must not scan unrelated sibling directories"
+    );
+}
+
+/// Build the exact split cache created when an existing install downloads bf16 after the pin bump.
+/// No refs/main is written, so the real resolver's most-files fallback selects the old snapshot.
+#[cfg(target_os = "macos")]
+fn ltx_split_revision_hub(tag: &str) -> tempfile::TempDir {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    let hub = tempfile::Builder::new()
+        .prefix(&format!("sw_ltx_hub_{tag}_"))
+        .tempdir()
+        .expect("temp hub");
+    let snapshots = hub
+        .path()
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("LTX repo slug")
+        ))
+        .join("snapshots");
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    write_complete_ltx_dir(&old.join("q4"));
+    write_complete_ltx_dir(&old.join("q8"));
+    write_complete_gemma_dir(&old.join("gemma"));
+    write_complete_ltx_dir(&snapshots.join(LTX_BUNDLE_REVISION).join("bf16"));
+    hub
+}
+
+#[cfg(target_os = "macos")]
+fn ltx_with_hermetic_cache<T>(hub: &Path, body: impl FnOnce() -> T) -> T {
+    temp_env_vars(
+        &[
+            ("HF_HUB_CACHE", hub.to_str().expect("utf-8 hub")),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("SCENEWORKS_MLX_LTX_DIR", ""),
+            ("SCENEWORKS_MLX_LTX_EROS_DIR", ""),
+            ("LTX_GEMMA_DIR", ""),
+        ],
+        body,
+    )
+}
+
+/// Drive the production resolver over the split cache, rather than only testing its helper.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_ltx_model_dir_reaches_bf16_in_a_sibling_revision() {
+    let hub = ltx_split_revision_hub("resolve");
+    let data = tempfile::tempdir().expect("temp data");
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let request_for = |bits: Option<i64>| {
+        let advanced = bits.map_or_else(|| json!({}), |bits| json!({ "mlxQuantize": bits }));
+        request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": advanced
+        }))
+    };
+    let snapshots = hub
+        .path()
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots");
+
+    let (bf16, q8, default) = ltx_with_hermetic_cache(hub.path(), || {
+        (
+            resolve_ltx_model_dir(&settings, &request_for(Some(0))),
+            resolve_ltx_model_dir(&settings, &request_for(Some(8))),
+            resolve_ltx_model_dir(&settings, &request_for(None)),
+        )
+    });
+
+    assert_eq!(
+        bf16.expect("bf16 resolves"),
+        snapshots.join(LTX_BUNDLE_REVISION).join("bf16")
+    );
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    assert_eq!(q8.expect("q8 resolves"), old.join("q8"));
+    assert_eq!(default.expect("default resolves"), old.join("q4"));
+}
+
+/// A complete tier in any revision is already provisioned. Presence checks must not contact the Hub
+/// for it, while a tier missing from every revision must still attempt the fetch.
+#[cfg(target_os = "macos")]
+#[test]
+fn ensure_ltx_tier_present_skips_fetch_for_a_sibling_revision() {
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    let hub = ltx_split_revision_hub("ensure");
+    let data = tempfile::tempdir().expect("temp data");
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(json!({
+        "id": "job-ltx-tier-1",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": "p",
+        "projectName": "P",
+        "payload": { "model": "ltx_2_3" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "error": null,
+        "etaSeconds": null,
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-08-13T00:00:00Z",
+        "updatedAt": "2026-08-13T00:00:00Z"
+    }))
+    .expect("job snapshot");
+    let ltx = |bits: i64| {
+        request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "x",
+            "advanced": { "mlxQuantize": bits }
+        }))
+    };
+
+    let (bf16, q8) = ltx_with_hermetic_cache(hub.path(), || {
+        (
+            block_on(ensure_ltx_bf16_present(&api, &settings, &job, &ltx(0))),
+            block_on(ensure_ltx_q8_present(&api, &settings, &job, &ltx(8))),
+        )
+    });
+    assert!(
+        bf16.is_ok(),
+        "bf16 in a sibling must not dial the Hub: {bf16:?}"
+    );
+    assert!(q8.is_ok(), "q8 in the selected snapshot is present: {q8:?}");
+
+    let bare = tempfile::tempdir().expect("bare hub");
+    let bare_snapshot = bare
+        .path()
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots")
+        .join(LTX_BUNDLE_PRE_BF16_REVISION);
+    write_complete_gemma_dir(&bare_snapshot.join("gemma"));
+    let missing = ltx_with_hermetic_cache(bare.path(), || {
+        block_on(ensure_ltx_bf16_present(&api, &settings, &job, &ltx(0)))
+    });
+    assert!(
+        missing.is_err(),
+        "bf16 absent from every revision must still attempt a fetch"
+    );
+}
+
 /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: config, tokenizer, a two-shard
 /// index, and the shards it maps. Mirrors the real bundle `gemma/` so the completeness +
 /// eros-resolution tests are hermetic.
@@ -9305,6 +9856,32 @@ fn video_load_spec_threads_text_encoder_dir() {
     assert!(
         matches!(video_load_spec(&with_te).text_encoder, Some(WeightsSource::Dir(ref p)) if *p == gemma),
         "text_encoder_dir rides LoadSpec::text_encoder as a Dir source"
+    );
+    assert!(
+        video_load_spec(&with_te).components.is_empty(),
+        "`text_encoder_dir` is the LoadSpec::text_encoder field — it must NOT also land in the \
+         components map, which is where MiniMax-H3's packed per-tier encoder goes (sc-19120)"
+    );
+
+    // sc-19120 / sc-19506: MiniMax-H3's packed per-tier text encoder is a COMPONENT, not the
+    // `text_encoder` field. `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads
+    // `spec.components["text_encoder"]` and falls back to `<weights>/text_encoder` when it is
+    // absent, so an unstaged packed encoder is a silent dense load rather than an error.
+    let packed_te = PathBuf::from("/models/minimax-h3-mlx/q4/text_encoder");
+    let with_component_te = VideoGenInput {
+        engine_id: "minimax_h3",
+        model_dir: PathBuf::from("/models/minimax-h3"),
+        text_encoder_component_dir: Some(packed_te.clone()),
+        ..VideoGenInput::default()
+    };
+    let spec = video_load_spec(&with_component_te);
+    assert!(
+        spec.text_encoder.is_none(),
+        "the packed encoder must not leak onto LoadSpec::text_encoder — that field is LTX's seam"
+    );
+    assert!(
+        matches!(spec.components.get("text_encoder"), Some(WeightsSource::Dir(p)) if *p == packed_te),
+        "text_encoder_component_dir rides LoadSpec::components[\"text_encoder\"]"
     );
 
     // sc-13664: a resolved amoral-enhancer dir is staged as the `uncensored_enhancer` component so
@@ -10349,7 +10926,10 @@ fn keyframe_conditioning_requires_both_frame_assets() {
 
 /// FLF on a 14B Wan MoE engine is rejected at the conditioning resolver (defence-in-depth
 /// behind the routing gate, which already restricts FLF to `wan_2_2`/TI2V-5B).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn wan_flf_rejected_on_non_ti2v_engine() {
     let settings = Settings::from_env();
@@ -10366,6 +10946,54 @@ fn wan_flf_rejected_on_non_ti2v_engine() {
 
 /// A 1×1 RGB [`Image`] for clip-conditioning construction tests (the engine resizes; the
 /// content is irrelevant — only the variant / frame_idx / strength mapping is under test).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn wan5_conditioning_rejects_stale_media_before_asset_io() {
+    let settings = Settings::from_env();
+    for payload in [
+        json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "a fox",
+            "mode": "text_to_video", "sourceAssetId": "stale"
+        }),
+        json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "a fox",
+            "mode": "image_to_video", "sourceAssetId": "first", "lastFrameAssetId": "stale"
+        }),
+    ] {
+        let req = request(payload);
+        let error = resolve_wan_conditioning(
+            &settings,
+            &req,
+            Path::new("/definitely/not/read"),
+            "wan2_2_ti2v_5b",
+        )
+        .expect_err("contradictory media must fail before asset loading")
+        .to_string();
+        assert!(error.contains("must not carry"), "got: {error}");
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_eros_resolves_the_manifest_managed_bundle_gemma() {
+    let bundle_guard = tempfile::Builder::new()
+        .prefix("sw_candle_eros_bundle_")
+        .tempdir()
+        .expect("temp dir");
+    let gemma = bundle_guard.path().join("gemma");
+    write_complete_gemma_dir(&gemma);
+    assert_eq!(
+        complete_ltx_bundle_gemma_dir(Some(bundle_guard.path().to_path_buf())).as_deref(),
+        Some(gemma.as_path()),
+        "fresh Eros installs must consume SceneWorks/ltx-2.3-mlx/gemma"
+    );
+    std::fs::remove_file(gemma.join("model-00002-of-00002.safetensors")).unwrap();
+    assert!(complete_ltx_bundle_gemma_dir(Some(bundle_guard.path().to_path_buf())).is_none());
+}
+
 #[cfg(target_os = "macos")]
 fn pixel(n: u8) -> Image {
     Image {
@@ -11491,6 +12119,48 @@ mod candle_video_label_tests {
     }
 
     #[test]
+    fn candle_ltx_admission_uses_provider_footprint_and_adapter_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let tier = root.path().join("q4");
+        let gemma = root.path().join("gemma");
+        std::fs::create_dir_all(&tier).unwrap();
+        std::fs::create_dir_all(&gemma).unwrap();
+        // The footprint registry counts exact safetensors files. Sparse-set lengths keep the fixture
+        // tiny while proving the live arithmetic across DiT/connector/encoder/decoder/Gemma.
+        for (path, bytes) in [
+            (tier.join("transformer.safetensors"), 1024),
+            (tier.join("connector.safetensors"), 2048),
+            (tier.join("vae_decoder.safetensors"), 4096),
+            (tier.join("vae_encoder.safetensors"), 8192),
+            (gemma.join("model.safetensors"), 16384),
+        ] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_len(bytes).unwrap();
+        }
+        std::fs::write(
+            tier.join("quantize_config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .unwrap();
+        let adapter = root.path().join("style.safetensors");
+        let file = std::fs::File::create(&adapter).unwrap();
+        file.set_len(32768).unwrap();
+
+        let input = VideoGenInput {
+            engine_id: "ltx_2_3_distilled",
+            model_dir: tier,
+            text_encoder_dir: Some(gemma),
+            adapters: vec![AdapterSpec::new(adapter, 1.0, gen_core::AdapterKind::Lora)],
+            ..VideoGenInput::default()
+        };
+        assert_eq!(
+            ltx_resident_weight_bytes(&input).unwrap(),
+            1024 + 2048 + 4096 + 8192 + 16384 + 32768,
+            "conditioned LTX must charge the provider-selected VAE encoder and additive adapter"
+        );
+    }
+
+    #[test]
     fn candle_video_adapter_labels_are_per_family() {
         // Every wan engine (5B + 14B T2V/I2V) reports the shared `candle_wan` adapter.
         for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
@@ -11733,24 +12403,29 @@ mod candle_video_label_tests {
     }
 
     #[test]
-    fn candle_video_conditioning_only_for_i2v() {
+    fn candle_video_conditioning_matches_each_native_request_shape() {
         let settings = crate::Settings::from_env();
         let project_path = std::path::Path::new("");
-        // txt2video engines never build conditioning (even if a stray source asset is present).
+        // Text-to-video requests never build conditioning.
         for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "ltx_2_3_distilled"] {
-            let payload = json!({ "sourceAssetId": "asset_1" });
+            let payload = json!({ "mode": "text_to_video" });
             let request = VideoRequest::from_payload(payload.as_object().expect("object"));
             let conditioning =
                 resolve_candle_video_conditioning(&settings, &request, project_path, engine_id)
                     .expect("txt2video conditioning resolves");
             assert!(
                 conditioning.is_empty(),
-                "{engine_id} must be txt2video-only"
+                "{engine_id} text_to_video must be unconditioned"
             );
         }
         // The 14B I2V + SVD-XT require a source image — a request without one errors before touching
         // disk (sc-5175 / sc-5493).
-        for engine_id in ["wan2_2_i2v_14b", "svd_xt"] {
+        for engine_id in [
+            "wan2_2_ti2v_5b",
+            "wan2_2_i2v_14b",
+            "ltx_2_3_distilled",
+            "svd_xt",
+        ] {
             let payload = json!({ "mode": "image_to_video" });
             let no_source = VideoRequest::from_payload(payload.as_object().expect("object"));
             assert!(
@@ -12672,10 +13347,20 @@ fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> te
         // The PACKED per-tier text encoder (sc-19120). It exists in the rehost for q4 and q8 ONLY —
         // bf16 reads the dense upstream component instead — so seeding it for every tier would hide
         // the tier-dependent resolution `minimax_h3_text_encoder_dir` performs.
+        //
+        // BOTH probed files, off the shared constant (sc-19558): the floor checks `config.json` AND
+        // `model.safetensors.index.json`, and a fixture writing only the first would leave every
+        // packed-tier test asserting against a refusal instead of a resolve.
         if matches!(*tier, "q4" | "q8") {
-            let text_encoder = guard.path().join(tier).join("text_encoder");
+            let text_encoder = guard
+                .path()
+                .join(tier)
+                .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
             std::fs::create_dir_all(&text_encoder).expect("packed text encoder dir");
-            std::fs::write(text_encoder.join("config.json"), "{}").expect("te config");
+            for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_PROBED_FILES
+            {
+                std::fs::write(text_encoder.join(file), "{}").expect("te probe");
+            }
         }
     }
     guard
@@ -12685,35 +13370,38 @@ fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> te
 /// `spec.weights` — the upstream repo's half of the install, which is a DIFFERENT download from the
 /// tiers.
 ///
-/// The audio VAE's constructor documents are written as FILES, because that is what the loader opens
-/// and what `minimax_h3_shared_is_complete` checks since sc-19573: the `FL2VA/audio_vae/` directory
-/// exists as soon as any one of its thirteen entries lands, so a bare `create_dir_all` fixture would
-/// certify an install the engine cannot construct an audio VAE from.
+/// It writes the probed **FILES**, and derives which ones from
+/// `mlx_tier_completeness::minimax_h3_shared_probe_paths` rather than restating a directory list.
+/// sc-19558 moved the completeness gate from `is_dir()` to `is_file()` precisely because an
+/// interrupted co-requisite download leaves the directory behind — the `FL2VA/audio_vae/` case makes
+/// it concrete, since that directory exists as soon as any one of its thirteen entries lands — so a
+/// directory-only fixture described an install the resolver now refuses, and a hand-copied file list
+/// here would drift from the gate the same way the catalog drifted from the loader.
+///
+/// The DENSE upstream text encoder is seeded too. It is present only at bf16 in a real install, but
+/// harmless here: a q4 resolve reads the tier root instead and never looks at this path.
 #[cfg(target_os = "macos")]
 fn minimax_h3_base_root(prefix: &str) -> tempfile::TempDir {
     let guard = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
         .expect("temp dir");
-    for component in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS {
-        std::fs::create_dir_all(guard.path().join(component)).expect("component dir");
-    }
-    // The dense upstream text encoder — present only at bf16 in a real install, but harmless here:
-    // a q4 resolve reads the tier root instead and never looks at this path.
-    std::fs::create_dir_all(
-        guard
-            .path()
-            .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
-    )
-    .expect("upstream text encoder dir");
-    let fl2va = guard
-        .path()
-        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_DIR);
-    std::fs::create_dir_all(&fl2va).expect("FL2VA dir");
-    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
-        std::fs::write(fl2va.join(file), "{}").expect("audio vae constructor document");
+    for probe in minimax_h3_base_root_probes(guard.path()) {
+        std::fs::create_dir_all(probe.parent().expect("a probe is a nested path"))
+            .expect("component dir");
+        std::fs::write(&probe, "{}").expect("probed file");
     }
     guard
+}
+
+/// Every path `minimax_h3_base_root` writes: the shared floor plus the DENSE upstream text encoder,
+/// which is where `minimax_h3_text_encoder_dir` sends a bf16 resolve.
+#[cfg(target_os = "macos")]
+fn minimax_h3_base_root_probes(root: &Path) -> Vec<std::path::PathBuf> {
+    sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+        root,
+        &root.join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
+    )
 }
 
 /// A `JobSnapshot` for a MiniMax-H3 video job.
@@ -12840,9 +13528,16 @@ fn drive_minimax_h3_arm_in_project(
 /// **What sc-19508 changed.** sc-17159 filled the slot with an unconditional refusal carrying a
 /// hard-coded "not in the pinned inference revision" string, because there was no dispatch arm to
 /// fall through to. There is one now, so the refusal is DERIVED: the arm asks the registry whether
-/// the engine is linked. At the current pin it is not, so every assertion below still holds — but it
-/// now holds for a reason that re-evaluates itself when the pin moves, instead of a string that can
-/// only go stale.
+/// the engine is linked.
+///
+/// **What sc-19721 changed.** The pin moved and the engine IS linked, so layer (1) of
+/// `ensure_minimax_h3_renderable` no longer fires — exactly the substitution the pre-bump version of
+/// this test demanded in its own premise assertion. The property under test is unchanged and is the
+/// whole point of the design: with the engine present but the weights unprovisioned, the ladder must
+/// STILL fall to `Stub` and the fail-loud gate must STILL refuse. It is layer (3) that refuses now,
+/// and its error is the resolver's own — `InvalidPayload`, naming the missing snapshot — rather than
+/// the `Engine` variant layer (1) produced. Asserting the variant AND the reason is what makes that
+/// substitution visible instead of silent.
 ///
 /// The refusal is asserted by ITS OWN reason, not by `is_err()`: a bare error check would go inert
 /// the moment the request were rejected for some unrelated cause (sc-19488).
@@ -12857,16 +13552,35 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
         data_dir: data_dir_guard.path().to_path_buf(),
         ..Settings::from_env()
     };
-    // The premise this whole test rests on, asserted rather than assumed: at the pinned inference
-    // revision the MiniMax-H3 engine is genuinely absent from the linked bundle. If a future pin
-    // registers it, this assertion fires FIRST and says so, instead of the four below failing with
-    // a confusing "expected a refusal" — the test tells you the world changed, not that you broke
-    // something.
+    // sc-19721: HERMETIC, and newly load-bearing. Before the pin bump the refusal short-circuited on
+    // "engine not registered" and never touched the filesystem, so no env var could reach it. Now
+    // the resolver runs, and `SCENEWORKS_MLX_MINIMAX_H3_*_DIR` / `HF_HUB_CACHE` are written by other
+    // tests in this SAME process — a concurrent writer pointing them at a staged tier would make
+    // `resolve_minimax_h3_load` succeed here, route the request to `VideoRoute::MiniMaxH3`, and fail
+    // this test for a reason that has nothing to do with it (observed, not theorised). Pinning them
+    // takes the crate-wide env lock, which is the only thing that makes the read atomic.
+    let _env = crate::test_env::EnvVars::set(&[
+        (crate::video_jobs::minimax_h3::MINIMAX_H3_TIER_DIR_ENV, ""),
+        (crate::video_jobs::minimax_h3::MINIMAX_H3_BASE_DIR_ENV, ""),
+        (
+            "HF_HUB_CACHE",
+            data_dir_guard
+                .path()
+                .join("no-such-hub")
+                .to_str()
+                .expect("utf-8 hub path"),
+        ),
+    ]);
+    // The premise this whole test rests on, asserted rather than assumed: the engine IS in the
+    // linked bundle, so the refusal below is the weights-unprovisioned one and not the
+    // engine-absent one. If a future pin drops the provider, this fires FIRST and says so, instead
+    // of the assertions below passing for the WRONG reason — an engine-absent refusal would satisfy
+    // "it refused" while proving nothing about the unprovisioned-install path.
     assert!(
-        !crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
-        "the linked inference bundle now REGISTERS minimax_h3 — the pin moved (sc-18650). This \
-         guard's premise is gone: re-point it at the weights-unprovisioned case, which is the \
-         refusal that survives the bump."
+        crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        "the linked inference bundle no longer registers minimax_h3 — the pin moved backwards off \
+         the sc-17137 inference feature head. This guard would then be re-testing layer (1), which \
+         is not the property it is here for."
     );
 
     // Every declared mode of BOTH partitions, so no shape slips past on a route the ladder happens
@@ -12891,22 +13605,31 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
         );
         let err = ensure_video_engine_weights(&req, &settings)
             .expect_err("a MiniMax-H3 job MUST fail loudly, never render a fake video");
-        let WorkerError::Engine(message) = err else {
-            panic!("{model}/{mode}: expected a WorkerError::Engine, got a different variant");
+        let WorkerError::InvalidPayload(message) = err else {
+            panic!(
+                "{model}/{mode}: expected the resolver's WorkerError::InvalidPayload. A \
+                 WorkerError::Engine here would mean layer (1) fired — the engine went missing \
+                 from the bundle — which is a different failure this test is not about."
+            );
         };
         assert!(
             message.contains(model),
             "{model}/{mode}: the error must name the model: {message}"
         );
         assert!(
-            message.contains("not in the pinned inference revision"),
-            "{model}/{mode}: the error must name the real cause — no engine, not missing weights: \
-             {message}"
+            message.contains("is not downloaded"),
+            "{model}/{mode}: the error must name the real cause — the weights are unprovisioned, \
+             which is the refusal that survives the pin bump: {message}"
         );
         assert!(
-            message.contains("No output was produced"),
-            "{model}/{mode}: the error must say nothing was rendered, so the failure cannot be \
+            message.contains("Model Manager"),
+            "{model}/{mode}: the error must tell the user how to fix it, so the failure cannot be \
              mistaken for a finished job: {message}"
+        );
+        assert!(
+            !message.contains("not in the pinned inference revision"),
+            "{model}/{mode}: layer (1)'s pre-bump string must be GONE — the engine is linked now, \
+             and leaving that reason reachable would be a lie about why the job failed: {message}"
         );
     }
 
@@ -13002,25 +13725,32 @@ fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
 /// lookup keyed on a string — so nothing needs the provider importable at compile time. What it
 /// needs is the id PRESENT in the registry.
 ///
-/// Both halves are load-bearing. The `is_none()` half proves the check is asking the real registry
-/// (a hard-coded `false` would pass it, but not the `is_some()` half for a model that IS linked); the
-/// `is_some()` half proves the registry read actually discriminates, so a check stubbed to always
-/// report "absent" — which would make every MiniMax job refuse forever, silently surviving the pin
-/// bump — fails here.
+/// Both halves are load-bearing, and sc-19721's pin bump FLIPPED which one is which. The engine is
+/// now in the linked bundle, so `minimax_h3` resolves; the discriminating negative is an id the
+/// registry genuinely does not carry. A check stubbed to answer "present" to everything fails the
+/// negative half, and one stubbed to answer "absent" — which would make every MiniMax job refuse
+/// forever while looking exactly like the pre-bump world — fails the positive half. That second
+/// failure mode is the one this test exists for now: before the bump it was the passing state.
 #[cfg(target_os = "macos")]
 #[test]
 fn minimax_h3_engine_presence_is_read_from_the_registry() {
     assert!(
-        crate::inference_runtime::media_descriptor("minimax_h3").is_none(),
-        "minimax_h3 is not registered at the pinned inference revision"
+        crate::inference_runtime::media_descriptor("minimax_h3").is_some(),
+        "minimax_h3 IS registered at the pinned inference revision (sc-19721 moved the pin onto \
+         the sc-17137 inference feature head, which is where mlx-gen-catalog first re-exports it)"
     );
     assert!(
         crate::inference_runtime::media_descriptor("wan2_2_t2v_14b").is_some(),
-        "the probe must discriminate: a registered video engine has to resolve, or `is_none()` \
-         above would pass against a registry that answers None to everything"
+        "the probe must resolve a long-registered video engine too, or the assertion above says \
+         nothing about MiniMax specifically"
     );
     assert!(
-        !crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        crate::inference_runtime::media_descriptor("minimax_h4").is_none(),
+        "the probe must discriminate: an id the bundle does not carry has to resolve to None, or \
+         `is_some()` above would pass against a registry that answers Some to everything"
+    );
+    assert!(
+        crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
         "the helper must agree with the registry read it claims to perform"
     );
 }
@@ -13119,8 +13849,12 @@ fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
         "the refusal must name the collision: {message}"
     );
 
-    // Audio-only leaves the visual stream unconditioned — the vision tower is the reference
-    // conditioner, so the engine refuses it. Refused here first, before any load.
+    // Audio-only leaves the visual stream unconditioned — upstream's `before_encoder.py` raises on
+    // `set(kinds) == {"audio"}` because an audio reference never reaches the reference conditioner.
+    // Refused here first, before any load. sc-19574 lifted the RULE into
+    // `sceneworks_core::video_request::classify_reference_set`, which the API and the MCP tool read
+    // too, so this asserts the worker's end of a decision the three now share rather than the only
+    // layer that held it.
     let audio_only = minimax_h3_request(
         "minimax_h3_ref",
         json!({ "referenceAudioAssetIds": ["a1"] }),
@@ -13132,9 +13866,32 @@ fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
         message.contains("audio-only"),
         "the refusal must name the shape: {message}"
     );
+    // WHICH refusal: a reference-free request hits a DIFFERENT arm with a different reason, and an
+    // `is_err()`-shaped assertion could not tell them apart. Both are `InvalidPayload`, so the
+    // message is the only discriminator.
+    let none_at_all = minimax_h3_request("minimax_h3_ref", json!({}));
+    let message = minimax_h3_validate_partition(&none_at_all)
+        .expect_err("a reference-free r2v request must be refused")
+        .to_string();
+    assert!(
+        message.contains("requires at least one reference") && !message.contains("audio-only"),
+        "an empty reference set must report the empty-set reason, not the audio one: {message}"
+    );
+    // …and an image alongside the same audio is accepted, so the audio list is a companion rather
+    // than a disqualifier. Without this leg the assertion above would pass for a guard that
+    // refused every request carrying audio at all.
+    let image_and_audio = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "referenceAssetIds": ["r1"], "referenceAudioAssetIds": ["a1"] }),
+    );
+    minimax_h3_validate_partition(&image_and_audio)
+        .expect("an image + audio reference set is the shape Ref2VA serves");
 
-    // `Conditioning::ReferenceVideo` — the only variant carrying a reference clip's own frame rate
-    // — arrives with the sc-18650 pin bump. Refused BY NAME rather than downgraded to
+    // `Conditioning::ReferenceVideo` — the only variant carrying a reference clip's own frame rate.
+    // sc-19721's pin bump made the VARIANT and the engine's advertisement of it both real, so the
+    // refusal's reason moved from "the pin does not have it" to "SceneWorks does not build it yet".
+    // The assertion follows: it must NOT name the pin bump, because citing a discharged blocker is
+    // how a refusal outlives its own premise. Refused BY NAME rather than downgraded to
     // `Conditioning::VideoClip`, which the engine deliberately does not advertise.
     let clips = minimax_h3_request(
         "minimax_h3_ref",
@@ -13144,8 +13901,14 @@ fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
         .expect_err("video references cannot be built at the pinned gen-core")
         .to_string();
     assert!(
-        message.contains("sc-18650") && message.contains("No output was produced"),
-        "the refusal must name the pin bump and say nothing was rendered: {message}"
+        !message.contains("sc-18650"),
+        "the pin bump is DONE (sc-19721) — a refusal that still blames it sends the reader to a \
+         discharged blocker: {message}"
+    );
+    assert!(
+        message.contains("sc-19508") && message.contains("No output was produced"),
+        "the refusal must name the work that is actually outstanding and say nothing was \
+         rendered: {message}"
     );
 }
 
@@ -13366,6 +14129,200 @@ fn minimax_h3_tier_resolution_requires_both_dit_partitions() {
     );
 }
 
+/// sc-19558 — **a shared probe that is missing is refused BY NAME**, one probe at a time, with the
+/// probe's DIRECTORY left in place.
+///
+/// 🔴 THE DIRECTORY STAYS. That is the whole defect: an interrupted co-requisite download leaves
+/// `vae/` (or `tokenizer/`, or the packed `q4/text_encoder/`) present and empty, so the sc-19573
+/// `is_dir()` floor read the install COMPLETE and the failure moved into the engine, past the only
+/// layer that could name it. Every mutation below is `remove_file`, and the parent directory is
+/// asserted to survive, so a regression to a directory probe cannot pass this test.
+///
+/// Deleting all of them at once would prove the SET is gated, not each member: a gate that checked
+/// only `vae/config.json` would pass that and still admit a snapshot with no tokenizer. The control
+/// resolve after each restore is equally load-bearing — without it a resolver that refused
+/// unconditionally would sweep clean.
+///
+/// Driven off `minimax_h3_shared_probe_paths` at the root the TIER resolves to (sc-19573), so the
+/// two probes that live under `<tier>/q4/text_encoder` are swept as well as the six under the
+/// upstream snapshot. A list restated here would drift from the gate the same way the catalog
+/// drifted from the loader.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_names_each_missing_shared_probe() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let base = minimax_h3_base_root("mm_probe_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let tier = minimax_h3_tier_root(
+        "mm_probe_tier_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let resolve = || {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier.path().to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    resolve().expect("the control: a complete base root and a complete q4 tier resolve");
+
+    // `q4` is what an unqualified request resolves to, so this is the install the sweep describes.
+    let probes = sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+        base.path(),
+        &sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+            tier.path(),
+            base.path(),
+            "q4",
+        ),
+    );
+    assert!(
+        probes.len() >= 8,
+        "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
+        probes.len()
+    );
+    // The packed text encoder must really be in the sweep, not merely assumed to be: it is the one
+    // probe that lives outside the upstream snapshot.
+    assert!(
+        probes
+            .iter()
+            .any(|probe| probe.starts_with(tier.path().join("q4"))),
+        "the q4 packed text encoder must be part of the shared floor: {probes:?}"
+    );
+
+    for probe in &probes {
+        let parent = probe.parent().expect("a probe is a nested path").to_owned();
+        let saved = std::fs::read(probe).expect("the fixture wrote every probed file");
+        std::fs::remove_file(probe).expect("remove one probe");
+        assert!(
+            parent.is_dir(),
+            "the mutation must leave {} behind — a directory probe would still pass",
+            parent.display()
+        );
+        let message = resolve()
+            .expect_err("a missing shared probe must be refused before the engine loads")
+            .to_string();
+        assert!(
+            message.contains(&probe.display().to_string()),
+            "the refusal must name `{}` rather than restating the whole list: {message}",
+            probe.display()
+        );
+        std::fs::write(probe, saved).expect("restore the probe");
+        resolve()
+            .unwrap_or_else(|e| panic!("restoring `{}` must resolve again: {e}", probe.display()));
+    }
+}
+
+/// sc-19120 / sc-19506 — a q4/q8 tier's PACKED text encoder is STAGED, and the dense upstream one
+/// is the fallback rather than the default.
+///
+/// This closes a silent half-landing. sc-19120 published packed q4/q8 text encoders beside the DiT
+/// tiers and declared them in the manifest as per-tier `coRequisite` rows, so the bytes downloaded —
+/// but nothing put the directory on the `LoadSpec`, and `mlx-gen-minimax-h3::resolve_text_encoder_dir`
+/// falls back to `<spec.weights>/text_encoder`, the UPSTREAM DENSE bf16 Qwen3-VL-32B. A q4 render
+/// therefore still loaded the 53.07 GB dense conditioner: the largest component in the family, at
+/// full width, on the tier a user picked precisely because bf16 does not fit.
+///
+/// Three cases: a tier WITH a packed TE stages it, a tier WITHOUT one is REFUSED by name, and a
+/// TORN one — the directory present but the shard index missing, which is what an interrupted
+/// download leaves behind and what sc-19517 found on the hosted `bf16/transformer/` — is refused by
+/// name too, rather than staged for the provider to fail on.
+///
+/// ⚠️ CASES 1 AND 3 CHANGED SHAPE WHEN sc-19558 MET sc-19573, and the change is deliberate. sc-19506
+/// made a q4 tier with no usable packed encoder FALL BACK to `<weights>/text_encoder`. sc-19573 made
+/// the encoder's ROOT tier-dependent, and under that resolution a q4 install has no upstream
+/// `text_encoder/` to fall back TO — the co-requisite row is `variant: "bf16"`-scoped. So the
+/// fallback would have been to a path that is absent by design, producing a hard error inside the
+/// engine on `text_encoder/config.json`; and where it did resolve, it would put a q4 render on the
+/// 53 GB dense conditioner, which is the sc-19506 defect wearing a different hat. Refusing by name
+/// is the only outcome that is both loadable-or-actionable.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let base = minimax_h3_base_root("mm_te_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let resolve = |tier_root: &Path| {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // The shipped shape: `config.json` + the shard index the rehost publishes for the component.
+    let packed = minimax_h3_tier_root(
+        "mm_te_packed_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let te = packed
+        .path()
+        .join("q4")
+        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
+    let load = resolve(packed.path()).expect("a complete q4 tier resolves");
+    assert_eq!(
+        load.text_encoder_dir,
+        Some(te.clone()),
+        "a q4 tier that ships a packed text encoder must stage it — an unstaged one means the q4 \
+         render loads the 53 GB dense conditioner and the tier buys nothing on it"
+    );
+
+    // TORN: the directory exists, the index does not. Named, not silently swapped for a fallback.
+    std::fs::remove_file(te.join("model.safetensors.index.json")).expect("remove te index");
+    assert!(te.is_dir(), "the mutation must leave the directory behind");
+    let message = resolve(packed.path())
+        .expect_err("an interrupted packed-text-encoder download must not resolve")
+        .to_string();
+    assert!(
+        message.contains(
+            &te.join("model.safetensors.index.json")
+                .display()
+                .to_string()
+        ),
+        "the refusal must name the missing shard index: {message}"
+    );
+
+    // ABSENT ENTIRELY — a pre-sc-19120 install. Same refusal, naming the config this time.
+    std::fs::remove_dir_all(&te).expect("drop the packed text encoder");
+    let message = resolve(packed.path())
+        .expect_err("a q4 tier with no packed text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains(&te.join("config.json").display().to_string()),
+        "the refusal must name the packed encoder the q4 tier is supposed to ship: {message}"
+    );
+}
+
 /// The shared components are a SEPARATE download from the tiers, and their absence says so.
 #[cfg(target_os = "macos")]
 #[test]
@@ -13374,14 +14331,17 @@ fn minimax_h3_resolution_names_the_missing_shared_components() {
         resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
     };
     let tiers = minimax_h3_tier_root("mm_shared_", &["q4"], &["transformer", "transformer_ref"]);
-    // A base root that exists but is missing `FL2VA/audio_vae/` — the audio VAE's constructor
-    // documents, which live ONLY in the FL2VA sources and which the loader probes explicitly.
+    // A base root holding every shared component DIRECTORY and not one of the files inside them —
+    // the shape an interrupted co-requisite download leaves behind, and the shape the sc-19573
+    // `is_dir()` floor certified as complete (sc-19558). `FL2VA/audio_vae/` is the case the
+    // assertion below names, because its constructor documents live ONLY in the FL2VA sources.
     let base = tempfile::Builder::new()
         .prefix("mm_torn_base_")
         .tempdir()
         .expect("temp dir");
-    for component in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_DIRS {
-        std::fs::create_dir_all(base.path().join(component)).expect("component dir");
+    for probe in minimax_h3_base_root_probes(base.path()) {
+        std::fs::create_dir_all(probe.parent().expect("a probe is a nested path"))
+            .expect("component dir");
     }
     let req = minimax_h3_request("minimax_h3", json!({}));
     let settings = Settings {
@@ -13708,6 +14668,92 @@ fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_t
     assert_eq!(raw_settings["realModelInference"], json!(true));
 }
 
+/// sc-19120 / sc-19506 — the ARM puts the packed text encoder on the `LoadSpec`, and leaves the key
+/// ABSENT when the tier has none.
+///
+/// `minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one` pins the
+/// RESOLVER, and `video_load_spec_threads_text_encoder_dir` pins the `VideoGenInput` → `LoadSpec`
+/// mapping. Neither covers the ONE line between them — `text_encoder_component_dir: load.text_encoder_dir` in
+/// `generate_minimax_h3_using` — and dropping that line was measured to leave both of those tests
+/// green while every q4 render silently went back to the 53 GB dense conditioner. This is the seam
+/// test that makes it red.
+///
+/// Both directions, because only the positive one is a claim about the fix and only the negative one
+/// keeps the fallback honest: an absent key is what sends the provider to `<weights>/text_encoder`,
+/// which is CORRECT for the dense bf16 tier.
+///
+/// The negative case is BF16, not "a q4 tier with the packed component deleted" (which is what it
+/// was before sc-19558 met sc-19573). Under the tier-aware root resolution a q4 install has no
+/// upstream `text_encoder/` to fall back TO — the co-requisite row is `variant: "bf16"`-scoped — so
+/// that shape is now REFUSED by the shared floor rather than resolved onto a fallback, and
+/// `minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one` is what pins the
+/// refusal. bf16 is the tier where an absent key is genuinely correct, so it is the one that keeps
+/// this direction non-vacuous.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_stages_the_packed_text_encoder_onto_the_load_spec() {
+    let source_dir = |source: Option<&WeightsSource>| match source {
+        Some(WeightsSource::Dir(dir)) => Some(dir.clone()),
+        _ => None,
+    };
+    let base = minimax_h3_base_root("mm_te_arm_base_");
+    let request = minimax_h3_request("minimax_h3", json!({}));
+
+    // bf16 ships no packed text encoder — the key must be absent so the provider falls back to the
+    // dense upstream copy under `spec.weights`. `mlxQuantize: 0` is what selects the dense tier
+    // (`resolve_mlx_dense_quant` maps <= 0 to `None`); absent would mean q4.
+    let bare = minimax_h3_tier_root(
+        "mm_te_arm_bare_",
+        &["bf16"],
+        &["transformer", "transformer_ref"],
+    );
+    let dense_request =
+        minimax_h3_request("minimax_h3", json!({ "advanced": { "mlxQuantize": 0 } }));
+    let probe = ArmProbe::default();
+    drive_minimax_h3_arm(bare.path(), base.path(), &probe, &dense_request)
+        .expect("a t2va job with a complete bf16 tier and shared components runs");
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert!(
+        !spec.components.contains_key("text_encoder"),
+        "a tier with no packed text encoder must leave the key ABSENT — that absence is what \
+         selects the provider's `<weights>/text_encoder` fallback"
+    );
+
+    // A q4 tier, whose packed component `minimax_h3_tier_root` seeds with the shipped shape:
+    // `config.json` + the shard index. Both are load-bearing — the shared floor probes each.
+    let packed = minimax_h3_tier_root(
+        "mm_te_arm_packed_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let te = packed
+        .path()
+        .join("q4")
+        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
+    // A SECOND base root, not a reuse of the first: the shared video funnel caches the loaded
+    // generator, and a second drive against the same `spec.weights` is served from that cache
+    // without calling the loader at all — which would leave `probe.spec` empty and the assertion
+    // below reading a load that never happened.
+    let base = minimax_h3_base_root("mm_te_arm_base2_");
+    let probe = ArmProbe::default();
+    drive_minimax_h3_arm(packed.path(), base.path(), &probe, &request)
+        .expect("a t2va job with a complete q4 tier and shared components runs");
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        source_dir(spec.components.get("text_encoder")),
+        Some(te),
+        "the packed per-tier text encoder must ride `LoadSpec::components[\"text_encoder\"]` — that \
+         is the key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads, and without it a q4 \
+         render loads the dense 53 GB conditioner and the tier buys nothing on it"
+    );
+    assert_eq!(
+        source_dir(Some(&spec.weights)),
+        Some(base.path().to_path_buf()),
+        "and it must NOT displace `spec.weights`, which stays the upstream root carrying the VAEs, \
+         the tokenizer and the dense text encoder the fallback needs"
+    );
+}
+
 /// The engine's synchronized soundtrack reaches the asset instead of being dropped (sc-19508).
 ///
 /// MiniMax-H3 emits video AND stereo audio in ONE pass. A clip that lost its soundtrack still plays,
@@ -13802,6 +14848,122 @@ fn generate_minimax_h3_using_refuses_a_wrong_partition_shape_before_loading() {
         "the shape check must run BEFORE the load — a wrong-partition job must never pay for a \
          53 GB text encoder, let alone render from the wrong DiT"
     );
+}
+
+/// sc-19558: every file `mlx-gen-minimax-h3::load` probes under the UPSTREAM root is supplied by a
+/// macOS download row of the catalog entry that needs it.
+///
+/// The defect this closes was a MISSING DOWNLOAD ROW, not a wrong one: `tokenizer/` and the three
+/// `FL2VA/audio_vae/` constructor documents were probed by the loader and by
+/// `minimax_h3_shared_is_complete`, and supplied by nothing — so a manifest-driven install of ANY
+/// tier failed the completeness gate before it reached the loader, on both catalog entries.
+///
+/// Deliberately NOT `#[cfg(target_os = "macos")]`. The probe list is a fact about the manifest and
+/// the engine's own loop, and it is on the Linux lane that a macOS-only row is easiest to delete by
+/// accident. `mlx_tier_completeness` is an unfenced core module for the same reason.
+///
+/// Overlaps `minimax_h3_downloads_cover_every_path_the_loader_probes` (sceneworks-core) without
+/// duplicating it, and both are kept: core's asks the TIER-SCOPED question over every tier and both
+/// entries, including the DiT partitions; this one asks the PLATFORM-SCOPED question — that the
+/// `platforms: ["macos"]` rows against the upstream repo, and not the candle rows that happen to
+/// name the same paths, are what supply the MLX lane's shared floor.
+///
+/// Mutation checks (each verified RED by construction of the assertion): delete either new row from
+/// either entry; narrow `"tokenizer/*"` to `"tokenizer/tokenizer_config.json"`; drop
+/// `"FL2VA/audio_vae/config.yaml"` from the three-document list.
+#[test]
+fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    // The upstream snapshot `spec.weights` resolves to. Spelled here rather than imported because
+    // `MINIMAX_H3_BASE_REPO` is macOS-fenced and this test is not; the two are tied together below.
+    const UPSTREAM_REPO: &str = "MiniMaxAI/MiniMax-H3";
+    #[cfg(target_os = "macos")]
+    assert_eq!(UPSTREAM_REPO, super::minimax_h3::MINIMAX_H3_BASE_REPO);
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+
+    // Every probe of a BF16 install, snapshot-relative. bf16 is the tier whose text encoder comes
+    // from the upstream repo (`minimax_h3_text_encoder_dir` sends q4/q8 to the rehost instead), so
+    // it is the tier that makes this the complete upstream set — and the upstream `text_encoder`
+    // row IS `variant: "bf16"`-scoped, so it must be declared somewhere.
+    //
+    // Both roots EMPTY so the enumerator yields the relative spelling a `files` pattern is written
+    // in. Read from `mlx_tier_completeness` rather than restated: a second hand-copied list here
+    // would drift from the gate exactly the way the catalog drifted from the loader.
+    let empty = Path::new("");
+    let probes: Vec<String> =
+        sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+            empty,
+            &sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+                empty, empty, "bf16",
+            ),
+        )
+        .iter()
+        // `to_string_lossy` yields NATIVE separators, so this is `FL2VA\audio_vae\config.json` on
+        // Windows while the declared patterns are Hugging Face download globs, which are always
+        // `/`. Comparing them raw passes on macOS/Linux and fails only on the Windows candle lane.
+        .map(|probe| probe.to_string_lossy().replace('\\', "/"))
+        .collect();
+    assert!(
+        probes.len() >= 8,
+        "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
+        probes.len()
+    );
+
+    for entry_id in ["minimax_h3", "minimax_h3_ref"] {
+        let model = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some(entry_id))
+            .unwrap_or_else(|| panic!("{entry_id} present in the builtin catalog"));
+
+        // macOS rows against the upstream repo only. The tier rows live in the SceneWorks rehost
+        // and the off-Mac rows serve candle, neither of which supplies `spec.weights` on this lane.
+        let patterns: Vec<&str> = model["downloads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{entry_id} declares downloads"))
+            .iter()
+            .filter(|row| row["repo"].as_str() == Some(UPSTREAM_REPO))
+            .filter(|row| {
+                row["platforms"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().any(|v| v.as_str() == Some("macos")))
+            })
+            .flat_map(|row| row["files"].as_array().into_iter().flatten())
+            .filter_map(|f| f.as_str())
+            .collect();
+        assert!(
+            !patterns.is_empty(),
+            "{entry_id} declares no macOS {UPSTREAM_REPO} rows at all"
+        );
+
+        for probe in &probes {
+            let covered = patterns
+                .iter()
+                .any(|pattern| match pattern.strip_suffix('*') {
+                    // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
+                    // what stops `vae/*` from claiming `audio_vae/config.json`.
+                    Some(prefix) => probe.starts_with(prefix),
+                    None => *pattern == probe.as_str(),
+                });
+            assert!(
+                covered,
+                "{entry_id}: `mlx-gen-minimax-h3::load` probes `{probe}` under the {UPSTREAM_REPO} \
+                 snapshot, but no macOS download row supplies it. A probe with no row is not a slow \
+                 download — it is an install that fails the completeness gate before the loader \
+                 runs. Declared patterns: {patterns:?}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

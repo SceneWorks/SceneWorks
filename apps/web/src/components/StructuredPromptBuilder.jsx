@@ -125,8 +125,8 @@ export default function StructuredPromptBuilder({
   // catalog via visionCaptionModelUsable in the parent). When it's false, the shared
   // ModelAvailabilityGate renders a download offer instead — formalizing sc-8108's inline,
   // error-driven "Download vision captioner" affordance into ONE coherent, proactive gate that mirrors
-  // the per-Studio model gates. macOnly keeps the whole section hidden off Mac (the parent only wires
-  // `onImageCaption` for Ideogram 4 + text-to-image, both macOnly).
+  // the per-Studio model gates. The parent wires `onImageCaption` for Ideogram 4 + text-to-image;
+  // both the captioner and Ideogram now have native MLX and Candle routes.
   visionCaptionReady = true,
   visionCaptionOffers = [],
   visionCaptionDownloadJobs = [],
@@ -392,8 +392,8 @@ export default function StructuredPromptBuilder({
           ) : null}
 
           {/* Reference-image → JSON caption (epic 8102, sc-8108 + sc-8110 → shared in sc-8208). The
-              parent only wires `onImageCaption` for Ideogram 4 + text-to-image (both macOnly), so the
-              section is already hidden off-Mac. The shared picker's ModelAvailabilityGate gates on the
+              parent wires `onImageCaption` for Ideogram 4 + text-to-image on both native backends.
+              The shared picker's ModelAvailabilityGate gates on the
               vision captioner being installed (download offer when missing). The image is captioning-only
               (C1) — never sent to generation. `onImageCaption` resolves to an already-parsed caption
               object (the parent runs parseVisionCaption); applyImageCaption injects it + opens Builder. */}

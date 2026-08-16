@@ -29,6 +29,10 @@ pub(crate) async fn create_image_job(
     // no-op for a web request (which sends the already-composed prompt + presetPromptResolvedClientSide
     // and no top-level styleId), so a web-composed prompt is never double-folded.
     crate::styles::apply_style_to_image_payload(&state, &payload, &mut job_payload).await?;
+    // Prompt enhancement is route-specific, so validate the canonical post-preset model rather
+    // than trusting the DTO's pre-expansion model. This is also where client attempts to forge the
+    // worker-owned report block are refused.
+    validate_prompt_enhancement_payload(&job_payload)?;
     // Ideogram 4 headless/API parity (sc-6519, fully async per sc-9120): a plain-text Ideogram 4 job
     // needs its prompt expanded into a rich JSON caption via the magic-prompt utility model — the same
     // separate prompt_refine job the web runs (sc-6501) — or it stochastically renders the safety-filter
@@ -39,16 +43,16 @@ pub(crate) async fn create_image_job(
     // edit. The worker's format-guard + reseed net remains the fallback if the expansion is unavailable.
     let caption_request = crate::ideogram::caption_request_for_ideogram(&job_payload);
     // Keyed off the POST-preset job_payload["model"], NOT the DTO's payload.model — see the
-    // matching note in create_video_job (sc-12300). apply_recipe_preset_to_image_payload above
-    // may have replaced the model with the preset's own when the caller omitted one, which
-    // leaves payload.model stale and would resolve the DEFAULT model's entry.
-    let model_id = job_payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(payload.model.as_str())
-        .to_owned();
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
-    // The model's declared `defaults.resolution`, keyed off the post-preset `model_id` for the same
+    // matching note in create_video_job (sc-12300). The shared canonicalizer reads the final
+    // payload and also owns retry/duplicate, so no alternate image boundary can retain
+    // caller-supplied manifest metadata.
+    let model_manifest_entry =
+        crate::jobs::canonicalize_image_model_payload(&state, &job_type, &mut job_payload)
+            .await?
+            .ok_or_else(|| {
+                ApiError::internal("image model canonicalization returned no catalog entry")
+            })?;
+    // The model's declared `defaults.resolution`, keyed off the canonical post-preset entry for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
     // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
     // size rendered a blanket 1024x1024 — HALF the declared 2048x2048 on the four sensenova_u1_8b
@@ -76,7 +80,6 @@ pub(crate) async fn create_image_job(
             job_payload.insert("count".to_owned(), Value::from(count));
         }
     }
-    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
         &state,
         Some(&payload.project_id),
@@ -518,12 +521,10 @@ pub(crate) async fn create_video_job(
     ApiJson(payload): ApiJson<VideoJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_video_job(&payload)?;
-    let job_type = match payload.mode.as_str() {
-        "extend_clip" => JobType::VideoExtend,
-        "video_bridge" => JobType::VideoBridge,
-        "replace_person" => JobType::PersonReplace,
-        _ => JobType::VideoGenerate,
-    };
+    // The mode → job-type mapping lives in core (sc-19570) because the UI-gating probes must build
+    // the SAME pair this route enqueues before asking the claim predicates about it. Two copies
+    // would let the oracle answer about a job type that is never created.
+    let job_type = video_job_type_for_mode(payload.mode.as_str());
     let requested_gpu = payload.requested_gpu.clone();
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
@@ -742,8 +743,24 @@ pub(crate) async fn create_video_job(
              its capabilities, or a model that supports this one."
         )));
     }
+    // **THE PLATFORM HALF OF THE SAME DEFECT IS NOT DECIDED HERE (sc-19570).** The gate above is
+    // platform-independent and stays that way, so it admits a request some OTHER host's lane would
+    // claim — `ltx_2_3` + `image_to_video`, `wan_2_2` + `first_last_frame` and the rest of the
+    // measured MLX-only set. Off-Mac nothing can claim those, and the job used to hang forever.
+    //
+    // sc-19570 first refused them right here with a `400`, which made `POST /api/v1/video/jobs`
+    // answer differently on Windows than on macOS for byte-identical bodies. That was ruled out:
+    // **an HTTP contract is not platform-dependent.** The status code, response shape and error
+    // envelope are the same on every host; what a given machine can actually RENDER is an execution
+    // outcome, and it is reported as one.
+    //
+    // So the platform verdict moved into the job lifecycle —
+    // `JobsStore::fail_platform_unreachable_jobs`, run below and again on every claim — and the job
+    // reaches a terminal `failed` with a `platform_unreachable:` reason instead of sitting queued.
+    // Nothing about the two gates' ORDER or wording is coupled: this one still 400s a mode no lane
+    // serves anywhere, on every platform alike.
     let job = create_generation_job(
-        state,
+        state.clone(),
         job_type,
         project_id,
         project_name,
@@ -751,7 +768,42 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
+    // Terminate an unreachable job NOW rather than leaving it for the claim-time sweep. The sweep
+    // runs when a worker polls, and the deployments that most need this answer are exactly the ones
+    // where no worker ever will (an API-only container, a Windows host whose GPU worker is not
+    // installed). Waiting for a poll would reintroduce the hang this story exists to remove, so the
+    // response the caller already holds carries the terminal state.
+    let job = fail_job_if_platform_unreachable(&state, job).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Run the sc-19570 platform-reachability sweep and return `job` as it now stands: unchanged on a
+/// Mac and for any pair this host's lane serves, terminal `failed` when nothing here can ever claim
+/// it.
+///
+/// The status code does NOT depend on the verdict — the caller returns `201` either way, on every
+/// platform. Only the snapshot's `status` / `error` differ, which is what an execution outcome is.
+///
+/// It calls the same store method the claim path calls rather than duplicating the decision, so the
+/// two entry points can never disagree about which pairs are unreachable.
+async fn fail_job_if_platform_unreachable(
+    state: &AppState,
+    job: JobSnapshot,
+) -> Result<JobSnapshot, ApiError> {
+    let host_os = state.settings.host_os.clone();
+    let failed = store_call(state.clone(), move |store, _timeout| {
+        store.fail_platform_unreachable_jobs(&host_os)
+    })
+    .await?;
+    let mut result = job;
+    for failed_job in failed {
+        crate::jobs::emit_platform_unreachable(&failed_job);
+        publish(state, "job.updated", &failed_job);
+        if failed_job.id == result.id {
+            result = failed_job;
+        }
+    }
+    Ok(result)
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the

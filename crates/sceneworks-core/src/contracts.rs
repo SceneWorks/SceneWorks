@@ -243,15 +243,15 @@ string_enum! {
         // upscale engines that previously only ran as a generation post-step.
         ImageUpscale => "image_upscale",
         // Standalone tile-ControlNet detail refine of an existing image asset (Image
-        // Editor, epic 2427; spike sc-2437). Native MLX SDXL/RealVisXL img2img + a
+        // Editor, epic 2427; spike sc-2437). Native MLX and Candle SDXL img2img + a
         // tile ControlNet run over feathered tiles to add micro-texture; GPU-required
         // like generation. Composes after image_upscale (creative upscale).
         ImageDetail => "image_detail",
         // Smart-select segmentation of an existing image asset (Image Editor, epic 6087
         // / sc-6105): a box prompt → a binary inpaint mask asset (white-on-black PNG at
-        // source dims) the editor loads into the sc-2436 mask layer. Native-MLX SAM3 on
-        // the macOS Rust worker (zero-Python, the box-PVS path of the sc-4926 SAM3 stack);
-        // GPU-required like generation, mac-only (no off-Mac standalone image-segment lane).
+        // source dims) the editor loads into the sc-2436 mask layer. Native SAM3 runs
+        // through MLX on macOS and Candle/CUDA off-Mac (zero-Python, the box-PVS path of
+        // the sc-4926 SAM3 stack); GPU-required like generation.
         ImageSegment => "image_segment",
         // Standalone upscale of an existing VIDEO asset (Video Studio, epic 4811 /
         // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
@@ -445,10 +445,9 @@ string_enum! {
         // backend is linked; the Rust CPU utility worker never emits it.
         // See jobs_store::job_requires_gpu.
         ImageDetail => "image_detail",
-        // Smart-select segmentation (Image Editor, epic 6087 / sc-6105). Advertised
-        // ONLY by the macOS MLX worker (native SAM3, `gpu.rs mlx_gpu`); no torch/candle
-        // worker emits it, so a box-prompt segment job routes to the Mac worker by
-        // construction. See jobs_store::job_requires_gpu / mac_rust_supported.
+        // Smart-select segmentation (Image Editor, epic 6087 / sc-6105). Advertised by the native
+        // SAM3 MLX worker on macOS and the native SAM3 Candle worker on CUDA hosts. See
+        // jobs_store::job_requires_gpu and the backend routing predicates.
         ImageSegment => "image_segment",
         // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
         // the macOS Rust/MLX worker and the off-Mac candle/CUDA worker (native

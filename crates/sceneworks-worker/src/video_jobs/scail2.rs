@@ -86,7 +86,10 @@ pub(super) fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
 /// the worker now descends into the chosen tier so a pre-packed snapshot loads with no install-time
 /// convert peak. The flat root files stay for back-compat with already-shipped workers that resolve
 /// the repo root; a new worker only ever resolves the tier subdirs.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
 
 /// Pinned revision for [`SCAIL2_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The repo is a hard-coded
@@ -94,23 +97,11 @@ pub(super) const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
 /// the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load. This is
 /// the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs (sc-9944); the native downloader still verifies
 /// each file's own hash on download.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const SCAIL2_REVISION: &str = "ce88cfdb1008f395e9c820e525e6db7b6695f7b3";
-
-/// The files that make a SCAIL-2 tier subdir COMPLETE — the six files the snapshot loader opens
-/// (`mlx-gen-scail2` `generate.rs`): the DiT plus the shared dense Wan2.1 z16 VAE, UMT5 T5 encoder,
-/// open-CLIP ViT-H/14 visual tower, UMT5 tokenizer, and `config.json` (which carries the quant
-/// manifest for `q4`/`q8`, or none for the dense `bf16` tier). A partially-downloaded tier fails this
-/// so [`scail2_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
-#[cfg(target_os = "macos")]
-pub(super) const SCAIL2_TIER_FILES: &[&str] = &[
-    "dit.safetensors",
-    "vae.safetensors",
-    "t5_encoder.safetensors",
-    "clip.safetensors",
-    "tokenizer.json",
-    "config.json",
-];
 
 /// Map a SCAIL-2 model id to its `(quant-matrix repo, pinned revision)` for the on-demand tier fetch,
 /// or `None` for a non-SCAIL-2 id. Keyed here so the whole tier-resolve/fetch path (mirroring the Wan
@@ -141,14 +132,13 @@ pub(super) fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static st
     }
 }
 
-/// Whether `dir` is a COMPLETE self-contained SCAIL-2 tier snapshot ([`SCAIL2_TIER_FILES`]). A
-/// partially-downloaded tier fails this so [`scail2_tier_subdir`] falls through to a smaller complete
-/// tier rather than half-loading.
+/// Whether `dir` is a COMPLETE self-contained SCAIL-2 tier snapshot. The canonical six-file
+/// inventory and this predicate live together in `sceneworks_core::mlx_tier_completeness`, so the
+/// MLX and shared-Candle resolvers cannot drift. A partially-downloaded tier fails this and
+/// [`scail2_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
 #[cfg(target_os = "macos")]
 pub(super) fn scail2_tier_is_complete(dir: &Path) -> bool {
-    SCAIL2_TIER_FILES
-        .iter()
-        .all(|file| dir.join(file).is_file())
+    sceneworks_core::mlx_tier_completeness::scail2_tier_complete(dir)
 }
 
 /// Descend a resolved SCAIL-2 quant-matrix repo `root` into the requested quant tier subdir (sc-9944,
@@ -556,7 +546,7 @@ pub(super) async fn generate_scail2_replace(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<(DecodedVideo, Value)> {
+) -> WorkerResult<(DecodedVideo, Value, bool)> {
     let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_scail2_replace_conditioning(api, settings, job, request, project_path).await?;
@@ -565,6 +555,9 @@ pub(super) async fn generate_scail2_replace(
     // + load-time quant for a legacy snapshot.
     ensure_scail2_tier_present(api, settings, job, request).await?;
     let (model_dir, quant) = resolve_scail2_tier_dir_and_quant(settings, request)?;
+    let adapters = resolve_scail2_adapters(settings, request)?;
+    let lightning = scail2_adapters_have_lightning(&adapters);
+    let (steps, guidance, scheduler_shift) = scail2_sampling(request, lightning);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -578,10 +571,14 @@ pub(super) async fn generate_scail2_replace(
         height: request.height,
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
+        steps,
+        guidance,
+        scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
+        adapters,
         ..VideoGenInput::default()
     };
     let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
-    Ok((decoded, status))
+    Ok((decoded, status, lightning))
 }

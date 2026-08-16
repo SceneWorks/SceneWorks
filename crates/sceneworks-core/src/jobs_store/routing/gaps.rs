@@ -81,6 +81,110 @@ pub fn video_request_is_claimable_by_any_lane(
         || video_request_is_candle_eligible(job_type, payload)
 }
 
+/// **The PLATFORM reachability predicate (sc-19570).** True when a lane that can exist on an `os`
+/// host would claim this video request.
+///
+/// [`video_request_is_claimable_by_any_lane`] asks whether ANY backend anywhere claims the job, and
+/// is deliberately platform-independent: refusing a pair one lane serves would break that lane's
+/// host. That leaves the *other* half of the same defect open, which is what sc-19570 measured.
+/// Off-Mac there is no `mlx` worker — MLX is an Apple-silicon runtime, and the settings contract
+/// records the topology explicitly (`mlx_required` is "absent on Windows/Linux/Docker",
+/// `candle_required` is "absent on macOS") — so an MLX-only request submitted on Windows or Linux
+/// is claimed by nothing that can ever register there. It does not fail: it sits `queued` /
+/// "Waiting for an available worker." forever, exactly the sc-19504 / GH #2074 symptom, and both
+/// enforce sweeps default to **warn** so neither rescues it.
+///
+/// **THIS IS NOT AN HTTP GATE, AND MUST NEVER BECOME ONE.** sc-19570 first shipped it inside
+/// `create_video_job`, so `POST /api/v1/video/jobs` answered `400` off-Mac for a body it answered
+/// `201` for on a Mac. That was ruled out: an HTTP contract is not platform-dependent. The published
+/// surface — status codes, response shape, error envelope — answers identically on every host, and
+/// only the job's *execution outcome* varies. So this predicate is consumed by
+/// [`super::super::JobsStore::fail_platform_unreachable_jobs`], a job-lifecycle sweep, and the
+/// request is ACCEPTED (201) everywhere; off-Mac the job it creates reaches a terminal `failed`
+/// state with a legible reason instead of queueing forever.
+///
+/// Keep it distinct from [`video_request_is_claimable_by_any_lane`], which IS a correct 400: a mode
+/// no lane serves *anywhere* is a malformed request on every host, so refusing it is
+/// platform-independent. "Nothing serves this" and "nothing serves this HERE" are different
+/// verdicts and belong at different layers.
+///
+/// **Asymmetric on purpose.** On macOS this returns `true` unconditionally and makes NO claim: the
+/// platform-independent gate is the whole gate there, so every pair that works on a Mac today keeps
+/// working byte-for-byte. Only the off-Mac branch is new. The tradeoff that buys: a deployment that
+/// somehow paired a Windows/Linux API host with a remote macOS `mlx` worker would now have MLX-only
+/// pairs failed by the sweep. That topology is not one SceneWorks ships or documents — every
+/// platform decision in this codebase reads the API host's OS the same way
+/// (`mac_capabilities(std::env::consts::OS, …)`, `host_capabilities`, `retain_downloads_for_os`) —
+/// and the alternative, keying off live worker presence, would fail legitimate work whenever the
+/// local worker happened to be restarting.
+///
+/// `os` is a parameter rather than `std::env::consts::OS` so the guard can be exercised with a
+/// FOREIGN OS fixture. macOS structurally cannot detect this class of defect by running on itself.
+pub fn video_request_is_claimable_on_platform(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+    os: &str,
+) -> bool {
+    if matches!(os, "macos" | "darwin") {
+        return true;
+    }
+    video_request_is_candle_eligible(job_type, payload)
+}
+
+/// The [`JobSnapshot`] form of [`video_request_is_claimable_on_platform`], negated and **scoped to
+/// the four video job types that predicate actually reasons about** (sc-19570).
+///
+/// The scoping is load-bearing, not defensive. `video_request_is_candle_eligible` answers `false`
+/// for every job type outside `{VideoGenerate, PersonReplace, VideoExtend, VideoBridge}` — its
+/// match arm is `_ => false` — so handing it an image, training or upscale job would report
+/// "unreachable" for work the candle lane runs perfectly well, and the sweep that consumes this
+/// would fail the entire off-Mac queue. The set is exactly the range of
+/// [`super::catalog::video_job_type_for_mode`], which is what `create_video_job` enqueues, so the
+/// sweep's reach is identical to the enqueue path's reach by construction.
+pub(crate) fn video_job_is_platform_unreachable(job: &JobSnapshot, os: &str) -> bool {
+    if !matches!(
+        job.job_type,
+        JobType::VideoGenerate
+            | JobType::PersonReplace
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+    ) {
+        return false;
+    }
+    !video_request_is_claimable_on_platform(&job.job_type, &job.payload, os)
+}
+
+/// Actionable terminal error for a video job whose mode has no lane on THIS host (sc-19570) — the
+/// reason text the job card and System → Logs show instead of "Waiting for an available worker."
+/// forever.
+///
+/// Prefixed `platform_unreachable:` so it is greppable and distinguishable from its three
+/// neighbours, which describe different situations and must not be collapsed with it:
+/// `mlx_unavailable` / `candle_unavailable` mean the right worker exists in principle but none
+/// checked in (transient — they carry a grace window), and `mlx_unsupported` /
+/// `candle_unsupported` mean a native surface is unported (opt-in, `enforce`-gated). This one is
+/// structural and permanent: no worker that could claim this job can ever register on this OS, so
+/// there is no window to wait out and nothing to enable.
+pub(crate) fn platform_unreachable_error(job: &JobSnapshot, os: &str) -> String {
+    let model = job
+        .payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
+    let mode = job
+        .payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or(job.job_type.as_str());
+    format!(
+        "platform_unreachable: {model} cannot render the \"{mode}\" mode on {os} — that combination \
+         runs only on the macOS MLX backend, and no worker that will ever claim it can register on \
+         this host (model={model}, type={job_type}). Choose a mode this model serves here, or a \
+         model that serves this mode on Windows/Linux.",
+        job_type = job.job_type.as_str()
+    )
+}
+
 /// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
 /// worker (sc-3483). Names the model + job type so the job card and the System → Logs
 /// surface point at the real gap, never a generic failure. Prefixed `mlx_unavailable:` so
@@ -341,8 +445,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::ImageDetail => Err(UnsupportedReason::new(
             model,
             "non-SDXL tile-detail refine",
-            "image_detail is ported to MLX only for the SDXL/RealVisXL backbones (sc-3060); other models / third-party LyCORIS are not available in the native flow on Mac.",
-            Some("epic 3041"),
+            "image_detail runs on the native MLX/Candle SDXL-family tile provider for SDXL, RealVisXL, and Illustrious backbones; this model is outside that family.",
+            Some("sc-18480"),
         )),
 
         // SenseNova-U1 VQA + Document-Studio interleave are ported to the Rust MLX worker
@@ -403,8 +507,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
         // segmentation runs in-process on the macOS Rust worker (the box-PVS path of the
         // sc-4926 SAM3 stack — `segment_jobs::run_image_segment_job`), so the Image Editor
-        // smart-select tool is native on Mac. Mac-only by construction: the capability
-        // is advertised only by `mlx_gpu`, so no other native worker claims it.
+        // smart-select tool is native on Mac. The off-Mac Candle sibling is advertised and
+        // dispatched separately; this oracle intentionally describes only the Mac path.
         JobType::ImageSegment => Ok(()),
 
         // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS runs
@@ -585,9 +689,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // `job_is_any_candle_eligible`, so reaching here means "no candle worker yet" — leave Ok
         // rather than enforce-fail, the same "parity landing later" treatment as lora_train.
         | JobType::ControlTraining
-        // sc-6535: a candle CLIP embedder (`candle-gen-clip`) is future work; until then
-        // dataset_analysis routes by capability (no candle worker advertises it) rather than
-        // enforce-failing — the same "parity landing later" treatment as the surfaces above.
+        // Dataset CLIP analysis routes by capability. Both native runtimes now register the paired
+        // image/text CLIP providers; a build missing either half withholds the advertisement.
         | JobType::DatasetAnalysis
         | JobType::CatalogAnalysis
         // sc-6539: dataset_upscale parity on candle routes by capability, like dataset_analysis.

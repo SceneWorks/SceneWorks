@@ -63,7 +63,12 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
-import { VIDEO_MODES, downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
+import {
+  VIDEO_MODES,
+  downloadOffersFor,
+  videoModelServesMode,
+  videoModelUsable,
+} from "../modelEligibility.js";
 import {
   defaultTurboVariant,
   modelIsMinimaxH3,
@@ -76,8 +81,8 @@ import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macGatingActive,
-  macVideoModeBlock,
 } from "../macGating.js";
+import { candleAvailableModels, candleGatingActive } from "../candleGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
 import {
@@ -88,6 +93,9 @@ import {
   tierPickerOptions,
   tierQuantize,
 } from "../quantTier.js";
+import { suggestTier } from "../tierSuggestion.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
   finiteRecipeNumber,
   recipeLoraSelection,
@@ -122,13 +130,12 @@ function humanizedNumberMenu(menu) {
 }
 
 const ltxVideoModelId = "ltx_2_3";
+const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
+const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
-const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
-// Keep Video Studio's MLX lane q4-first (sc-10859). Unlike Image Studio, it deliberately does not
-// inherit the app-wide generation-quality setting: video activation peaks need a larger safety margin.
+const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
 const TIER_SCREEN = "video";
-const VIDEO_DEFAULT_TIER = "q4";
 
 // Video sub-modes that map onto a recipe workflow. extend_clip / replace_person
 // aren't recipe workflows, so "Save as Preset" is gated to these.
@@ -247,9 +254,15 @@ export function VideoStudio() {
       };
     });
   const [guideOpen, setGuideOpen] = useState(false);
-  // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
+  // Platform UI gating: hide whole models with no lane on THIS platform and snap off one if
+  // selected. Two composed partitions, one per platform, each a no-op on the other's platform:
+  //   * `macAvailableModels` (sc-3486) — torch-only models (e.g. SVD) on a gated Mac.
+  //   * `candleAvailableModels` (sc-19570) — models with no candle lane at all off-Mac (e.g.
+  //     `wan_2_2_vace_fun_14b`, whose only advertised mode is candle-unclaimable). Before this the
+  //     export existed and NOTHING imported it, so whole-model hiding was dead in the one screen
+  //     that matters and the picker still listed a model no off-Mac worker can claim.
   const macVideoModels = useMemo(
-    () => macAvailableModels(videoModels, macCapabilities),
+    () => candleAvailableModels(macAvailableModels(videoModels, macCapabilities), macCapabilities),
     [videoModels, macCapabilities],
   );
   useEffect(() => {
@@ -275,21 +288,43 @@ export function VideoStudio() {
   const selectedTextEncoderAvailable = textEncoderOptions.some(
     (option) => option.id === selectedTextEncoderModel,
   );
-  // Models gated on the selected tab, not tabs on the selected model (sc-5716). A model "serves" a
-  // mode when it declares the capability AND, under active Mac gating, that mode is MLX-routed for
-  // it (`macVideoModeBlock` is a no-op off-Mac, so there this is pure capability). The mode tabs,
-  // the model picker, and the snap-on-mode-switch effect all derive from this so the user is never
-  // trapped on a mode whose model can't serve the others.
+  // Models gated on the selected tab, not tabs on the selected model (sc-5716). "Serves" is the
+  // SHARED `videoModelServesMode` from modelEligibility.js — this screen used to keep a local copy
+  // that read the Mac block only, and that is exactly how sc-19570's off-Mac gate got added to the
+  // shared predicate (and so to the Simple studio, the screen gate and the download offers) while
+  // the Advanced shell kept rendering MLX-only tabs off-Mac. One authority, three layers:
+  // declaration + `macVideoModeBlock` + `candleVideoModeBlock`. The mode tabs, the model picker and
+  // the snap-on-mode-switch effect all derive from it so the user is never trapped on a mode whose
+  // model can't serve the others.
   const macGating = macGatingActive(macCapabilities);
-  const baseVideoModels = macVideoModels.length ? macVideoModels : videoModels;
-  const modelServesMode = (item, value) =>
-    Boolean(item?.capabilities?.includes(value)) && !macVideoModeBlock(item, macCapabilities, value);
-  const modelsForMode = (value) => baseVideoModels.filter((item) => modelServesMode(item, value));
-  // Model-availability gate (sc-5947): when the user has no mac-available video model at all,
-  // show recommended video-model downloads instead of the studio. `ready` matches the picker
-  // (which falls back to all baseVideoModels); offers come from the full catalog via
-  // videoModelUsable, recommended-first.
-  const modelReady = baseVideoModels.length > 0;
+  const candleGating = candleGatingActive(macCapabilities);
+  // sc-19570 — NO `macVideoModels.length ? macVideoModels : videoModels` FALLBACK, and its removal
+  // is the point rather than a tidy-up. That fallback restored the UNFILTERED catalog precisely when
+  // the platform filter had emptied it — i.e. exactly when every installed video model is blocked on
+  // this host. `modelReady` read off it, so it stayed `true`, the sc-5947 gate never engaged, and
+  // the user got the full Studio with a picker of models that cannot serve any mode: every tab
+  // disabled by `modeTabBlocked`, no download offer, and no statement of why. Degraded rather than
+  // hung, but it hid the one screen that could fix it.
+  //
+  // Pre-existing, and it did not fire before this story because `macAvailableModels` alone empties
+  // the list only for a Mac user whose every video model is torch-only. `candleAvailableModels`
+  // makes it reachable for an ordinary Windows/Linux user with an MLX-only catalog, which is the
+  // common case off-Mac.
+  //
+  // `ImageStudio.jsx:765` is the precedent and settles the semantics: `modelReady =
+  // macImageModels.length > 0`, filtered list, no fallback. This is the video twin.
+  //
+  // Not a behaviour change when no gate is engaged: `macAvailableModels` and `candleAvailableModels`
+  // both return the input list unfiltered when their gate is inactive (and before the capabilities
+  // endpoint responds), so `macVideoModels === videoModels` and the two expressions are identical.
+  // The difference appears only when a gate is active AND has filtered everything out — the case the
+  // gate exists for.
+  const modelsForMode = (value) =>
+    macVideoModels.filter((item) => videoModelServesMode(item, value, macCapabilities));
+  // Model-availability gate (sc-5947): when the user has no PLATFORM-available video model at all,
+  // show recommended video-model downloads instead of the studio. `ready` matches the picker; offers
+  // come from the full catalog via videoModelUsable, recommended-first.
+  const modelReady = macVideoModels.length > 0;
   const modelOffers = useMemo(
     () => downloadOffersFor(models, videoModelUsable, macCapabilities),
     [models, macCapabilities],
@@ -609,36 +644,43 @@ export function VideoStudio() {
   // `macGating` is the worker `mlx_required` master switch, so the menu reflects the
   // manifest's `mlx.limits` override on Mac/MLX and `candle.limits` on the candle build.
   const activeBackend = macGating ? "mlx" : "candle";
-  // MLX tier installs and the torch/GGUF quantization variants can coexist on one catalog model,
-  // but they target different worker lanes. Only derive an MLX tier while the MLX lane is active;
-  // the existing quantization picker owns the non-MLX lane. The explicit false gates keep the
-  // candle-only INT8-ConvRot and NVFP4 image tiers out of this MLX video control.
-  const mlxTierLane = activeBackend === "mlx";
+  // The same hosted q4/q8/bf16 matrices drive both native video backends. Candle Wan tiers must use
+  // this explicit picker too: sending the unrelated Torch GGUF `advanced.quantization` field to the
+  // Candle worker would otherwise be ignored and silently replaced by its default tier.
+  const nativeTierLane =
+    activeBackend === "mlx" ||
+    (activeBackend === "candle" && candleTierModelIds.has(selectedModel?.id));
   const tierOptions = useMemo(
-    () => ({ convRotEligible: false, nvfp4Eligible: false, defaultQuality: VIDEO_DEFAULT_TIER }),
+    () => ({ convRotEligible: false, nvfp4Eligible: false }),
     [],
   );
   const availableTiers = useMemo(
-    () => (mlxTierLane ? installedTiers(selectedModel, tierOptions) : []),
-    [mlxTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? installedTiers(selectedModel, tierOptions) : []),
+    [nativeTierLane, selectedModel, tierOptions],
   );
   // The full display set (all possible tiers, installed or not) + the picker option list with
   // un-downloaded tiers disabled — same show-all/disable-unavailable rule as Image Studio. `availableTiers`
   // stays the SELECTABLE/send set; the picker shows whenever there is more than one POSSIBLE tier and at
   // least one is installed to select.
   const possibleTiers = useMemo(
-    () => (mlxTierLane ? allPossibleTiers(selectedModel, tierOptions) : []),
-    [mlxTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? allPossibleTiers(selectedModel, tierOptions) : []),
+    [nativeTierLane, selectedModel, tierOptions],
   );
   const tierPickerItems = useMemo(
-    () => (mlxTierLane ? tierPickerOptions(selectedModel, tierOptions) : []),
-    [mlxTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? tierPickerOptions(selectedModel, tierOptions) : []),
+    [nativeTierLane, selectedModel, tierOptions],
   );
   const showTierPicker = useMemo(
-    () => mlxTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
-    [mlxTierLane, possibleTiers, availableTiers],
+    () => nativeTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
+    [nativeTierLane, possibleTiers, availableTiers],
   );
-  // Seed from the per-(video, model) sticky, then the video-specific q4 base, clamped to installed.
+  const hostMemory = useHostMemory();
+  const nativeMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
+  const autoTier = useMemo(
+    () => suggestTier(selectedModel, nativeMemoryGb, { backend: activeBackend }),
+    [selectedModel, nativeMemoryGb, activeBackend],
+  );
+  // Seed from the per-(video, model) sticky, then the global quality/Auto policy, clamped to installed.
   // A model transition always re-seeds even when both models happen to expose the same tier list.
   const {
     quantTier,
@@ -652,11 +694,13 @@ export function VideoStudio() {
     selectedModel,
     availableTiers,
     tierOptions,
+    autoTier,
+    useGenerationQuality: true,
     reseedOnModelChange: true,
   });
-  const showTorchQuantization = !mlxTierLane && supportsQuantization;
-  const selectedMlxQuantize =
-    mlxTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
+  const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
+  const selectedTierQuantize =
+    nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
   const tierHasMemoryRisk = showTierPicker && ["q8", "bf16"].includes(quantTier);
   const samplerOptions = useMemo(
     () => samplerOptionsFromModel(selectedModel, activeBackend),
@@ -695,8 +739,8 @@ export function VideoStudio() {
       : schedulerOptions[0];
     setScheduler(preferred);
   }, [schedulerOptions, scheduler, selectedModel]);
-  const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
-  const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
+  const requiresLtxIcLora = ltxIcLoraModelIds.has(selectedModel?.id) && ltxIcLoraRequiredModes.has(mode);
+  const hasLtxIcLora = selectedLoras.some((lora) => loraLooksLikeIcLora(lora));
 
   // Sync the source from a genuine USER asset-selection TRANSITION after mount — but NEVER from
   // App's non-user auto-default (sc-11964). App derives `selectedAsset = assets.find(id ===
@@ -897,7 +941,7 @@ export function VideoStudio() {
     // picker on a phantom id; the mode-snap effect then moves to a model that serves the mode. Say
     // so rather than letting the swap look like the recipe's own choice.
     const recipeModelAvailable =
-      !recipe.model || baseVideoModels.some((item) => item.id === recipe.model);
+      !recipe.model || macVideoModels.some((item) => item.id === recipe.model);
     if (recipe.model && recipeModelAvailable) {
       setModel(recipe.model);
     }
@@ -1006,14 +1050,14 @@ export function VideoStudio() {
   // current model already serves the mode (e.g. an LTX image_to_video → text_to_video switch) or
   // when no model serves it (a reduced catalog) — there's nothing to snap to.
   useEffect(() => {
-    if (modelServesMode(selectedModel, mode)) {
+    if (videoModelServesMode(selectedModel, mode, macCapabilities)) {
       return;
     }
     const fallback = modelsForMode(mode)[0];
     if (fallback && fallback.id !== model) {
       setModel(fallback.id);
     }
-    // modelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
+    // videoModelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model, selectedModel, videoModels, macCapabilities]);
 
@@ -1197,14 +1241,33 @@ export function VideoStudio() {
     // capabilities include it (today: scail2_14b); the same per-model gating as the others.
     ["animate_character", "Animate character"],
   ];
-  // Mac UI gating (sc-3486, sc-3773, sc-5716): mode tabs are gated at the MODE level, not on the
-  // selected model. A tab is disabled only under active Mac gating when NO available model serves
-  // the mode (mode-level availability across `macVideoModels`) — never on the selected model's
-  // `videoModes`, which used to trap the user on replace_person / animate_character with no way
-  // back. Off-Mac `macGating` is false so tabs are never disabled here. The active tab is always
-  // left enabled so a reduced catalog can't strand you on a disabled tab. `macVideoModeBlock` still
-  // gates the in-mode model picker + submit (via `modelsForMode` / `supportsMode`).
-  const macModeTabBlocked = (value) => macGating && modelsForMode(value).length === 0;
+  // Platform UI gating (sc-3486, sc-3773, sc-5716, sc-19570): mode tabs are gated at the MODE
+  // level, not on the selected model. A tab is disabled only under active platform gating when NO
+  // available model serves the mode (mode-level availability across `macVideoModels`) — never on
+  // the selected model's `videoModes`, which used to trap the user on replace_person /
+  // animate_character with no way back. The active tab is always left enabled so a reduced catalog
+  // can't strand you on a disabled tab; the per-mode block still gates the in-mode model picker +
+  // submit (via `modelsForMode` / `supportsMode`).
+  //
+  // sc-19570 — PLATFORM-AGNOSTIC. This read `macGating &&`, which is false off-Mac, so every
+  // MLX-only tab (LTX 2.3's Image→Video / First-Last-Frame / Extend / Bridge / Replace) stayed
+  // enabled on Windows/Linux and the user only learned at Generate. Either gate disables the tab now.
+  //
+  // The two are mutually exclusive, so AT MOST one is ever true — not "exactly one", which this
+  // comment used to claim and which is false in two ordinary states. `candleGatingActive` is
+  // `!is_mac` and `macGatingActive` is the SCENEWORKS_MLX_REQUIRED rollout flag, so BOTH are false
+  // (a) before `GET /api/v1/capabilities/mac` responds, since `DEFAULT_MAC_CAPABILITIES` sets both
+  // false, and (b) permanently on a Mac still in observe mode. In both windows this predicate is
+  // inert and the tab list falls back to the manifest declaration alone. That is deliberate — a
+  // client that has not yet been told the platform must not invent a gate — but it means the
+  // declaration IS the whole answer there, and copy that says otherwise misdescribes the screen.
+  const modeTabBlocked = (value) =>
+    (macGating || candleGating) && modelsForMode(value).length === 0;
+  // The tab tooltip names the platform that is doing the gating — off-Mac the honest sentence is
+  // the inverse of the Mac one (the pair works, just not here).
+  const modeTabBlockedText = candleGating
+    ? "No installed model supports this mode on this platform (macOS/MLX only)."
+    : "No installed model supports this mode on macOS.";
   const matchingTracks = useMemo(
     () =>
       mode === "replace_person"
@@ -1278,6 +1341,14 @@ export function VideoStudio() {
     // screen cannot violate must not be able to refuse.
     audio: showAudioReferences ? referenceAudioAssetIds.length : 0,
   });
+  // sc-19574 — the audio-only Ref2VA shape, named so the Generate gate can SAY why rather than
+  // leaving the user to infer it from an empty image zone next to a full audio one. Counted off the
+  // outgoing lists so a stale audio selection on a model that declares no audio cap can't raise it.
+  const audioOnlyReferenceSet =
+    mode === "reference_to_video" &&
+    outgoingReferenceAudioAssetIds.length > 0 &&
+    referenceAssetIds.length === 0 &&
+    outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
     (mode === "image_to_video" && sourceAssetId) ||
@@ -1287,16 +1358,21 @@ export function VideoStudio() {
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId) ||
     // Bernini editing / reference-driven modes (sc-4703).
     (mode === "video_to_video" && sourceClipAssetId) ||
-    // `reference_to_video` needs at least one reference of ANY kind the model takes, not
-    // specifically an IMAGE (sc-17159 fixed the same spelling in `validate_video_job`). Bernini was
-    // the only model serving r2v when this line was written and it conditions on images alone, so
-    // "an image" and "a reference" were the same sentence; MiniMax-H3 Ref2VA broke that identity —
-    // an audio-only or clip-only set is a shape its checkpoint serves and the API admits. Gated on
-    // what the MODEL declares, so Bernini keeps needing an image: its clip/audio counts are 0 here.
+    // `reference_to_video` needs at least one VISUAL reference — an image or a video clip. Audio
+    // references ride along and can never be the only one.
+    //
+    // sc-17159 widened this from images-alone because MiniMax-H3 Ref2VA also takes clips and audio;
+    // the clip half was right and the audio half was not. sc-19574 settled it against the reference
+    // implementation: diffusers `MiniMaxH3` refuses `set(kinds) == {"audio"}` outright — an audio
+    // reference never reaches the conditioner, so an audio-only set leaves the visual stream
+    // unconditioned — and the worker refuses it too (sc-19508). Enabling Generate for a shape three
+    // layers down rejects is exactly the "the product offers it and then says no" gap this closes;
+    // `validate_video_job` now 400s the same shape with the same rule.
+    //
+    // Bernini is unaffected: it declares no clip or audio caps, so `outgoingSourceClipAssetIds` is
+    // empty there and this stays "needs an image".
     (mode === "reference_to_video" &&
-      (referenceAssetIds.length > 0 ||
-        outgoingSourceClipAssetIds.length > 0 ||
-        outgoingReferenceAudioAssetIds.length > 0)) ||
+      (referenceAssetIds.length > 0 || outgoingSourceClipAssetIds.length > 0)) ||
     (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0) ||
     // Bernini multi-source modes (sc-5425): mv2v needs >=2 clips; ads2v needs a source
     // clip, a reference video, and >=1 reference image.
@@ -1376,6 +1452,7 @@ export function VideoStudio() {
       hasLtxIcLora,
       replaceReady,
       referenceLimitMessage,
+      audioOnlyReferenceSet,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1394,6 +1471,7 @@ export function VideoStudio() {
       hasLtxIcLora,
       replaceReady,
       referenceLimitMessage,
+      audioOnlyReferenceSet,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1514,7 +1592,7 @@ export function VideoStudio() {
             ? { textEncoderModel: selectedTextEncoderModel }
             : {}),
           ...(showTorchQuantization && quantization !== "auto" ? { quantization } : {}),
-          ...(selectedMlxQuantize !== null ? { mlxQuantize: selectedMlxQuantize } : {}),
+          ...(selectedTierQuantize !== null ? { mlxQuantize: selectedTierQuantize } : {}),
           // Configurable sampler / scheduler (epic 1753). Sealed adapters
           // (LTX native, MLX) silently fall back to default; only the Wan
           // diffusers (torch) path actually applies these.
@@ -1616,8 +1694,8 @@ export function VideoStudio() {
               options={modeOptions}
               mode={mode}
               onChange={setMode}
-              blockFor={(value, active) => !active && macModeTabBlocked(value)
-                ? { text: "No installed model supports this mode on macOS." }
+              blockFor={(value, active) => !active && modeTabBlocked(value)
+                ? { text: modeTabBlockedText }
                 : null}
             />
             <div className="prompt-hero-links">
@@ -1943,7 +2021,7 @@ export function VideoStudio() {
                   {/* Models gated on the selected tab (sc-5716): show only models that serve the
                       active mode, falling back to the full available list if none do (a reduced
                       catalog) so the picker is never empty. */}
-                  {(modelsForMode(mode).length ? modelsForMode(mode) : baseVideoModels).map((item) => (
+                  {(modelsForMode(mode).length ? modelsForMode(mode) : macVideoModels).map((item) => (
                     <option key={item.id} value={item.id}>
                       {updateOptionLabel(item)}
                     </option>

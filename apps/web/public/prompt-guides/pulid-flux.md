@@ -55,8 +55,8 @@ FLUX-dev is photoreal by default; you can dial in cinematic looks with descripto
 ## Limits
 
 - **Person characters only.** PuLID extracts an ArcFace face embedding; non-person characters (animals, mechs, stylized cartoons) won't have a detectable face and the generation will fail. Use **FLUX.1 [dev]** with IP-Adapter for non-face references, or **InstantID (RealVisXL)** for stylized people on SDXL.
-- **1024×1024 only.** The sc-2012 spike validated 1024² on Apple Silicon at ~85 GB peak unified memory and ~127s/image. Other FLUX buckets are deferred to a follow-up.
-- **64 GB+ Mac required.** PuLID-FLUX needs FLUX-dev + T5-XXL + EVA-CLIP + PuLID weights resident at once. A 128 GB Mac is comfortable; 36 GB is not feasible at 1024² without offload.
+- **1024×1024 only.** The sc-2012 spike measured ~85 GB peak unified memory and ~127s/image on Apple Silicon. Other FLUX buckets are deferred to a follow-up.
+- **A large-memory accelerator is required.** PuLID-FLUX runs through native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux, and needs FLUX-dev + T5-XXL + EVA-CLIP + PuLID weights resident at once. The measured Apple path is comfortable on a 128 GB Mac; size off-Mac GPUs accordingly.
 - **License: FLUX.1 [dev] non-commercial (gated).** Inherits the FLUX.1-dev license — accept the gate on Hugging Face and use a token before downloading.
 
 ## Sources

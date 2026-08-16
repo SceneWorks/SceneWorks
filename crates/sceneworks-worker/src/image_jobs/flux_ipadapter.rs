@@ -442,6 +442,9 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 flux_base,
                 ip_adapter: adapter_file,
                 image_encoder: encoder_dir,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                adapters: Vec::new(),
             };
             let model =
                 IpAdapterFlux::load_with_memory(&paths, generation_memory).map_err(|error| {

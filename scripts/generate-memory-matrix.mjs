@@ -43,8 +43,15 @@ const GENERATION_CAPABILITIES = new Set([
   "image_inpaint",
   "image_detail",
   "character_image",
-  "style_variations",
 ]);
+
+export function activeCalibrationPlan(calibrationPlan) {
+  const retiredModes = new Set(Object.keys(calibrationPlan.retiredModes ?? {}));
+  return {
+    ...calibrationPlan,
+    providers: calibrationPlan.providers.filter((entry) => !retiredModes.has(entry.target.mode)),
+  };
+}
 
 // This is ownership metadata, not conformance data. Drift is checked against the
 // source-owned EXPECTED_IMAGE_IDS list and the shipped manifest below.
@@ -2800,7 +2807,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const mlxFitBody = bodies.mlxFitGate;
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
-  const calibrationPlan = JSON.parse(bodies.calibrationPlan);
+  const calibrationPlan = activeCalibrationPlan(JSON.parse(bodies.calibrationPlan));
   // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
   // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
   const inferenceClosureDigests = validatedInferenceClosures(

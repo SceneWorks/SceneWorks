@@ -3,11 +3,12 @@
 // verbatim so the per-Studio availability gates and the screens themselves agree on
 // exactly which models qualify. Predicates are capability + Mac-gating only (no install
 // state) — callers layer installState via the helpers at the bottom.
+import { candleModelBlock, candleVideoModeBlock } from "./candleGating.js";
 import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGating.js";
 import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
 
 // Image generation modes a model can serve (ImageStudio mode tabs).
-const IMAGE_MODES = ["text_to_image", "edit_image", "character_image", "style_variations"];
+const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
 
 // Video generation modes a model can advertise (VideoStudio modeOptions).
 export const VIDEO_MODES = [
@@ -46,6 +47,7 @@ export function imageModelServesMode(model, mode, caps) {
   // still can never leak into Text.
   const capabilitiesDeclared = Array.isArray(model?.capabilities);
   const capabilities = capabilitiesDeclared ? model.capabilities : [];
+  if (!IMAGE_MODES.includes(mode)) return false;
   if (mode === "edit_image") {
     return (
       (capabilities.includes("edit_image") || capabilities.includes("image_edit")) &&
@@ -54,9 +56,6 @@ export function imageModelServesMode(model, mode, caps) {
   }
   if (mode === "character_image") {
     return capabilities.includes("character_image") && !macModelFeatureBlock(model, caps, "reference");
-  }
-  if (mode === "style_variations") {
-    return capabilities.includes("style_variations") && !macModelFeatureBlock(model, caps, "reference");
   }
   return !capabilitiesDeclared || capabilities.includes("text_to_image");
 }
@@ -70,16 +69,43 @@ export function imageModelUsable(model, caps) {
   );
 }
 
-// Video Studio — mirrors VideoStudio.jsx `modelServesMode`.
+// Video Studio — the ONE authority for "does this model serve this mode?" (VideoStudio.jsx imports
+// it rather than keeping the local copy it used to have; two copies is how one platform's gate got
+// added and the other's did not).
+//
+// Three conjuncts, one per layer of the reachability question (sc-19570):
+//   * the model DECLARES the mode (the manifest capability), and
+//   * under active Mac gating, MLX claims it for this model (`macVideoModeBlock`), and
+//   * under active off-Mac gating, candle claims it for this model (`candleVideoModeBlock`).
+// The two platform blocks are mutually exclusive and each is a no-op on the other's platform, so AT
+// MOST one of them can ever fire.
+//
+// ⚠️ NOT "exactly one", and declaration alone is NOT "never again the whole answer" — this comment
+// asserted both and each is false in the same two states, where NEITHER block fires and this
+// function collapses back to `capabilities.includes(mode)`:
+//   1. Before `GET /api/v1/capabilities/mac` responds. `DEFAULT_MAC_CAPABILITIES` sets both
+//      `macGatingActive` and `candleGatingActive` false, so both helpers short-circuit to "not
+//      blocked" on every platform. Every consumer of this predicate renders at least one pass in
+//      that window.
+//   2. On a Mac in observe mode, permanently. `macGatingActive` is the SCENEWORKS_MLX_REQUIRED
+//      rollout flag rather than a fact about the host, and `candleGatingActive` is `!is_mac`, so a
+//      Mac with the flag off has neither.
+// Both are deliberate — a client that has not been told what it is running on must not invent a
+// gate — but a reader who believes the stronger claim will look for a bug that is not there.
 export function videoModelServesMode(model, mode, caps) {
-  return Boolean(model?.capabilities?.includes(mode)) && !macVideoModeBlock(model, caps, mode);
+  return (
+    Boolean(model?.capabilities?.includes(mode)) &&
+    !macVideoModeBlock(model, caps, mode) &&
+    !candleVideoModeBlock(model, caps, mode)
+  );
 }
 
-// Usable on Video Studio: a video-type model that isn't Mac-blocked and serves ≥1 mode.
+// Usable on Video Studio: a video-type model that isn't platform-blocked and serves ≥1 mode.
 export function videoModelUsable(model, caps) {
   return (
     model?.type === "video" &&
     !macModelBlock(model, caps) &&
+    !candleModelBlock(model, caps) &&
     VIDEO_MODES.some((mode) => videoModelServesMode(model, mode, caps))
   );
 }
