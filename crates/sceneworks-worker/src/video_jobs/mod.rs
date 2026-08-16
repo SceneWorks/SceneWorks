@@ -2126,6 +2126,14 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
         .or_else(|| scail2_engine_id(model))
         .or_else(|| krea_realtime_engine_id(model))
         .or_else(|| mochi_engine_id(model))
+        // MiniMax-H3 (epic 17137 / sc-19508) — the same tail arm `resolve_video_route_with` carries.
+        // Unfiltered by `minimax_h3_ready` exactly as every resolver above is unfiltered by its
+        // `*_available` sibling: this function answers "which inference generator does dispatch
+        // NAME for this route", not "is it loadable on this machine right now". Omitting it made
+        // the capability-facts dumper report "worker dispatch resolves no inference engine" for a
+        // route whose dispatch arm is right there — main added this derivation while the epic added
+        // the family, and neither side's diff touched the other's lines.
+        .or_else(|| minimax_h3_engine_id(model))
         .into_iter()
         .collect()
 }

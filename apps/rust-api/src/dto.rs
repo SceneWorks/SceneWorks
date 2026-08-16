@@ -1119,11 +1119,15 @@ pub(crate) struct ModelDownloadRequest {
     /// else the first supported entry) — the back-compat single-variant behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) variant: Option<String>,
-    /// The caller asserts the user has accepted the model's license (sc-17227). Required — and
-    /// only consulted — for a catalog entry carrying `requiresLicenseAcknowledgment`, whose
-    /// Hugging Face repo is PUBLIC and therefore has no credential check to fail behind. Defaults
-    /// to `false`, so a client that does not know about the field is refused rather than let
-    /// through: the acknowledgment must be affirmatively asserted, never assumed.
+    /// The caller asserts the user has accepted the license of the weights this request FETCHES
+    /// (sc-17227). Read by `create_model_download_job` and `create_lora_download_job`, which share
+    /// this body. Consulted when the catalog entry the path id names carries
+    /// `requiresLicenseAcknowledgment`, AND when any repo the request would queue resolves against
+    /// `license_acknowledgment_repo_index` — the same repo-keyed gate `POST /api/v1/jobs` applies,
+    /// so the typed and generic doors answer the same repo the same way. The gated repos are
+    /// PUBLIC and therefore have no credential check to fail behind. Defaults to `false`, so a
+    /// client that does not know about the field is refused rather than let through: the
+    /// acknowledgment must be affirmatively asserted, never assumed.
     #[serde(default)]
     pub(crate) license_acknowledged: bool,
 }

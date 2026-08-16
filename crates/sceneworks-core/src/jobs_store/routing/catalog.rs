@@ -892,10 +892,6 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // Both are VACE-capable on candle.
     VideoModelCaps::new("wan_2_2_t2v_14b", true, true, false, true),
     VideoModelCaps::new("wan_2_2_i2v_14b", true, true, true, true),
-    // Wan2.2 VACE-Fun A14B (sc-18478): dedicated dual-expert replace-person providers on both native
-    // backends. Like SCAIL-2 below, this is deliberately absent from the base Candle and generic
-    // single-expert VACE columns: its dedicated predicate admits PersonReplace only.
-    VideoModelCaps::new("wan_2_2_vace_fun_14b", true, false, false, false),
     // SVD (`svd` → `svd_xt`, sc-3523 MLX; sc-5493 candle): image→video ONLY. Not a VACE model.
     VideoModelCaps::new("svd", true, true, true, false),
     // Bernini (epic 4699 / sc-4707 MLX; sc-10997 candle): Qwen2.5-VL planner + Wan2.2-T2V-A14B
@@ -950,7 +946,10 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // "this video model has no MLX engine" reason — untrue for a model whose engine arm is right
     // there. Every candle column is false and load-bearing: it is in none of the `CANDLE_VIDEO_*`
     // sets (the candle VACE lane runs the Wan2.1-VACE-14B tree under `wan_2_2` / the 14B pair), so
-    // the MLX lane is the only lane it has.
+    // the MLX lane is the only lane it has. sc-18478 recorded the same row independently on `main`,
+    // phrased as "like SCAIL-2, deliberately absent from the base Candle and generic single-expert
+    // VACE columns: its dedicated predicate admits PersonReplace only" — same claim, and the two
+    // additions merged into a duplicate row that this sync collapsed back to one.
     VideoModelCaps::new("wan_2_2_vace_fun_14b", true, false, false, false),
     // MiniMax-H3 / Hailuo 3.0, both partitions (epic 17137, sc-17158 manifest / sc-17159 routing):
     // joint audio+video generation. `minimax_h3` serves t2va + fl2va (`text_to_video` /
@@ -1735,7 +1734,6 @@ mod tests {
         "wan_2_2",
         "wan_2_2_t2v_14b",
         "wan_2_2_i2v_14b",
-        "wan_2_2_vace_fun_14b",
         "svd",
         "bernini",
         "scail2_14b",
@@ -2495,6 +2493,25 @@ mod tests {
                 media.insert("referenceAssetIds".to_owned(), serde_json::json!(["img-1"]));
             }
             _ => {}
+        }
+        // The LTX advanced modes are IC-LoRA-conditioned on BOTH lanes: `video_request_is_mlx_eligible`
+        // and `ltx_replace_candle_eligible` / `video_request_candle_eligible` all require
+        // `loras_contain_ltx_ic_lora`, because the extend/bridge/replacement providers are the
+        // IC-LoRA keyframe-append paths rather than a separate checkpoint. The Video Studio only
+        // offers those tabs on LTX with the IC-LoRA selected, so an adapter-free payload is refused
+        // for a reason that has nothing to do with the advertised capability — the same shape the
+        // `text_to_video` carve-out above avoids.
+        //
+        // Confined to the LTX pair on purpose: generic Wan-VACE REFUSES a LoRA-bearing advanced job
+        // (`video_request_candle_vace_eligible` rejects `loras` for every model but the dedicated
+        // VACE-Fun provider), so attaching one unconditionally would invert this probe for `wan_2_2`.
+        if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+            && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
+        {
+            media.insert(
+                "loras".to_owned(),
+                serde_json::json!([{ "id": "ltx-ic-lora-probe", "icLora": true }]),
+            );
         }
         serde_json::from_value(serde_json::json!({
             "id": "job_video_probe",
