@@ -17,6 +17,10 @@ vi.mock("../api.js", async () => {
 });
 
 import { ApiError } from "../api.js";
+// The REAL gate predicate, not a restatement of it. The LoRA tests below assert what
+// `createLoraDownloadJob` would actually see, so if the gate ever stops reading the stamp these
+// assertions move with it instead of pinning a hand-copied field name.
+import { licenseAcknowledgmentSource } from "../licenseAcknowledgment.js";
 import { inspectFailureMessage, useWorkflowDrop } from "./useWorkflowDrop.js";
 
 const PNG_HEAD = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -509,6 +513,71 @@ describe("useWorkflowDrop", () => {
         catalogModels: [{ id: "unrelated", type: "image" }],
       });
       expect(installModel).toHaveBeenCalledWith({ id: "fixture_model" });
+    });
+
+    // sc-17227 review MAJOR 1 — the SAME defect in the second surface. The LoRA branch resolved
+    // nothing at all: it passed `null` unconditionally, so `installLora` always got an `{ id }`
+    // stub. `createLoraDownloadJob`'s gate reads `licenseAcknowledgmentModelId`, which the SERVER
+    // stamps onto the fetched row and which a stub cannot carry, so the panel sent no
+    // `licenseAcknowledged` and the server gate at `apps/rust-api/src/loras.rs` answered a 403
+    // nothing in the product could clear — an unsatisfiable gate.
+    //
+    // Unreachable in today's shipped LoRA catalog (no row's `source.repo` is a restricted repo),
+    // which is why it survived the first pass. Pinned here so the fix does not depend on the
+    // catalog's current contents.
+    const queueLoraInstall = async (props) => {
+      inspectWorkflowFile.mockResolvedValue(installableBody());
+      await render(props);
+      await act(async () => {
+        await hook.handleDroppedFile(pngFile());
+      });
+      await act(async () => {
+        await hook.missing.onInstall({ kind: "lora", id: "fixture_lora" });
+      });
+    };
+
+    it("hands the LoRA installer the real catalog entry, not an { id } stub (sc-17227)", async () => {
+      const installLora = vi.fn(async () => ({ id: "job_1", status: "queued" }));
+      const entry = {
+        id: "fixture_lora",
+        name: "Fixture LoRA",
+        source: { provider: "huggingface", repo: "MiniMaxAI/MiniMax-H3" },
+        // Server-stamped by `annotate_license_acknowledgment_sources`; present ONLY on a fetched
+        // catalog row.
+        licenseAcknowledgmentModelId: "minimax_h3",
+        licenseAcknowledgmentModelName: "MiniMax-H3",
+      };
+      await queueLoraInstall({
+        projectId: "project_1",
+        token: "t",
+        installLora,
+        catalogLoras: [{ id: "some_other_lora" }, entry],
+      });
+      expect(installLora).toHaveBeenCalledTimes(1);
+      const handed = installLora.mock.calls[0][0];
+      expect(handed).toBe(entry);
+      // Derived from the GATE's own predicate rather than from a copied field name: what the
+      // installer received must be something the licence gate can actually read a source off.
+      expect(licenseAcknowledgmentSource(handed)).toEqual({
+        id: "minimax_h3",
+        name: "MiniMax-H3",
+      });
+      // Non-vacuity: the stub the old code passed is exactly what the predicate CANNOT read, so
+      // this pair fails if the resolution is reverted.
+      expect(licenseAcknowledgmentSource({ id: entry.id })).toBeNull();
+    });
+
+    it("keeps the old { id } call when the LoRA catalog has no entry for it (sc-17227)", async () => {
+      // `POST /api/v1/loras/:id/download` 404s an id the catalog does not contain, so there is
+      // nothing to gate and nothing to resolve — same fallback as the model branch.
+      const installLora = vi.fn(async () => ({ id: "job_1", status: "queued" }));
+      await queueLoraInstall({
+        projectId: "project_1",
+        token: "t",
+        installLora,
+        catalogLoras: [{ id: "unrelated" }],
+      });
+      expect(installLora).toHaveBeenCalledWith({ id: "fixture_lora" });
     });
   });
 });

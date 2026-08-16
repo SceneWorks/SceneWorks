@@ -100,3 +100,34 @@ export function licenseAcknowledgmentBlocked(model) {
 export function offerableWithoutLicenseUi(model) {
   return model?.requiresLicenseAcknowledgment !== true;
 }
+
+// A catalog row that is not itself a model can still sit behind a MODEL's acknowledgment: a LoRA
+// whose Hugging Face `source.repo` is a repo some `requiresLicenseAcknowledgment` model declares
+// downloads exactly those restricted weights, and `POST /api/v1/loras/:id/download` refuses it
+// without the assertion (sc-17227).
+//
+// The row cannot answer "does this need an acknowledgment?" on its own, and this client must not
+// try to answer it either: the model catalog it holds is filtered to the running OS, so a repo→model
+// re-derivation here would come up empty on a host where the gating model's download rows were
+// stripped — and silently drop the gate on exactly the hosts where it still binds. So the SERVER
+// stamps the answer onto the row (`annotate_license_acknowledgment_sources`,
+// `apps/rust-api/src/models.rs`), reading the unfiltered manifest, and this reads the stamp.
+//
+// Returns the `{ id, name }` of the model whose card carries the licence text and the checkbox —
+// the LoRA rows have neither, so a refusal that did not name it would be a dead end.
+export function licenseAcknowledgmentSource(entry) {
+  const id = entry?.licenseAcknowledgmentModelId;
+  if (typeof id !== "string" || id === "") {
+    return null;
+  }
+  const name = entry?.licenseAcknowledgmentModelName;
+  return { id, name: typeof name === "string" && name !== "" ? name : id };
+}
+
+// The `licenseAcknowledgmentBlocked` of a borrowed acknowledgment: blocked when the row names a
+// gating model whose licence the user has not accepted. Reads the SAME store the model gate reads,
+// so accepting on the Models screen clears both.
+export function borrowedLicenseAcknowledgmentBlocked(entry) {
+  const source = licenseAcknowledgmentSource(entry);
+  return source !== null && !readLicenseAck(source.id);
+}
