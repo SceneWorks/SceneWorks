@@ -336,6 +336,16 @@ Consequences, binding on agents:
   suggest.
 - Story "done" = the code, its tests, adversarial review, and green required CI
   on the PR. Nothing more unless the story itself is a measurement story.
+- **Tests over measured corpora** (calibration records and evidence, capability
+  dumps, session logs, survey populations) **assert shape and invariants —
+  schema validity, non-emptiness, resolving cross-references, per-item
+  properties — never exact populations, pinned ids, or historical counts.** A
+  pinned count over a corpus that is supposed to churn cannot fail on a bug and
+  is guaranteed to fail on every legitimate re-capture; it is a gate on
+  measurement wearing a test's clothes. When a re-capture trips one, the defect
+  is in the test: rewrite that assertion and its siblings to shape in the same
+  PR rather than hand-updating the numbers. (Golden/parity fixtures that pin a
+  fixed input's output are a different, legitimate class.)
 
 #### Merge queues
 
