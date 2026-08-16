@@ -1002,7 +1002,7 @@ test("shipped five-rung oracles stay fresh after backend reuse verdicts", async 
     assert.ok(mlx.every((item) => item.modelLoadPolicy === "fresh_per_case"));
     assert.deepEqual(
       [...new Set(mlx.map((item) => item.calibrationFingerprint))],
-      ["z-image-mlx-independent-materialization-v3"],
+      ["z-image-mlx-independent-materialization-v4"],
       "load shape is a typed receipt axis, not part of the provider content fingerprint",
     );
     assert.equal(mlx.filter((item) => item.loadShape === "eager_materialization").length, 4);

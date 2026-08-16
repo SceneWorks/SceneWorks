@@ -4659,7 +4659,7 @@ mod z_image_reuse_tests {
 
     #[test]
     fn shape_independent_fingerprint_still_keeps_eager_and_deferred_loads_distinct() {
-        let fingerprint = "z-image-mlx-independent-materialization-v3";
+        let fingerprint = "z-image-mlx-independent-materialization-v4";
         assert_ne!(
             z_image_reuse_identity(fingerprint, LoadShape::EagerMaterialization),
             z_image_reuse_identity(fingerprint, LoadShape::DeferredMaterialization),

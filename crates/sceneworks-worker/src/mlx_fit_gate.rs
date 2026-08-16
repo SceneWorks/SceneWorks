@@ -41,7 +41,6 @@ use gen_core::{
     MemoryNumericTier, MemoryOptimizationAuthority, MemoryParityContract, MemoryParityResult,
     MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
     PerComponentBytes, Precision, Quant, TransformerComponent, WeightsSource,
-    MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -244,7 +243,6 @@ pub(crate) enum DecodeQualityBindingDecision {
     Legacy,
     Bound {
         artifact: MemoryDecodeArtifactIdentity,
-        implementation_fingerprint: String,
         row_count: usize,
     },
     Refused {
@@ -386,30 +384,11 @@ pub(crate) fn bind_decode_quality_policies_from_manifest(
             },
         });
     }
-    if let Some(foreign) = policies.iter().find(|policy| {
-        policy.implementation_fingerprint != MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT
-    }) {
-        return Ok(DecodeQualityPolicyBinding {
-            policies: Vec::new(),
-            authoritative: true,
-            runtime_identity: None,
-            decision: DecodeQualityBindingDecision::Refused {
-                reason: format!(
-                    "decode-quality implementation fingerprint {} does not match running implementation {}",
-                    foreign.implementation_fingerprint,
-                    MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
-                ),
-            },
-        });
-    }
-    let implementation_fingerprint = MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT.to_owned();
     let runtime_identity = MemoryDecodeQualityRuntimeIdentity {
         artifact: artifact.clone(),
-        implementation_fingerprint: implementation_fingerprint.clone(),
     };
     let decision = DecodeQualityBindingDecision::Bound {
         artifact,
-        implementation_fingerprint,
         row_count: policies.len(),
     };
     Ok(DecodeQualityPolicyBinding {
@@ -5012,6 +4991,9 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
+    const DECODE_QUALITY_TEST_STAMP: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn quality_policy_json(route: &str) -> Value {
         serde_json::json!({
             "qualityAbi": gen_core::MEMORY_DECODE_QUALITY_ABI,
@@ -5026,7 +5008,7 @@ mod tests {
                 "variant": "packed-q4",
                 "fingerprint": format!("SceneWorks/fixture@{}:packed-q4", "c".repeat(40)),
             },
-            "implementationFingerprint": gen_core::MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
+            "implementationFingerprint": DECODE_QUALITY_TEST_STAMP,
             "mode": "text_to_image",
             "overlay": null,
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1, "referenceCount": 0 },
@@ -5151,21 +5133,25 @@ mod tests {
             ));
         }
 
-        let mut stale_source_value = manifest_value;
-        stale_source_value["mlx"]["memoryStrategyContract"]["implementations"][0]
+        let mut forensic_source_value = manifest_value;
+        forensic_source_value["mlx"]["memoryStrategyContract"]["implementations"][0]
             ["parameterRanges"]["decodeGeometryPolicies"][0]["implementationFingerprint"] =
             Value::String("f".repeat(64));
-        let stale_source = bind_decode_quality_policies_from_manifest(
-            stale_source_value.as_object().unwrap(),
+        let forensic_source = bind_decode_quality_policies_from_manifest(
+            forensic_source_value.as_object().unwrap(),
             "realvisxl",
             Some(&provenance),
         )
         .unwrap();
-        assert!(stale_source.authoritative);
+        assert!(forensic_source.authoritative);
+        assert_eq!(forensic_source.policies.len(), 1);
+        assert_eq!(
+            forensic_source.policies[0].implementation_fingerprint,
+            "f".repeat(64)
+        );
         assert!(matches!(
-            stale_source.decision,
-            DecodeQualityBindingDecision::Refused { ref reason }
-                if reason.contains("does not match running implementation")
+            forensic_source.decision,
+            DecodeQualityBindingDecision::Bound { row_count: 1, .. }
         ));
     }
 
@@ -5383,15 +5369,15 @@ mod tests {
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
         let expected = [
-            ("chroma1_base", "chroma", 4_usize, 1_usize),
-            ("chroma1_flash", "chroma", 4, 2),
-            ("chroma1_hd", "chroma", 4, 0),
-            ("illustrious_xl_v1", "sdxl", 10, 0),
-            ("illustrious_xl_v2", "sdxl", 10, 0),
-            ("kolors", "kolors", 7, 0),
-            ("realvisxl", "sdxl", 10, 0),
-            ("realvisxl_lightning", "sdxl", 10, 6),
-            ("sdxl", "sdxl", 10, 0),
+            ("chroma1_base", "chroma", 4_usize, 4_usize),
+            ("chroma1_flash", "chroma", 4, 4),
+            ("chroma1_hd", "chroma", 4, 4),
+            ("illustrious_xl_v1", "sdxl", 10, 10),
+            ("illustrious_xl_v2", "sdxl", 10, 10),
+            ("kolors", "kolors", 7, 7),
+            ("realvisxl", "sdxl", 10, 10),
+            ("realvisxl_lightning", "sdxl", 10, 10),
+            ("sdxl", "sdxl", 10, 10),
         ];
         let expected_ids = expected
             .iter()
@@ -5399,6 +5385,7 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         let mut all_rows = 0_usize;
         let mut all_admitted = 0_usize;
+        let mut quality_stamps = std::collections::BTreeSet::new();
 
         for (model_id, family, row_count, admitted_count) in expected {
             let model = models
@@ -5437,9 +5424,16 @@ mod tests {
                     && row.geometry.batch == 1
                     && row.geometry.frames == 1
                     && row.geometry.reference_count == 0
-                    && row.implementation_fingerprint
-                        == gen_core::MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT
+                    && row.implementation_fingerprint.len() == 64
+                    && row
+                        .implementation_fingerprint
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             }));
+            quality_stamps.extend(
+                rows.iter()
+                    .map(|row| row.implementation_fingerprint.clone()),
+            );
             let admitted = rows
                 .iter()
                 .filter(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
@@ -5527,21 +5521,19 @@ mod tests {
                     "{model_id}: admitted row must create its exact physical decode candidate"
                 );
             }
-            let refused = rows
-                .iter()
-                .find(|row| {
-                    matches!(
-                        row.disposition,
-                        MemoryDecodeQualityDisposition::Refused { .. }
-                    )
-                })
-                .expect("every route retains refused evidence");
+            let unmeasured_geometry = MemoryGeometry {
+                width: 64,
+                height: 64,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
             let result = synthesize_estimate_ladder(
                 contract,
                 &plan,
                 "text_to_image",
                 None,
-                refused.geometry,
+                unmeasured_geometry,
                 false,
                 None,
                 &[],
@@ -5550,7 +5542,7 @@ mod tests {
                 result.estimates.iter().all(|candidate| {
                     candidate.selection.strategy != MemoryStrategy::BoundedDecode
                 }),
-                "{model_id}: refused row must not create a physical decode candidate"
+                "{model_id}: an unmeasured coordinate must not create a physical decode candidate"
             );
             let matched = contract
                 .decode_geometry_policies_for_request(MemoryDecodePolicyQuery {
@@ -5558,22 +5550,19 @@ mod tests {
                     load_shape: contract.load_shape,
                     mode_key: "text_to_image",
                     overlay: None,
-                    geometry: refused.geometry,
+                    geometry: unmeasured_geometry,
                     use_pid: false,
                 })
                 .expect("exact policy query");
-            assert!(
-                matched.iter().any(|row| {
-                    matches!(
-                        row.disposition,
-                        MemoryDecodeQualityDisposition::Refused { .. }
-                    ) && row.production_evidence_sha256 == refused.production_evidence_sha256
-                }),
-                "{model_id}: refusal must retain its typed sealed evidence identity"
-            );
+            assert!(matched.is_empty(), "{model_id}: unmeasured policy query");
         }
 
-        assert_eq!((all_rows, all_admitted), (69, 9));
+        assert_eq!((all_rows, all_admitted), (69, 69));
+        assert_eq!(
+            quality_stamps.len(),
+            10,
+            "the sealed corpus retains each collection-time source closure"
+        );
         for model in models {
             let id = model["id"].as_str().expect("model id");
             if !expected_ids.contains(id) {
@@ -7777,8 +7766,7 @@ mod tests {
                     variant: "q4".to_owned(),
                     fingerprint: format!("SceneWorks/{route}-mlx@{}:q4", "d".repeat(40)),
                 },
-                implementation_fingerprint: MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT
-                    .to_owned(),
+                implementation_fingerprint: DECODE_QUALITY_TEST_STAMP.to_owned(),
                 mode: MemoryMode::TextToImage,
                 overlay: None,
                 geometry,
@@ -8272,7 +8260,7 @@ mod tests {
                 variant: "packed-q4".to_owned(),
                 fingerprint: format!("SceneWorks/fixture@{}:packed-q4", "c".repeat(40)),
             },
-            implementation_fingerprint: MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT.to_owned(),
+            implementation_fingerprint: DECODE_QUALITY_TEST_STAMP.to_owned(),
             mode: MemoryMode::TextToImage,
             overlay: None,
             geometry: admitted_geometry,

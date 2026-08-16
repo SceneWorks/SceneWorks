@@ -737,7 +737,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   );
   assert.ok(
     bounded.every((cell) =>
-      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
+      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v4") &&
       cell.evidence.staticImplementation.some((entry) =>
         entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
       ),
