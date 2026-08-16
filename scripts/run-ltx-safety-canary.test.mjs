@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  CARGO_METADATA_TIMEOUT_MS,
   CHILD_ATTESTATION_TIMEOUT_SECONDS,
   CanaryInterrupted,
   MAX_FOOTPRINT_BYTES,
@@ -281,6 +282,8 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.doesNotMatch(source, /--child-adapter|async function child\(/);
   assert.match(source, /buildExactAdapter\(/);
   assert.match(source, /inferenceCargoSource\(/);
+  assert.equal(CARGO_METADATA_TIMEOUT_MS, 15 * 60 * 1000);
+  assert.match(source, /timeout: CARGO_METADATA_TIMEOUT_MS/);
   assert.match(source, /await assertAdapterIdentity\(adapter, signal\)/);
   assert.match(source, /pre-launch q4/);
   assert.match(source, /post-run q4/);
