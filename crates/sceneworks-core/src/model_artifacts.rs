@@ -174,7 +174,6 @@ impl ResolvedBundleClosure {
     pub fn new(mut members: Vec<ResolvedBundleMember>) -> Result<Self, ArtifactContractError> {
         for member in &mut members {
             member.files.sort();
-            member.files.dedup();
             member.validate()?;
         }
         members.sort_by(|left, right| member_sort_key(left).cmp(&member_sort_key(right)));
@@ -188,12 +187,29 @@ impl ResolvedBundleClosure {
                 "a resolved bundle must contain exactly one primary member".to_owned(),
             ));
         }
-        for pair in members.windows(2) {
-            if pair[0].destination == pair[1].destination {
+        let mut output_paths = Vec::new();
+        for member in &members {
+            for file in &member.files {
+                let path = member.destination.join(&file.relative_path);
+                output_paths.push(portable_relative_path(&path, "artifact output file")?);
+            }
+        }
+        output_paths.sort();
+        for (index, path) in output_paths.iter().enumerate() {
+            if output_paths.get(index + 1) == Some(path) {
                 return Err(ArtifactContractError(format!(
-                    "duplicate bundle destination {}",
-                    pair[0].destination.display()
+                    "duplicate artifact output file {path}"
                 )));
+            }
+            for descendant in output_paths.iter().skip(index + 1) {
+                if descendant
+                    .strip_prefix(path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                {
+                    return Err(ArtifactContractError(format!(
+                        "artifact output file {path} is an ancestor of {descendant}"
+                    )));
+                }
             }
         }
         Ok(Self { members })
@@ -359,19 +375,116 @@ impl ResolvedModelArtifact {
     }
 
     /// Stable key over the versioned immutable identity, full sorted closure and provenance.
-    /// Physical location, availability and usage state are deliberately excluded.
+    /// Physical location, availability, usage state, and post-copy verification enrichment are
+    /// deliberately excluded.
     pub fn cache_key(&self) -> Result<String, ArtifactContractError> {
         self.identity.validate()?;
+        self.provenance.identity.validate()?;
+        if self.identity != self.provenance.identity {
+            return Err(ArtifactContractError(
+                "artifact identity and provenance identity differ".to_owned(),
+            ));
+        }
         let closure = ResolvedBundleClosure::new(self.closure.members.clone())?;
-        let canonical = serde_json::to_vec(&(
+        let canonical = cache_key_payload(
             self.schema_version,
             &self.identity,
             &closure,
             &self.provenance,
-        ))
-        .map_err(|error| ArtifactContractError(format!("cannot encode artifact key: {error}")))?;
+        )?;
         Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheKeyIdentity<'a> {
+    repository: &'a str,
+    revision: &'a str,
+    variant: &'a str,
+    fingerprint: &'a str,
+}
+
+impl<'a> From<&'a ArtifactIdentity> for CacheKeyIdentity<'a> {
+    fn from(identity: &'a ArtifactIdentity) -> Self {
+        Self {
+            repository: &identity.repository,
+            revision: &identity.revision,
+            variant: &identity.variant,
+            fingerprint: &identity.fingerprint,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheKeyMember<'a> {
+    role: &'a ArtifactMemberRole,
+    component_id: Option<&'a str>,
+    source: CacheKeyIdentity<'a>,
+    tier: Option<&'a str>,
+    source_subpath: String,
+    destination: String,
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheKeyProvenance<'a> {
+    identity: CacheKeyIdentity<'a>,
+    fixed_artifact_tier: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheKeyPayload<'a> {
+    schema_version: u32,
+    identity: CacheKeyIdentity<'a>,
+    members: Vec<CacheKeyMember<'a>>,
+    provenance: CacheKeyProvenance<'a>,
+}
+
+fn cache_key_payload(
+    schema_version: u32,
+    identity: &ArtifactIdentity,
+    closure: &ResolvedBundleClosure,
+    provenance: &ArtifactProvenance,
+) -> Result<Vec<u8>, ArtifactContractError> {
+    let mut members = closure
+        .members
+        .iter()
+        .map(|member| {
+            let mut files = member
+                .files
+                .iter()
+                .map(|file| portable_relative_path(&file.relative_path, "artifact file"))
+                .collect::<Result<Vec<_>, _>>()?;
+            files.sort();
+            Ok(CacheKeyMember {
+                role: &member.role,
+                component_id: member.component_id.as_deref(),
+                source: CacheKeyIdentity::from(&member.source),
+                tier: member.tier.as_deref(),
+                source_subpath: portable_relative_path(
+                    &member.source_subpath,
+                    "artifact source subpath",
+                )?,
+                destination: portable_relative_path(&member.destination, "artifact destination")?,
+                files,
+            })
+        })
+        .collect::<Result<Vec<_>, ArtifactContractError>>()?;
+    members.sort();
+    serde_json::to_vec(&CacheKeyPayload {
+        schema_version,
+        identity: CacheKeyIdentity::from(identity),
+        members,
+        provenance: CacheKeyProvenance {
+            identity: CacheKeyIdentity::from(&provenance.identity),
+            fixed_artifact_tier: provenance.fixed_artifact_tier.as_deref(),
+        },
+    })
+    .map_err(|error| ArtifactContractError(format!("cannot encode artifact key: {error}")))
 }
 
 /// Shared runtime lease accounting for eviction/materialization policy. Resolvers that share this
@@ -447,8 +560,7 @@ impl ActiveArtifactLease {
                 .artifact
                 .cache_key()
                 .expect("a leased artifact has already passed contract validation"),
-            identity: self.artifact.identity.clone(),
-            closure: self.artifact.closure.clone(),
+            artifact: self.artifact.as_ref().clone(),
         };
         // Success is deliberately separate from release. Taking the state here releases the
         // active count only after the promotion candidate has been formed.
@@ -471,8 +583,7 @@ impl Drop for ActiveArtifactLease {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PromotionCandidate {
     pub cache_key: String,
-    pub identity: ArtifactIdentity,
-    pub closure: ResolvedBundleClosure,
+    pub artifact: ResolvedModelArtifact,
 }
 
 /// Typed source-library root. Compatibility path helpers delegate to this type so even legacy
@@ -825,6 +936,28 @@ fn validate_relative_path_allow_empty(
     Ok(())
 }
 
+fn portable_relative_path(path: &Path, label: &str) -> Result<String, ArtifactContractError> {
+    validate_relative_path_allow_empty(path, label)?;
+    path.components()
+        .map(|component| match component {
+            Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    ArtifactContractError(format!("{label} is not valid UTF-8: {}", path.display()))
+                })?;
+                if value.contains('\\') {
+                    return Err(ArtifactContractError(format!(
+                        "{label} uses a non-portable separator: {}",
+                        path.display()
+                    )));
+                }
+                Ok(value)
+            }
+            _ => unreachable!("relative-path validation permits only normal components"),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
+}
+
 fn canonical_or_absolute(path: &Path) -> Result<PathBuf, ArtifactContractError> {
     if let Ok(path) = std::fs::canonicalize(path) {
         return Ok(path);
@@ -941,6 +1074,18 @@ mod tests {
         }
     }
 
+    fn component(
+        role: ArtifactMemberRole,
+        component_id: &str,
+        destination: &str,
+        file: &str,
+    ) -> ResolvedBundleMember {
+        let mut member = primary(destination, file);
+        member.role = role;
+        member.component_id = Some(component_id.to_owned());
+        member
+    }
+
     #[test]
     fn mutable_revision_and_traversal_fail_closed() {
         assert!(ArtifactIdentity::pinned("SceneWorks/model", "main", "q8").is_err());
@@ -952,9 +1097,12 @@ mod tests {
 
     #[test]
     fn closure_is_canonical_and_cache_key_preserves_every_member() {
-        let mut optional = primary("optional", "adapter.safetensors");
-        optional.role = ArtifactMemberRole::OptionalComponent;
-        optional.component_id = Some("adapter".to_owned());
+        let optional = component(
+            ArtifactMemberRole::OptionalComponent,
+            "adapter",
+            "optional",
+            "adapter.safetensors",
+        );
         let a =
             ResolvedBundleClosure::new(vec![optional.clone(), primary("", "model.safetensors")])
                 .unwrap();
@@ -986,6 +1134,167 @@ mod tests {
         let mut changed = artifact.clone();
         changed.closure.members[1].component_id = Some("different".to_owned());
         assert_ne!(before, changed.cache_key().unwrap());
+    }
+
+    #[test]
+    fn closure_accepts_disjoint_multi_member_outputs_and_rejects_file_collisions() {
+        let shared_destination = ResolvedBundleClosure::new(vec![
+            primary("bundle", "model.safetensors"),
+            component(
+                ArtifactMemberRole::RequiredComponent,
+                "encoder",
+                "bundle",
+                "encoder.safetensors",
+            ),
+            component(
+                ArtifactMemberRole::CoRequisite,
+                "tokenizer",
+                "bundle/tokenizer",
+                "tokenizer.json",
+            ),
+        ])
+        .expect("disjoint files may share and nest member destinations");
+        assert_eq!(shared_destination.members.len(), 3);
+
+        let duplicate = ResolvedBundleClosure::new(vec![
+            primary("bundle", "model.safetensors"),
+            component(
+                ArtifactMemberRole::RequiredComponent,
+                "duplicate",
+                "bundle",
+                "model.safetensors",
+            ),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            duplicate.0,
+            "duplicate artifact output file bundle/model.safetensors"
+        );
+
+        let ancestor = ResolvedBundleClosure::new(vec![
+            primary("", "weights"),
+            component(
+                ArtifactMemberRole::RequiredComponent,
+                "descendant",
+                "weights",
+                "encoder.safetensors",
+            ),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            ancestor.0,
+            "artifact output file weights is an ancestor of weights/encoder.safetensors"
+        );
+    }
+
+    #[test]
+    fn cache_key_uses_portable_paths_and_ignores_verification_enrichment() {
+        let mut native_path = PathBuf::from("weights");
+        native_path.push("nested");
+        native_path.push("model.safetensors");
+        assert_eq!(
+            portable_relative_path(&native_path, "test path").unwrap(),
+            "weights/nested/model.safetensors"
+        );
+
+        let mut primary = primary("bundle", "weights/model.safetensors");
+        primary.source_subpath = PathBuf::from("q8/transformer");
+        primary
+            .files
+            .push(ArtifactFile::new("config/config.json").unwrap());
+        let closure = ResolvedBundleClosure::new(vec![
+            component(
+                ArtifactMemberRole::OptionalComponent,
+                "adapter",
+                "bundle",
+                "adapters/style.safetensors",
+            ),
+            primary,
+        ])
+        .unwrap();
+        let identity = ArtifactIdentity::pinned("SceneWorks/model", REV, "q8").unwrap();
+        let provenance = ArtifactProvenance {
+            identity: identity.clone(),
+            fixed_artifact_tier: Some("q8".to_owned()),
+        };
+        let artifact = ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: identity.clone(),
+            location: ArtifactLocation::SourceLibrary {
+                root: PathBuf::from("/source/is/not/cache/identity"),
+            },
+            closure,
+            provenance: provenance.clone(),
+            completeness: ArtifactCompleteness::Complete,
+            availability: ArtifactAvailability::Available,
+        };
+        let payload = String::from_utf8(
+            cache_key_payload(
+                artifact.schema_version,
+                &identity,
+                &artifact.closure,
+                &provenance,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(payload.contains("q8/transformer"));
+        assert!(payload.contains("weights/model.safetensors"));
+        assert!(payload.contains("adapters/style.safetensors"));
+        assert!(!payload.contains('\\'));
+        assert!(!payload.contains("sizeBytes"));
+        assert!(!payload.contains("sha256"));
+
+        let before = artifact.cache_key().unwrap();
+        let mut enriched = artifact.clone();
+        for (member_index, member) in enriched.closure.members.iter_mut().enumerate() {
+            for (file_index, file) in member.files.iter_mut().enumerate() {
+                file.size_bytes = Some((member_index * 10 + file_index + 1) as u64);
+                file.sha256 = Some(format!("sha256:{:064x}", member_index * 10 + file_index));
+            }
+        }
+        assert_eq!(before, enriched.cache_key().unwrap());
+
+        let mut reordered = artifact.clone();
+        reordered.closure.members.reverse();
+        for member in &mut reordered.closure.members {
+            member.files.reverse();
+        }
+        assert_eq!(before, reordered.cache_key().unwrap());
+
+        let mut changed_schema = artifact.clone();
+        changed_schema.schema_version += 1;
+        assert_ne!(before, changed_schema.cache_key().unwrap());
+
+        let mut changed_identity = artifact.clone();
+        let changed = ArtifactIdentity::pinned(
+            "SceneWorks/model",
+            "1111111111111111111111111111111111111111",
+            "q4",
+        )
+        .unwrap();
+        changed_identity.identity = changed.clone();
+        changed_identity.provenance.identity = changed;
+        assert_ne!(before, changed_identity.cache_key().unwrap());
+
+        let mut changed_role = artifact.clone();
+        changed_role
+            .closure
+            .members
+            .iter_mut()
+            .find(|member| member.component_id.as_deref() == Some("adapter"))
+            .unwrap()
+            .role = ArtifactMemberRole::RequiredComponent;
+        assert_ne!(before, changed_role.cache_key().unwrap());
+
+        let mut changed_file = artifact.clone();
+        changed_file.closure.members[0].files[0].relative_path =
+            PathBuf::from("adapters/other.safetensors");
+        assert_ne!(before, changed_file.cache_key().unwrap());
+
+        let mut changed_provenance = artifact;
+        changed_provenance.provenance.fixed_artifact_tier = Some("q4".to_owned());
+        assert_ne!(before, changed_provenance.cache_key().unwrap());
     }
 
     #[test]
@@ -1070,11 +1379,28 @@ mod tests {
             from_source.cache_key().unwrap(),
             from_local.cache_key().unwrap()
         );
+        let expected_source = from_source.clone();
         let candidate = resolver
-            .acquire_runtime_lease(&Arc::new(from_local))
+            .acquire_runtime_lease(&Arc::new(from_source.clone()))
             .unwrap()
             .mark_success();
         assert_eq!(candidate.cache_key, from_source.cache_key().unwrap());
+        assert_eq!(candidate.artifact, expected_source);
+        assert!(matches!(
+            candidate.artifact.location,
+            ArtifactLocation::SourceLibrary { .. }
+        ));
+        assert_eq!(
+            candidate.artifact.availability,
+            ArtifactAvailability::UsableStale
+        );
+        let serialized = serde_json::to_value(&candidate).unwrap();
+        assert_eq!(
+            serialized["artifact"]["schemaVersion"],
+            MODEL_ARTIFACT_CONTRACT_VERSION
+        );
+        let round_trip: PromotionCandidate = serde_json::from_value(serialized).unwrap();
+        assert_eq!(round_trip, candidate);
 
         std::fs::remove_file(snapshot.join("model.safetensors")).unwrap();
         assert!(
