@@ -273,3 +273,119 @@ fn manifest_dimension_multiple_matches_the_pinned_engine_stride() {
         );
     }
 }
+
+/// Every MiniMax-H3 resolution the catalog ADVERTISES must fit the pinned engine's per-edge
+/// ceiling, not just its area budget (sc-19721).
+///
+/// **This is the guard the 21:9 caveat was standing in for.** `1536x672` is 1,032,192 px — byte for
+/// byte what `1344x768` is — so it always satisfied `CANVAS_MAX_PIXELS`, and every area-based check
+/// in this repo passed it while the engine refused it: MiniMax-H3 bounds each EDGE independently,
+/// and that ceiling used to sit below 1536. For two stories the only thing standing between the
+/// catalog and a canvas the engine rejects was a prose caveat in the manifest and the prompt guide,
+/// with a JS test asserting the caveat's WORDING. inference #640 raised the ceiling and sc-19721's
+/// pin bump brought it here, so the caveat is discharged — and rather than delete the coverage with
+/// it, the claim is re-expressed as the thing it should always have been: a comparison against the
+/// engine.
+///
+/// `max_size` is read off the REGISTERED descriptor rather than `pipeline::MAX_CANVAS_EDGE`, because
+/// the descriptor field is what `gen_core::validate_request` actually enforces; the const is only
+/// what the provider chose to build it from. They agree at this pin, and that agreement is asserted
+/// here so neither can be substituted for the other by accident.
+#[test]
+fn advertised_minimax_h3_resolutions_fit_the_pinned_engine_edge_cap() {
+    let descriptor = crate::inference_runtime::media_descriptor("minimax_h3")
+        .expect("the pinned bundle registers minimax_h3 (sc-19721)");
+    let max_edge = u64::from(descriptor.capabilities.max_size);
+    assert_eq!(
+        max_edge,
+        u64::from(platform_runtime::providers::minimax_h3::pipeline::MAX_CANVAS_EDGE),
+        "the descriptor's enforced max_size and the pipeline const have diverged; this guard must \
+         follow the one the request validator reads"
+    );
+    assert!(
+        max_edge > u64::from(CANVAS_MAX_PIXELS).isqrt(),
+        "a per-edge cap at or below the square root of the area budget would make the area budget \
+         unreachable — if that is ever true the model's geometry story has changed, not this test"
+    );
+
+    let mut checked = 0_usize;
+    for (id, limits) in shipped_video_limits() {
+        if !id.starts_with("minimax_h3") {
+            continue;
+        }
+        let resolutions = limits
+            .get("resolutions")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{id} advertises a limits.resolutions list"));
+        assert!(!resolutions.is_empty(), "{id}: empty resolutions list");
+        for entry in resolutions {
+            let (width, height) = match entry {
+                Value::Object(map) => (
+                    map.get("width").and_then(Value::as_u64),
+                    map.get("height").and_then(Value::as_u64),
+                ),
+                Value::String(text) => {
+                    let (w, h) = text
+                        .split_once('x')
+                        .unwrap_or_else(|| panic!("{id}: unparseable resolution {text:?}"));
+                    (w.trim().parse().ok(), h.trim().parse().ok())
+                }
+                other => panic!("{id}: unexpected resolution entry {other}"),
+            };
+            let (Some(width), Some(height)) = (width, height) else {
+                panic!("{id}: resolution entry has no width/height: {entry}");
+            };
+            assert!(
+                width.max(height) <= max_edge,
+                "{id}: advertises {width}x{height}, whose long edge exceeds the PINNED engine's \
+                 per-edge cap ({max_edge}). The area budget does NOT settle this — the engine \
+                 bounds each edge independently. Either the catalog got ahead of the engine or the \
+                 pin moved behind the catalog; they must move together (sc-17152 / sc-19721)."
+            );
+            assert!(
+                width * height <= u64::from(CANVAS_MAX_PIXELS),
+                "{id}: advertises {width}x{height}, over the engine's area budget"
+            );
+            checked += 1;
+        }
+    }
+    // The loop must have had something to check: a renamed key or an entry shape this parser skips
+    // would otherwise make the whole guard a vacuous pass.
+    assert!(
+        checked >= 10,
+        "expected both MiniMax-H3 partitions to advertise their full bucket list; checked only \
+         {checked} resolutions"
+    );
+}
+
+/// The MiniMax-H3 install-integrity mirror in `sceneworks-core` is bound to the engine's own
+/// component names (sc-19721).
+///
+/// `mlx_tier_completeness` transcribed `transformer` / `transformer_ref` / `text_encoder` by READING
+/// the engine source, and said so: at the old pin `mlx-gen-minimax-h3` was not in the tree, so there
+/// was no symbol to import and nothing could go red when the engine renamed one. The recorded
+/// obligation was to bind them once the pin carried the crate. It does now, so they are bound —
+/// `sceneworks-core` cannot depend on an inference crate, so the tie lives here, in the worker,
+/// where the pinned bundle is already in scope.
+#[test]
+fn minimax_h3_component_names_are_the_pinned_engines_own() {
+    use platform_runtime::providers::minimax_h3::model as engine;
+    use sceneworks_core::mlx_tier_completeness::{
+        MINIMAX_H3_PARTITIONS, MINIMAX_H3_TEXT_ENCODER_DIR,
+    };
+
+    assert_eq!(
+        MINIMAX_H3_PARTITIONS,
+        [
+            ("minimax_h3", engine::DIT_COMPONENT),
+            ("minimax_h3_ref", engine::REFERENCE_DIT_PARTITION),
+        ],
+        "the install-integrity mirror's DiT partition dirs must be the engine's own constants — a \
+         rename upstream has to red here, not at load time on a user's machine"
+    );
+    assert_eq!(
+        MINIMAX_H3_TEXT_ENCODER_DIR,
+        engine::TEXT_ENCODER_COMPONENT,
+        "the staged text-encoder component name is the engine's, not a transcription"
+    );
+}

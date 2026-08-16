@@ -118,10 +118,11 @@ pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
 /// string** — so nothing in this module needs the provider to be importable at compile time. What
 /// it does need is for the id to be PRESENT in the registry, which is exactly what this reads.
 ///
-/// Deriving it beats asserting it: at the current pin (`014134e3`) the descriptor is absent and the
-/// refusal fires; the moment sc-18650 lands a bundle that registers `minimax_h3`, the descriptor
-/// appears and this arm goes live with **no code change**. A hard-coded revision string could only
-/// have gone stale.
+/// Deriving it beat asserting it, and sc-19721 is the proof: at `014134e3` the descriptor was
+/// absent and this refusal fired, and when the pin moved to `75d66db5` the descriptor appeared and
+/// the arm went live with **no code change here**. A hard-coded revision string would have gone
+/// stale instead — which is exactly what happened to every prose citation of the old pin around
+/// it.
 ///
 /// The same `media_descriptor(...).is_none()` idiom already gates the not-in-this-bundle branches
 /// of `mlx_fit_gate`, so this is the established way to ask the question.
@@ -387,18 +388,30 @@ pub(super) fn minimax_h3_validate_partition(request: &VideoRequest) -> WorkerRes
             )));
         }
         // `Conditioning::ReferenceVideo` — the ONLY variant that carries a reference clip's own
-        // frame rate — arrives with the sc-18650 pin bump. It is genuinely absent from the pinned
-        // gen-core, so this shape cannot be built here yet. Refuse it by name rather than
-        // downgrading it to `Conditioning::VideoClip`: the engine deliberately does NOT advertise
-        // `VideoClip` (it has no in-context clip mechanism), so that substitution would be refused
-        // as `Unsupported` after the load — or, worse, silently accepted by some future provider as
-        // a completely different mechanism. Tracked as the sc-19508 follow-up.
+        // frame rate.
+        //
+        // 🔴 THE REASON FOR THIS REFUSAL CHANGED AT sc-19721, AND THE MESSAGE HAD TO CHANGE WITH IT.
+        // It used to say the variant "arrives with the inference pin bump (sc-18650)", which was
+        // true at `014134e3`: gen-core had no such variant. The pin is now `75d66db5`, where
+        // `Conditioning::ReferenceVideo { frames, fps, audio }` EXISTS and MiniMax-H3's descriptor
+        // ADVERTISES `ConditioningKind::ReferenceVideo`. Both halves of the old reason are gone.
+        //
+        // What is missing is on THIS side: nothing in the worker decodes a source clip into
+        // `Vec<Image>` + its own fps + its own `AudioTrack` for this arm — no call site in the repo
+        // constructs the variant at all. That is a SceneWorks feature slice (the sc-19508
+        // follow-up), not a pin. The refusal stands, honestly stated, until it is built.
+        //
+        // Still refused BY NAME rather than downgraded to `Conditioning::VideoClip`: the engine
+        // deliberately does NOT advertise `VideoClip` (it has no in-context clip mechanism), so
+        // that substitution would be refused as `Unsupported` after the load — or, worse, silently
+        // accepted by some future provider as a completely different mechanism.
         if clip_refs > 0 {
             return Err(WorkerError::InvalidPayload(format!(
-                "{}: video references are not renderable in this build — the conditioning variant \
-                 that carries a reference clip's own frame rate arrives with the inference pin \
-                 bump (sc-18650). Image and audio references render now; remove the \
-                 sourceClipAssetIds entries, or wait for the pin. No output was produced.",
+                "{}: video references are not renderable in this build — the engine accepts them, \
+                 but SceneWorks does not yet decode a reference clip into the frames, frame rate \
+                 and soundtrack the conditioning carries (sc-19508 follow-up). Image and audio \
+                 references render now; remove the sourceClipAssetIds entries. No output was \
+                 produced.",
                 request.model
             )));
         }

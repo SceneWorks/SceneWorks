@@ -1976,7 +1976,8 @@ test("a rung-4 implementation claim survives an absent rung 1 exactly when the p
 test("a structurally-N/A rung 1 satisfies the provider's own rung-4 edge vacuously", async () => {
   // `validate_selection` has TWO accepting arms for a `Rung { .. EngagedInSameRequest }` edge, and
   // the gate shipped only the first. inference
-  // `crates/contracts/gen-core/src/memory_strategy.rs:1468-1481` at pinned `014134e3`:
+  // `crates/contracts/gen-core/src/memory_strategy.rs` at pinned `75d66db5` (`1468-1481` at
+  // the `014134e3` this was written against):
   //
   //     if self.engages(selection.strategy, rung) { continue; }
   //     // `StructurallyNotApplicable` satisfies the edge vacuously: it asserts the
@@ -2434,7 +2435,10 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   const survey = await surveyFixture();
   const cargo = await readFile(new URL("../Cargo.toml", import.meta.url), "utf8");
   const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  assert.equal(pin, "014134e3035ad7e4eca5c2ed7bded2375dc3c071");
+  // sc-19721 moved the pin onto the inference sc-17137 feature head. The literal is re-stamped
+  // rather than relaxed to a shape check: the assertion below only means something while the pin is
+  // known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
+  assert.equal(pin, "75d66db50543ac288deb278853d0f0b432f92c5c");
 
   for (const backend of ["mlx", "candle"]) {
     const revision = h3(survey).backends[backend].contractRevision;

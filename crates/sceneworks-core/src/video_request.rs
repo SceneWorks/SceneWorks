@@ -2291,7 +2291,9 @@ mod tests {
     /// [`DURATION_FLOORS`] is of [`hard_min_duration`].
     ///
     /// `None` is the load-bearing half, and it is a SURVEY RESULT rather than a default: sc-19426
-    /// read every video engine's schedule construction at the pinned inference rev `014134e3`
+    /// read every video engine's schedule construction at the then-pinned inference rev `014134e3`
+    /// (sc-19721 moved the pin to `75d66db5`; the survey's finding below is unchanged, and the rev
+    /// is kept because it dates the READING)
     /// looking for a step count below which it errors or builds an unusable schedule. What it found:
     ///
     /// * **Every** engine shares gen-core's `steps == 0` rejection (`generator.rs`, "steps must be

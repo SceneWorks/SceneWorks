@@ -339,18 +339,22 @@ pub fn minimax_h3_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
 // stands in front of the download ([`crate::builtin_manifests`]' guard) cannot disagree with each
 // other, so a wrong entry here goes red in one place and is fixed in one place.
 //
-// ⚠️ NO TRIPWIRE BINDS THIS TO THE ENGINE. Being the only mirror keeps the two SceneWorks-side
-// readers consistent with EACH OTHER; nothing here can go red when the engine's probe list changes
-// upstream, because at the current pin (`014134e3`) `mlx-gen-minimax-h3` is not in the tree at all
-// and there is no symbol to import or construct. Every constant below was transcribed by reading
-// the engine source, and it stays a transcription until the pin carries the crate.
+// ⚠️ PARTLY BOUND TO THE ENGINE SINCE sc-19721's PIN BUMP — and the unbound half is named.
 //
-// The obligation therefore rides the PIN BUMP: sc-18650 must re-read
-// `mlx-gen-minimax-h3::model::load` and reconcile it against these constants, and — once the crate
-// is linkable — bind them to it (importing `DIT_COMPONENT` / `TEXT_ENCODER_COMPONENT` directly, and
-// asserting the shared-dir list against a real `load` of a fixture missing each path in turn) so
-// this stops being a mirror. Recorded on sc-18650 rather than only here, because a comment in this
-// file is not something a pin-bump session is guaranteed to open.
+// This crate cannot depend on an inference crate, so the tie lives in the worker:
+// `sceneworks-worker::pinned_engine_geometry::minimax_h3_component_names_are_the_pinned_engines_own`
+// asserts [`MINIMAX_H3_PARTITIONS`] and [`MINIMAX_H3_TEXT_ENCODER_DIR`] against
+// `mlx-gen-minimax-h3::model`'s own `DIT_COMPONENT` / `REFERENCE_DIT_PARTITION` /
+// `TEXT_ENCODER_COMPONENT`. A rename upstream now reds there instead of at load time on a user's
+// machine. Before the bump none of that was possible: at `014134e3` the crate was not in the tree
+// and there was no symbol to import.
+//
+// STILL A TRANSCRIPTION: [`MINIMAX_H3_SHARED_PROBED_DIRS`] and
+// [`MINIMAX_H3_AUDIO_VAE_CONFIG_FILES`]. The engine's probe list is a private array literal inside
+// `model::load`, not an exported constant, so there is nothing to import — binding it needs either
+// an upstream export or a real `load` of a fixture missing each path in turn (which needs weights).
+// That remainder stays recorded on sc-18650, because a comment in this file is not something a
+// pin-bump session is guaranteed to open.
 // ---------------------------------------------------------------------------
 
 /// The shared component DIRECTORIES a MiniMax-H3 load opens under the snapshot it is handed as

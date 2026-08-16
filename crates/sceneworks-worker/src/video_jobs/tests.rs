@@ -13175,8 +13175,11 @@ fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
         "the refusal must name the shape: {message}"
     );
 
-    // `Conditioning::ReferenceVideo` — the only variant carrying a reference clip's own frame rate
-    // — arrives with the sc-18650 pin bump. Refused BY NAME rather than downgraded to
+    // `Conditioning::ReferenceVideo` — the only variant carrying a reference clip's own frame rate.
+    // sc-19721's pin bump made the VARIANT and the engine's advertisement of it both real, so the
+    // refusal's reason moved from "the pin does not have it" to "SceneWorks does not build it yet".
+    // The assertion follows: it must NOT name the pin bump, because citing a discharged blocker is
+    // how a refusal outlives its own premise. Refused BY NAME rather than downgraded to
     // `Conditioning::VideoClip`, which the engine deliberately does not advertise.
     let clips = minimax_h3_request(
         "minimax_h3_ref",
@@ -13186,8 +13189,14 @@ fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
         .expect_err("video references cannot be built at the pinned gen-core")
         .to_string();
     assert!(
-        message.contains("sc-18650") && message.contains("No output was produced"),
-        "the refusal must name the pin bump and say nothing was rendered: {message}"
+        !message.contains("sc-18650"),
+        "the pin bump is DONE (sc-19721) — a refusal that still blames it sends the reader to a \
+         discharged blocker: {message}"
+    );
+    assert!(
+        message.contains("sc-19508") && message.contains("No output was produced"),
+        "the refusal must name the work that is actually outstanding and say nothing was \
+         rendered: {message}"
     );
 }
 
