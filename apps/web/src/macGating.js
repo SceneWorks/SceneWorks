@@ -13,6 +13,9 @@ export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (MLX only)";
 // non-Mac / observe-mode deployments). Every helper below short-circuits to "not blocked".
 export const DEFAULT_MAC_CAPABILITIES = {
   macGatingActive: false,
+  // sc-19570 — the off-Mac twin (see candleGating.js). Inert here for the same reason
+  // `macGatingActive` is: until the capabilities endpoint responds, nothing is gated.
+  candleGatingActive: false,
   platform: "",
   notAvailableLabel: MAC_NOT_AVAILABLE_LABEL,
   features: {},

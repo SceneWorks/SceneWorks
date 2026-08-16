@@ -518,12 +518,10 @@ pub(crate) async fn create_video_job(
     ApiJson(payload): ApiJson<VideoJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_video_job(&payload)?;
-    let job_type = match payload.mode.as_str() {
-        "extend_clip" => JobType::VideoExtend,
-        "video_bridge" => JobType::VideoBridge,
-        "replace_person" => JobType::PersonReplace,
-        _ => JobType::VideoGenerate,
-    };
+    // The mode → job-type mapping lives in core (sc-19570) because the UI-gating probes must build
+    // the SAME pair this route enqueues before asking the claim predicates about it. Two copies
+    // would let the oracle answer about a job type that is never created.
+    let job_type = video_job_type_for_mode(payload.mode.as_str());
     let requested_gpu = payload.requested_gpu.clone();
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
@@ -742,8 +740,24 @@ pub(crate) async fn create_video_job(
              its capabilities, or a model that supports this one."
         )));
     }
+    // **THE PLATFORM HALF OF THE SAME DEFECT IS NOT DECIDED HERE (sc-19570).** The gate above is
+    // platform-independent and stays that way, so it admits a request some OTHER host's lane would
+    // claim — `ltx_2_3` + `image_to_video`, `wan_2_2` + `first_last_frame` and the rest of the
+    // measured MLX-only set. Off-Mac nothing can claim those, and the job used to hang forever.
+    //
+    // sc-19570 first refused them right here with a `400`, which made `POST /api/v1/video/jobs`
+    // answer differently on Windows than on macOS for byte-identical bodies. That was ruled out:
+    // **an HTTP contract is not platform-dependent.** The status code, response shape and error
+    // envelope are the same on every host; what a given machine can actually RENDER is an execution
+    // outcome, and it is reported as one.
+    //
+    // So the platform verdict moved into the job lifecycle —
+    // `JobsStore::fail_platform_unreachable_jobs`, run below and again on every claim — and the job
+    // reaches a terminal `failed` with a `platform_unreachable:` reason instead of sitting queued.
+    // Nothing about the two gates' ORDER or wording is coupled: this one still 400s a mode no lane
+    // serves anywhere, on every platform alike.
     let job = create_generation_job(
-        state,
+        state.clone(),
         job_type,
         project_id,
         project_name,
@@ -751,7 +765,42 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
+    // Terminate an unreachable job NOW rather than leaving it for the claim-time sweep. The sweep
+    // runs when a worker polls, and the deployments that most need this answer are exactly the ones
+    // where no worker ever will (an API-only container, a Windows host whose GPU worker is not
+    // installed). Waiting for a poll would reintroduce the hang this story exists to remove, so the
+    // response the caller already holds carries the terminal state.
+    let job = fail_job_if_platform_unreachable(&state, job).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Run the sc-19570 platform-reachability sweep and return `job` as it now stands: unchanged on a
+/// Mac and for any pair this host's lane serves, terminal `failed` when nothing here can ever claim
+/// it.
+///
+/// The status code does NOT depend on the verdict — the caller returns `201` either way, on every
+/// platform. Only the snapshot's `status` / `error` differ, which is what an execution outcome is.
+///
+/// It calls the same store method the claim path calls rather than duplicating the decision, so the
+/// two entry points can never disagree about which pairs are unreachable.
+async fn fail_job_if_platform_unreachable(
+    state: &AppState,
+    job: JobSnapshot,
+) -> Result<JobSnapshot, ApiError> {
+    let host_os = state.settings.host_os.clone();
+    let failed = store_call(state.clone(), move |store, _timeout| {
+        store.fail_platform_unreachable_jobs(&host_os)
+    })
+    .await?;
+    let mut result = job;
+    for failed_job in failed {
+        crate::jobs::emit_platform_unreachable(&failed_job);
+        publish(state, "job.updated", &failed_job);
+        if failed_job.id == result.id {
+            result = failed_job;
+        }
+    }
+    Ok(result)
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the

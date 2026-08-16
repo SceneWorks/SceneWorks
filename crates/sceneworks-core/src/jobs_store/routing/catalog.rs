@@ -7,7 +7,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-use crate::jobs_store::routing::gaps::{classify_image_gap, classify_video_gap, UnsupportedReason};
+use crate::contracts::JobType;
+use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
+use crate::jobs_store::routing::gaps::{
+    classify_candle_video_gap, classify_image_gap, classify_video_gap, UnsupportedReason,
+};
 use crate::jobs_store::routing::mlx::{image_request_mlx_eligible, video_mode_is_mlx_eligible};
 use crate::jobs_store::routing::{
     has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
@@ -271,6 +275,168 @@ pub(crate) fn video_model_mac_support(model: &str) -> ModelMacSupport {
     }
 }
 
+/// The [`JobType`] a video `mode` is enqueued as. The three advanced modes get their own job
+/// types; everything else rides the base `video_generate`.
+///
+/// It lives HERE, in core, because three call sites need the SAME mapping and a re-typed copy is
+/// the false-green shape this epic keeps hitting: `create_video_job` (which builds the real job),
+/// [`video_mode_probe_payload`] (which builds the synthetic one the UI-gating probes ask the claim
+/// predicates about), and any future caller that must reach a claim predicate from a `(model, mode)`
+/// pair. If the API's mapping and the probe's mapping ever disagree, the gating oracle answers a
+/// question about a job type that is never enqueued — the gate reads green and the user still hangs.
+pub fn video_job_type_for_mode(mode: &str) -> JobType {
+    match mode {
+        "extend_clip" => JobType::VideoExtend,
+        "video_bridge" => JobType::VideoBridge,
+        "replace_person" => JobType::PersonReplace,
+        _ => JobType::VideoGenerate,
+    }
+}
+
+/// The canonical MINIMAL well-formed request for `(model, mode)` — the synthetic payload that
+/// carries exactly the conditioning media `validate_video_job`'s per-mode required-asset `match`
+/// demands for that mode, and nothing else (sc-19570).
+///
+/// This is the video sibling of [`probe_payload`]'s image probes, and it exists because the two
+/// lanes' predicates are shaped differently. `video_mode_is_mlx_eligible` is `(model, mode)` and
+/// ignores the payload entirely, so the Mac gate could map [`VIDEO_UI_MODES`] straight onto it. The
+/// candle predicates are payload-shaped — `video_request_candle_eligible` requires the mode's source
+/// image, `video_request_candle_vace_eligible` the clip/track/character set,
+/// `scail2_animate_candle_eligible` the reference + driving clip — so asking them "does this model
+/// serve this mode?" requires reconstructing the request. Restating each lane's answer as a
+/// hand-maintained table instead is precisely what sc-19570's acceptance forbids.
+///
+/// MINIMAL, not maximal, in both directions:
+/// * every key a mode's gate REQUIRES is present, so the probe never under-reports (hiding a mode
+///   that works off-Mac is a worse regression than the hang this closes), and
+/// * no key it does not require is present, because several gates REJECT stray conditioning — a
+///   `sourceAssetId` on a `text_to_video` probe, or a `referenceAssetId` alongside it, both make
+///   `video_request_candle_eligible` return false for reasons that have nothing to do with the mode.
+///
+/// The ids are placeholders: no gate resolves them, every one only asks whether the slot is filled.
+pub(crate) fn video_mode_probe_payload(model: &str, mode: &str) -> Map<String, Value> {
+    let probe = json!("probe");
+    let media: Vec<(&str, Value)> = match mode {
+        "text_to_video" => vec![],
+        "image_to_video" => vec![("sourceAssetId", probe.clone())],
+        "first_last_frame" => vec![
+            ("sourceAssetId", probe.clone()),
+            ("lastFrameAssetId", probe.clone()),
+        ],
+        "extend_clip" => vec![("sourceClipAssetId", probe.clone())],
+        "video_bridge" => vec![
+            ("sourceClipAssetId", probe.clone()),
+            ("bridgeRightClipAssetId", probe.clone()),
+        ],
+        "replace_person" => vec![
+            ("sourceClipAssetId", probe.clone()),
+            ("personTrackId", probe.clone()),
+            ("characterId", probe.clone()),
+        ],
+        "video_to_video" => vec![("sourceClipAssetId", probe.clone())],
+        "reference_to_video" => vec![("referenceAssetIds", json!(["probe"]))],
+        "reference_video_to_video" => vec![
+            ("sourceClipAssetId", probe.clone()),
+            ("referenceAssetIds", json!(["probe"])),
+        ],
+        "multi_video_to_video" => vec![("sourceClipAssetIds", json!(["probe-a", "probe-b"]))],
+        "ads2v" => vec![
+            ("sourceClipAssetId", probe.clone()),
+            ("referenceClipAssetId", probe.clone()),
+            ("referenceAssetIds", json!(["probe"])),
+        ],
+        "animate_character" => vec![
+            ("referenceAssetIds", json!(["probe"])),
+            ("sourceClipAssetId", probe.clone()),
+        ],
+        // An unknown mode probes as bare — every lane's per-mode arm refuses it, which is the
+        // right answer for a mode no surface offers.
+        _ => vec![],
+    };
+    let mut payload = probe_payload(model, &media);
+    payload.insert("mode".to_owned(), Value::String(mode.to_owned()));
+    payload
+}
+
+/// UI-facing per-model CANDLE (Windows/Linux) support — the off-Mac twin of [`ModelMacSupport`]
+/// (sc-19570), derived from the same claim predicates the candle worker's `worker_supports_job`
+/// arm consults, so what the UI hides off-Mac can never drift from what routing refuses there.
+///
+/// **Why it had to exist.** [`ModelMacSupport`] had no sibling, so off-Mac
+/// `videoModelServesMode` collapsed to `capabilities.includes(mode)` — the manifest declaration
+/// alone, with nothing asking whether a lane exists on that platform. Every MLX-only,
+/// candle-unclaimable, Windows/Linux-installable pair was therefore offered as a Video Studio tab
+/// on Windows and Linux, and submitting one produced a job that sat `queued` /
+/// "Waiting for an available worker." forever: no mlx worker exists off-Mac to claim it, the candle
+/// worker's own gate refuses it, and both enforce sweeps default to **warn**.
+///
+/// Scoped to `videoModes`, which is the whole of the measured gap: the block is emitted for video
+/// models and reports nothing about image features. `supported: false` means no [`VIDEO_UI_MODES`]
+/// entry is candle-claimable for this model at all, so the model itself is hidden off-Mac rather
+/// than shown with every tab disabled.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCandleSupport {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UnsupportedReason>,
+    pub features: ModelCandleFeatures,
+}
+
+/// Per-feature off-Mac support for a model (sc-19570) — the candle mirror of [`ModelMacFeatures`],
+/// carrying the one feature axis the off-Mac gap was measured on. `video_modes` is populated only
+/// for video models.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCandleFeatures {
+    /// Video-only: which `video_generate` modes the candle lane claims. Empty for non-video models.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub video_modes: BTreeMap<String, bool>,
+}
+
+/// Off-Mac (candle) UI gating support for a model id of the given catalog `model_type` — the
+/// sibling of [`model_mac_support`] (sc-19570). Only `"video"` carries a verdict; every other type
+/// is reported `supported` with an empty feature set, because the measured off-Mac reachability gap
+/// this block closes is per-video-mode. A caller must therefore read `features.video_modes` for the
+/// per-mode answer and treat an empty map as "this block says nothing about that model".
+pub fn model_candle_support(model_id: &str, model_type: &str) -> ModelCandleSupport {
+    match model_type {
+        "video" => video_model_candle_support(model_id),
+        _ => ModelCandleSupport {
+            supported: true,
+            reason: None,
+            features: ModelCandleFeatures::default(),
+        },
+    }
+}
+
+pub(crate) fn video_model_candle_support(model: &str) -> ModelCandleSupport {
+    let video_modes: BTreeMap<String, bool> = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| {
+            (
+                (*mode).to_owned(),
+                video_mode_is_candle_eligible(model, mode),
+            )
+        })
+        .collect();
+    if video_modes.values().any(|eligible| *eligible) {
+        return ModelCandleSupport {
+            supported: true,
+            reason: None,
+            features: ModelCandleFeatures { video_modes },
+        };
+    }
+    // No mode at all: the model has no candle video engine off-Mac, so the picker hides it rather
+    // than offering a model whose every tab is disabled. Derived, not listed — the verdict is the
+    // per-mode map's own `any`, so a model that gains its first candle mode un-hides itself.
+    ModelCandleSupport {
+        supported: false,
+        reason: Some(classify_candle_video_gap(&probe_payload(model, &[]))),
+        features: ModelCandleFeatures::default(),
+    }
+}
+
 /// macOS support for a non-model feature/sub-system (sc-3486): the infra job types that have no
 /// in-process Rust path. `supported=false` carries the `reason` (the same `UnsupportedReason` the
 /// `mlx_unsupported` event uses); when one of these is ported its flag flips to `true`.
@@ -321,6 +487,16 @@ pub struct MacTrainingSupport {
 pub struct MacCapabilities {
     pub platform: String,
     pub mac_gating_active: bool,
+    /// sc-19570 — the off-Mac twin of `mac_gating_active`, and the master switch for the
+    /// [`ModelCandleSupport`] block on `GET /api/v1/models`. **Platform-intrinsic, not a rollout
+    /// flag**: it is `true` exactly when the host is not a Mac, because that is when the candle
+    /// lane is the only backend that can register (`mlx_required` is documented "absent on
+    /// Windows/Linux/Docker" — MLX is an Apple-silicon runtime). It deliberately does NOT read
+    /// `candle_required`, which defaults OFF and only governs the enforce sweeps: the modes this
+    /// gates are unreachable off-Mac whether or not a deployment opted into terminal gap
+    /// reporting, so tying the gate to that flag would leave the default deployment — the one the
+    /// defect was measured on — still offering tabs that hang.
+    pub candle_gating_active: bool,
     pub not_available_label: String,
     pub features: BTreeMap<String, MacFeatureSupport>,
     pub training: MacTrainingSupport,
@@ -471,6 +647,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     MacCapabilities {
         platform: platform.to_owned(),
         mac_gating_active,
+        // sc-19570: the candle lane is the only backend off-Mac, so the per-mode `candleSupport`
+        // gate engages exactly there. Derived from the same `is_mac` the platform-intrinsic engine
+        // flags above use, never from `candle_required`.
+        candle_gating_active: !is_mac,
         not_available_label: MAC_NOT_AVAILABLE_LABEL.to_owned(),
         features,
         training: MacTrainingSupport {
@@ -1490,13 +1670,16 @@ mod tests {
     use super::{
         image_family_is_mlx_routed, image_model_mac_support,
         imported_image_model_lora_advertisement, imported_image_request_family_eligible,
-        is_builtin_image_model, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
-        CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
-        CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
-        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
-        MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS,
-        VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, VIDEO_UI_MODES,
+        is_builtin_image_model, video_job_type_for_mode, video_mode_probe_payload,
+        video_model_candle_support, video_model_mac_support, CANDLE_IMPORTED_CAPS,
+        CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
+        CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS,
+        CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS,
+        MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
+        MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, VIDEO_UI_MODES,
     };
+    use crate::contracts::JobType;
+    use crate::jobs_store::routing::gaps::video_request_is_claimable_on_platform;
     use crate::jobs_store::JobSnapshot;
 
     /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
@@ -2398,60 +2581,18 @@ mod tests {
     /// rejects a stray source image on the non-i2v lane, so adding one would make the candle half
     /// of the probe answer `false` for a reason that has nothing to do with the capability.
     fn video_capability_probe(model: &str, mode: &str) -> JobSnapshot {
-        let job_type = match mode {
-            "extend_clip" => "video_extend",
-            "video_bridge" => "video_bridge",
-            "replace_person" => "person_replace",
+        // sc-19570 folded the hand-maintained copies of this table into the production
+        // `video_mode_probe_payload` / `video_job_type_for_mode`, which the off-Mac gating oracle
+        // now builds its per-mode verdicts from. Delegating rather than keeping a parallel copy is
+        // the point: this guard and the gate it sits next to must judge the SAME request shape, or
+        // one can be green about a payload the other never sees.
+        let payload = video_mode_probe_payload(model, mode);
+        let job_type = match video_job_type_for_mode(mode) {
+            JobType::VideoExtend => "video_extend",
+            JobType::VideoBridge => "video_bridge",
+            JobType::PersonReplace => "person_replace",
             _ => "video_generate",
         };
-        let mut payload = serde_json::json!({ "model": model, "mode": mode });
-        let media = payload.as_object_mut().expect("probe payload is an object");
-        match mode {
-            "image_to_video" => {
-                media.insert("sourceAssetId".to_owned(), serde_json::json!("img-1"));
-            }
-            "first_last_frame" => {
-                media.insert("sourceAssetId".to_owned(), serde_json::json!("img-1"));
-                media.insert("lastFrameAssetId".to_owned(), serde_json::json!("img-2"));
-            }
-            "extend_clip" | "video_to_video" => {
-                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
-            }
-            "video_bridge" => {
-                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
-                media.insert(
-                    "bridgeRightClipAssetId".to_owned(),
-                    serde_json::json!("clip-2"),
-                );
-            }
-            "replace_person" => {
-                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
-                media.insert("personTrackId".to_owned(), serde_json::json!("track-1"));
-                media.insert("characterId".to_owned(), serde_json::json!("character-1"));
-            }
-            "reference_to_video" => {
-                media.insert("referenceAssetIds".to_owned(), serde_json::json!(["img-1"]));
-            }
-            "reference_video_to_video" | "animate_character" => {
-                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
-                media.insert("referenceAssetIds".to_owned(), serde_json::json!(["img-1"]));
-            }
-            "multi_video_to_video" => {
-                media.insert(
-                    "sourceClipAssetIds".to_owned(),
-                    serde_json::json!(["clip-1", "clip-2"]),
-                );
-            }
-            "ads2v" => {
-                media.insert("sourceClipAssetId".to_owned(), serde_json::json!("clip-1"));
-                media.insert(
-                    "referenceClipAssetId".to_owned(),
-                    serde_json::json!("clip-2"),
-                );
-                media.insert("referenceAssetIds".to_owned(), serde_json::json!(["img-1"]));
-            }
-            _ => {}
-        }
         serde_json::from_value(serde_json::json!({
             "id": "job_video_probe",
             "type": job_type,
@@ -2578,6 +2719,221 @@ mod tests {
              with no error (GH #2074). A pair in the constant and not in `found` has been fixed: \
              delete its row."
         );
+    }
+
+    /// **THE OFF-MAC CLASS GUARD (sc-19570).** The sibling above proves an advertised mode is
+    /// claimable by SOME lane, anywhere. That is the platform-independent question, and it passes
+    /// for every pair below — which is exactly why they hung: they are claimable on a Mac and
+    /// claimable NOWHERE on Windows or Linux, where no `mlx` worker can ever register. The Video
+    /// Studio offered each as a tab off-Mac (`macGatingActive` is false there, so
+    /// `videoModelServesMode` collapsed to `capabilities.includes(mode)`), and submitting one
+    /// produced a job that sat `queued` / "Waiting for an available worker." with no terminal state.
+    ///
+    /// The inventory is EXACT, like `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`: it is not a suppression
+    /// list, it is the measured set, and every member must be BOTH hidden (a `false` in the model's
+    /// `candleSupport.features.videoModes`, which `candleVideoModeBlock` reads) AND judged
+    /// unreachable on both off-Mac platforms (`video_request_is_claimable_on_platform`). Hiding
+    /// alone would not do: `VIDEO_JOB_MODES` is global and the MCP tool, a raw REST caller or a
+    /// recipe replay can still name any admitted mode against any model.
+    ///
+    /// **The unreachability verdict is an EXECUTION outcome, never a status code.** A client may be
+    /// platform-aware — hiding a tab off-Mac is fine, and is half of sc-19570's value — but the
+    /// HTTP surface may not be: `POST /api/v1/video/jobs` answers `201` for these pairs on every
+    /// host, and `JobsStore::fail_platform_unreachable_jobs` then fails the JOB terminal with a
+    /// legible reason. sc-19570 shipped this as a platform-conditional `400` first and that was
+    /// ruled out. Do not re-read this predicate at an HTTP boundary.
+    ///
+    /// It asserts the Mac side too, in the same loop and on the same pairs, because "fix the other
+    /// platform" is one edit away from "break this one".
+    ///
+    /// Derived on both sides: the ADVERTISEMENT is read from the shipped `builtin.models.jsonc`
+    /// bytes, and the verdicts come from the real predicates. Nothing here restates a mode list.
+    #[test]
+    fn every_declared_video_mode_with_no_off_mac_lane_is_hidden_and_unreachable() {
+        /// The measured MLX-only, candle-unclaimable pairs a shipped model ADVERTISES (sc-19570).
+        /// A pair leaving this set has gained an off-Mac lane; a pair joining it is a new tab that
+        /// hangs on Windows and Linux.
+        const MLX_ONLY_ADVERTISED_PAIRS: &[(&str, &str)] = &[
+            // LTX-2.3 and its Eros sibling: candle serves their `text_to_video` and nothing else.
+            ("ltx_2_3", "image_to_video"),
+            ("ltx_2_3", "first_last_frame"),
+            ("ltx_2_3", "extend_clip"),
+            ("ltx_2_3", "video_bridge"),
+            ("ltx_2_3", "replace_person"),
+            ("ltx_2_3_eros", "image_to_video"),
+            ("ltx_2_3_eros", "first_last_frame"),
+            ("ltx_2_3_eros", "extend_clip"),
+            ("ltx_2_3_eros", "video_bridge"),
+            ("ltx_2_3_eros", "replace_person"),
+            // Wan TI2V-5B: its extend / bridge / replace ARE candle-VACE-served, so only the two
+            // keyframe-ish shapes are stranded. That asymmetry is the reason this is a measured set
+            // rather than a per-model verdict.
+            ("wan_2_2", "image_to_video"),
+            ("wan_2_2", "first_last_frame"),
+            // The VACE-Fun control checkpoint advertises `replace_person` alone, and the candle
+            // VACE gate does not route it, so the WHOLE model is candle-unsupported.
+            ("wan_2_2_vace_fun_14b", "replace_person"),
+            // The three MLX-only families whose every download is `platforms: ["macos"]`. They are
+            // in the set because they are the same defect — an advertised mode with no off-Mac
+            // lane — even though the catalog's own `retain_downloads_for_os` already leaves them
+            // uninstallable off-Mac, which is why sc-19570's measured list (scoped to
+            // Windows/Linux-INSTALLABLE models) did not name them. They are covered rather than
+            // exempted: install state is not a reachability gate, a mac-only download list is one
+            // manifest edit from changing, and a raw REST call for a pair no worker on this host
+            // can claim must still terminate regardless of what is on disk.
+            ("krea_realtime_14b", "text_to_video"),
+            ("krea_realtime_14b", "image_to_video"),
+            ("krea_realtime_14b", "video_to_video"),
+            ("minimax_h3", "text_to_video"),
+            ("minimax_h3", "image_to_video"),
+            ("minimax_h3", "first_last_frame"),
+            ("minimax_h3_ref", "reference_to_video"),
+        ];
+
+        let models = builtin_video_models();
+        assert!(
+            models.len() >= 12,
+            "the shipped video catalog shrank unexpectedly ({}) — this guard reads the real \
+             manifest and would be asserting almost nothing",
+            models.len()
+        );
+
+        let expected: BTreeSet<(String, String)> = MLX_ONLY_ADVERTISED_PAIRS
+            .iter()
+            .map(|(id, mode)| ((*id).to_owned(), (*mode).to_owned()))
+            .collect();
+        let mut found: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut checked = 0_usize;
+        for model in &models {
+            let id = model
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .expect("every model row has an id");
+            let candle_support = video_model_candle_support(id);
+            let mac_support = video_model_mac_support(id);
+            for capability in model
+                .get("capabilities")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("{id}: every shipped video model declares capabilities"))
+            {
+                let mode = capability
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: capabilities entries are strings"));
+                checked += 1;
+                let job_type = video_job_type_for_mode(mode);
+                let payload = video_mode_probe_payload(id, mode);
+                let mlx = super::super::mlx::video_request_is_mlx_eligible(&job_type, &payload);
+                let candle =
+                    super::super::candle::video_request_is_candle_eligible(&job_type, &payload);
+                // The `candleSupport` block the web reads must agree with the predicate, per mode,
+                // for EVERY advertised pair — not only the stranded ones.
+                assert_eq!(
+                    candle_support
+                        .features
+                        .video_modes
+                        .get(mode)
+                        .copied()
+                        .unwrap_or(false),
+                    candle,
+                    "{id} + {mode}: candleSupport.features.videoModes disagrees with the real \
+                     candle claim predicate, so the off-Mac UI gate and routing would diverge"
+                );
+                if !(mlx && !candle) {
+                    continue;
+                }
+                found.insert((id.to_owned(), mode.to_owned()));
+                // 1. HIDDEN off-Mac: either the whole model is candle-unsupported (so the picker
+                //    drops it) or this specific mode is `false` (so the tab never renders).
+                assert!(
+                    !candle_support.supported
+                        || candle_support.features.video_modes.get(mode) == Some(&false),
+                    "{id} + {mode} has no off-Mac lane but candleSupport still offers it — the \
+                     Video Studio would show the tab on Windows/Linux"
+                );
+                // 2. UNREACHABLE on BOTH off-Mac platforms, for the callers that never see a tab at
+                //    all — so the sweep terminates the job instead of letting it queue forever.
+                for os in ["windows", "linux"] {
+                    assert!(
+                        !video_request_is_claimable_on_platform(&job_type, &payload, os),
+                        "{id} + {mode} would still be judged CLAIMABLE on {os}, where nothing can \
+                         claim it — the sweep would leave it queued forever"
+                    );
+                }
+                // 3. UNCHANGED on the Mac, where the pair genuinely renders.
+                assert!(
+                    video_request_is_claimable_on_platform(&job_type, &payload, "macos"),
+                    "{id} + {mode} must still be accepted on macOS — refusing it there would break \
+                     a working combination to fix a different platform"
+                );
+                assert_eq!(
+                    mac_support.features.video_modes.get(mode),
+                    Some(&true),
+                    "{id} + {mode} must stay offered on a gated Mac"
+                );
+            }
+        }
+        assert!(
+            checked >= 30,
+            "only {checked} advertised (model, mode) pairs were probed — the manifest read is \
+             wrong and this guard is vacuous"
+        );
+        assert_eq!(
+            found, expected,
+            "the set of advertised video modes with no off-Mac lane changed. A pair in `found` and \
+             not in `MLX_ONLY_ADVERTISED_PAIRS` is a NEW Windows/Linux hang; a pair in the constant \
+             and not in `found` has gained a candle lane — delete its row."
+        );
+    }
+
+    /// The other half of the same mechanism: a pair the candle lane DOES claim must stay claimable
+    /// off-Mac. The cheapest way to get a platform verdict wrong is to condemn too much — a
+    /// `wan_2_2` `extend_clip` on Windows renders through candle Wan-VACE today, and an over-broad
+    /// predicate would have the sweep fail it terminal on the host that serves it.
+    ///
+    /// Includes two pairs no model ADVERTISES but candle serves anyway (`wan_2_2_t2v_14b` +
+    /// `extend_clip`, `wan_2_2_i2v_14b` + `replace_person`), for the reason sc-19504 gave the
+    /// platform-independent gate: this is not a capability gate, and a capability-shaped one would
+    /// condemn working shapes.
+    #[test]
+    fn a_candle_served_video_mode_is_still_claimable_off_mac() {
+        let served = [
+            ("wan_2_2", "text_to_video"),
+            ("wan_2_2", "extend_clip"),
+            ("wan_2_2", "video_bridge"),
+            ("wan_2_2", "replace_person"),
+            ("wan_2_2_t2v_14b", "text_to_video"),
+            ("wan_2_2_t2v_14b", "extend_clip"),
+            ("wan_2_2_i2v_14b", "image_to_video"),
+            ("wan_2_2_i2v_14b", "extend_clip"),
+            ("wan_2_2_i2v_14b", "video_bridge"),
+            ("wan_2_2_i2v_14b", "replace_person"),
+            ("ltx_2_3", "text_to_video"),
+            ("ltx_2_3_eros", "text_to_video"),
+            ("svd", "image_to_video"),
+            ("mochi_1", "text_to_video"),
+            ("bernini", "text_to_video"),
+            ("bernini", "video_to_video"),
+            ("bernini", "reference_to_video"),
+            ("bernini", "reference_video_to_video"),
+            ("bernini", "multi_video_to_video"),
+            ("bernini", "ads2v"),
+            ("scail2_14b", "animate_character"),
+            ("scail2_14b", "replace_person"),
+        ];
+        for (model, mode) in served {
+            let job_type = video_job_type_for_mode(mode);
+            let payload = video_mode_probe_payload(model, mode);
+            assert!(
+                super::super::candle::video_mode_is_candle_eligible(model, mode),
+                "{model} + {mode} is candle-served — the probe payload must reach the real gate"
+            );
+            for os in ["windows", "linux", "macos"] {
+                assert!(
+                    video_request_is_claimable_on_platform(&job_type, &payload, os),
+                    "{model} + {mode} must stay claimable on {os}"
+                );
+            }
+        }
     }
 
     /// A video model's `ui.recommendedFor` is a SECOND advertisement of the same promise — the
