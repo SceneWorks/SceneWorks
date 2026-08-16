@@ -58,6 +58,20 @@ export function runtimeFreeFloor(memoryBytes) {
   return MIN_RUNTIME_FREE_BYTES + telemetryResolutionBytes(memoryBytes);
 }
 
+export function privateArtifactRoots(scratch) {
+  const snapshotRoot = path.join(
+    scratch,
+    "artifacts",
+    `models--${ARTIFACT_REPOSITORY.replaceAll("/", "--")}`,
+    "snapshots",
+    ARTIFACT_REVISION,
+  );
+  return {
+    numericTier: path.join(snapshotRoot, "q4"),
+    textEncoder: path.join(snapshotRoot, "gemma"),
+  };
+}
+
 export function watchdogFailureSummary(status, eventBytes) {
   let hardStopReason = null;
   let validEvents = 0;
@@ -640,9 +654,11 @@ async function controller(argv) {
   try {
     const { signal } = cancellation;
     const scratchDevice = (await stat(scratch, { bigint: true })).dev;
-    const privateNumericTierRoot = path.join(scratch, "artifacts/q4");
-    const privateTextEncoderRoot = path.join(scratch, "artifacts/gemma");
-    await mkdir(path.dirname(privateNumericTierRoot), { mode: 0o700 });
+    const {
+      numericTier: privateNumericTierRoot,
+      textEncoder: privateTextEncoderRoot,
+    } = privateArtifactRoots(scratch);
+    await mkdir(path.dirname(privateNumericTierRoot), { recursive: true, mode: 0o700 });
     await cloneArtifactTree(numericTierRoot, privateNumericTierRoot, scratchDevice, signal);
     await cloneArtifactTree(textEncoderRoot, privateTextEncoderRoot, scratchDevice, signal);
     assertInventory(

@@ -20,6 +20,7 @@ import {
   inventoryAtRoot,
   parseMemoryFreePercent,
   parseSwapFreeBytes,
+  privateArtifactRoots,
   preservePrimaryFailure,
   preflightFreeFloor,
   repositoryToolchain,
@@ -57,6 +58,27 @@ test("the runner freezes the exact tiny bounded-decode canary", () => {
     sha256: "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a",
   });
   assert.throws(() => canaryRequest(128 * 1024 ** 3));
+});
+
+test("private artifact clones preserve the canonical immutable snapshot roots", async () => {
+  const scratch = "/private/canary-scratch";
+  const roots = privateArtifactRoots(scratch);
+  const snapshotRoot = path.join(
+    scratch,
+    "artifacts/models--SceneWorks--ltx-2.3-mlx/snapshots",
+    "01df27d308466533aa09d251e3aebdcc627d07eb",
+  );
+  assert.deepEqual(roots, {
+    numericTier: path.join(snapshotRoot, "q4"),
+    textEncoder: path.join(snapshotRoot, "gemma"),
+  });
+  assert.notEqual(roots.numericTier, path.join(scratch, "artifacts/q4"));
+  assert.notEqual(roots.textEncoder, path.join(scratch, "artifacts/gemma"));
+  assert.equal(path.relative(scratch, roots.numericTier).startsWith(".."), false);
+  assert.equal(path.relative(scratch, roots.textEncoder).startsWith(".."), false);
+  const runnerSource = await readFile(new URL("./run-ltx-safety-canary.mjs", import.meta.url), "utf8");
+  assert.match(runnerSource,
+    /mkdir\(path\.dirname\(privateNumericTierRoot\), \{ recursive: true, mode: 0o700 \}\)/);
 });
 
 test("the runner refuses promotable or identity-drifted adapter output", () => {
@@ -308,6 +330,19 @@ test("the runner binds the pinned toolchain and private same-volume artifact clo
     await cloneArtifactTree(linked, resolved, device);
     assert.equal(await readFile(path.join(resolved, "weights.safetensors"), "utf8"), "immutable\n");
     assert.equal((await stat(path.join(resolved, "weights.safetensors"))).isFile(), true);
+
+    const privateRoots = privateArtifactRoots(root);
+    await mkdir(path.dirname(privateRoots.numericTier), { recursive: true, mode: 0o700 });
+    await cloneArtifactTree(source, privateRoots.numericTier, device);
+    await cloneArtifactTree(source, privateRoots.textEncoder, device);
+    assert.equal(
+      await readFile(path.join(privateRoots.numericTier, "weights.safetensors"), "utf8"),
+      "immutable\n",
+    );
+    assert.equal(
+      await readFile(path.join(privateRoots.textEncoder, "weights.safetensors"), "utf8"),
+      "immutable\n",
+    );
 
     assert.equal(await repositoryToolchain(), "1.97.1");
     if (process.platform === "darwin") {
