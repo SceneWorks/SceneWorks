@@ -707,6 +707,37 @@ mod tests {
         }
     }
 
+    /// A fresh Eros install must carry the external Gemma encoder required by both native backends.
+    #[test]
+    fn eros_fresh_install_provisions_the_shared_gemma_encoder() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value = serde_json::from_str(&stripped).expect("manifest parses");
+        let eros = manifest["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|model| model["id"] == "ltx_2_3_eros")
+            .expect("Eros model");
+        let gemma = eros["downloads"]
+            .as_array()
+            .expect("downloads")
+            .iter()
+            .find(|download| {
+                download["repo"] == "SceneWorks/ltx-2.3-mlx" && download["coRequisite"] == true
+            })
+            .expect("Eros must install the shared Gemma bundle on a clean machine");
+        assert_eq!(gemma["files"], serde_json::json!(["gemma/*"]));
+        assert_eq!(gemma["revision"].as_str().map(str::len), Some(40));
+        for platform in ["macos", "windows", "linux"] {
+            assert!(
+                gemma["platforms"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == platform)),
+                "Gemma co-requisite must provision {platform}"
+            );
+        }
+    }
+
     /// A full 40-char lowercase-hex commit SHA — the only revision shape the F-029 pin
     /// authority accepts (`^[0-9a-f]{40}$`, mirrored from model-manifest.schema.json).
     fn is_full_sha_revision(revision: &str) -> bool {

@@ -225,10 +225,6 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("image_jobs/kolors.rs", DownloadRole::JobTime),
     ("image_jobs/sdxl.rs", DownloadRole::JobTime),
     ("image_jobs/sensenova.rs", DownloadRole::JobTime),
-    (
-        "image_jobs/zimage_identity_candle.rs",
-        DownloadRole::JobTime,
-    ),
     // Bernini tier staging, reached from the image lane as well as the video one.
     ("image_jobs/bernini.rs", DownloadRole::JobTime),
     // The candle video dispatcher stages Mochi/Wan tiers.
@@ -245,7 +241,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
 ///
 /// **Only ever goes down.** Each migration slice deletes its entry and lowers this in the same
 /// commit.
-const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 42;
+const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 41;
 
 /// What a `<data_dir>/cache/<subdir>` destination holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

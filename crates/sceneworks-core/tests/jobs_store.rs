@@ -3167,7 +3167,7 @@ fn mage_flow_image_job_with_a_lora_is_claimed_by_the_mlx_worker() {
             .claim_next_job("worker-torch")
             .expect("torch claim ok")
             .is_none(),
-        "Mage-Flow is MLX-only; the generic torch descriptor must not claim it"
+        "Mage-Flow uses native backends; the generic torch descriptor must not claim it"
     );
     let claimed = store
         .claim_next_job("worker-mlx")
@@ -3916,10 +3916,17 @@ fn candle_stranded_sweep_partitions_and_is_noop_when_off() {
 #[test]
 fn platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately() {
     let store = store("platform-unreachable-offmac");
+    // `krea_realtime_14b`, not `ltx_2_3`. This test needs a pair that is MLX-claimable and
+    // candle-unclaimable, and sc-19570 originally used LTX because that held on the epic branch.
+    // Syncing `main` gave the LTX pair a real candle lane (`candle_video_engine_id` resolves it to
+    // `ltx_2_3_distilled`), so the old pair is now candle-SERVED and the sweep is correctly inert on
+    // it — the assertion below would fail for the right reason. Krea Realtime has no
+    // `candle-gen-krea-realtime` at all, so it is still MLX-only; it is one of the seven pairs left
+    // in `MLX_ONLY_ADVERTISED_PAIRS` after that same sync.
     let job = job_of(
         &store,
         JobType::VideoGenerate,
-        json!({ "model": "ltx_2_3", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
     );
 
     // macOS FIRST, on the very same job: the MLX engine renders this pair, so the sweep must be
@@ -3965,7 +3972,9 @@ fn platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately() {
         );
     }
     assert!(
-        error.contains("ltx_2_3") && error.contains("image_to_video") && error.contains("windows"),
+        error.contains("krea_realtime_14b")
+            && error.contains("image_to_video")
+            && error.contains("windows"),
         "the reason names the model, the mode and the host: {error}"
     );
     assert_eq!(
@@ -4049,10 +4058,14 @@ fn platform_sweep_never_touches_a_non_video_or_candle_served_job() {
 
     // …and the sweep is not simply inert: an unreachable job in the SAME store, on the same pass,
     // is still failed. Without this arm every assertion above would pass on a no-op.
+    // Krea Realtime rather than LTX, for the reason spelled out in
+    // `platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately`: syncing `main` gave the LTX
+    // pair a candle lane, so an LTX job is no longer stranded off-Mac and this arm would assert a
+    // no-op — the precise failure it exists to prevent.
     let stranded = job_of(
         &store,
         JobType::VideoGenerate,
-        json!({ "model": "ltx_2_3", "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2", "prompt": "p" }),
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
     );
     let failed = store
         .fail_platform_unreachable_jobs("windows")
@@ -4374,12 +4387,22 @@ fn mac_rust_supported_names_advanced_video_and_svd() {
     // (sc-3522 / sc-3357).
     let wan_extend = job_of(&store, JobType::VideoExtend, json!({ "model": "wan_2_2" }));
     assert!(mac_rust_supported(&wan_extend).is_ok());
-    let ltx_extend = job_of(&store, JobType::VideoExtend, json!({ "model": "ltx_2_3" }));
+    let ltx_extend = job_of(
+        &store,
+        JobType::VideoExtend,
+        json!({
+            "model": "ltx_2_3",
+            "loras": [{ "conditioningRole": "ic_lora" }],
+        }),
+    );
     assert!(mac_rust_supported(&ltx_extend).is_ok());
     let ltx_bridge = job_of(
         &store,
         JobType::VideoBridge,
-        json!({ "model": "ltx_2_3_eros" }),
+        json!({
+            "model": "ltx_2_3_eros",
+            "loras": [{ "conditioningRole": "ic_lora" }],
+        }),
     );
     assert!(mac_rust_supported(&ltx_bridge).is_ok());
     // SVD image→video is now MLX-supported (sc-3523: `svd`→`svd_xt`, image-conditioned only).
@@ -4714,7 +4737,8 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     let flux_schnell = model_mac_support("flux_schnell", "image", None);
     assert!(flux_schnell.features.reference);
     assert!(!flux_schnell.features.edit);
-    // SDXL + FLUX.2 do reference/edit on MLX (epic 3041 / MLX-only family) → enabled.
+    // SDXL + FLUX.2 do reference/edit on the native MLX lane (epic 3041), with native Candle
+    // siblings off-Mac → enabled.
     let sdxl = model_mac_support("sdxl", "image", None);
     assert!(sdxl.features.reference);
     assert!(sdxl.features.edit);
@@ -4773,9 +4797,8 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
             .get("first_last_frame"),
         Some(&false)
     );
-    // Bernini (epic 4699) is MLX-routed text-to-video only. Its renderer is
-    // Wan2.2-T2V, so still-image-to-video is off; the editing/reference video
-    // modes are net-new vocabulary (sc-4703), off until then.
+    // Bernini (epic 4699) has native MLX and Candle lanes for text generation plus its shipped
+    // reference/edit modes. The assertions below keep genuinely unsupported video shapes off.
     let bernini = model_mac_support("bernini", "video", None);
     assert!(bernini.supported, "bernini should be MLX-supported");
     assert!(bernini.reason.is_none());
@@ -4854,7 +4877,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Person detect/track is ported (sc-3488 / sc-3633/3634/3709) → supported, no epic.
     assert_eq!(epic("personDetect"), None);
     assert!(mac.features["personDetect"].supported);
-    // Smart-select segmentation is native-MLX SAM3 on Mac (sc-6105) → supported, no epic.
+    // Smart-select segmentation is native SAM3 on MLX and Candle (sc-6105 / sc-18480).
     assert_eq!(epic("imageSegment"), None);
     assert!(mac.features["imageSegment"].supported);
     assert_eq!(epic("datasetCaptioning"), None);
@@ -4898,6 +4921,10 @@ fn mac_capabilities_master_switch_and_infra_features() {
     let windows = mac_capabilities("windows", false);
     assert!(windows.features["imageUpscaleSeedvr2"].supported);
     assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());
+    assert!(windows.features["imageSegment"].supported);
+    assert!(windows.features["imageSegment"].reason.is_none());
+    assert!(inert.features["imageSegment"].supported);
+    assert!(inert.features["imageSegment"].reason.is_none());
     // AuraSR is dropped as an offered engine off-Mac too (sc-5499): unsupported on Windows (and Linux),
     // not just under active Mac gating — so the web picker hides it on every platform.
     assert!(!windows.features["imageUpscaleAuraSr"].supported);
@@ -5718,7 +5745,17 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("lens_lora", "lens", "lora"),
         ("krea_lora", "krea_2_raw", "lokr"),
         ("ltx_mlx_lora", "ltx_2_3", "lora"),
+        ("kolors_lora", "kolors", "lokr"),
+        ("sd3_lora", "sd3_5_large", "lora"),
+        ("sd3_lora", "sd3_5_medium", "lokr"),
+        ("wan_lora", "wan_2_2", "lora"),
         ("wan_moe_lora", "wan_2_2_t2v_14b", "lora"),
+        ("wan_moe_lora", "wan_2_2_t2v_14b", "lokr"),
+        ("wan_moe_lora", "wan_2_2_i2v_14b", "lora"),
+        ("anima_lora", "anima_base", "lokr"),
+        ("mage_flow_lora", "mage_flow_base", "lora"),
+        ("mage_flow_lora", "mage_flow_base", "lokr"),
+        ("mage_flow_lora", "mage_flow_base", "full"),
     ];
     for (kernel, base_model, network_type) in cases {
         let store = store(&format!("candle-training-{kernel}-{base_model}"));
@@ -5741,36 +5778,39 @@ fn candle_worker_claims_candle_native_training_kernels() {
 }
 
 #[test]
-fn candle_worker_refuses_torch_served_training_kernels() {
-    // Kernels with no candle trainer must be refused by candle because the
-    // `lora_train_execute` advertisement is coarse; production leaves them queued instead of
-    // mis-claiming and failing terminally. The generic descriptor below is a synthetic compatibility
-    // check. Covers Kolors, the dense Wan 5B, and the I2V A14B.
-    let cases: &[(&str, &str)] = &[
-        ("kolors_lora", "kolors"),
-        ("wan_lora", "wan_2_2"),
-        ("wan_moe_lora", "wan_2_2_i2v_14b"),
+fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("kolors_lora", "not_kolors", "lora"),
+        ("sd3_lora", "sd3_5_large_turbo", "lora"),
+        ("sd3_lora", "sd3_5_large", "full"),
+        ("wan_lora", "wan_2_2", "lokr"),
+        ("wan_moe_lora", "wan_2_2_i2v_14b", "lokr"),
+        ("wan_moe_lora", "wan_2_2_unknown", "lora"),
+        ("anima_lora", "anima_turbo", "lora"),
+        ("mage_flow_lora", "mage_flow_edit_base", "lora"),
+        ("mage_flow_lora", "mage_flow_base", "mystery"),
     ];
-    for (kernel, base_model) in cases {
-        let store = store(&format!("candle-refuse-{kernel}-{base_model}"));
+    for (kernel, base_model, network_type) in cases {
+        let store = store(&format!(
+            "candle-refuse-{kernel}-{base_model}-{network_type}"
+        ));
         register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
-        let job = store
-            .create_job(mlx_training_job(kernel, base_model, "lora", false, "auto"))
+        store
+            .create_job(mlx_training_job(
+                kernel,
+                base_model,
+                network_type,
+                false,
+                "auto",
+            ))
             .expect("job creates");
         assert!(
             store
                 .claim_next_job("worker-candle")
                 .unwrap_or_else(|error| panic!("candle claim ok ({kernel}): {error:?}"))
                 .is_none(),
-            "candle must refuse {kernel}/{base_model} (no candle trainer)"
+            "candle must refuse unsupported {kernel}/{base_model}/{network_type}"
         );
-        // A synthetic generic training descriptor can claim it in this isolated routing test.
-        register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
-        let claimed = store
-            .claim_next_job("worker-torch")
-            .expect("torch claim ok")
-            .unwrap_or_else(|| panic!("torch should claim {kernel}/{base_model}"));
-        assert_eq!(claimed.id, job.id, "kernel={kernel} base={base_model}");
     }
 }
 
@@ -5801,8 +5841,6 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
         // A generic (non-Rust) training descriptor must still defer: there is no torch Mage trainer,
         // so claiming would fail the job terminally instead of leaving it for the mlx worker.
         register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
-        // Nor a candle worker: `mlx-gen-mage` has no candle twin.
-        register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
 
         let job = store
             .create_job(mlx_training_job(
@@ -5822,15 +5860,6 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
             "a generic worker must defer mage_flow_lora ({base_model}/{network_type}) — it has no \
              Mage trainer"
         );
-        assert!(
-            store
-                .claim_next_job("worker-candle")
-                .expect("candle claim ok")
-                .is_none(),
-            "a candle worker must defer mage_flow_lora ({base_model}/{network_type}) — mlx-gen-mage \
-             has no candle twin"
-        );
-
         // …and the mlx worker DOES claim it. This is the half that was broken: without
         // `mage_flow_lora` in `MLX_ROUTED_TRAINING_KERNELS` the job queues forever.
         register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
@@ -6248,12 +6277,16 @@ fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
             register_gpu_worker(&store, "worker-torch", "mps", video_caps());
             register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
+            let loras = model
+                .starts_with("ltx_")
+                .then(|| json!([{ "conditioningRole": "ic_lora" }]));
             let job = store
                 .create_job(video_job_typed(
                     job_type.clone(),
                     json!({
                         "model": model, "mode": mode,
-                        "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right"
+                        "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right",
+                        "loras": loras,
                     }),
                     "auto",
                 ))
@@ -6603,8 +6636,8 @@ fn flux2_klein_variants_route_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // All three FLUX.2-klein txt2img variants + FLUX.2-dev (MLX-only family) route to the mlx
-    // worker (dev is txt2img-only today — epic 5914 / sc-5921).
+    // All three FLUX.2-klein txt2img variants + FLUX.2-dev route to the MLX worker on Mac; the
+    // corresponding Candle/CUDA routes own them off-Mac.
     for model in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -6659,8 +6692,8 @@ fn flux2_edit_reference_job_routes_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // FLUX.2 is MLX-only, so an edit/reference job (sc-3029) routes to the mlx worker
-    // (sc-3025 kept these on Python; the edit path now exists on Rust).
+    // A FLUX.2 edit/reference job (sc-3029) routes to the MLX worker on Mac; the native Candle edit
+    // lane owns the same shape off-Mac (sc-3025 originally kept these on Python).
     let job = store
         .create_job(image_job_with(
             json!({
@@ -6866,7 +6899,12 @@ fn image_detail_routes_to_mlx_worker() {
         initial_status: None,
     };
 
-    for model in ["sdxl", "realvisxl"] {
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
         let job = store
             .create_job(detail_job(
                 json!({ "model": model, "sourceAssetId": "asset_src" }),
@@ -6919,6 +6957,99 @@ fn image_detail_routes_to_mlx_worker() {
         .expect("mlx claims lycoris detail job");
     assert_eq!(claimed.id, lycoris.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
+    let store = store("candle-routing-native-utilities");
+    register_gpu_worker(
+        &store,
+        "worker-candle",
+        "0",
+        vec![
+            WorkerCapability::Gpu,
+            WorkerCapability::ImageDetail,
+            WorkerCapability::ImageSegment,
+            WorkerCapability::DatasetAnalysis,
+            WorkerCapability::Unknown("candle".to_owned()),
+        ],
+    );
+
+    let utility_job = |job_type, payload: Value| CreateJob {
+        job_type,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: "auto".to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    };
+
+    for (label, job_type, payload) in [
+        (
+            "SDXL detail",
+            JobType::ImageDetail,
+            json!({ "model": "illustrious_xl_v2", "sourceAssetId": "asset_src" }),
+        ),
+        (
+            "SAM3 box segment",
+            JobType::ImageSegment,
+            json!({ "sourceAssetId": "asset_src", "box": [8, 12, 64, 80] }),
+        ),
+        (
+            "CLIP dataset analysis",
+            JobType::DatasetAnalysis,
+            json!({ "datasetId": "dataset-1", "items": [] }),
+        ),
+    ] {
+        let job = store
+            .create_job(utility_job(job_type, payload))
+            .unwrap_or_else(|_| panic!("{label} job creates"));
+        let claimed = store
+            .claim_next_job("worker-candle")
+            .expect("candle claim succeeds")
+            .unwrap_or_else(|| panic!("candle claims {label}"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                    worker_id: Some("worker-candle".to_owned()),
+                },
+            )
+            .expect("complete native utility job");
+    }
+
+    let unsupported = store
+        .create_job(utility_job(
+            JobType::ImageDetail,
+            json!({ "model": "flux2_dev", "sourceAssetId": "asset_src" }),
+        ))
+        .expect("unsupported detail job creates");
+    assert!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("candle decline succeeds")
+            .is_none(),
+        "a coarse image_detail advertisement must not claim a non-SDXL request"
+    );
+    assert_eq!(
+        store.get_job(&unsupported.id).expect("job remains").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]

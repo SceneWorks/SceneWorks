@@ -773,7 +773,7 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "mlx",
+          "backend": "native",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
@@ -806,7 +806,6 @@
           1,
           128
         ],
-        "appleSiliconOnly": true,
         "batchSize": [
           1,
           4
@@ -835,7 +834,6 @@
           4,
           128
         ],
-        "requiresBackend": "mlx",
         "resolutions": [
           768,
           1024,
@@ -847,10 +845,9 @@
         ]
       },
       "ui": {
-        "appleSiliconOnly": true,
-        "backend": "mlx",
+        "backend": "native",
         "datasetModality": "image",
-        "description": "Train an image LoRA for Stable Diffusion 3.5 Large (triple text encoder CLIP-L + CLIP-G + T5-XXL, 16-channel VAE). Trains on the SD3.5 Large MMDiT and applies to SD3.5 Large and Large Turbo. Apple Silicon only (native MLX).",
+        "description": "Train an image LoRA for Stable Diffusion 3.5 Large (triple text encoder CLIP-L + CLIP-G + T5-XXL, 16-channel VAE). Trains on the SD3.5 Large MMDiT and applies to SD3.5 Large and Large Turbo. Runs on CUDA and Apple Silicon.",
         "label": "SD3.5 Large LoRA",
         "recommendedFor": [
           "character",
@@ -879,7 +876,7 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "mlx",
+          "backend": "native",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
@@ -912,7 +909,6 @@
           1,
           128
         ],
-        "appleSiliconOnly": true,
         "batchSize": [
           1,
           4
@@ -941,7 +937,6 @@
           4,
           128
         ],
-        "requiresBackend": "mlx",
         "resolutions": [
           768,
           1024,
@@ -953,10 +948,9 @@
         ]
       },
       "ui": {
-        "appleSiliconOnly": true,
-        "backend": "mlx",
+        "backend": "native",
         "datasetModality": "image",
-        "description": "Train an image LoRA for Stable Diffusion 3.5 Medium (MMDiT-X dual-attention; triple text encoder, 16-channel VAE). Trains on the SD3.5 Medium MMDiT-X and applies to SD3.5 Medium. Apple Silicon only (native MLX).",
+        "description": "Train an image LoRA for Stable Diffusion 3.5 Medium (MMDiT-X dual-attention; triple text encoder, 16-channel VAE). Trains on the SD3.5 Medium MMDiT-X and applies to SD3.5 Medium. Runs on CUDA and Apple Silicon.",
         "label": "SD3.5 Medium LoRA",
         "recommendedFor": [
           "character",
@@ -1197,8 +1191,7 @@
           "cosine"
         ],
         "networkTypes": [
-          "lora",
-          "lokr"
+          "lora"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1293,7 +1286,8 @@
           "cosine"
         ],
         "networkTypes": [
-          "lora"
+          "lora",
+          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1321,7 +1315,7 @@
       },
       "ui": {
         "datasetModality": "image",
-        "description": "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
+        "description": "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
         "label": "Wan2.2 14B T2V Video LoRA",
         "recommendedFor": [
           "character",
@@ -1416,7 +1410,7 @@
       },
       "ui": {
         "datasetModality": "image",
-        "description": "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size bf16 base (large; on Windows/Linux a Q8_0 GGUF base fits smaller hosts).",
+        "description": "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
         "label": "Wan2.2 14B I2V Video LoRA",
         "recommendedFor": [
           "character",

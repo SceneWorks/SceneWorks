@@ -13,7 +13,7 @@ import {
   optionLabel,
   qualityPresetLabel,
   timestepBiasOptions,
-  timestepTypeOptions,
+  timestepTypeOptionsForTarget,
   trainingAdapterVersionLabels,
 } from "../../training/trainingConfig.js";
 
@@ -100,6 +100,12 @@ export function ConfigureJobPanel({
   const isControlTarget = selectedTarget?.outputKind === "control_branch";
   const controlType =
     selectedTarget?.defaults?.advanced?.controlType ?? selectedTarget?.limits?.controlTypes?.[0] ?? "pose";
+  const fullFinetuneConfig = isFullFinetune
+    ? selectedTarget?.defaults?.advanced?.fullFinetuneConfig
+    : null;
+  const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
+  const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
+  const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   return (
     <WorkPanel
       className="training-config-panel"
@@ -349,7 +355,7 @@ export function ConfigureJobPanel({
                 />
               </label>
               {showNetworkType ? (
-                <label title="What the run trains. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only); Full base fine-tune updates every base weight and writes a fine-tuned checkpoint instead of an adapter — far more memory, offered only where the engine supports it.">
+                <label title="What the run trains. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter on targets that advertise it; Full base fine-tune updates every base weight and writes a fine-tuned checkpoint instead of an adapter — far more memory, offered only where the engine supports it.">
                   Network type
                   <select
                     onChange={(event) => updateConfigDraft("networkType", event.target.value)}
@@ -430,7 +436,7 @@ export function ConfigureJobPanel({
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
-                  {timestepTypeOptions.map((option) => (
+                  {visibleTimestepTypeOptions.map((option) => (
                     <option key={option} value={option}>
                       {optionLabel(option)}
                     </option>
@@ -489,7 +495,16 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Precision
-                <input onChange={(event) => updateConfigDraft("precision", event.target.value)} value={configDraft.precision ?? ""} />
+                <input
+                  disabled={Boolean(requiredFullPrecision)}
+                  onChange={(event) => updateConfigDraft("precision", event.target.value)}
+                  value={requiredFullPrecision ?? configDraft.precision ?? ""}
+                />
+                {requiredFullPrecision ? (
+                  <span className="training-field-hint">
+                    This backend requires {requiredFullPrecision.toUpperCase()} for full base fine-tuning.
+                  </span>
+                ) : null}
               </label>
               <label>
                 Guidance scale
@@ -516,7 +531,7 @@ export function ConfigureJobPanel({
             </label>
 
             <div className="training-advanced-toggles">
-              {isFullFinetune ? (
+              {fullCheckpointingUnsupported ? (
                 <p className="training-field-hint">
                   Gradient checkpointing is not available for a full base fine-tune yet, so it is not applied to this
                   run. Lower the training resolution if the run does not fit.

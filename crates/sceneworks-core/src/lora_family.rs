@@ -364,8 +364,9 @@ pub fn apply_model_manifest_defaults(
 /// 15-bucket ÷16-aligned ≤2048² resolution list, the 1024² default, `mlx.minMemoryGb` 48 (the ≤1536²
 /// visibility floor + the >1536² memory-gate anchor, sc-13959 — an empty `mlx` block would offer 2048²
 /// unconditionally on any Mac), the `ui.img2img` toggle + `img2imgStrength` slider (reference-guided
-/// latent-init, resolved by the worker's `resolve_img2img_init_generic`), and — for the MLX Kontext
-/// edit surface (sc-14119) — the `ui.editReferences` optional-second-image slot the Edit tab renders
+/// latent-init, resolved by the worker's `resolve_img2img_init_generic`), and — for the native
+/// Kontext-style edit surface on MLX and Candle (sc-14119) — the `ui.editReferences`
+/// optional-second-image slot the Edit tab renders
 /// (the `edit_image` capability is stamped by `model_capabilities_for_type_and_family`). The
 /// `editReferences` copy mirrors the builtin Turbo entry (image 1 required + image 2 optional, fixed
 /// order).
@@ -559,10 +560,9 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "chroma" => Some("chroma_diffusers"),
         "kolors" => Some("kolors_diffusers"),
         "sdxl" => Some("sdxl_diffusers"),
-        // Mage-Flow is macOS-only native MLX (epic 14034): there is no Torch/diffusers adapter.
-        // Like bernini / sd3 this label is recorded in recipe/lineage only — the job is MLX-routed
-        // by engine id (builtins) or by family (a full base fine-tune, sc-15036), never
-        // instantiated through a Torch adapter. Matches the builtin entries' `"adapter"`.
+        // Mage-Flow uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
+        // Torch/diffusers adapter. This family label records recipe/lineage and selects the native
+        // routes; it is never instantiated through the generic Torch adapter.
         "mage-flow" => Some("mlx_mage"),
         // SD3 / SD3.5 is the native-MLX port (epic 7841); there is no Torch/diffusers
         // adapter wired in SceneWorks. This label is recorded in recipe/lineage only —
@@ -573,21 +573,21 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
         "svd" => Some("svd_video"),
-        // Bernini is macOS-only native MLX (epic 4699): there is no Torch/diffusers
-        // adapter. This label is recorded in recipe/lineage only; on Mac the job is
-        // MLX-routed by engine id, never instantiated through a Torch adapter.
+        // Bernini uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
+        // Torch/diffusers adapter. This label is recorded in recipe/lineage and selects native
+        // routes, never the generic Torch adapter.
         "bernini" => Some("bernini"),
-        // SCAIL-2 (epic 5439) is likewise macOS-only native MLX (engine id
+        // SCAIL-2 (epic 5439) uses native MLX on macOS and native Candle off-Mac (engine id
         // "scail2_14b"); no Torch/diffusers adapter. Lineage label only.
         "scail2" => Some("scail2"),
-        // Anima (epic 10512) is macOS-only native MLX (Cosmos-Predict2 DiT + AnimaTextConditioner);
-        // there is no Torch/diffusers adapter — the job is MLX-routed by engine id (`anima_base` /
-        // `anima_aesthetic` / `anima_turbo`), never instantiated through a Torch adapter. Lineage
-        // label only (mirrors sd3 / bernini / scail2).
+        // Anima (epic 10512) uses native MLX on Mac and Candle/CUDA off-Mac; there is no Python
+        // diffusers adapter. This lineage label names the MLX dispatch path while Candle routing owns
+        // the sibling native engine (mirrors sd3 / bernini / scail2).
         "anima" => Some("anima"),
-        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints reuse the same MLX Krea
-        // adapter the builtin krea_2 catalog entries declare (`mlx_krea`), routed to the Krea MLX
-        // engine by family (sc-14108). The match scrutinee is the normalized family, so the arm keys
+        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints retain the historical
+        // `mlx_krea` lineage token used by the builtin catalog. Both native MLX and Candle dispatch
+        // this family through their imported Krea routes (sc-14108). The match scrutinee is the
+        // normalized family, so the arm keys
         // on the hyphen form `krea-2` (`normalize_model_family("krea_2")`). Builtin krea_2 entries
         // (`krea_2_turbo` / `krea_2_raw`) declare `adapter` explicitly, so
         // `apply_model_manifest_defaults` (`or_insert_with`) never overrides them — this default only
@@ -606,48 +606,56 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // code, and no Z-Image IP-Adapter exists upstream
         // (sc-2005). Custom z-image models that override capabilities can still
         // re-declare it, but the family default shouldn't claim what it can't do.
-        ("image", "z-image") => vec!["text_to_image", "style_variations"],
-        ("image", "qwen-image") => vec!["text_to_image", "style_variations"],
-        ("image", "lens") => vec!["text_to_image", "style_variations"],
+        ("image", "z-image") => vec!["text_to_image"],
+        ("image", "qwen-image") => vec!["text_to_image"],
+        // Qwen Image, Lens, Chroma, imported SDXL, and imported Mage-Flow have no distinct
+        // style-variation execution mode. Their builtin entries and imported-family defaults must
+        // agree where both exist so an imported checkpoint cannot restore the hidden no-op removed
+        // by sc-18481. Imported SDXL also has no model-specific edit route: only the exact builtin
+        // ids are admitted by the native SDXL edit/IP-Adapter route tables.
+        //
+        // Lens and Chroma have no distinct style-variation execution mode. Their builtin entries
+        // and imported-family defaults must agree so an imported checkpoint cannot restore the
+        // hidden no-op removed by sc-18481.
+        ("image", "lens") => vec!["text_to_image"],
         ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa", "interleave"],
-        ("image", "flux") => vec!["text_to_image", "style_variations"],
-        ("image", "chroma") => vec!["text_to_image", "style_variations"],
-        ("image", "kolors") => vec!["text_to_image", "character_image", "style_variations"],
-        ("image", "sdxl") => vec!["text_to_image", "edit_image", "style_variations"],
-        // SD3 / SD3.5 (epic 7841, native MLX). Text-to-image flow-matching MMDiT;
+        ("image", "flux") => vec!["text_to_image"],
+        ("image", "chroma") => vec!["text_to_image"],
+        ("image", "kolors") => vec!["text_to_image", "character_image"],
+        ("image", "sdxl") => vec!["text_to_image"],
+        // SD3 / SD3.5 (epic 7841, native MLX and Candle). Text-to-image flow-matching MMDiT;
         // img2img/inpaint are exposed by the diffusers pipelines but are not wired in
-        // SceneWorks yet, so the family default advertises only what the native port
-        // serves today (sc-7874 declares the LoRA-compatibility family).
-        ("image", "sd3") => vec!["text_to_image", "style_variations"],
-        // Anima (epic 10512, native MLX) is an anime text-to-image DiT. LoRA-capable
-        // (`supports_lora`/`supports_lokr`, sc-10521); no edit/inpaint or reference/IP-Adapter
-        // surface, so the family default advertises only t2i + style variations (like z-image /
-        // qwen-image / lens / flux).
-        ("image", "anima") => vec!["text_to_image", "style_variations"],
-        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The KreaImported lane serves
-        // text-to-image (sc-14018), img2img (sc-14071 — reference-guided latent-init, exposed via the
+        // SceneWorks yet, so the family default advertises only what the shared native
+        // backend routes serve today (sc-7874 declares the LoRA-compatibility family).
+        ("image", "sd3") => vec!["text_to_image"],
+        // Anima (epic 10512) is an anime text-to-image DiT served by native MLX and Candle.
+        // LoRA-capable (`supports_lora`/`supports_lokr`, sc-10521); no edit/inpaint,
+        // reference/IP-Adapter, or distinct style surface, so the family default is t2i-only.
+        ("image", "anima") => vec!["text_to_image"],
+        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints. The native MLX and Candle
+        // KreaImported lanes serve text-to-image (sc-14018), img2img (sc-14071 — reference-guided latent-init, exposed via the
         // `ui.img2img` toggle stamped by `apply_family_studio_surface_defaults`, NOT a capabilities
         // value: z-image owns "image_to_image" for its edit-mode img2img), AND the Kontext instruction
-        // `edit_image` surface on the MLX backend (sc-14119 — the source rides as in-context tokens +
+        // `edit_image` surface on both backends (sc-14119 — the source rides as in-context tokens +
         // grounds the Qwen3-VL vision tower, driven by the `krea2_identity_edit` LoRA). `edit_image`
         // pairs with the `ui.editReferences` slot `apply_family_studio_surface_defaults` also stamps.
         // Still NOT `character_image` (no IP-Adapter/identity surface on the bare transformer). The
         // match keys on the normalized hyphen form `krea-2` (`normalize_model_family("krea_2")`). This
         // default only affects imported/user krea_2 models; the builtin krea_2 entries declare their
         // own `capabilities` explicitly, so `apply_model_manifest_defaults` never changes them.
-        ("image", "krea-2") => vec!["text_to_image", "edit_image", "style_variations"],
+        ("image", "krea-2") => vec!["text_to_image", "edit_image"],
         // Mage-Flow (epic 14034). The non-edit variants — the only ones that are a training target,
         // and therefore the only ones a full base fine-tune (sc-15036) can be derived from —
         // advertise NO conditioning on their descriptor: no reference, no multi-reference, no edit.
-        // So text-to-image plus style variations, and deliberately not `edit_image` (that needs an
-        // `mage_flow_edit*` checkpoint) nor `character_image` (no identity surface).
-        ("image", "mage-flow") => vec!["text_to_image", "style_variations"],
+        // So text-to-image only: there is no separate style-variation route, `edit_image` needs a
+        // `mage_flow_edit*` checkpoint, and there is no `character_image` identity surface.
+        ("image", "mage-flow") => vec!["text_to_image"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
         // (`edit_image`, the source-image edit via `Conditioning::Reference`). No
-        // `character_image`/`style_variations` (no IP-Adapter/style surface) and no LoRA
-        // (the descriptor reports `supports_lora: false`).
+        // `character_image` or distinct style mode (no IP-Adapter/style surface). The MLX descriptor has
+        // no adapter slot; Candle supports LoRA/LoKr and is represented as Candle-only matrix cells.
         ("image", "bernini") => vec!["text_to_image", "edit_image"],
         ("video", "ltx-video") => vec![
             "image_to_video",
@@ -2873,7 +2881,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("flux"), Some("flux_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "flux"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -2882,7 +2890,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("chroma"), Some("chroma_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "chroma"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -2891,7 +2899,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("kolors"), Some("kolors_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "kolors"),
-            vec!["text_to_image", "character_image", "style_variations"],
+            vec!["text_to_image", "character_image"],
         );
     }
 
@@ -2900,7 +2908,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("sdxl"), Some("sdxl_diffusers"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "sdxl"),
-            vec!["text_to_image", "edit_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -3901,7 +3909,7 @@ mod tests {
         assert_eq!(super::model_adapter_for_family("anima"), Some("anima"));
         assert_eq!(
             super::model_capabilities_for_type_and_family("image", "anima"),
-            vec!["text_to_image", "style_variations"]
+            vec!["text_to_image"]
         );
         assert_eq!(
             super::diffusers_class_name_to_family("AnimaModularPipeline").as_deref(),
@@ -4324,7 +4332,7 @@ mod tests {
         assert_eq!(model_adapter_for_family("sd3"), Some("sd3"));
         assert_eq!(
             model_capabilities_for_type_and_family("image", "sd3"),
-            vec!["text_to_image", "style_variations"],
+            vec!["text_to_image"],
         );
     }
 
@@ -4584,6 +4592,27 @@ mod tests {
     }
 
     #[test]
+    fn imported_family_defaults_do_not_restore_unrouted_image_modes() {
+        for (family, adapter) in [
+            ("lens", "lens_turbo"),
+            ("chroma", "chroma_diffusers"),
+            ("qwen-image", "qwen_image"),
+            ("sdxl", "sdxl_diffusers"),
+            ("mage-flow", "mlx_mage"),
+        ] {
+            let mut entry = serde_json::Map::new();
+            apply_model_manifest_defaults(&mut entry, "image", Some(family));
+
+            assert_eq!(entry["adapter"], adapter, "{family} adapter default");
+            assert_eq!(
+                entry["capabilities"],
+                json!(["text_to_image"]),
+                "imported {family} must expose only its routed text-to-image default"
+            );
+        }
+    }
+
+    #[test]
     fn imported_krea_2_gets_adapter_and_text_to_image_capability() {
         // sc-14108 (epic 14015): an imported single-file krea_2 base checkpoint whose family the
         // base-weight gate stamps must ALSO pick up the krea_2 family defaults, or it stays
@@ -4596,12 +4625,12 @@ mod tests {
 
         // The imported model is now MLX-Krea-routed and selectable as a text-to-image model.
         assert_eq!(entry["adapter"], "mlx_krea");
-        // Text-to-image + edit_image (the MLX Kontext edit surface, sc-14119) + style_variations.
+        // Text-to-image + edit_image (the MLX Kontext edit surface, sc-14119).
         // img2img is a `ui.img2img` toggle (asserted in the sibling test), NOT a capabilities value.
         // `character_image` stays unclaimed (no IP-Adapter/identity surface on the bare transformer).
         assert_eq!(
             entry["capabilities"],
-            json!(["text_to_image", "edit_image", "style_variations"])
+            json!(["text_to_image", "edit_image"])
         );
         // `loraCompatibility.families` carries the normalized token (as every other family does,
         // e.g. wan-video above) — Krea LoRAs resolve to it through `canonical_lora_family`.
@@ -4679,13 +4708,10 @@ mod tests {
         apply_model_manifest_defaults(&mut entry, "image", Some("mage-flow"));
 
         assert_eq!(entry["adapter"], "mlx_mage");
-        // Text-to-image + style variations. NOT `edit_image` (that needs an `mage_flow_edit*`
-        // checkpoint, which is not a training target) and NOT `character_image` (no identity
-        // surface) — the non-edit Mage descriptors advertise no conditioning at all.
-        assert_eq!(
-            entry["capabilities"],
-            json!(["text_to_image", "style_variations"])
-        );
+        // Text-to-image only. There is no separate style route; `edit_image` needs a
+        // `mage_flow_edit*` checkpoint, which is not a training target, and the non-edit Mage
+        // descriptors advertise no identity/conditioning surface.
+        assert_eq!(entry["capabilities"], json!(["text_to_image"]));
         assert_eq!(entry["loraCompatibility"]["families"], json!(["mage-flow"]));
 
         assert_eq!(

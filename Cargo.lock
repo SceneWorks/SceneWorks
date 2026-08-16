@@ -6446,6 +6446,7 @@ dependencies = [
  "if-addrs",
  "keyring",
  "nix",
+ "objc2-foundation",
  "reqwest 0.12.28",
  "sceneworks-core",
  "serde",
@@ -6574,6 +6575,7 @@ version = "0.8.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "candle-gen",
  "fs2",
  "futures-util",
  "glob",

@@ -120,6 +120,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::Flux2Edit,
             CandleImageLane::Flux2Edit,
             CandleImageLane::QwenEdit,
+            CandleImageLane::SenseNovaEdit,
             CandleImageLane::ZImageEdit,
             CandleImageLane::ZImageIdentity,
             CandleImageLane::IdeogramEdit,
@@ -134,9 +135,11 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::FluxIpAdapter,
             CandleImageLane::QwenControl,
             CandleImageLane::KolorsControl,
+            CandleImageLane::KolorsEdit,
             CandleImageLane::ZImageControl,
             CandleImageLane::ZImageImg2Img,
             CandleImageLane::Sd3Img2Img,
+            CandleImageLane::SanaImg2Img,
             CandleImageLane::Flux1Control,
             CandleImageLane::Flux2Control,
             CandleImageLane::KreaControl,
@@ -224,8 +227,28 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         (reference("sd3_5_large"), CandleImageLane::Sd3Img2Img),
         (reference("sd3_5_large_turbo"), CandleImageLane::Sd3Img2Img),
         (reference("sd3_5_medium"), CandleImageLane::Sd3Img2Img),
+        (reference("sana_1600m"), CandleImageLane::SanaImg2Img),
+        (reference("sana_sprint_1600m"), CandleImageLane::SanaImg2Img),
         (pose("flux_dev"), CandleImageLane::Flux1Control),
         (pose("flux2_dev"), CandleImageLane::Flux2Control),
+        (
+            json!({
+                "model": "flux2_dev",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": [{ "keypoints": [] }] }
+            }),
+            CandleImageLane::Flux2Control,
+        ),
+        (
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": [{ "keypoints": [] }] }
+            }),
+            CandleImageLane::QwenEdit,
+        ),
         (pose("krea_2_turbo"), CandleImageLane::KreaControl),
         (reference("krea_2_turbo"), CandleImageLane::KreaImg2Img),
         (reference("krea_2_raw"), CandleImageLane::KreaImg2Img),
@@ -330,6 +353,244 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
 }
 
 #[test]
+fn conditioned_routes_fail_closed_on_conflicts_malformed_references_and_cfg() {
+    for model in ["qwen_image_edit_2511", "sensenova_u1_8b"] {
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": model, "mode": "character_image",
+            "referenceAssetIds": ["a", "b"], "advanced": { "trueCfgScale": "2.5" }
+        }))));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+                "model": model, "mode": "character_image",
+                "referenceAssetIds": absent_plural, "referenceAssetId": "a"
+            }))));
+        }
+        for malformed in [
+            json!({ "model": model, "mode": "character_image", "referenceAssetIds": ["a", ""] }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetIds": ["a", "b", "c", "d", "e", "f"] }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetIds": "a" }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "" }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "a", "referenceAssetIds": ["b"] }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "a", "advanced": { "trueCfgScale": {} } }),
+            json!({ "model": model, "mode": "character_image", "referenceAssetId": "a", "advanced": { "trueCfgScale": "not-a-number" } }),
+        ] {
+            assert!(!image_job_is_candle_eligible(&image_generate_job(
+                malformed
+            )));
+        }
+    }
+    for model in ["krea_2_raw", "krea_2_turbo"] {
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "edit_image", "referenceAssetId": "a"
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "edit_image", "referenceAssetIds": ["a", "b", "c"]
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "b"
+        }))));
+        for absent_plural in [Value::Null, json!([])] {
+            assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+                "model": model, "mode": "edit_image",
+                "referenceAssetIds": absent_plural, "referenceAssetId": "a"
+            }))));
+        }
+        for unsupported in [
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "maskAssetId": "mask" }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "controls": [{}] }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "poses": [{}] } }),
+            json!({ "model": model, "mode": "edit_image", "referenceAssetId": "a", "advanced": { "phases": [{}] } }),
+        ] {
+            assert!(!image_job_is_candle_eligible(&image_edit_job(unsupported)));
+        }
+    }
+
+    for model in [
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "style_variations",
+            "referenceAssetIds": null, "referenceAssetId": "a"
+        }))));
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": model, "mode": "reference",
+            "referenceAssetIds": [], "referenceAssetId": "a"
+        }))));
+        for malformed in [
+            json!({ "model": model, "mode": "reference", "referenceAssetIds": ["a", "b", "c", "d", "e"] }),
+            json!({ "model": model, "mode": "reference", "referenceAssetIds": ["a", null] }),
+            json!({ "model": model, "mode": "reference", "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "model": model, "mode": "reference", "referenceAssetId": "a", "advanced": { "trueCfgScale": [] } }),
+        ] {
+            assert!(!image_job_is_candle_eligible(&image_edit_job(malformed)));
+        }
+    }
+
+    for strength in [json!(0.0), json!("0.6"), Value::Null] {
+        assert!(image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": "kolors", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "strength": strength }
+        }))));
+    }
+    for strength in [json!(false), json!({}), json!("not-a-number")] {
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": "kolors", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "strength": strength }
+        }))));
+    }
+    assert_eq!(
+        image_job_candle_lane(&image_generate_job(json!({
+            "model": "kolors", "referenceAssetId": "ip-ref"
+        }))),
+        Some(CandleImageLane::KolorsIpAdapter)
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_generate_job(json!({
+            "model": "kolors", "advanced": { "poses": [{}] }
+        }))),
+        Some(CandleImageLane::KolorsControl)
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_edit_job(json!({
+            "model": "kolors", "mode": "edit_image", "sourceAssetId": "source"
+        }))),
+        Some(CandleImageLane::KolorsEdit)
+    );
+}
+
+#[test]
+fn qwen_edit_pose_carrier_is_strict_and_flux2_pose_stays_on_control() {
+    let qwen = |poses: Value| {
+        image_generate_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "character_image",
+            "referenceAssetId": "identity_1",
+            "advanced": { "poses": poses }
+        }))
+    };
+    for poses in [Value::Null, json!([])] {
+        assert_eq!(
+            image_job_candle_lane(&qwen(poses)),
+            Some(CandleImageLane::QwenEdit)
+        );
+    }
+    assert_eq!(
+        image_job_candle_lane(&qwen(json!([
+            { "keypoints": [] },
+            { "keypoints": [[0.1, 0.2, 0.9]] }
+        ]))),
+        Some(CandleImageLane::QwenEdit)
+    );
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        assert_eq!(image_job_candle_lane(&qwen(malformed)), None);
+    }
+    assert_eq!(
+        image_job_candle_lane(&qwen(Value::Array(
+            (0..=crate::image_request::MAX_JOB_POSES)
+                .map(|_| json!({}))
+                .collect()
+        ))),
+        None,
+        "oversize pose sets must fail closed"
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_generate_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "character_image",
+            "referenceAssetIds": ["identity_1", "identity_2"],
+            "advanced": { "poses": [{}] }
+        }))),
+        None,
+        "the pose recipe has exactly [identity, skeleton] and cannot drop extra identities"
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_edit_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "edit_image",
+            "sourceAssetId": "source_1",
+            "advanced": { "poses": [{}] }
+        }))),
+        None,
+        "pose sets are a Character Studio shape, never instruction edit"
+    );
+
+    let flux_character_pose = image_generate_job(json!({
+        "model": "flux2_dev",
+        "mode": "character_image",
+        "referenceAssetId": "identity_1",
+        "advanced": { "poses": [{ "keypoints": [] }] }
+    }));
+    assert_eq!(
+        image_job_candle_lane(&flux_character_pose),
+        Some(CandleImageLane::Flux2Control),
+        "the edit lane must not swallow FLUX.2 pose controls"
+    );
+    assert_eq!(
+        image_job_candle_lane(&image_edit_job(json!({
+            "model": "flux2_dev", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "poses": [{}] }
+        }))),
+        None,
+        "FLUX.2 edit plus pose has no scheduler lane and must fail closed"
+    );
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "flux2_dev", "mode": mode, "referenceAssetId": "identity",
+                "advanced": { "poses": [{}] }
+            }))),
+            Some(CandleImageLane::Flux2Control),
+            "FLUX.2 non-edit pose mode {mode} remains on control"
+        );
+    }
+    for poses in [Value::Null, json!([])] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "flux2_dev",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": poses }
+            }))),
+            Some(CandleImageLane::Flux2Edit)
+        );
+    }
+    for malformed in [json!({}), json!(false), json!([{}, null])] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "flux2_dev",
+                "mode": "character_image",
+                "referenceAssetId": "identity_1",
+                "advanced": { "poses": malformed }
+            }))),
+            None
+        );
+    }
+    for mode in [
+        "text_to_image",
+        "reference",
+        "image_to_image",
+        "style_variations",
+    ] {
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": "qwen_image_edit_2511_lightning", "mode": mode,
+                "referenceAssetId": "identity", "advanced": { "poses": [{}] }
+            }))),
+            None,
+            "Qwen pose mode {mode} is not an advertised scheduler lane"
+        );
+    }
+}
+
+#[test]
 fn candle_routed_models_plain_txt2img_are_eligible() {
     // SDXL/RealVisXL (sc-3678) + the image families wired in sc-5096 — every base txt2img id, now
     // INCLUDING base `z_image` (sc-8679): the registered candle `z_image` base generator makes a plain
@@ -397,20 +658,49 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         "a non-edit imported-Krea img2img referenceAssetId must be candle-eligible (sc-14071)"
     );
 
-    // LoRAs (sc-14111) and the Kontext edit surface (sc-14119) stay OFF candle — its native
-    // single-file loader takes no adapters yet (sc-14135) — along with every base-tier-only shape
-    // (mask, character, strict pose, multi-phase) and the plural edit-reference set on a non-edit
-    // job (that is the edit surface).
+    // The pinned Candle provider accepts adapters, Kontext edit, and strict pose over the imported
+    // DiT. These shapes must route to the same bespoke worker lanes that advertise them.
+    for extra in [
+        json!({ "loras": [{ "id": "adapter_1" }] }),
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "source_1",
+            "loras": [{ "id": "edit", "conditioningRole": "image_edit" }]
+        }),
+        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({
+            "loras": [{ "id": "style" }],
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
+    ] {
+        let mut payload = plain.clone();
+        payload
+            .as_object_mut()
+            .expect("payload object")
+            .extend(extra.as_object().expect("extra object").clone());
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(payload.clone())),
+            "supported imported-Krea shape must route on candle: {payload}"
+        );
+    }
+
+    // Every shape the bespoke imported handlers would otherwise ignore remains fail-closed.
     let mut unsupported_shapes = Vec::new();
     for extra in [
-        json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
-        json!({ "mode": " edit_image ", "sourceAssetId": "source_1" }),
-        json!({ "mode": "edit_image", "referenceAssetIds": ["scene_1", "person_1"] }),
+        json!({ "mode": "edit_image" }),
         json!({ "referenceAssetIds": ["reference_1"] }),
+        json!({ "sourceAssetId": "source_1" }),
         json!({ "maskAssetId": "mask_1" }),
         json!({ "characterId": "character_1" }),
-        json!({ "loras": [{ "id": "adapter_1" }] }),
-        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({
+            "sourceAssetId": "source_1",
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "source_1",
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
         json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
     ] {
         let mut payload = plain.clone();
@@ -440,20 +730,10 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
     }))));
 }
 
-/// A strict-pose set on an imported Krea 2 checkpoint is served on MLX (the pose control branch
-/// folds onto the file-loaded DiT) but NOT on candle, whose native single-file entrypoint threads
-/// no control overlay. This pins the shape of that asymmetry so the candle refusal stays a LOUD,
-/// terminal, named gap rather than a job that silently never routes:
-///   * `image_job_is_candle_eligible` is false, so no candle worker ever claims it — the claim gate
-///     and the worker's `KREA_IMPORTED_SUPPORTS_POSE_CONTROL` agree;
-///   * `candle_supported` returns `Err(reason)`, which is what makes the enforce sweep
-///     (`fail_unsupported_candle_jobs`) fail it terminally with a named feature instead of routing
-///     it to the grace-window "no candle worker yet" sweep, where it would sit queued forever.
-///
-/// The MLX half of the same payload is asserted alongside it, so a future change that quietly drops
-/// the imported pose surface on BOTH backends cannot pass this test by making the candle half green.
+/// The imported Krea strict-pose set must be claimed by both native backends and must pass Candle's
+/// terminal support oracle, proving scheduler eligibility and the worker capability stay aligned.
 #[test]
-fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
+fn imported_krea_pose_routes_to_both_native_backends() {
     let pose = json!({
         "projectId": "project_1",
         "model": "kreamania_variant4",
@@ -471,15 +751,12 @@ fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
         "MLX serves the imported pose set through the native control entrypoint"
     );
     assert!(
-        !image_job_is_candle_eligible(&job),
-        "candle's single-file entrypoint threads no control overlay, so it must not claim the job"
+        image_job_is_candle_eligible(&job),
+        "Candle serves the imported pose set through its native control entrypoint"
     );
-
-    let reason = candle_supported(&job)
-        .expect_err("an imported pose set must be a NAMED candle gap, not a silent never-route");
     assert!(
-        !reason.feature.trim().is_empty() && !reason.detail.trim().is_empty(),
-        "the terminal failure must name the feature and explain it: {reason:?}"
+        candle_supported(&job).is_ok(),
+        "the Candle enforce sweep must agree that imported strict pose is executable"
     );
 }
 
@@ -523,29 +800,116 @@ fn non_candle_families_and_variants_are_never_candle_eligible() {
 }
 
 #[test]
-fn sana_candle_txt2img_routes_to_candle() {
+fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
     // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane (the
     // `candle-gen-sana` provider, candle-gen #495 — the whole `Efficient-Large-Model/
     // Sana_1600M_1024px_diffusers` snapshot). sc-11781: the CFG-free SANA-Sprint distill
     // `sana_sprint_1600m` rides it too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the
-    // whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot). Pure txt2img on BOTH:
-    // any conditioning / LoRA / quant shape is refused and remains queued (neither candle base path
-    // advertises adapters or quant — the Sprint adapter rejects all three).
+    // whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot). Both also accept one
+    // singular reference for non-edit img2img; edit/control/multiple-reference, LoRA, and quant shapes
+    // are refused rather than silently ignored.
     for model in ["sana_1600m", "sana_sprint_1600m"] {
         assert!(
             image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
             "{model} plain txt2img must be candle-eligible (sc-11780 / sc-11781)"
         );
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "referenceAssetId": "reference-1",
+                "advanced": { "strength": 0.5 }
+            }))),
+            Some(CandleImageLane::SanaImg2Img)
+        );
+        for empty_carriers in [
+            json!({
+                "model": model,
+                "prompt": "p",
+                "controls": [],
+                "controlnets": [],
+                "referenceAssetIds": []
+            }),
+            json!({
+                "model": model,
+                "referenceAssetId": "reference-1",
+                "controls": null,
+                "controlnets": [],
+                "referenceAssetIds": [],
+                "loras": [],
+                "sourceAssetId": " ",
+                "maskAssetId": null,
+                "advanced": {
+                    "strength": 0.5,
+                    "poses": [],
+                    "phases": null,
+                    "controlMode": null,
+                    "controlImage": null,
+                    "controlScale": null,
+                    "controlWeights": null,
+                    "convRot": null,
+                    "quantTier": null,
+                    "mlxQuantize": 0
+                }
+            }),
+        ] {
+            assert!(
+                image_job_candle_lane(&image_generate_job(empty_carriers.clone())).is_some(),
+                "{model} empty/null optional carriers preserve txt2img/img2img: {empty_carriers}"
+            );
+        }
         for payload in [
             json!({ "prompt": "p", "mode": "edit_image", "sourceAssetId": "a" }),
-            json!({ "prompt": "p", "referenceAssetId": "a" }),
             json!({ "prompt": "p", "maskAssetId": "a" }),
             json!({ "prompt": "p", "loras": [{ "path": "x", "weight": 0.8 }] }),
             json!({ "prompt": "p", "advanced": { "mlxQuantize": 4 } }),
+            json!({ "prompt": "p", "advanced": { "controlMode": "canny" } }),
+            json!({ "prompt": "p", "advanced": { "controlImage": "control-1" } }),
+            json!({ "prompt": "p", "advanced": { "controlScale": 0.9 } }),
+            json!({ "prompt": "p", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
+            json!({ "prompt": "p", "advanced": { "convRot": true } }),
+            json!({ "prompt": "p", "advanced": { "quantTier": "nvfp4" } }),
         ] {
             assert!(
                 !image_request_candle_eligible(model, &object(payload.clone())),
                 "{model} conditioning/adapter/quant shape must fall back to torch: {payload}"
+            );
+        }
+
+        for malformed in [
+            json!({ "model": model, "referenceAssetIds": ["a"] }),
+            json!({ "model": model, "referenceAssetId": 7 }),
+            json!({ "model": model, "referenceAssetId": " " }),
+            json!({ "model": model, "referenceAssetId": "a", "sourceAssetId": "b" }),
+            json!({ "model": model, "referenceAssetId": "a", "maskAssetId": "m" }),
+            json!({ "model": model, "referenceAssetId": "a", "loras": [{ "path": "x" }] }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "poses": [{}] } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "phases": [{}] } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "mlxQuantize": 4 } }),
+            json!({ "model": model, "referenceAssetId": "a", "referenceAssetIds": [7] }),
+            json!({ "model": model, "referenceAssetId": "a", "referenceAssetIds": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "controls": [{}] }),
+            json!({ "model": model, "referenceAssetId": "a", "controls": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "controlnets": [{}] }),
+            json!({ "model": model, "referenceAssetId": "a", "controlnets": "invalid" }),
+            json!({ "model": model, "referenceAssetId": "a", "loras": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "sourceAssetId": 7 }),
+            json!({ "model": model, "referenceAssetId": "a", "maskAssetId": {} }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "poses": 7 } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "phases": {} } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "mlxQuantize": {} } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlMode": "canny" } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlImage": "control-1" } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlScale": 0.9 } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "controlWeights": { "overlayId": "overlay-1" } } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "convRot": true } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": { "quantTier": "nvfp4" } }),
+            json!({ "model": model, "referenceAssetId": "a", "advanced": 7 }),
+        ] {
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(malformed.clone())),
+                None,
+                "{model} malformed img2img shape must be rejected: {malformed}"
             );
         }
     }
@@ -577,15 +941,15 @@ fn flux2_klein_weight_variants_route_txt2img_to_candle() {
 
 #[test]
 fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
-    // Every candle image family is txt2img-only on candle: unsupported conditioning shapes are
-    // refused (the worker advertises none of these, so this is the no-silently-dropped-control boundary).
+    // These cases exercise unsupported conditioning on the generic base predicate. Specialized edit,
+    // reference, identity, and control routes are asserted separately; anything not claimed by one
+    // of them must be refused rather than silently rendered as unconditioned text-to-image.
     let cases = [
         (
             "z_image_turbo",
             json!({ "mode": "edit_image", "sourceAssetId": "a" }),
         ),
         ("flux_dev", json!({ "referenceAssetId": "a" })),
-        ("flux_schnell", json!({ "loras": [{ "name": "x" }] })),
         (
             "qwen_image",
             json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
@@ -594,8 +958,8 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
         // lane (asserted via `image_job_is_candle_eligible` in `candle_worker_claims_*`), like SDXL
         // edit. The txt2img gate still rejects it (it rejects all `edit_image`), but the bespoke
         // candle edit lane claims it at the router level.
-        // sc-5484 / sc-5576: Chroma / Kolors / SenseNova-U1 are pure T2I on candle. Their MLX-only
-        // conditioning shapes (Kolors edit / IP-reference / pose-control; SenseNova edit) defer.
+        // These assertions exercise only the generic T2I gate. Kolors and SenseNova conditioning is
+        // intentionally rejected here and claimed by their dedicated routes at the full scheduler.
         (
             "chroma1_hd",
             json!({ "mode": "edit_image", "sourceAssetId": "a" }),
@@ -619,6 +983,19 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
         assert!(
             !image_request_candle_eligible(model, &object(payload.clone())),
             "{model} conditioning shape must fall back to torch: {payload}"
+        );
+    }
+}
+
+#[test]
+fn flux1_lora_stays_on_candle() {
+    for model in ["flux_schnell", "flux_dev"] {
+        assert!(
+            image_request_candle_eligible(
+                model,
+                &object(json!({ "prompt": "x", "loras": [{ "name": "x" }] }))
+            ),
+            "{model} LoRA must stay on Candle"
         );
     }
 }
@@ -756,13 +1133,18 @@ fn bernini_candle_txt2img_and_i2i_route_to_candle() {
     assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
         "model": "bernini_image", "mode": "edit_image"
     }))));
-    // NOT `candle_quant` (sc-10996): the off-Mac packed-tier select is deferred (sc-11003), so an
-    // explicit `mlxQuantize` request is refused rather than staying on candle — the descriptor
-    // advertises Q4/Q8 but no consumable off-Mac tier exists yet.
-    assert!(!image_request_candle_eligible(
-        "bernini_image",
-        &object(json!({ "prompt": "a marble bust", "advanced": { "mlxQuantize": 8 } }))
-    ));
+    // sc-11003 publishes bf16/q8/q4 subdirectories in the off-Mac snapshot, and the worker's shared
+    // Bernini resolver selects them for both the image and video lanes. Quant requests therefore stay
+    // on Candle instead of being bounced by a stale catalog flag.
+    for bits in [4, 8] {
+        assert!(image_request_candle_eligible(
+            "bernini_image",
+            &object(json!({
+                "prompt": "a marble bust",
+                "advanced": { "mlxQuantize": bits }
+            }))
+        ));
+    }
 }
 
 #[test]
@@ -885,7 +1267,7 @@ fn boogu_base_and_turbo_img2img_route_to_candle() {
 }
 
 #[test]
-fn explicit_quantization_falls_back_to_torch_image_and_video() {
+fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
     // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
     // explicit `advanced.mlxQuantize > 0` is refused rather than silently running dense. chroma1_hd
     // is such a dense-only candle family (contrast the SDXL family, sc-10767, which now advertises
@@ -896,9 +1278,15 @@ fn explicit_quantization_falls_back_to_torch_image_and_video() {
     ));
     // NOTE: qwen_image USED to be a dense-only counter-example here; sc-11020 moved it to
     // CANDLE_QUANT_MODELS (its turnkey q4/q8 packed tiers load off-Mac), so its quant tier-select now
-    // STAYS on candle — covered by `qwen_image_quant_tier_select_stays_on_candle`.
-    assert!(!video_request_candle_eligible(
+    // STAYS on candle — covered by `qwen_image_quant_and_lora_stay_on_candle`.
+    // sc-18478: Wan TI2V-5B now owns native Candle q4/q8 tiers as well as dense.
+    assert!(video_request_candle_eligible(
         "wan_2_2",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
+    ));
+    // Mochi remains a dense-only Candle video family and is still a negative counter-example.
+    assert!(!video_request_candle_eligible(
+        "mochi_1",
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
     ));
     // Dense (<= 0) or absent quant leaves a dense candle family on its native path → still eligible.
@@ -913,12 +1301,12 @@ fn explicit_quantization_falls_back_to_torch_image_and_video() {
 }
 
 #[test]
-fn qwen_image_quant_tier_select_stays_on_candle() {
+fn qwen_image_quant_and_lora_stay_on_candle() {
     // sc-11020 (epic 9083): base `qwen_image` is a turnkey packed-quant candle family — its q4/q8/bf16
     // subdirs load off-Mac via `standard_tier_subdir` (sc-8669) and the tiers are GPU-measured
     // (sc-10969), so a `mlxQuantize` tier-select now STAYS on candle instead of enforce-failing
     // `candle_unsupported` at routing (the routing half sc-9983 flipped for krea/ideogram/boogu but
-    // missed qwen). A LoRA still defers — base qwen advertises no candle inference LoRA.
+    // missed qwen). sc-18477 also admits its native Candle LoRA/LoKr path.
     for bits in [4, 8] {
         assert!(
             image_request_candle_eligible(
@@ -933,8 +1321,8 @@ fn qwen_image_quant_tier_select_stays_on_candle() {
         "qwen_image",
         &object(json!({ "prompt": "x" }))
     ));
-    // A LoRA request is still refused — no candle inference LoRA on base qwen.
-    assert!(!image_request_candle_eligible(
+    // A LoRA request stays on Candle and reaches the strict adapter loader.
+    assert!(image_request_candle_eligible(
         "qwen_image",
         &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
     ));
@@ -965,7 +1353,7 @@ fn z_image_quant_tier_select_stays_on_candle() {
 }
 
 #[test]
-fn flux2_turnkey_quant_tier_select_stays_on_candle() {
+fn flux2_turnkey_quant_and_lora_stay_on_candle() {
     // sc-10222 (epic 9083): the LAST families carrying the "engine wired, router half missed" skew
     // (sc-9983 krea/ideogram/boogu, sc-11020 qwen). `flux2_klein_9b`/`_kv`/`flux2_dev` are worker
     // `STANDARD_TIER_MODELS` members whose `SceneWorks/flux2-*-mlx` turnkeys ship q4/q8/bf16 packed
@@ -994,13 +1382,13 @@ fn flux2_turnkey_quant_tier_select_stays_on_candle() {
                 "{model} dense/plain shape must stay candle-eligible"
             );
         }
-        // No candle inference LoRA on any FLUX.2 id, so a LoRA is still refused.
+        // sc-18477: every published FLUX.2 tier applies LoRA/LoKr natively.
         assert!(
-            !image_request_candle_eligible(
+            image_request_candle_eligible(
                 model,
                 &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
             ),
-            "{model} LoRA must still defer (quant and LoRA are decoupled caps)"
+            "{model} LoRA must stay on Candle"
         );
     }
     // `_true_v2` is deliberately NOT flipped: the wikeeyang fine-tune installs by convert-at-install
@@ -1013,6 +1401,10 @@ fn flux2_turnkey_quant_tier_select_stays_on_candle() {
     assert!(!image_request_candle_eligible(
         "flux2_klein_9b_true_v2",
         &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+    ));
+    assert!(image_request_candle_eligible(
+        "flux2_klein_9b_true_v2",
+        &object(json!({ "prompt": "x", "loras": [{ "name": "x" }] }))
     ));
 }
 
@@ -1143,10 +1535,9 @@ fn lens_conditioning_shapes_fall_back_to_torch() {
 }
 
 #[test]
-fn sd3_5_quant_stays_on_candle_but_lora_and_conditioning_defer() {
-    // sc-7880 (epic 7982): the candle SD3.5 descriptor advertises supported_quants: [Q4, Q8] but
-    // supports_lora: false, so — unlike Lens — an explicit quant request stays on the candle lane
-    // while a LoRA (and every conditioning shape) is refused and remains queued.
+fn sd3_5_quant_and_lora_stay_on_candle_but_conditioning_defers() {
+    // sc-7880 (epic 7982) + sc-18477: the Candle SD3.5 descriptor advertises Q4/Q8 and native
+    // LoRA/LoKr. Quant and adapter requests stay on Candle; unsupported conditioning still defers.
     for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
         // Plain txt2img is eligible.
         assert!(
@@ -1163,13 +1554,13 @@ fn sd3_5_quant_stays_on_candle_but_lora_and_conditioning_defer() {
                 "{model} Q{bits} request should stay on candle"
             );
         }
-        // A LoRA defers (SD3.5 has no inference-LoRA candle path yet).
+        // A LoRA stays on the strict native adapter path.
         assert!(
-            !image_request_candle_eligible(
+            image_request_candle_eligible(
                 model,
                 &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
             ),
-            "{model} with a LoRA must fall back to torch"
+            "{model} with a LoRA must stay on Candle"
         );
         // Every conditioning shape defers (txt2img only).
         for case in [
@@ -1436,12 +1827,12 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         // t2i (the dedicated `generate_candle_bernini_image_stream` lane, `frames:1`).
         "bernini_image",
         // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane now (the
-        // `candle-gen-sana` provider, candle-gen #495). Pure txt2img — its conditioning/adapter/quant
-        // refusal is asserted just below.
+        // `candle-gen-sana` provider, candle-gen #495). It also accepts one singular img2img reference;
+        // its unsupported adapter/quant/control refusal is asserted elsewhere.
         "sana_1600m",
         // sc-11781 (epic 8485): the CFG-free SANA-Sprint distill `sana_sprint_1600m` rides the candle
-        // lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498). Pure txt2img (1–4 step
-        // SCM/TrigFlow) — the Sprint adapter rejects quant / LoRA / control, so those requests remain queued.
+        // lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498). Its 1–4 step SCM/TrigFlow
+        // path also accepts one singular img2img reference; quant / LoRA / control remain unsupported.
         "sana_sprint_1600m",
     ] {
         assert!(
@@ -1454,8 +1845,8 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
     }
     // Refuses a genuinely unsupported plain-txt2img image id (`pulid_flux_dev` — its only candle lane is the
     // bespoke character-reference path, so a PLAIN txt2img prompt has no candle route, candle_routed=
-    // false), an adapter shape on the txt2img-only SANA base (candle SANA advertises neither quant nor
-    // LoRA — sc-11780/sc-11781), and a conditioning shape on a wired family — all are refused.
+    // false), an adapter shape on dense SANA base (which advertises neither quant nor LoRA), and an
+    // unsupported conditioning shape on a wired family — all are refused.
     assert!(!worker_supports_job(
         &candle,
         &image_generate_job(json!({ "model": "pulid_flux_dev", "prompt": "p" }))
@@ -1469,9 +1860,9 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
                 "loras": [{ "path": "x", "weight": 0.8 }]
             }))
         ),
-        "candle SANA base is pure txt2img — a LoRA request defers to torch (sc-11780)"
+        "candle SANA base supports no adapters — a LoRA request defers to torch"
     );
-    assert!(!worker_supports_job(
+    assert!(worker_supports_job(
         &candle,
         &image_generate_job(json!({
             "model": "kolors",
@@ -1585,17 +1976,37 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
     }))));
     assert!(image_job_is_candle_eligible(&image_generate_job(json!({
         "model": "flux2_dev",
-        "mode": "edit_image",
-        "sourceAssetId": "asset_1",
+        "mode": "character_image",
         "referenceAssetIds": ["asset_1", "asset_2"]
     }))));
-    // sc-7736: a pure-reference flux2_dev job (a `referenceAssetId`, NO `edit_image` source, NO poses)
-    // is neither the edit lane (needs `edit_image` + a source) nor the control lane (needs poses), so
-    // the txt2img gate rejects the reference shape, so it remains queued.
-    assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+    // sc-18476: a pure-reference flux2_dev job is now claimed by Flux2Edit; it no longer falls through
+    // the generic T2I gate or remains queued.
+    assert!(image_job_is_candle_eligible(&image_generate_job(json!({
         "model": "flux2_dev",
+        "mode": "reference",
         "referenceAssetId": "asset_1"
     }))));
+    for (mode, reference_field) in [
+        ("image_to_image", "sourceAssetId"),
+        ("style_variations", "referenceAssetId"),
+    ] {
+        let mut payload = json!({ "model": "flux2_dev", "mode": mode });
+        payload
+            .as_object_mut()
+            .expect("image payload")
+            .insert(reference_field.to_owned(), json!("asset_1"));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+    }
+    for malformed in [
+        json!({ "model": "flux2_dev", "mode": "reference", "referenceAssetId": " " }),
+        json!({ "model": "flux2_dev", "mode": "character_image", "referenceAssetIds": ["asset_1", ""] }),
+        json!({ "model": "flux2_dev", "mode": "style_variations", "referenceAssetId": "asset_1", "sourceAssetId": "asset_2" }),
+        json!({ "model": "flux2_dev", "mode": "edit_image", "sourceAssetId": "asset_1", "referenceAssetIds": ["asset_2"] }),
+    ] {
+        assert!(!image_job_is_candle_eligible(&image_generate_job(
+            malformed
+        )));
+    }
     // sc-7736: FLUX.2-dev strict pose (`advanced.poses`, not edit) is the candle `Flux2Control`
     // Fun-Controlnet-Union lane — the worker CLAIMS it (the 4th wired strict-pose family). A pose job
     // with no poses array is plain txt2img (claimed by the generic candle lane, not the control one).
@@ -1646,8 +2057,9 @@ fn torch_worker_claims_everything_the_candle_worker_defers() {
     // Production has no fallback: shapes refused by candle remain queued, including unsupported-pose
     // shapes that candle owns-to-reject (sc-5968) to prevent unconditioned T2I rendering.
     let torch = gpu_worker(TORCH_CAPS);
-    // A family with no candle provider (`sana_1600m` — MLX-only, candle_routed=false; `bernini_image`
-    // is now candle-routed off-Mac, sc-10996), and a conditioning shape on a wired family.
+    // The legacy torch worker may also claim a model that now has a native provider; scheduler
+    // precedence still prefers the native SANA lane. The second assertion covers an unsupported
+    // conditioning shape on another wired family.
     assert!(worker_supports_job(
         &torch,
         &image_generate_job(json!({ "model": "sana_1600m", "prompt": "p" }))
@@ -1749,9 +2161,15 @@ fn unsupported_pose_is_owned_by_candle_declined_by_torch_served_by_mlx() {
 
 /// A queued `video_generate` job carrying `payload`.
 fn video_generate_job(payload: Value) -> JobSnapshot {
+    video_job("video_generate", payload)
+}
+
+/// A queued video job carrying `payload`, with its API-stamped type preserved so the full claim
+/// gate derives advanced modes from the job type rather than trusting a stale payload mode.
+fn video_job(job_type: &str, payload: Value) -> JobSnapshot {
     serde_json::from_value(json!({
         "id": "job_v",
-        "type": "video_generate",
+        "type": job_type,
         "status": "queued",
         "payload": payload,
         "result": {},
@@ -1811,11 +2229,15 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
         "ltx_2_3_eros text_to_video must route to the candle lane"
     );
     assert!(
-        !video_request_candle_eligible(
+        video_request_candle_eligible(
             "ltx_2_3_eros",
-            &object(json!({ "mode": "first_last_frame" }))
+            &object(json!({
+                "mode": "first_last_frame",
+                "sourceAssetId": "first",
+                "lastFrameAssetId": "last"
+            }))
         ),
-        "a conditioned ltx_2_3_eros shape must fall back to the Python worker"
+        "a complete conditioned ltx_2_3_eros shape must stay on candle"
     );
     // A genuinely non-candle video model is refused and remains queued.
     assert!(
@@ -1828,10 +2250,9 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
     // Wan-5B in any conditioned shape (default/i2v mode, a source, or a LoRA) is refused.
     let cases = [
         json!({ "prompt": "p" }), // no mode → defaults to i2v
-        json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
         json!({ "mode": "first_last_frame" }),
         json!({ "mode": "text_to_video", "sourceAssetId": "a" }), // txt mode but conditioned
-        json!({ "mode": "text_to_video", "loras": [{ "name": "x" }] }),
+        json!({ "mode": "image_to_video" }),
     ];
     for case in cases {
         assert!(
@@ -1930,21 +2351,152 @@ fn candle_video_models_with_provider_slots_accept_user_loras() {
             "{model} text_to_video + user LoRA must stay on candle"
         );
     }
+    assert!(video_request_candle_eligible(
+        "wan_2_2",
+        &object(json!({ "mode": "text_to_video", "loras": [{ "id": "wan_style" }] }))
+    ));
     // Families whose candle provider advertises no LoRA slot still refuse a LoRA.
-    for (model, payload) in [
-        (
-            "wan_2_2",
-            json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
-        ),
-        (
-            "svd",
-            json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] }),
-        ),
-    ] {
+    let model = "svd";
+    let payload =
+        json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] });
+    assert!(
+        !video_request_candle_eligible(model, &object(payload.clone())),
+        "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
+    );
+}
+
+#[test]
+fn candle_ltx_and_wan5_serve_new_conditioning_shapes() {
+    for model in ["ltx_2_3", "ltx_2_3_eros", "wan_2_2"] {
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({ "mode": "image_to_video", "sourceAssetId": "first" }))
+        ));
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({
+                "mode": "first_last_frame",
+                "sourceAssetId": "first",
+                "lastFrameAssetId": "last"
+            }))
+        ));
+    }
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({
+                "mode": "extend_clip",
+                "sourceClipAssetId": "left",
+                "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+            }))
+        ));
+        assert!(video_request_candle_eligible(
+            model,
+            &object(json!({
+                "mode": "video_bridge",
+                "sourceClipAssetId": "left",
+                "bridgeRightClipAssetId": "right",
+                "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+            }))
+        ));
+    }
+}
+
+#[test]
+fn candle_video_tier_selects_match_published_platform_tiers() {
+    for model in ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
+        let payload = if model == "wan_2_2_i2v_14b" {
+            json!({ "mode": "image_to_video", "sourceAssetId": "first", "advanced": { "mlxQuantize": 8 } })
+        } else {
+            json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } })
+        };
+        assert!(video_request_candle_eligible(model, &object(payload)));
+    }
+    assert!(video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
+    ));
+    assert!(!video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
+    ));
+    assert!(!video_request_candle_eligible(
+        "ltx_2_3_eros",
+        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
+    ));
+
+    let explicit_torch = video_generate_job(json!({
+        "model": "wan_2_2",
+        "mode": "text_to_video",
+        "advanced": { "quantization": "gguf-q4_k_m" }
+    }));
+    assert!(!video_request_candle_eligible(
+        "wan_2_2",
+        &explicit_torch.payload
+    ));
+    assert!(
+        !video_job_is_candle_eligible(&explicit_torch),
+        "Candle must reject rather than silently discard an explicit Torch GGUF selection"
+    );
+
+    for neutral in ["auto", " Auto ", ""] {
+        let payload = object(json!({
+            "model": "wan_2_2",
+            "mode": "text_to_video",
+            "advanced": { "quantization": neutral }
+        }));
         assert!(
-            !video_request_candle_eligible(model, &object(payload.clone())),
-            "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
+            video_request_candle_eligible("wan_2_2", &payload),
+            "neutral Torch quantization marker {neutral:?} must not eject a native Candle request"
         );
+    }
+}
+
+#[test]
+fn candle_ltx_replace_is_model_native_and_requires_its_ic_adapter() {
+    let shape = json!({
+        "sourceClipAssetId": "clip",
+        "personTrackId": "track",
+        "characterId": "character",
+        "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+    });
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        assert!(ltx_replace_candle_eligible(model, &object(shape.clone())));
+        let mut payload = object(shape.clone());
+        payload.insert("model".into(), json!(model));
+        assert!(video_job_is_candle_eligible(&person_replace_job(
+            Value::Object(payload)
+        )));
+    }
+    let mut missing_adapter = object(shape);
+    missing_adapter.remove("loras");
+    assert!(!ltx_replace_candle_eligible("ltx_2_3", &missing_adapter));
+    let ordinary_adapter = object(json!({
+        "sourceClipAssetId": "clip",
+        "personTrackId": "track",
+        "characterId": "character",
+        "loras": [{ "id": "ordinary_ltx_style" }]
+    }));
+    assert!(
+        !ltx_replace_candle_eligible("ltx_2_3", &ordinary_adapter),
+        "any LoRA is not enough: native replacement requires the recognizable IC-LoRA"
+    );
+}
+
+#[test]
+fn candle_ltx_clip_modes_require_a_recognizable_ic_lora() {
+    for mode in ["extend_clip", "video_bridge"] {
+        let mut payload = object(json!({
+            "mode": mode,
+            "sourceClipAssetId": "left",
+            "loras": [{ "id": "ordinary_ltx_style" }]
+        }));
+        if mode == "video_bridge" {
+            payload.insert("bridgeRightClipAssetId".into(), json!("right"));
+        }
+        assert!(!video_request_candle_eligible("ltx_2_3", &payload));
+        payload.insert("loras".into(), json!([{ "conditioningRole": "ic_lora" }]));
+        assert!(video_request_candle_eligible("ltx_2_3", &payload));
     }
 }
 
@@ -1972,6 +2524,54 @@ fn candle_vace_modes_eligible_with_required_assets() {
         &object(json!({ "sourceClipAssetId": "l", "bridgeRightClipAssetId": "r" })),
         &JobType::VideoBridge
     ));
+    // sc-18478: VACE-Fun is an exact dual-expert provider and accepts its own user adapter stack.
+    assert!(video_request_candle_vace_eligible(
+        "wan_2_2_vace_fun_14b",
+        &object(json!({
+            "sourceClipAssetId": "clip_1",
+            "personTrackId": "track_1",
+            "characterId": "char_1",
+            "loras": [{ "name": "vace-fun-style" }]
+        })),
+        &JobType::PersonReplace
+    ));
+}
+
+#[test]
+fn candle_vace_fun_is_dedicated_to_person_replace() {
+    let model = "wan_2_2_vace_fun_14b";
+    assert!(video_job_is_candle_eligible(&person_replace_job(json!({
+        "model": model,
+        "sourceClipAssetId": "clip_1",
+        "personTrackId": "track_1",
+        "characterId": "char_1"
+    }))));
+
+    let unsupported = [
+        (
+            "video_generate",
+            json!({ "model": model, "mode": "text_to_video" }),
+        ),
+        (
+            "video_extend",
+            json!({ "model": model, "mode": "extend_clip", "sourceClipAssetId": "clip_1" }),
+        ),
+        (
+            "video_bridge",
+            json!({
+                "model": model,
+                "mode": "video_bridge",
+                "sourceClipAssetId": "left",
+                "bridgeRightClipAssetId": "right"
+            }),
+        ),
+    ];
+    for (job_type, payload) in unsupported {
+        assert!(
+            !video_job_is_candle_eligible(&video_job(job_type, payload)),
+            "VACE-Fun must not cross-route {job_type} onto a base or single-expert VACE engine"
+        );
+    }
 }
 
 #[test]
@@ -2074,6 +2674,15 @@ fn scail2_candle_serves_animation_and_replace_in_native_shape() {
             "sourceClipAssetId": "clip_1",
             "personTrackId": "track_1",
             "characterId": "char_1"
+        }))
+    ));
+    assert!(scail2_replace_candle_eligible(
+        "scail2_14b",
+        &object(json!({
+            "sourceClipAssetId": "clip_1",
+            "personTrackId": "track_1",
+            "characterId": "char_1",
+            "loras": [{ "name": "scail2-dpo" }]
         }))
     ));
     // Through the full video claim gate: animate_character (VideoGenerate) + replace (PersonReplace).
@@ -2252,7 +2861,7 @@ fn scail2_candle_rejects_incomplete_or_wrong_shape() {
 }
 
 #[test]
-fn candle_worker_claims_txt2video_but_refuses_other_video_shapes() {
+fn candle_worker_claims_native_video_shapes_and_refuses_invalid_ones() {
     let candle = gpu_worker(CANDLE_VIDEO_CAPS);
     // Claims wan + ltx + the 14B T2V plain txt2video.
     for model in ["wan_2_2", "ltx_2_3", "wan_2_2_t2v_14b"] {
@@ -2293,11 +2902,15 @@ fn candle_worker_claims_txt2video_but_refuses_other_video_shapes() {
         &candle,
         &video_generate_job(json!({ "model": "svd", "mode": "text_to_video" }))
     ));
-    assert!(!worker_supports_job(
+    assert!(worker_supports_job(
         &candle,
         &video_generate_job(
             json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "a" })
         )
+    ));
+    assert!(!worker_supports_job(
+        &candle,
+        &video_generate_job(json!({ "model": "wan_2_2", "mode": "image_to_video" }))
     ));
     assert!(!worker_supports_job(
         &candle,
@@ -2381,7 +2994,8 @@ fn mlx_worker_claims_seedvr2_video_upscale_and_refuses_other_engines() {
         &mlx,
         &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
     ));
-    // A non-SeedVR2 engine is refused by the mlx worker (mac-only; nowhere else to run).
+    // A non-SeedVR2 engine is refused by the MLX worker; the off-Mac Candle lane enforces the same
+    // SeedVR2-only contract.
     assert!(!worker_supports_job(
         &mlx,
         &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "aura-sr" }))
@@ -3033,25 +3647,19 @@ fn image_edit_job_type_routes_through_candle_edit_lane() {
             "{model} edit via the `image_edit` job type must reach its candle lane"
         );
     }
-    // An unsupported edit family (`kolors` has a candle txt2img lane but no candle EDIT lane)
-    // submitted as `image_edit` is NOT candle-eligible. The generic descriptor asserted below is a
-    // synthetic compatibility check, not a deployed fallback; production leaves the job queued.
+    // Kolors source img2img is now a registered Candle Reference route.
     let kolors_edit = json!({
         "model": "kolors",
         "mode": "edit_image",
         "sourceAssetId": "asset_1"
     });
-    assert!(!image_job_is_candle_eligible(&image_edit_job(
+    assert!(image_job_is_candle_eligible(&image_edit_job(
         kolors_edit.clone()
     )));
-    assert!(!worker_supports_job(
+    assert!(worker_supports_job(
         &gpu_worker(CANDLE_CAPS),
         &image_edit_job(kolors_edit.clone())
     ));
-    assert!(
-        worker_supports_job(&gpu_worker(TORCH_CAPS), &image_edit_job(kolors_edit)),
-        "a torch-only edit model must still be claimable by the co-resident torch worker"
-    );
     // An `image_edit` job with no source image is not the edit lane → not candle-eligible.
     assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
         "model": "sdxl", "mode": "edit_image"

@@ -1,7 +1,7 @@
 use super::{
     admit_conditioning_paths, consume_gen_events, curated_image_menu, drive_gen_items_scored,
     load_reference_image, non_empty, normalize_sampling_knob, read_advanced_sampling_knobs,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
     resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
     ApiClient, Image, ImagePlan, ImageRequest, IpAdapterKolors, IpAdapterKolorsPaths,
     IpAdapterKolorsRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
@@ -314,17 +314,20 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         .collect();
     let total = work.len();
     let negative_prompt = request.negative_prompt.clone();
+    let adapters = resolve_adapters(request, settings)?;
 
     // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the Kolors base held co-resident with
     // the IP-Adapter overlay. This lane loads through the UNcached `start_gen_stream` with a bespoke
     // `IpAdapterKolorsPaths`, so it reaches neither the `generate_candle_stream` `vram_gate` nor the
     // `generator_cache` `apply_residency_policy`; before this it allocated unchecked.
+    let mut admission_overlays = vec![ip_adapter.as_path()];
+    admission_overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
     admit_conditioning_paths(
         settings,
         "Kolors",
         "IP-Adapter",
         &kolors_base,
-        &[ip_adapter.as_path()],
+        &admission_overlays,
     )
     .await?;
 
@@ -336,9 +339,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             let paths = IpAdapterKolorsPaths {
                 kolors_base,
                 ip_adapter,
-                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
-                // performed.
-                adapters: Vec::new(),
+                adapters,
             };
             let model = IpAdapterKolors::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("Kolors IP-Adapter load failed: {error}"))

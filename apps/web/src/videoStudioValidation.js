@@ -81,7 +81,7 @@ export function videoGenerateValidation({
     issues.push(issue.error(null, "This entry point is reserved for the next runtime slice."));
   }
   if (requiresLtxIcLora && !hasLtxIcLora) {
-    issues.push(issue.error(null, "LTX video-conditioned generation needs an installed IC-LoRA preset."));
+    issues.push(issue.error(null, "LTX video-conditioned generation needs a selected IC-LoRA adapter."));
   }
   if (!replaceReady) {
     issues.push(issue.error(null, "No live GPU worker can run person replacement yet."));

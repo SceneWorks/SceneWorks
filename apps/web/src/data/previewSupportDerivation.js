@@ -16,16 +16,15 @@
 // ## Why the result is engine-KEYED and not a boolean
 //
 // `supports_streaming` is a property of the model, so the audio catalog ships one flag. Preview
-// support is a property of **the engine that runs it**: during epic 16948's rollout `krea_2_turbo`
-// is `true` on MLX/macOS and `false` on candle/Windows — same model id, same app version, two
-// answers. It does not fully collapse when the epic completes either: SenseNova-U1 is candle-only
-// and MLX never wired it (sc-16960), so at least one route stays split permanently. A single
-// shipped boolean is wrong in every ordering, so the derived value is a `{ backend: bool }` map.
+// support is a property of **the engine that runs it**. Provider routes and preview sinks can land
+// independently on MLX and Candle, so the same model id and app version can temporarily have two
+// answers. A single shipped boolean is wrong in that ordering, so the derived value is a
+// `{ backend: bool }` map even when the current routes happen to agree.
 //
 // ## Absence is UNKNOWN, never false
 //
 // A backend key is emitted only when that backend's facts file actually contains the engine id. A
-// backend that never registered the engine (no candle Mage, no MLX SenseNova), or a backend whose
+// backend that never registered a given engine, or a backend whose
 // facts file has not been dumped on this checkout, produces NO key — the consumer reads that as
 // "unknown" and renders exactly as it did before this story. Under-claiming is invisible;
 // over-claiming would leave a placeholder up forever on a route that never emits.
@@ -238,6 +237,91 @@ export function parseEngineModelTable(rustSource) {
     seen.add(row.sceneworksId);
   }
   return rows;
+}
+
+/**
+ * Parse preview support for the bespoke Candle Qwen-Edit lane.
+ *
+ * That provider is dispatched directly by SceneWorks rather than registered in the generic media
+ * registry, so stage-1 engine facts cannot describe it. The declaration and the actual
+ * `QwenEditRequest.preview` wiring live in one Rust source file; both must remain present or this
+ * parser fails loudly instead of preserving a stale `true` claim.
+ */
+export function parseBespokePreviewRoutes(rustSource) {
+  if (typeof rustSource !== "string" || rustSource.length === 0) {
+    throw new Error("parseBespokePreviewRoutes: expected qwen_edit_candle.rs source text");
+  }
+  const source = stripRustComments(
+    rustSource,
+    "parseBespokePreviewRoutes: qwen_edit_candle.rs",
+  );
+  const anchor = "const QWEN_EDIT_CANDLE_PREVIEW_MODELS: &[&str] =";
+  const declarations = source.split(anchor).length - 1;
+  if (declarations !== 1) {
+    throw new Error(
+      `parseBespokePreviewRoutes: expected exactly one ${anchor}, found ${declarations}`,
+    );
+  }
+  const afterAnchor = source.slice(source.indexOf(anchor) + anchor.length);
+  const open = afterAnchor.indexOf("&[");
+  const close = open === -1 ? -1 : afterAnchor.indexOf("]", open + 2);
+  if (open === -1 || close === -1) {
+    throw new Error("parseBespokePreviewRoutes: preview model list is not a closed `&[...]`");
+  }
+  const body = afterAnchor.slice(open + 2, close);
+  const modelIds = [...body.matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
+  const quotes = (body.match(/"/g) ?? []).length;
+  if (modelIds.length === 0 || quotes !== modelIds.length * 2) {
+    throw new Error("parseBespokePreviewRoutes: preview model list is empty or only partly parsed");
+  }
+  if (new Set(modelIds).size !== modelIds.length) {
+    throw new Error("parseBespokePreviewRoutes: preview model list contains a duplicate id");
+  }
+  if (
+    !/move\s*\|\s*index,\s*\(seed,\s*prompt\),\s*preview,\s*on_progress\s*\|/.test(source) ||
+    !/let\s+req\s*=\s*QwenEditRequest\s*\{[\s\S]*?\bpreview,\s*\};/.test(source)
+  ) {
+    throw new Error(
+      "parseBespokePreviewRoutes: QwenEditRequest is not wired to drive_gen_items' live preview sink",
+    );
+  }
+  return modelIds.map((modelId) => ({
+    modelId,
+    backend: "candle",
+    supportsPreview: true,
+  }));
+}
+
+/**
+ * Parse the direct-dispatch PuLID preview routes from both platform worker implementations.
+ * PuLID is intentionally absent from MODEL_TABLE: MLX loads the registry engine through its
+ * identity route and Candle calls its bespoke provider by name. The exact model constants and live
+ * request sinks in these two files are therefore the authority for the derived catalog entries.
+ */
+export function parsePulidPreviewRoutes(mlxSource, candleSource) {
+  if (typeof mlxSource !== "string" || typeof candleSource !== "string") {
+    throw new Error("parsePulidPreviewRoutes: expected MLX and Candle PuLID source text");
+  }
+  const mlx = stripRustComments(mlxSource, "parsePulidPreviewRoutes: pulid.rs");
+  const candle = stripRustComments(candleSource, "parsePulidPreviewRoutes: pulid_candle.rs");
+  const modelId = /const\s+PULID_MODEL:\s*&str\s*=\s*"([a-z0-9_]+)";/.exec(mlx)?.[1];
+  const candleModelId =
+    /const\s+PULID_CANDLE_MODEL:\s*&str\s*=\s*"([a-z0-9_]+)";/.exec(candle)?.[1];
+  if (!modelId || modelId !== candleModelId) {
+    throw new Error("parsePulidPreviewRoutes: platform model declarations are missing or disagree");
+  }
+  if (!/GenerationRequest\s*\{[\s\S]*?\bpreview,\s*[\s\S]*?\};/.test(mlx)) {
+    throw new Error("parsePulidPreviewRoutes: MLX GenerationRequest has no live preview sink");
+  }
+  if (!/PulidFluxRequest\s*\{[\s\S]*?\bpreview:\s*preview\.clone\(\),[\s\S]*?\};/.test(candle)) {
+    throw new Error("parsePulidPreviewRoutes: Candle PulidFluxRequest has no live preview sink");
+  }
+  return ["mlx", "candle"].map((backend) => ({
+    modelId,
+    backend,
+    supportsPreview: true,
+    directDispatch: true,
+  }));
 }
 
 /**
@@ -493,9 +577,10 @@ const byBackendName = (left, right) =>
  * @param {{sceneworksId: string, engineId: string}[]} rows from {@link parseEngineModelTable}
  * @param {{backend: string, generatedFrom?: object, engines: object[]}[]} factsFiles media stage-1 dumps
  * @param {{backend: string, registry: string, generatedFrom?: object, engines: object[]}[]} audioFactsFiles audio stage-1 dumps
+ * @param {{modelId: string, backend: string, supportsPreview: boolean, directDispatch?: boolean}[]} bespokePreviewRoutes exact direct-dispatch routes parsed from worker source
  * @returns the canonical catalog object both artifacts are written from
  */
-export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
+export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = [], bespokePreviewRoutes = []) {
   if (!Array.isArray(factsFiles) || factsFiles.length === 0) {
     throw new Error(
       "derivePreviewSupport: no stage-1 facts files. Nothing can be derived without at least one " +
@@ -504,6 +589,9 @@ export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
   }
   if (!Array.isArray(audioFactsFiles)) {
     throw new Error("derivePreviewSupport: audioFactsFiles must be an array of audio dumps");
+  }
+  if (!Array.isArray(bespokePreviewRoutes)) {
+    throw new Error("derivePreviewSupport: bespokePreviewRoutes must be an array");
   }
 
   const indexed = factsFiles
@@ -547,10 +635,52 @@ export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
     }
   }
 
+  const modelIds = new Set(rows.map((row) => row.sceneworksId));
+  const knownBackends = new Set(backendNames);
+  const bespokeKeys = new Set();
+  for (const route of bespokePreviewRoutes) {
+    if (
+      typeof route?.modelId !== "string" ||
+      typeof route?.backend !== "string" ||
+      route?.supportsPreview !== true ||
+      ![undefined, true].includes(route?.directDispatch)
+    ) {
+      throw new Error(
+        `derivePreviewSupport: malformed bespoke preview route ${JSON.stringify(route)}`,
+      );
+    }
+    if (!modelIds.has(route.modelId) && route.directDispatch !== true) {
+      throw new Error(
+        `derivePreviewSupport: bespoke preview route names unknown MODEL_TABLE id ${route.modelId}`,
+      );
+    }
+    if (!knownBackends.has(route.backend)) {
+      throw new Error(
+        `derivePreviewSupport: bespoke preview route names undumped backend ${route.backend}`,
+      );
+    }
+    const key = `${route.modelId}\u0000${route.backend}`;
+    if (bespokeKeys.has(key)) {
+      throw new Error(`derivePreviewSupport: duplicate bespoke preview route ${key}`);
+    }
+    bespokeKeys.add(key);
+    const existing = models[route.modelId]?.[route.backend];
+    if (existing !== undefined && existing !== route.supportsPreview) {
+      throw new Error(
+        `derivePreviewSupport: bespoke preview route ${route.modelId}/${route.backend} conflicts ` +
+          "with the generic media registry dump",
+      );
+    }
+    models[route.modelId] = {
+      ...(models[route.modelId] ?? {}),
+      [route.backend]: route.supportsPreview,
+    };
+  }
+
   // Every MODEL_TABLE id, not merely the ones that produced an answer: the collision is between the
   // two NAMESPACES, and a media row whose engine happens to be in no facts file today would
   // otherwise let an audio engine quietly take its name and answer for it.
-  const fromMedia = new Set(rows.map((row) => row.sceneworksId));
+  const fromMedia = modelIds;
   for (const entry of audioIndexed) {
     for (const [engineId, supportsPreview] of entry.engines) {
       if (fromMedia.has(engineId)) {

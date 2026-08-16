@@ -90,8 +90,8 @@ export function macVideoModeBlock(model, caps, mode) {
       blocked: true,
       // On Mac the runtime is MLX-only (epic 3482) — there is no torch fallback, so a
       // blocked mode simply isn't served for this model here (some modes have no MLX path
-      // on this engine; others, like Bernini's editing/reference modes, are MLX-only and
-      // exclusive to another model). Don't call it "torch-only".
+      // on this engine; other specialist surfaces may be exposed under a different catalog
+      // model). Don't call it "torch-only".
       text: `${label(caps)} — the selected model doesn't support this mode on macOS.`,
     };
   }

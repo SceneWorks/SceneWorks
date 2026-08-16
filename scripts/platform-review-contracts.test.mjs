@@ -808,6 +808,50 @@ test("Rust Docker dependency layers include every memory-strategy adapter target
   }
 });
 
+test("both Rust Docker builders carry the mechanically digested web capability sources", async () => {
+  const dockerfile = await source("docker/rust.Dockerfile");
+  const matrix = await source(
+    "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+  );
+  const webEmbeds = [
+    ...matrix.matchAll(
+      /include_str!\(\s*"\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/apps\/web\/src\/([^"\n]+)"\s*\)/g,
+    ),
+  ].map((match) => match[1]);
+  assert.ok(webEmbeds.length > 0, "matrix must retain its production web source inputs");
+  const stage = (name) => {
+    const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(
+      dockerfile,
+    );
+    assert.ok(heading, `${name} Docker stage must exist`);
+    const start = heading.index + heading[0].length;
+    const end = dockerfile.indexOf("\nFROM ", start);
+    return dockerfile.slice(start, end === -1 ? undefined : end);
+  };
+  for (const name of ["builder", "candle-builder"]) {
+    assert.match(
+      stage(name),
+      /^COPY apps\/web\/src \.\/apps\/web\/src$/m,
+      `${name} must copy the whole owning source root`,
+    );
+  }
+  for (const relative of webEmbeds) {
+    assert.doesNotMatch(relative, /(?:^|\/)\.\.(?:\/|$)/, relative);
+  }
+});
+
+test("both Rust Docker builders carry the compiled memory-calibration evidence", async () => {
+  const dockerfile = await source("docker/rust.Dockerfile");
+  assert.equal(
+    (
+      dockerfile.match(
+        /^COPY docs\/generated\/memory-calibration-evidence\.json \.\/docs\/generated\/$/gm,
+      ) ?? []
+    ).length,
+    2,
+  );
+});
+
 test("all three manifest scripts import the shared JSONC parser", async () => {
   for (const scriptPath of [
     "scripts/check-scaffold.mjs",
@@ -1129,7 +1173,9 @@ test("the Rust gate verifies the generated docs derived from Rust sources", asyn
     assert.match(scripts["check:rust-derived-docs"], new RegExp(`\\b${sub}\\b`), sub);
   }
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  assert.match(scripts.check, /\bcheck:rust-derived-docs\b/);
+  // sc-19758 removed the `npm run check` arm of this. That chain was 18 steps of pin-keyed gates
+  // and is now the unit tests alone; the derived-docs check keeps its two other entry points, the
+  // `rust:check` gate above and the pre-push hook below, both of which still run it.
   // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
   assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
@@ -1271,7 +1317,7 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
 
-test("both stage-1 lanes verify their own capability dump, LAST and reachably", async () => {
+test("both stage-1 lanes verify their complete capability dump, then publish only its evidence", async () => {
   // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
   // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
   // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
@@ -1287,40 +1333,57 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
     const lane = await source(path);
     const verifyAt = lane.indexOf(`- name: Verify ${file} is a real dump, not a restamp`);
     assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
+    if (path.endsWith("macos-mlx.yml")) {
+      const hostedAt = lane.indexOf("\n  macos-checks:");
+      const naxAt = lane.indexOf("\n  nax-worker:");
+      assert.ok(
+        hostedAt < verifyAt && verifyAt < naxAt,
+        "the weights-free MLX facts producer belongs on the hosted Mac job, not the M5/NAX pool",
+      );
+      assert.doesNotMatch(
+        lane.slice(naxAt),
+        /Verify capabilities\.mlx\.json|Upload fresh MLX capability facts/,
+        "the NAX-only job must not duplicate the hosted MLX facts producer",
+      );
+    }
     // Re-dump to a SCRATCH dir and compare. Dumping over the checked-in file would make the
     // comparison vacuous and mutate the tree on a red run.
     assert.match(lane, /bin dump-engine-capabilities/, path);
 
     // LAST on the PR path. A step failure aborts the job, and this one goes red on exactly the
     // routine pin-bump PRs where nobody re-dumped — so placed earlier it would cancel the coverage
-    // each lane uniquely carries (macOS: `nax_guard`; Windows: the only PR run of
+    // each lane uniquely carries (macOS: the hosted full workspace suite; Windows: the only PR run of
     // `cargo test -p sceneworks-worker --features backend-candle`). A missing dump must not suppress
     // unrelated verdicts.
     //
-    // "Last" means last among steps that RUN on a pull request, not last in the file: macos-mlx.yml
-    // keeps a long `workflow_dispatch`-only calibration tail after it, which is skipped on every PR
-    // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
+    // "Last" means last among steps that RUN in the same job on a pull request. The Mac workflow has
+    // a later, separate NAX job; bounding this scan at the next job key keeps its M5-only steps out.
+    // Asserting the ordering rather than mere presence is
     // the point — nothing else would notice an unconditional step being appended later.
-    //
-    // A `failure()`-gated step is the one other admissible tail (sc-19721). The rule protects
-    // COVERAGE: a step appended unconditionally after the verifier is SKIPPED on exactly the red
-    // pin-bump runs the verifier exists to produce, so whatever it checks silently stops being
-    // checked there. A step that runs only when the job has already failed carries no coverage to
-    // lose and cannot suppress a verdict — every earlier step has already run by definition. The
-    // candle lane uses it to upload the fresh dump it just compared and would otherwise discard,
-    // which is the only way a contributor without a CUDA box can complete an inference pin bump.
-    const ADMISSIBLE_TAIL =
-      /if: \$\{\{[^\n]*(github\.event_name == 'workflow_dispatch'|failure\(\))/;
-    for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+    const afterVerify = lane.slice(verifyAt);
+    const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
+    const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
+    for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+      if (/^name: Upload fresh (?:MLX|Candle) capability facts/m.test(block)) {
+        assert.match(block, /if: \$\{\{ always\(\) \}\}/);
+        assert.match(block, /uses: actions\/upload-artifact@[0-9a-f]{40}/);
+        assert.match(block, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
+        continue;
+      }
       assert.match(
         block,
-        ADMISSIBLE_TAIL,
+        /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
         `${path}: "${block.split("\n")[0]}" runs after the dump-verification step on the PR path. ` +
           "That step must stay last for everything a PR executes, so its failure cannot cancel " +
-          "coverage this lane is the only place to have. Move it above the verification step, or " +
-          "gate it on `failure()` if it exists only to salvage artifacts from an already-red run.",
+          "coverage this lane is the only place to have. Move it above the verification step.",
       );
     }
+
+    // The rich runtime descriptor artifact is part of the same native evidence contract. It must
+    // be generated by the one matching-platform producer and byte-diffed beside the legacy preview
+    // projection; hashing a narrow supportsPreview file is not descriptor drift protection.
+    assert.match(lane, /runtime[\\/]capabilities\.(?:mlx|candle)\.json/);
+    assert.match(lane, /backend-capability-facts-(?:mlx|candle)/);
 
     // Reachability. A restamp touches ONLY the facts file, so without this path entry the lane does
     // not run at all on the one PR the step exists to catch — declared but unreachable, the same
@@ -1472,6 +1535,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.candle.json", // the restamp-verify step diffs it
+        "config/engine-capabilities/runtime/capabilities.candle.json", // same step diffs rich descriptor + worker facts
         // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
         // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
         // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
@@ -1490,6 +1554,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.mlx.json", // the restamp-verify step diffs it
+        "config/engine-capabilities/runtime/capabilities.mlx.json", // same step diffs rich descriptor + worker facts
         // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
         // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
         // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
@@ -2395,6 +2460,19 @@ function mlxJobSteps(workflow, job) {
   return steps;
 }
 
+// The jobs that carry fatal guards, scanned as ONE set. Both, not just `nax-worker`: main
+// moved "Verify capabilities.mlx.json is a real dump, not a restamp" onto the hosted
+// `macos-checks` job, because it is a weights-free registry walk that has no business on the
+// scarce M5/NAX pool. The guard was not weakened — it still ends every branch in `exit 1` —
+// it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
+// caught it: that assertion exists precisely so a guard living outside the scanned job cannot
+// ship unpinned, and the fix it asks for is to enumerate that job, which is this.
+const MLX_GUARD_JOBS = ["macos-checks", "nax-worker"];
+
+function mlxGuardSteps(workflow) {
+  return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
+}
+
 // ONE ROW PER FATAL GUARD, saying which failure it detects — not merely that the step
 // fails somehow. `branch` is the statement chain that reaches the diagnostic, matched
 // exactly and in order, which is what distinguishes guards whose MESSAGE is identical:
@@ -2409,6 +2487,16 @@ const MLX_FATAL_GUARDS = [
       'if ! diff -u config/engine-capabilities/capabilities.mlx.json "$scratch/capabilities.mlx.json"; then',
     ],
     diagnostic: /^echo "::error::config\/engine-capabilities\/capabilities\.mlx\.json does not match a fresh"/,
+  },
+  {
+    step: "Verify capabilities.mlx.json is a real dump, not a restamp",
+    detects:
+      "the checked-in RUNTIME facts file is a restamp rather than inference's fresh snapshot",
+    branch: [
+      'if ! diff -u config/engine-capabilities/runtime/capabilities.mlx.json "$scratch/runtime/capabilities.mlx.json"; then',
+    ],
+    diagnostic:
+      /^echo "::error::config\/engine-capabilities\/runtime\/capabilities\.mlx\.json does not"/,
   },
   {
     step: "Verify capabilities.mlx.json is a real dump, not a restamp",
@@ -2551,9 +2639,17 @@ const MLX_FATAL_GUARDS = [
 // Reachability is the sibling of fatality: a guard whose step never runs is exactly as
 // silent as one that never fails. The dispatch-only guards are dispatch-only BY DESIGN, so
 // the contract is the exact expression, not its presence. `null` means the step is
-// unconditional and must stay that way — the restamp check runs on every PR.
+// unconditional and must stay that way.
+//
+// The restamp check reads `if: ${{ always() }}` since main moved it to `macos-checks`, and
+// that is MORE reachable than unconditional, not less: `always()` on a step's `if:` makes it
+// run even when an earlier step in the job already failed. It does not swallow this step's own
+// failures — only `continue-on-error` and `|| true` do that, and both remain banned below. The
+// reason main wants it is stated in the workflow: a pin bump deliberately makes descriptor-
+// backed tests fail closed, and `always()` lets the producer and its paired upload still run so
+// the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
-  "Verify capabilities.mlx.json is a real dump, not a restamp": null,
+  "Verify capabilities.mlx.json is a real dump, not a restamp": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate memory-strategy calibration identities":
@@ -2568,15 +2664,23 @@ const MLX_GUARD_STEP_REACHABILITY = {
 
 test("every failure diagnostic on the MLX lane is fatal, derived from the lane's own text", async () => {
   const workflow = await source(MLX_LANE);
-  const steps = mlxJobSteps(workflow, "nax-worker");
+  const steps = mlxGuardSteps(workflow);
 
   // ANTI-VACUITY. If the splitter stops recognising steps, every loop below is trivially
   // satisfied and this test means nothing — which is exactly how the sibling audit in this
   // file silently emptied itself when sc-18691 changed a guard's polarity.
   assert.ok(
     steps.length >= 20,
-    `expected the nax-worker job to still split into steps, derived ${steps.length}`,
+    `expected ${MLX_GUARD_JOBS.join(" + ")} to still split into steps, derived ${steps.length}`,
   );
+  // Per-job anti-vacuity too: the union above stays over the floor even if one job's splitter
+  // silently returns nothing, which would hide every guard that job carries.
+  for (const job of MLX_GUARD_JOBS) {
+    assert.ok(
+      mlxJobSteps(workflow, job).length > 0,
+      `expected the ${job} job to still split into steps`,
+    );
+  }
 
   const diagnostics = [];
   const exits = [];
@@ -2625,9 +2729,11 @@ test("every failure diagnostic on the MLX lane is fatal, derived from the lane's
     );
   }
 
-  // WHOLE FILE, not just this job. A guard added to the hosted `macos-checks` job — or
-  // anywhere else in the lane — would be invisible to the job-scoped scan above and would
-  // ship unpinned. Comment lines stripped so prose cannot move the number either way.
+  // WHOLE FILE, not just the scanned jobs. A guard added anywhere else in the lane would be
+  // invisible to the job-scoped scan above and would ship unpinned. This is the assertion that
+  // caught main moving the restamp guard into `macos-checks`; the answer it demands is to
+  // enumerate that job (see MLX_GUARD_JOBS), never to relax the count. Comment lines stripped
+  // so prose cannot move the number either way.
   const laneExits = workflow
     .split("\n")
     .filter((line) => !/^\s*#/.test(line))
@@ -2635,20 +2741,21 @@ test("every failure diagnostic on the MLX lane is fatal, derived from the lane's
   assert.equal(
     laneExits,
     exits.length,
-    `${MLX_LANE} has ${laneExits} fatal exits but only ${exits.length} are inside nax-worker. ` +
-      "A guard outside that job is pinned by nothing here; enumerate it.",
+    `${MLX_LANE} has ${laneExits} fatal exits but only ${exits.length} are inside ` +
+      `${MLX_GUARD_JOBS.join(" + ")}. A guard outside those jobs is pinned by nothing here; ` +
+      "enumerate its job.",
   );
 });
 
 test("each MLX-lane fatal guard is pinned individually, by which failure it detects", async () => {
   const workflow = await source(MLX_LANE);
-  const steps = mlxJobSteps(workflow, "nax-worker");
+  const steps = mlxGuardSteps(workflow);
   const byName = new Map(steps.map((step) => [step.name, step]));
   const claimed = new Set();
 
   for (const guard of MLX_FATAL_GUARDS) {
     const step = byName.get(guard.step);
-    assert.ok(step, `${MLX_LANE} must keep a nax-worker step named "${guard.step}"`);
+    assert.ok(step, `${MLX_LANE} must keep a ${MLX_GUARD_JOBS.join(" or ")} step named "${guard.step}"`);
 
     // Located by the branch chain AND the message together. Either alone is ambiguous on
     // this lane: two guards share the "not available on this runner" message, and two share
@@ -2693,7 +2800,7 @@ test("each MLX-lane fatal guard is pinned individually, by which failure it dete
 
 test("MLX-lane guard steps stay reachable and cannot be degraded into warnings", async () => {
   const workflow = await source(MLX_LANE);
-  const steps = mlxJobSteps(workflow, "nax-worker");
+  const steps = mlxGuardSteps(workflow);
   const byName = new Map(steps.map((step) => [step.name, step]));
 
   // Derived from the guards, not hand-listed beside them: every step that carries a row is
@@ -2707,7 +2814,7 @@ test("MLX-lane guard steps stay reachable and cannot be degraded into warnings",
 
   for (const name of guardSteps) {
     const step = byName.get(name);
-    assert.ok(step, `${MLX_LANE} must keep a nax-worker step named "${name}"`);
+    assert.ok(step, `${MLX_LANE} must keep a ${MLX_GUARD_JOBS.join(" or ")} step named "${name}"`);
     const conditions = step.statements.filter((statement) => statement.startsWith("if: "));
     const expected = MLX_GUARD_STEP_REACHABILITY[name];
     if (expected === null) {
@@ -2727,11 +2834,28 @@ test("MLX-lane guard steps stay reachable and cannot be degraded into warnings",
     }
 
     // Degrading by SWALLOWING: `continue-on-error` makes every `exit 1` in the step
-    // advisory without touching one of them, and `|| true` does it per command.
+    // advisory without touching one of them, and `|| true` does it per command. Neither is
+    // ever allowed, on any statement.
     for (const statement of step.statements) {
       assert.doesNotMatch(
         statement,
-        /continue-on-error|always\(\)|\|\| true/,
+        /continue-on-error|\|\| true/,
+        `${MLX_LANE} / "${name}": "${statement}" degrades a guard failure into a warning.`,
+      );
+    }
+
+    // `always()` is banned everywhere EXCEPT as the step's own pinned `if:` condition, which
+    // the `deepEqual` above already fixes to an exact string. The distinction is real:
+    // `always()` in a step `if:` makes the step run even after an earlier step in the job
+    // failed — strictly more reachable, and it does not touch this step's own exit status.
+    // Anywhere else (inside a `run:` body, on a nested expression) it is a swallow. Comparing
+    // against `expected` rather than allowing the substring means a step can only carry
+    // `always()` if a reachability row deliberately says so.
+    for (const statement of step.statements) {
+      if (expected !== null && statement === expected) continue;
+      assert.doesNotMatch(
+        statement,
+        /always\(\)/,
         `${MLX_LANE} / "${name}": "${statement}" degrades a guard failure into a warning.`,
       );
     }

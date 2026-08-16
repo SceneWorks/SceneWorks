@@ -596,6 +596,10 @@ pub(crate) async fn submit_full_finetune_job(
     let mut config = target["defaults"].clone();
     config["triggerWord"] = json!("auroraStyle");
     config["advanced"]["networkType"] = json!("full");
+    if let Some(full_config) = target["defaults"]["advanced"]["fullFinetuneConfig"].as_object() {
+        config["advanced"]["mixedPrecision"] = full_config["mixedPrecision"].clone();
+        config["advanced"]["gradientCheckpointing"] = full_config["gradientCheckpointing"].clone();
+    }
     // The full-tune memory envelope scales with the training resolution; keep the submit gate
     // out of the way so this test is about registration, not about the gate (which sc-14056 pins).
     config["resolution"] = json!(256);

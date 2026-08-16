@@ -9,7 +9,10 @@ use crate::jobs_store::routing::catalog::{
     MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
+    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
+    has_nonempty_nested_array, has_nonempty_or_malformed_array,
+    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
+    has_nonnull_or_malformed_nested_carrier, krea_edit_has_unsupported_carrier,
     SENSENOVA_MODEL_IDS,
 };
 
@@ -108,13 +111,14 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
     }
 }
 
-/// Does this `image_detail` job belong on the in-process Rust MLX worker? sc-3060 (epic 3041)
-/// ports the tile-ControlNet detail refine onto the engine. Detail is SDXL-family only
-/// (`sdxl` / `realvisxl`, the detail-capable backbones; the payload defaults to `realvisxl`).
+/// Does this `image_detail` job belong on an in-process native Rust worker? sc-3060 (epic 3041)
+/// ported the tile-ControlNet detail refine onto MLX; sc-18480 adds the same provider contract to
+/// Candle. Detail is SDXL-family only (`sdxl` / `realvisxl` / Illustrious; the payload defaults to
+/// `realvisxl`).
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path too (epic 3641,
-/// sc-3671), so it no longer changes eligibility. On Windows/Linux no `mlx` worker exists, so detail
-/// remains queued unless a compatible native worker registers.
-pub(crate) fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
+/// sc-3671), so it no longer changes eligibility. Both native schedulers reuse this exact gate so
+/// their advertised `image_detail` capability cannot claim a non-SDXL family.
+pub(crate) fn image_detail_native_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageDetail) {
         return false;
     }
@@ -133,7 +137,7 @@ pub(crate) fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
 
 /// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
 pub(crate) fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    image_job_is_mlx_eligible(job) || image_detail_mlx_eligible(job)
+    image_job_is_mlx_eligible(job) || image_detail_native_eligible(job)
 }
 
 /// Epic 3180 / sc-3905 routing — does this understanding job (`image_vqa` / `image_interleave`)
@@ -169,7 +173,7 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// registered; only a compatible native lane may claim the job.
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path (epic 3641,
 /// sc-3671), so every SDXL shape — including a LyCORIS-tagged job — is MLX-eligible.
-/// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
+/// `image_detail` is a separate job type with its own routing (see `image_detail_native_eligible`).
 pub(crate) fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }
@@ -224,13 +228,32 @@ pub(crate) fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
-/// FLUX.2 MLX-routing conditions, shared by klein and dev. FLUX.2 is an **MLX-only** family (no torch
-/// backend), so everything it does runs on MLX: klein txt2img (sc-3025), edit/reference + KV-cache +
+/// FLUX.2 MLX-routing conditions, shared by klein and dev. FLUX.2 runs on MLX on Mac and matching
+/// Candle routes off-Mac: klein txt2img (sc-3025), edit/reference + KV-cache +
 /// multi-reference (sc-3029), third-party LyCORIS via the core loader (epic 3641), and FLUX.2-dev
-/// txt2img (epic 5914 — dev's manifest advertises `text_to_image` only, so its edit/character modes
-/// are never offered until the Pixtral path lands in sc-5919).
-pub(crate) fn flux2_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
+/// txt2img plus edit/reference/character/style workflows. Reference-bearing modes require one strict,
+/// non-conflicting reference carrier so malformed requests cannot fall through to unconditioned T2I.
+pub(crate) fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
+    if matches!(
+        mode,
+        Some(
+            "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
+        )
+    ) {
+        return conditioned_reference_count(
+            payload,
+            matches!(mode, Some("edit_image" | "image_to_image")),
+            4,
+        )
+        .is_some()
+            && !mlx_conditioned_edit_has_unsupported_carrier(payload, true, false, true)
+            && !conditioned_true_cfg_is_malformed(payload);
+    }
+    matches!(mode, None | Some("image_generation" | "text_to_image"))
+        && !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+        && !has_nonempty_or_malformed_string(payload, "referenceAssetId")
+        && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
 }
 
 /// Qwen-Image (sc-3024 / strict pose sc-3575) MLX-routing conditions: text-to-image,
@@ -251,11 +274,10 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if has_poses {
         return true;
     }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_reference {
+    if has_nonempty_or_malformed_string(payload, "referenceAssetId")
+        || has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        || has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+    {
         return false;
     }
     true
@@ -270,19 +292,11 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// (sc-3398) shares the same gate (its sampler + distill-LoRA are worker-local). Third-party
 /// LyCORIS now applies on the core MLX loader (epic 3641), so it no longer forces torch.
 pub(crate) fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    match payload.get("mode").and_then(Value::as_str) {
-        Some("edit_image") => has_source || has_reference,
-        Some("character_image") => has_reference,
-        _ => false,
-    }
+    let mode = payload.get("mode").and_then(Value::as_str);
+    matches!(mode, Some("edit_image" | "character_image"))
+        && conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
+        && !mlx_conditioned_edit_has_unsupported_carrier(payload, true, false, true)
+        && !conditioned_true_cfg_is_malformed(payload)
 }
 
 /// FLUX.1 (`flux_schnell` / `flux_dev`) MLX-routing conditions. Text-to-image and
@@ -387,13 +401,14 @@ pub(crate) fn z_image_base_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
-/// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**
-/// (`text_to_image` + `style_variations`; no edit / reference / ControlNet — those would be
-/// later engine ports), so every non-edit `image_generate` job routes to the in-process Rust
-/// `mlx-gen-chroma` worker on Mac. An `edit_image` mode — which Chroma has no path for on any
-/// platform — stays off MLX (defensive; the UI never offers edit for Chroma). All three variants
-/// (`chroma1_hd` / `chroma1_base` / `chroma1_flash`) share this gate. Third-party LyCORIS and peft
-/// LoKr apply on the core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
+/// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**; it has no
+/// edit / reference / ControlNet surface, so every non-edit `image_generate` job routes to the
+/// in-process Rust `mlx-gen-chroma` worker on Mac. The retired `style_variations` alias may still be
+/// admitted defensively for legacy API payloads, but it is no longer advertised by the catalog or
+/// UI. An `edit_image` mode — which Chroma has no path for on any platform — stays off MLX
+/// (defensive; the UI never offers edit for Chroma). All three variants (`chroma1_hd` /
+/// `chroma1_base` / `chroma1_flash`) share this gate. Third-party LyCORIS and peft LoKr apply on the
+/// core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
 pub(crate) fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
@@ -408,30 +423,72 @@ pub(crate) fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// reference the it2i path needs; plain T2I is always eligible. User LoRAs are not supported
 /// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
 pub(crate) fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let mode = payload.get("mode").and_then(Value::as_str);
     let has_poses = payload
         .get("advanced")
         .and_then(Value::as_object)
         .and_then(|advanced| advanced.get("poses"))
         .and_then(Value::as_array)
         .is_some_and(|poses| !poses.is_empty());
-    if has_poses {
+    if has_poses
+        || mlx_conditioned_edit_has_unsupported_carrier(payload, false, true, false)
+        || conditioned_true_cfg_is_malformed(payload)
+    {
         // No skeleton/ControlNet conditioning — strict pose is not an MLX SenseNova path.
         return false;
     }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    match payload.get("mode").and_then(Value::as_str) {
-        Some("edit_image") => has_source || has_reference,
-        Some("character_image") => has_reference,
-        // Plain T2I (text_to_image / no mode) — eligible with or without an inert reference.
-        _ => true,
+    match mode {
+        Some("edit_image") => conditioned_reference_count(payload, true, 5).is_some(),
+        Some("character_image") => conditioned_reference_count(payload, false, 5).is_some(),
+        // Plain T2I (`image_generation` / `text_to_image` / no mode) is eligible only without
+        // reference carriers. A reference submitted in T2I mode is malformed, not permission to
+        // drop conditioning.
+        None | Some("image_generation" | "text_to_image") => {
+            !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+                && !has_nonempty_or_malformed_string(payload, "referenceAssetId")
+                && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        }
+        _ => false,
     }
+}
+
+fn conditioned_true_cfg_is_malformed(payload: &Map<String, Value>) -> bool {
+    ["trueCfgScale", "imageGuidanceScale"]
+        .iter()
+        .any(|key| has_malformed_optional_nested_number(payload, "advanced", key))
+}
+
+fn mlx_conditioned_edit_has_unsupported_carrier(
+    payload: &Map<String, Value>,
+    allow_loras: bool,
+    reject_strength: bool,
+    allow_poses: bool,
+) -> bool {
+    (!allow_loras && has_nonempty_or_malformed_array(payload, "loras"))
+        || ["controls", "controlnets"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        || has_nonempty_or_malformed_string(payload, "maskAssetId")
+        || (!allow_poses && has_nonempty_or_malformed_nested_array(payload, "advanced", "poses"))
+        || has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
+        || [
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        || (reject_strength
+            && ["strength", "ipAdapterScale", "referenceStrength"]
+                .iter()
+                .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key)))
+        || (reject_strength
+            && ["strength", "referenceStrength"]
+                .iter()
+                .any(|key| payload.get(*key).is_some_and(|value| !value.is_null())))
 }
 
 /// Kolors (epic 3090) MLX-routing conditions. The engine `kolors` model (an SDXL-family U-Net under
@@ -535,9 +592,12 @@ pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
         // `edit_reference_ids` (base.rs) accepts, in the same priority: the two-reference scene+person
         // set (`referenceAssetIds`, epic 10871 — scene = image 1, person = image 2, `sourceAssetId`
         // null), a single `referenceAssetId`, or a plain `sourceAssetId`. Checking only `sourceAssetId`
-        // here stranded the two-ref form: the mlx worker refused it and, with no torch/candle Krea edit
-        // lane on Mac, it sat on "Waiting for an available GPU worker" forever.
-        return is_krea_edit && edit_has_reference(payload);
+        // here stranded the two-ref form: the MLX worker refused it and no other Mac worker owns the
+        // native Krea edit lane, so it sat on "Waiting for an available GPU worker" forever. The
+        // off-Mac Candle route has the same edit surface through its own routing predicate.
+        return is_krea_edit
+            && conditioned_reference_count(payload, true, 2).is_some()
+            && !krea_edit_has_unsupported_carrier(payload);
     }
     true
 }
@@ -546,31 +606,66 @@ pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// [`edit_reference_ids`](../../../sceneworks-worker) resolves — a non-empty `referenceAssetIds`
 /// list, a `referenceAssetId`, or a `sourceAssetId`. Mirrors that worker helper so the router and
 /// the worker agree on what counts as a runnable edit.
-fn edit_has_reference(payload: &Map<String, Value>) -> bool {
-    has_nonempty_string_array(payload, "referenceAssetIds")
-        || has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "sourceAssetId")
-}
-
 /// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.
-/// The native `mlx-gen-sd3` engine serves the **text-to-image** surface only (Large + Medium run true
-/// CFG, Turbo is the CFG-free few-step distill); there is no source/reference/edit path, so an
-/// `edit_image` request is rejected (the same defensive shape Krea / Lens reject). This keeps
-/// `model_mac_support`'s `features.edit` false for all three (it probes with `mode: edit_image`).
-/// macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so nothing defers.
+/// The native `mlx-gen-sd3` engine serves text-to-image plus reference-guided latent-init img2img
+/// (`referenceAssetId`, epic 8588 A4 / sc-10189). It does not expose the semantic `edit_image` job
+/// shape, so that distinct mode remains rejected. The family also runs through Candle/CUDA off-Mac;
+/// this predicate describes only the MLX half of the shared catalog contract.
 pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
 /// SANA 1600M (epic 8485 / sc-8489) + SANA-Sprint (sc-8490) MLX-eligibility. The native `mlx-gen-sana`
-/// engine serves the **text-to-image** surface only — base SANA (true-CFG, 20 steps / guidance 4.5) and
-/// the CFG-free few-step Sprint distillation (default 2 steps) share this gate; neither checkpoint has
-/// img2img/control conditioning, so an `edit_image` request is rejected (the same defensive shape
-/// Krea / SD3.5 / Lens reject). This keeps `model_mac_support`'s `features.edit` false (it probes with
-/// `mode: edit_image`). macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so
-/// nothing defers.
+/// engine serves non-edit text-to-image plus singular-reference latent-init img2img — base SANA
+/// (true-CFG, 20 steps / guidance 4.5) and the CFG-free few-step Sprint distillation (default 2 steps)
+/// share this gate. Edit, control, multiple-reference, adapter, pose, phase, and malformed unsupported
+/// carriers are rejected instead of being silently ignored. This keeps `model_mac_support`'s
+/// `features.edit` false (it probes with `mode: edit_image`). Off-Mac no MLX worker registers.
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+        && payload
+            .get("referenceAssetId")
+            .map(|value| value.as_str().is_some_and(|id| !id.trim().is_empty()))
+            .unwrap_or(true)
+        && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        && !["referenceAssetIds", "controls", "controlnets"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        && !has_nonempty_or_malformed_string(payload, "maskAssetId")
+        && !has_nonempty_or_malformed_nested_array(payload, "advanced", "poses")
+        && !has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
+        && ![
+            "controlMode",
+            "controlImage",
+            "controlScale",
+            "controlWeights",
+            "convRot",
+            "quantTier",
+        ]
+        .iter()
+        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        && !sana_has_malformed_quant_carrier(payload)
+        && !has_nonempty_or_malformed_array(payload, "loras")
+}
+
+/// Mirror the worker's `quant_int` request contract without treating an invalid explicit override as
+/// absence. Missing/null means "use the manifest default"; an integer or trimmed integer string is a
+/// valid explicit tier selection. Every other shape must fail closed instead of silently selecting Q4.
+fn sana_has_malformed_quant_carrier(payload: &Map<String, Value>) -> bool {
+    let Some(value) = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"))
+    else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
+        .is_none()
 }
 
 /// Anima base / aesthetic / turbo (epic 10512 / sc-10523) MLX-eligibility. The native `mlx-gen-anima`
@@ -579,10 +674,9 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// `edit_image` request is rejected, the same defensive shape SANA / SD3.5 / Krea / Lens use. All
 /// three variants share the engine and differ only in checkpoint + step/guidance defaults.
 ///
-/// Anima is `mlx_routed` with `candle_routed = false`, so this predicate is the ONLY thing that can
-/// make an Anima job claimable: the mlx worker refuses a job it is not eligible for
-/// (`worker_supports_job`) and no candle lane advertises the family. A missing arm here left
-/// every Anima job queued on "Waiting for an available worker." forever.
+/// Anima is routed through MLX on Mac and the native Candle lane off-Mac (sc-10676). This predicate
+/// owns only MLX request eligibility; Candle applies its sibling catalog/descriptor gate. A missing
+/// MLX arm still leaves Mac jobs queued on "Waiting for an available worker."
 pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
@@ -655,6 +749,34 @@ pub(crate) fn video_request_is_mlx_eligible(
     if !video_mode_is_mlx_eligible(model, mode) {
         return false;
     }
+    if model == "wan_2_2" {
+        let has_source = payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_last = payload
+            .get("lastFrameAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let shape_is_exact = match mode {
+            "text_to_video" => !has_source && !has_last,
+            "image_to_video" => has_source && !has_last,
+            "first_last_frame" => has_source && has_last,
+            _ => true,
+        };
+        if !shape_is_exact {
+            return false;
+        }
+    }
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+        && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
+        && !payload
+            .get("loras")
+            .and_then(Value::as_array)
+            .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
+    {
+        return false;
+    }
     true
 }
 
@@ -675,6 +797,22 @@ pub(crate) fn video_request_is_mlx_eligible(
 pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "svd" {
         return mode == "image_to_video";
+    }
+    // The two Wan2.2 14B MoE registrations are specialized descriptors, not interchangeable aliases:
+    // the T2V engine advertises no conditioning, while the I2V engine advertises Reference. Keeping
+    // this split in routing prevents a source image from reaching the text-only engine (or an empty
+    // request from reaching the reference-required engine).
+    if model == "wan_2_2_t2v_14b" {
+        return mode == "text_to_video";
+    }
+    if model == "wan_2_2_i2v_14b" {
+        return mode == "image_to_video";
+    }
+    // VACE-Fun is a shipped, dedicated dual-expert replacement engine. It must not fall into the
+    // generic Wan text/image generation arm: the worker dispatches only `replace_person` to
+    // `wan2_2_vace_fun_14b`, and explicitly refuses the model off-Mac.
+    if model == "wan_2_2_vace_fun_14b" {
+        return mode == "replace_person";
     }
     // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no classic
     // still-image-to-video. Beyond `text_to_video` (sc-4707) it serves the planner's
@@ -761,7 +899,36 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         );
     }
     if model == "minimax_h3_ref" {
-        return mode == "reference_to_video";
+        // WITHHELD, NOT AN OVERSIGHT — `reference_to_video` is the ONLY mode this partition serves,
+        // and it is deliberately not declared MLX-routed yet. Unblocked by **sc-17157**, and the
+        // condition is exact and checkable in one place:
+        //
+        //   the MLX provider must declare `ConditioningKind::MultiReference` in
+        //   `mlx-gen-minimax-h3/src/model.rs`'s `conditioning` vec.
+        //
+        // Measured at inference `75d66db5` (the revision PR #2356 pins, which is the FIRST one that
+        // registers `mlx_gen_minimax_h3` at all): that vec is
+        // `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]` — no `MultiReference`. SceneWorks
+        // requires `multiReference` for `reference_to_video`
+        // (`video_mode_conditioning_requirements`), and that is the convention rather than a quirk:
+        // `bernini`, the only other engine with a `reference_to_video` mapping, declares it, as do
+        // `scail2_14b` and the whole edit-model family.
+        //
+        // So declaring it here advertises an MLX route the pinned engine does not claim to serve.
+        // `dump-engine-capabilities` refuses outright — "descriptors cannot satisfy required
+        // conditioning alternatives [multiReference]" — which blocks the runtime artifact for EVERY
+        // model, not just this one. Withdrawing the declaration is what makes the catalog true.
+        //
+        // Nothing is lost today: the family's engine is absent from the currently pinned bundle, so
+        // ref2va renders nowhere, and sc-19558 deliberately gave this partition no off-Mac downloads
+        // either. `video_mlx_routed` stays TRUE on the `minimax_h3_ref` row on purpose — this
+        // withholds ONE mapping, not the family, so `classify_video_gap` still does not claim the
+        // model has no MLX engine (sc-17159's point).
+        //
+        // Re-enabling is a one-line revert of this arm plus deleting the matching row from
+        // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`; that constant is an EXACT set, so it goes red the
+        // moment the pair becomes claimable and cannot be left behind.
+        return false;
     }
     match mode {
         "text_to_video" | "image_to_video" => true,
@@ -839,8 +1006,8 @@ pub(crate) fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// `mlx-gen-seedvr2`. `aura-sr` (a 617M-param historical GigaGAN backend) was dropped on Mac after
 /// the sc-3668 port-or-drop spike, so the mlx worker refuses it and it remains queued.
 /// Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
-/// SeedVR2 is Mac-only here (a Windows/Linux Candle backend is the separate sc-5157); the Mac UI
-/// gating + `imageUpscaleSeedvr2` capability keep it off non-Mac pickers.
+/// SeedVR2 runs here through MLX on Mac and through the native Candle/CUDA backend on Windows/Linux
+/// (sc-5928 / sc-5160). The platform capability mirrors those two production lanes.
 pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageUpscale) {
         return false;

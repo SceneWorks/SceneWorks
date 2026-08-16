@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_os = "macos")]
 use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};
+use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
 
 #[test]
 fn video_jobs_remains_split_into_real_engine_modules() {
@@ -229,10 +229,11 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "Candle-shared VACE imports must not pull in macOS-only generation symbols"
     );
     assert!(
-        test_imports.contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};")
+        test_imports
+            .contains("use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};")
             && !test_imports
                 .contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, vace::*, wan::*};"),
-        "Candle tests must import the LTX helpers without the unused VACE family glob"
+        "Candle tests must import the shared LTX/SCAIL helpers without the unused VACE family glob"
     );
     for dispatch in [
         "generate_candle_video",
@@ -251,6 +252,95 @@ use serde_json::json;
 
 fn request(value: Value) -> VideoRequest {
     VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+}
+
+/// Both SCAIL modes carry the model path and one-shot admission together into the shared generator.
+/// The generator cache, not these request arms, decides warm versus cold under its single-owner
+/// transaction; keeping the plan structural prevents either mode from regressing to a racy external
+/// peek/check or an unconditionally gated warm hit.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
+    const SOURCE: &str = include_str!("candle.rs");
+    assert_eq!(
+        SOURCE.matches("scail2_cold_load_plan(").count(),
+        3,
+        "one owner function and exactly two production callers must exist"
+    );
+    let animate = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2(")
+        .expect("animate arm")
+        .1
+        .split_once("/// Resolve a candle SCAIL-2 `replace_person`")
+        .expect("animate arm boundary")
+        .0;
+    let replace = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2_replace(")
+        .expect("replace arm")
+        .1
+        .split_once("/// Resolve the candle Wan-VACE diffusers snapshot dir")
+        .expect("replace arm boundary")
+        .0;
+    for (name, arm) in [("animate_character", animate), ("replace_person", replace)] {
+        assert!(
+            arm.contains("let Scail2ColdLoadPlan {")
+                && arm.contains("model_dir,")
+                && arm.contains("admission,"),
+            "{name} must keep the resolved model path and cold admission together"
+        );
+        let input = arm
+            .split_once("let input = VideoGenInput {")
+            .expect("engine input")
+            .1;
+        assert!(
+            input.contains("model_dir,"),
+            "{name} must use the planned model path"
+        );
+        assert!(
+            input.contains("cold_load_admission: Some(admission),"),
+            "{name} must hand admission to the cache cold-miss seam"
+        );
+        assert!(
+            !input.contains("model_dir: resolve_candle_scail2_model_dir"),
+            "{name} must not retain an ungated resolver bypass"
+        );
+    }
+
+    let wan = include_str!("wan.rs");
+    assert!(
+        wan.contains("Some(admission) => {")
+            && wan.contains("let cold_load_cancel = cancel.clone();")
+            && wan.contains(
+                "with_cached_generator_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
+            ),
+        "the shared video path must bind SCAIL admission and the same request cancel flag at the generator-cache seam"
+    );
+    let cache = include_str!("../generator_cache.rs");
+    assert!(
+        cache.contains("run_cached_with_access_after_cold_evict("),
+        "generator cache must use the serialized evict/admit/load transaction"
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn scail2_cold_admission_uses_a_fresh_bounded_probe_without_blocking_the_request_runtime() {
+    const CANDLE: &str = include_str!("candle.rs");
+    const GPU: &str = include_str!("../gpu.rs");
+    assert!(CANDLE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    let helper = GPU
+        .split_once("pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(")
+        .expect("fresh blocking NVIDIA helper")
+        .1
+        .split_once("/// Apple-Silicon unified-memory")
+        .expect("helper boundary")
+        .0;
+    assert!(helper.contains("tokio::runtime::Builder::new_current_thread()"));
+    assert!(helper.contains("query_gpu_utilization(gpu_id)"));
+    assert!(
+        !helper.contains("tokio::runtime::Handle::current()"),
+        "the cache OS thread must not block the request's Tokio runtime"
+    );
 }
 
 #[test]
@@ -2825,7 +2915,9 @@ fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() 
         },
     );
 
-    let (_decoded, adapter, _raw_settings) = out.expect("the candle mochi arm runs to completion");
+    let (_decoded, adapter, _raw_settings, status) =
+        out.expect("the candle mochi arm runs to completion");
+    assert!(status.is_none(), "plain generation has no mode status");
     assert_eq!(
         probe.engine_frames(),
         151,
@@ -5190,6 +5282,10 @@ fn wan_lightning_subdir_is_canonical_for_fetch_and_resolution() {
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx_bundle_revision_is_pinned_commit_not_main() {
+    assert_eq!(
+        LTX_BUNDLE_REVISION, "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "the LTX pin must name the first revision that contains bf16/ (sc-18853)"
+    );
     assert_ne!(
         LTX_BUNDLE_REVISION, "main",
         "LTX q8 bundle must pin a fixed revision"
@@ -5205,6 +5301,48 @@ fn ltx_bundle_revision_is_pinned_commit_not_main() {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "the pinned revision must be lowercase hex"
     );
+}
+
+/// The Models-screen install and generation-time tier fetch are two entry points into the same
+/// bundle. Every LTX row must therefore use the worker pin, and the bf16 row must request the
+/// directory that exists at that pin (sc-18853).
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_bundle_manifest_rows_match_the_worker_pin() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    let model = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"].as_str() == Some("ltx_2_3"))
+        .expect("ltx_2_3 present in the builtin catalog");
+    let downloads = model["downloads"]
+        .as_array()
+        .expect("ltx_2_3 declares downloads");
+
+    assert_eq!(downloads.len(), 4, "gemma plus q4/q8/bf16 rows");
+    for download in downloads {
+        assert_eq!(download["repo"].as_str(), Some(LTX_BUNDLE_REPO));
+        assert_eq!(
+            download["revision"].as_str(),
+            Some(LTX_BUNDLE_REVISION),
+            "manifest and on-demand fetches must populate the same snapshot"
+        );
+    }
+    let bf16 = downloads
+        .iter()
+        .find(|download| download["variant"].as_str() == Some("bf16"))
+        .expect("bf16 tier row");
+    assert_eq!(bf16["files"], json!(["bf16/*"]));
 }
 
 // sc-8828 (F-026): `resolve_video_route` is the extracted native (MLX) dispatch decision — the
@@ -5270,12 +5408,42 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         CandleVideoRoute::Stub,
     );
 
-    // Enabled: `replace_person` on the candle SCAIL-2 model → the SCAIL-2 replacement variant;
-    // any other replace-capable model → candle Wan-VACE.
+    // Enabled: each native replacement family keeps its exact provider.
     settings.backend_candle_enabled = true;
     assert_eq!(
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
+    );
+    let vace_fun = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&vace_fun, &settings),
+        CandleVideoRoute::ReplacePersonWanVaceFun,
+    );
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        for mode in ["replace_person", "extend_clip", "video_bridge"] {
+            let native = request(json!({ "projectId": "p", "model": model, "mode": mode }));
+            assert_eq!(
+                resolve_candle_video_route(&native, &settings),
+                CandleVideoRoute::CandleVideo,
+                "{model} {mode} must stay on the native LTX provider",
+            );
+            assert_eq!(
+                runtime_descriptor_engine_ids(model, mode),
+                vec!["ltx_2_3_distilled"],
+                "runtime facts must report the same native LTX engine",
+            );
+        }
+    }
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
+        vec!["wan2_2_vace_fun_14b"],
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2", "replace_person"),
+        vec!["wan_vace"],
+        "generic Wan replacement must describe the single-expert VACE route, not the base TI2V provider",
     );
     let extend = request(json!({
         "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
@@ -5284,6 +5452,62 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&extend, &settings),
         CandleVideoRoute::WanVaceExtendBridge,
     );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
+    let mut settings = Settings::from_env();
+    settings.backend_candle_enabled = true;
+
+    let replacement = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&replacement, &settings),
+        CandleVideoRoute::ReplacePersonWanVaceFun,
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
+        vec!["wan2_2_vace_fun_14b"],
+    );
+    assert_eq!(
+        runtime_descriptor_engine_ids("wan_2_2", "replace_person"),
+        vec!["wan_vace"],
+        "generic Wan replacement must describe the single-expert VACE route, not the base TI2V provider",
+    );
+
+    for mode in ["text_to_video", "extend_clip", "video_bridge"] {
+        let unsupported = request(json!({
+            "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": mode,
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&unsupported, &settings),
+            CandleVideoRoute::Stub,
+            "VACE-Fun {mode} must not cross-route to a base or single-expert VACE engine",
+        );
+        assert!(
+            runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", mode).is_empty(),
+            "VACE-Fun {mode} must expose no dispatch descriptor",
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_vace_fun_attaches_fail_closed_sequential_cold_admission() {
+    const SOURCE: &str = include_str!("candle.rs");
+    let arm = SOURCE
+        .split_once("async fn generate_candle_wan_vace_engine(")
+        .expect("shared VACE engine")
+        .1
+        .split_once("/// Windows/CUDA candle Wan-VACE `extend_clip`")
+        .expect("VACE engine boundary")
+        .0;
+    assert!(arm.contains("vace_fun_cold_load_admission("));
+    assert!(arm.contains("cold_load_admission,"));
+    assert!(SOURCE.contains("wan_vace_fun_sequential_weight_bytes("));
+    assert!(SOURCE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
 }
 
 /// sc-10997 (epic 6562): the candle Bernini VIDEO lane routes t2v + every editing/reference/
@@ -6532,6 +6756,88 @@ fn scail2_engine_id_maps_only_the_scail2_family() {
     assert_eq!(scail2_engine_id(""), None);
 }
 
+/// The off-Mac resolver must consume the exact pinned bf16 tier that Model Manager installs, and it
+/// must use the provider-owned completeness predicate rather than a weaker worker-side sentinel.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    assert_eq!(
+        sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES,
+        runtime_cuda::providers::scail2::SHARED_TIER_FILES,
+        "API/MLX completeness and the pinned candle provider must require identical package files"
+    );
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_shared_")
+        .tempdir()
+        .expect("temp dir");
+    let tier = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
+        .expect("repo cache path")
+        .join("snapshots")
+        .join(SCAIL2_REVISION)
+        .join("bf16");
+    std::fs::create_dir_all(&tier).unwrap();
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+
+    // A directory or one plausible tensor is not an install. Missing any provider-required file
+    // must keep routing closed and name Model Manager as the repair path.
+    std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+    let error = resolve_managed_candle_scail2_model_dir(&settings)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Model Manager"), "got: {error}");
+    assert!(error.contains("bf16"), "got: {error}");
+
+    for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+        std::fs::write(tier.join(file), b"").unwrap();
+    }
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        tier
+    );
+
+    std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+}
+
+/// Existing manually assembled candle snapshots remain a compatibility fallback, but only when the
+/// provider accepts their complete legacy component shape.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_preserves_complete_legacy_layout_only() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_legacy_")
+        .tempdir()
+        .expect("temp dir");
+    let legacy = data.path().join("models").join("candle").join("scail2");
+    for component in ["transformer", "text_encoder", "vae", "clip", "tokenizer"] {
+        std::fs::create_dir_all(legacy.join(component)).unwrap();
+    }
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+
+    std::fs::write(legacy.join("tokenizer/tokenizer.json"), b"").unwrap();
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        legacy
+    );
+}
+
 /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),
 /// `mlxQuantize` opts up to Q8 or down to bf16 (`<= 0`), parsing a JSON number or string. The
 /// bf16 snapshot is ~47 GB so a missing control NEVER means bf16. Mirrors the Bernini quant test.
@@ -7269,7 +7575,7 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
     std::fs::create_dir_all(&dir).unwrap();
-    for file in SCAIL2_TIER_FILES {
+    for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
 }
@@ -8873,6 +9179,251 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
     assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
 }
 
+/// A pre-hotfix install keeps q4/q8 in the old snapshot while bf16 lands in the bumped snapshot.
+/// The requested tier must win across revisions; otherwise a bf16 request silently runs q8.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    let cache = tempfile::tempdir().expect("temp cache");
+    let snapshots = cache.path().join("snapshots");
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    let bumped = snapshots.join(LTX_BUNDLE_REVISION);
+    write_complete_ltx_dir(&old.join("q4"));
+    write_complete_ltx_dir(&old.join("q8"));
+    write_complete_ltx_dir(&bumped.join("bf16"));
+
+    assert_eq!(
+        ltx_bundle_subdir(&old, &["bf16", "q8", "q4"]).as_deref(),
+        Some(old.join("q8").as_path()),
+        "precondition: a single-snapshot lookup downgrades bf16 to q8"
+    );
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&old, &["bf16", "q8", "q4"]).as_deref(),
+        Some(bumped.join("bf16").as_path()),
+        "bf16 in a sibling revision must beat q8 in the selected revision"
+    );
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&bumped, &["q4", "q8"]).as_deref(),
+        Some(old.join("q4").as_path()),
+        "the default tier remains reachable in the pre-hotfix snapshot"
+    );
+
+    write_complete_ltx_dir(&bumped.join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&old, &["q4"]).as_deref(),
+        Some(bumped.join("q4").as_path()),
+        "the immutable current pin wins when both compatible revisions contain the tier"
+    );
+
+    let unrelated = snapshots.join("ffffffffffffffffffffffffffffffffffffffff");
+    write_complete_ltx_dir(&unrelated.join("bf16"));
+    std::fs::remove_file(bumped.join("bf16/vocoder.safetensors")).unwrap();
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&unrelated, &["bf16", "q8", "q4"]).as_deref(),
+        Some(old.join("q8").as_path()),
+        "an arbitrary cached revision must never bypass the immutable pin or its proven parent"
+    );
+
+    let flat = tempfile::tempdir().expect("flat cache");
+    write_complete_ltx_dir(&flat.path().join("sibling").join("bf16"));
+    write_complete_ltx_dir(&flat.path().join("selected").join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&flat.path().join("selected"), &["bf16", "q8", "q4"])
+            .as_deref(),
+        Some(flat.path().join("selected").join("q4").as_path()),
+        "legacy flat layouts must not scan unrelated sibling directories"
+    );
+}
+
+/// Build the exact split cache created when an existing install downloads bf16 after the pin bump.
+/// No refs/main is written, so the real resolver's most-files fallback selects the old snapshot.
+#[cfg(target_os = "macos")]
+fn ltx_split_revision_hub(tag: &str) -> tempfile::TempDir {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    let hub = tempfile::Builder::new()
+        .prefix(&format!("sw_ltx_hub_{tag}_"))
+        .tempdir()
+        .expect("temp hub");
+    let snapshots = hub
+        .path()
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("LTX repo slug")
+        ))
+        .join("snapshots");
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    write_complete_ltx_dir(&old.join("q4"));
+    write_complete_ltx_dir(&old.join("q8"));
+    write_complete_gemma_dir(&old.join("gemma"));
+    write_complete_ltx_dir(&snapshots.join(LTX_BUNDLE_REVISION).join("bf16"));
+    hub
+}
+
+#[cfg(target_os = "macos")]
+fn ltx_with_hermetic_cache<T>(hub: &Path, body: impl FnOnce() -> T) -> T {
+    temp_env_vars(
+        &[
+            ("HF_HUB_CACHE", hub.to_str().expect("utf-8 hub")),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("SCENEWORKS_MLX_LTX_DIR", ""),
+            ("SCENEWORKS_MLX_LTX_EROS_DIR", ""),
+            ("LTX_GEMMA_DIR", ""),
+        ],
+        body,
+    )
+}
+
+/// Drive the production resolver over the split cache, rather than only testing its helper.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_ltx_model_dir_reaches_bf16_in_a_sibling_revision() {
+    let hub = ltx_split_revision_hub("resolve");
+    let data = tempfile::tempdir().expect("temp data");
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let request_for = |bits: Option<i64>| {
+        let advanced = bits.map_or_else(|| json!({}), |bits| json!({ "mlxQuantize": bits }));
+        request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": advanced
+        }))
+    };
+    let snapshots = hub
+        .path()
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots");
+
+    let (bf16, q8, default) = ltx_with_hermetic_cache(hub.path(), || {
+        (
+            resolve_ltx_model_dir(&settings, &request_for(Some(0))),
+            resolve_ltx_model_dir(&settings, &request_for(Some(8))),
+            resolve_ltx_model_dir(&settings, &request_for(None)),
+        )
+    });
+
+    assert_eq!(
+        bf16.expect("bf16 resolves"),
+        snapshots.join(LTX_BUNDLE_REVISION).join("bf16")
+    );
+    let old = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+    assert_eq!(q8.expect("q8 resolves"), old.join("q8"));
+    assert_eq!(default.expect("default resolves"), old.join("q4"));
+}
+
+/// A complete tier in any revision is already provisioned. Presence checks must not contact the Hub
+/// for it, while a tier missing from every revision must still attempt the fetch.
+#[cfg(target_os = "macos")]
+#[test]
+fn ensure_ltx_tier_present_skips_fetch_for_a_sibling_revision() {
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    let hub = ltx_split_revision_hub("ensure");
+    let data = tempfile::tempdir().expect("temp data");
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(json!({
+        "id": "job-ltx-tier-1",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": "p",
+        "projectName": "P",
+        "payload": { "model": "ltx_2_3" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "error": null,
+        "etaSeconds": null,
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-08-13T00:00:00Z",
+        "updatedAt": "2026-08-13T00:00:00Z"
+    }))
+    .expect("job snapshot");
+    let ltx = |bits: i64| {
+        request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "x",
+            "advanced": { "mlxQuantize": bits }
+        }))
+    };
+
+    let (bf16, q8) = ltx_with_hermetic_cache(hub.path(), || {
+        (
+            block_on(ensure_ltx_bf16_present(&api, &settings, &job, &ltx(0))),
+            block_on(ensure_ltx_q8_present(&api, &settings, &job, &ltx(8))),
+        )
+    });
+    assert!(
+        bf16.is_ok(),
+        "bf16 in a sibling must not dial the Hub: {bf16:?}"
+    );
+    assert!(q8.is_ok(), "q8 in the selected snapshot is present: {q8:?}");
+
+    let bare = tempfile::tempdir().expect("bare hub");
+    let bare_snapshot = bare
+        .path()
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots")
+        .join(LTX_BUNDLE_PRE_BF16_REVISION);
+    write_complete_gemma_dir(&bare_snapshot.join("gemma"));
+    let missing = ltx_with_hermetic_cache(bare.path(), || {
+        block_on(ensure_ltx_bf16_present(&api, &settings, &job, &ltx(0)))
+    });
+    assert!(
+        missing.is_err(),
+        "bf16 absent from every revision must still attempt a fetch"
+    );
+}
+
 /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: config, tokenizer, a two-shard
 /// index, and the shards it maps. Mirrors the real bundle `gemma/` so the completeness +
 /// eros-resolution tests are hermetic.
@@ -10375,7 +10926,10 @@ fn keyframe_conditioning_requires_both_frame_assets() {
 
 /// FLF on a 14B Wan MoE engine is rejected at the conditioning resolver (defence-in-depth
 /// behind the routing gate, which already restricts FLF to `wan_2_2`/TI2V-5B).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn wan_flf_rejected_on_non_ti2v_engine() {
     let settings = Settings::from_env();
@@ -10392,6 +10946,54 @@ fn wan_flf_rejected_on_non_ti2v_engine() {
 
 /// A 1×1 RGB [`Image`] for clip-conditioning construction tests (the engine resizes; the
 /// content is irrelevant — only the variant / frame_idx / strength mapping is under test).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn wan5_conditioning_rejects_stale_media_before_asset_io() {
+    let settings = Settings::from_env();
+    for payload in [
+        json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "a fox",
+            "mode": "text_to_video", "sourceAssetId": "stale"
+        }),
+        json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "a fox",
+            "mode": "image_to_video", "sourceAssetId": "first", "lastFrameAssetId": "stale"
+        }),
+    ] {
+        let req = request(payload);
+        let error = resolve_wan_conditioning(
+            &settings,
+            &req,
+            Path::new("/definitely/not/read"),
+            "wan2_2_ti2v_5b",
+        )
+        .expect_err("contradictory media must fail before asset loading")
+        .to_string();
+        assert!(error.contains("must not carry"), "got: {error}");
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_eros_resolves_the_manifest_managed_bundle_gemma() {
+    let bundle_guard = tempfile::Builder::new()
+        .prefix("sw_candle_eros_bundle_")
+        .tempdir()
+        .expect("temp dir");
+    let gemma = bundle_guard.path().join("gemma");
+    write_complete_gemma_dir(&gemma);
+    assert_eq!(
+        complete_ltx_bundle_gemma_dir(Some(bundle_guard.path().to_path_buf())).as_deref(),
+        Some(gemma.as_path()),
+        "fresh Eros installs must consume SceneWorks/ltx-2.3-mlx/gemma"
+    );
+    std::fs::remove_file(gemma.join("model-00002-of-00002.safetensors")).unwrap();
+    assert!(complete_ltx_bundle_gemma_dir(Some(bundle_guard.path().to_path_buf())).is_none());
+}
+
 #[cfg(target_os = "macos")]
 fn pixel(n: u8) -> Image {
     Image {
@@ -11517,6 +12119,48 @@ mod candle_video_label_tests {
     }
 
     #[test]
+    fn candle_ltx_admission_uses_provider_footprint_and_adapter_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let tier = root.path().join("q4");
+        let gemma = root.path().join("gemma");
+        std::fs::create_dir_all(&tier).unwrap();
+        std::fs::create_dir_all(&gemma).unwrap();
+        // The footprint registry counts exact safetensors files. Sparse-set lengths keep the fixture
+        // tiny while proving the live arithmetic across DiT/connector/encoder/decoder/Gemma.
+        for (path, bytes) in [
+            (tier.join("transformer.safetensors"), 1024),
+            (tier.join("connector.safetensors"), 2048),
+            (tier.join("vae_decoder.safetensors"), 4096),
+            (tier.join("vae_encoder.safetensors"), 8192),
+            (gemma.join("model.safetensors"), 16384),
+        ] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_len(bytes).unwrap();
+        }
+        std::fs::write(
+            tier.join("quantize_config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .unwrap();
+        let adapter = root.path().join("style.safetensors");
+        let file = std::fs::File::create(&adapter).unwrap();
+        file.set_len(32768).unwrap();
+
+        let input = VideoGenInput {
+            engine_id: "ltx_2_3_distilled",
+            model_dir: tier,
+            text_encoder_dir: Some(gemma),
+            adapters: vec![AdapterSpec::new(adapter, 1.0, gen_core::AdapterKind::Lora)],
+            ..VideoGenInput::default()
+        };
+        assert_eq!(
+            ltx_resident_weight_bytes(&input).unwrap(),
+            1024 + 2048 + 4096 + 8192 + 16384 + 32768,
+            "conditioned LTX must charge the provider-selected VAE encoder and additive adapter"
+        );
+    }
+
+    #[test]
     fn candle_video_adapter_labels_are_per_family() {
         // Every wan engine (5B + 14B T2V/I2V) reports the shared `candle_wan` adapter.
         for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
@@ -11759,24 +12403,29 @@ mod candle_video_label_tests {
     }
 
     #[test]
-    fn candle_video_conditioning_only_for_i2v() {
+    fn candle_video_conditioning_matches_each_native_request_shape() {
         let settings = crate::Settings::from_env();
         let project_path = std::path::Path::new("");
-        // txt2video engines never build conditioning (even if a stray source asset is present).
+        // Text-to-video requests never build conditioning.
         for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "ltx_2_3_distilled"] {
-            let payload = json!({ "sourceAssetId": "asset_1" });
+            let payload = json!({ "mode": "text_to_video" });
             let request = VideoRequest::from_payload(payload.as_object().expect("object"));
             let conditioning =
                 resolve_candle_video_conditioning(&settings, &request, project_path, engine_id)
                     .expect("txt2video conditioning resolves");
             assert!(
                 conditioning.is_empty(),
-                "{engine_id} must be txt2video-only"
+                "{engine_id} text_to_video must be unconditioned"
             );
         }
         // The 14B I2V + SVD-XT require a source image — a request without one errors before touching
         // disk (sc-5175 / sc-5493).
-        for engine_id in ["wan2_2_i2v_14b", "svd_xt"] {
+        for engine_id in [
+            "wan2_2_ti2v_5b",
+            "wan2_2_i2v_14b",
+            "ltx_2_3_distilled",
+            "svd_xt",
+        ] {
             let payload = json!({ "mode": "image_to_video" });
             let no_source = VideoRequest::from_payload(payload.as_object().expect("object"));
             assert!(
@@ -14258,7 +14907,10 @@ fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
             ),
         )
         .iter()
-        .map(|probe| probe.to_string_lossy().into_owned())
+        // `to_string_lossy` yields NATIVE separators, so this is `FL2VA\audio_vae\config.json` on
+        // Windows while the declared patterns are Hugging Face download globs, which are always
+        // `/`. Comparing them raw passes on macOS/Linux and fails only on the Windows candle lane.
+        .map(|probe| probe.to_string_lossy().replace('\\', "/"))
         .collect();
     assert!(
         probes.len() >= 8,

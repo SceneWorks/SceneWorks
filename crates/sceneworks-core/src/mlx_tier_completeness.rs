@@ -1,5 +1,5 @@
 //! Per-family tier-completeness predicates for the MLX turnkeys that ship NO `model_index.json`
-//! (Anima / Boogu / SANA / Wan / SenseNova-U1 / MiniMax-H3).
+//! (Anima / Boogu / SANA / SCAIL-2 / Wan / SenseNova-U1 / MiniMax-H3).
 //!
 //! These families lay their weights out in a bespoke tree rather than a diffusers `model_index.json`
 //! pipeline, so the generic `<tier>/*` presence checks — the worker's `tier_components_present`
@@ -106,6 +106,27 @@ pub fn sana_tier_complete(dir: &Path) -> bool {
         && dir_has_visible_file_ending(&dir.join("vae"), ".safetensors")
         && dir.join("text_encoder/gemma-2-2b-it.safetensors").is_file()
         && dir.join("text_encoder/tokenizer.json").is_file()
+}
+
+/// The exact files in one self-contained `SceneWorks/scail2-mlx` tier. The dense bf16 tier is shared
+/// by MLX and candle; q4/q8 carry the same file names but an MLX-packed DiT. This list is consumed by
+/// the MLX worker resolver and rust-api install-state predicate, while the candle worker asserts it is
+/// byte-for-byte identical to the pinned inference provider's `SHARED_TIER_FILES` contract.
+pub const SCAIL2_TIER_FILES: &[&str] = &[
+    "config.json",
+    "dit.safetensors",
+    "t5_encoder.safetensors",
+    "tokenizer.json",
+    "clip.safetensors",
+    "vae.safetensors",
+];
+
+/// Whether a SCAIL-2 tier is complete enough for either native provider to load. Exact paths make a
+/// hidden sidecar insufficient and prevent a partial `<tier>/*` download from appearing installed.
+pub fn scail2_tier_complete(dir: &Path) -> bool {
+    SCAIL2_TIER_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
 }
 
 /// Whether a Wan2.2 MLX turnkey tier `dir` is COMPLETE and loadable by the native MLX Wan trainer
@@ -533,6 +554,12 @@ mod tests {
         touch(&dir.join("text_encoder/tokenizer.json"));
     }
 
+    fn seed_scail2(dir: &Path) {
+        for file in SCAIL2_TIER_FILES {
+            touch(&dir.join(file));
+        }
+    }
+
     /// Write a COMPLETE dense (single-expert, TI2V-5B) Wan MLX tier tree.
     fn seed_wan_dense(dir: &Path) {
         touch(&dir.join("config.json"));
@@ -653,6 +680,25 @@ mod tests {
             fs::remove_file(torn.join(component)).unwrap();
             assert!(
                 !sana_tier_complete(&torn),
+                "removing {component} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn scail2_complete_true_each_provider_file_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bf16");
+        seed_scail2(&dir);
+        assert!(scail2_tier_complete(&dir));
+
+        for component in SCAIL2_TIER_FILES {
+            let torn = tmp.path().join("torn");
+            seed_scail2(&torn);
+            fs::remove_file(torn.join(component)).unwrap();
+            assert!(
+                !scail2_tier_complete(&torn),
                 "removing {component} must read incomplete"
             );
             fs::remove_dir_all(&torn).ok();

@@ -1,10 +1,11 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32_with, resolve_pid_weights, run_candle_strict_control,
-    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError,
-    WorkerResult, ZImageControl, ZImageControlPaths, ZImageControlRequest,
+    pid_effective_dims, pid_output_tier, pose_entries, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_pid_weights,
+    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
+    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl, ZImageControlPaths,
+    ZImageControlRequest,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -322,6 +323,7 @@ pub(super) struct ZImageStrictControl {
     /// AND the PiD + Gemma snapshots are cached (Z-Image is the FLUX.1 latent space → `zimage-turbo` alias).
     /// Threaded into `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native VAE decode.
     pid: Option<gen_core::PidWeights>,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -350,6 +352,7 @@ pub(super) fn zimage_strict_control_test_fixture(
             ZIMAGE_CTRL_ENGINE_ID
         },
         pid: None,
+        adapters: Vec::new(),
     }
 }
 
@@ -386,6 +389,7 @@ impl CandleStrictControl for ZImageStrictControl {
     fn conditioning_admission(&self) -> ConditioningAdmission {
         let mut overlays = vec![self.controlnet.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             if self.is_base {
                 "Z-Image"
@@ -402,12 +406,10 @@ impl CandleStrictControl for ZImageStrictControl {
         let paths = ZImageControlPaths {
             snapshot: self.snapshot.clone(),
             control: self.controlnet.clone(),
-            // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
-            // performed.
-            adapters: Vec::new(),
             // Base `z_image` (sc-8680) → the faithful undistilled control path (shift-6.0, ~50-step,
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
+            adapters: self.adapters.clone(),
         };
         let model = ZImageControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
@@ -541,6 +543,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
+    let adapters = resolve_adapters(request, settings)?;
     let provider = ZImageStrictControl {
         snapshot: base,
         controlnet,
@@ -554,6 +557,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         negative_prompt,
         engine_id,
         pid: pid_weights,
+        adapters,
     };
 
     run_candle_strict_control(
