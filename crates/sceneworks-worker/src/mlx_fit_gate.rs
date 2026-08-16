@@ -13533,6 +13533,11 @@ mod tests {
             assert_eq!(DIT_BF16_BYTES, h3::DIT_BF16_BYTES);
             assert_eq!(VAE_BYTES, h3::VIDEO_VAE_BYTES + h3::AUDIO_VAE_BYTES);
             assert_eq!(ADALN_RESIDENT_BF16_BYTES, h3::ADALN_EVICTED_BYTES);
+            // The tier-scaled sub-stack figures are declared by the MLX engine only: the candle
+            // sibling's `memory_strategy` carries the bf16 constant plus a private
+            // `resolved_adaln_bytes` that scales it from the staged tier, and publishes no q4
+            // `pub const` to bind to. Nothing to tie on that lane, so the tie is macOS-only.
+            #[cfg(target_os = "macos")]
             assert_eq!(ADALN_RESIDENT_Q4_BYTES, h3::ADALN_EVICTED_Q4_BYTES);
             assert_eq!(
                 ADALN_RETAINED_BYTES,

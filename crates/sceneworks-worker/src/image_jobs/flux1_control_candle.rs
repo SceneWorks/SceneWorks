@@ -326,6 +326,9 @@ impl CandleStrictControl for Flux1StrictControl {
         let paths = Flux1ControlPaths {
             flux_base: self.base.clone(),
             control: self.control.clone(),
+            // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+            // performed.
+            adapters: Vec::new(),
         };
         Flux1DevControl::load_with_memory(&paths, self.memory).map_err(|error| {
             WorkerError::Engine(format!("FLUX.1-dev strict-control load failed: {error}"))

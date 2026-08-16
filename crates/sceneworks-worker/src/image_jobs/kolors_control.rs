@@ -305,6 +305,9 @@ impl CandleStrictControl for KolorsStrictControl {
         let paths = KolorsControlPaths {
             kolors_base: self.kolors_base.clone(),
             controlnet: self.controlnet.clone(),
+            // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+            // performed.
+            adapters: Vec::new(),
         };
         let model = KolorsControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Kolors strict-pose control load failed: {error}"))

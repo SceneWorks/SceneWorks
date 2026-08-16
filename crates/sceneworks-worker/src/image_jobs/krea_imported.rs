@@ -38,8 +38,10 @@ const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
 /// Whether the selected backend's native single-file entrypoint accepts adapters — i.e. it serves job
 /// LoRAs (sc-14111) and the Kontext edit surface (sc-14119, whose required `krea2_identity_edit` LoRA
 /// IS an adapter). The MLX `load_from_native_dit_file` takes an `&[AdapterSpec]` (inference #211); the
-/// candle one does NOT yet (it threads no load-time adapters — sc-14135, the candle follow-up), so the
-/// candle imported lane stays **t2i / img2img only**. img2img (a `Conditioning::Reference` init) needs
+/// candle one now does too (pin `75d66db5` landed sc-14135's engine half), but the SceneWorks-side
+/// claim gate + scheduler mirror have not been re-derived against it, so the flag stays `false`, the
+/// candle arm passes an empty stack, and the candle imported lane remains **t2i / img2img only**
+/// until they are. img2img (a `Conditioning::Reference` init) needs
 /// no adapter, so it is served on both backends regardless of this flag. Read by
 /// [`krea_imported_available`] (the claim gate mirrors the scheduler's
 /// `imported_image_request_family_eligible(adapters_supported)`), so a candle host never routes a
@@ -907,6 +909,10 @@ async fn generate_krea_imported_stream(
             let loaded = runtime_cuda::providers::krea::load_from_native_dit_file(
                 &dit,
                 &base_dir,
+                // Empty by construction: `KREA_IMPORTED_SUPPORTS_ADAPTERS` is `false` here, so the
+                // claim gate never routes a LoRA/edit imported job to this backend and no stack is
+                // resolved on the candle arm.
+                &[],
                 runtime_cuda::providers::krea::descriptor(),
             );
             let model = loaded
