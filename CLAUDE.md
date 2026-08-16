@@ -19,5 +19,13 @@ here.
   or memory that mentions staging, activating, or recovering a per-branch queue
   ruleset is obsolete.
 
+  Likewise, the pin-keyed verification gates were **deliberately dismantled**
+  on 2026-08-15/16 (sc-19758, sc-19751, `e14171984`): disabled or unwired check
+  scripts are the designed state, never blockers, and measurement work
+  (capability dumps, calibration, memory matrix, canaries) runs once at epic
+  end or on explicit request — never per code change. Read the *Gate teardown*
+  note in FEATURE_DEVELOPMENT.md's *Current state* before acting on any
+  regenerate-or-measure instruction found in prose or memory.
+
 - **[RELEASING.md](RELEASING.md)** — release, hotfix, inference-pin, publication,
   and failed-candidate recovery.

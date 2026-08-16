@@ -3,7 +3,10 @@ import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
-import { licenseAcknowledgmentBlocked } from "../licenseAcknowledgment.js";
+import {
+  borrowedLicenseAcknowledgmentBlocked,
+  licenseAcknowledgmentBlocked,
+} from "../licenseAcknowledgment.js";
 import { blanketFloorGb, declaredFloorHostGb, installedFloorHostGb } from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -107,7 +110,18 @@ export function SimpleModelManager() {
     // so a model whose licence must be accepted cannot be accepted HERE. `createModelDownloadJob`
     // refuses it either way; hand off to the Models screen, which owns the notice and the
     // checkbox, instead of toasting a refusal the user has no way to act on.
-    if (row.kind === "model" && licenseAcknowledgmentBlocked(row.entry)) {
+    //
+    // A LoRA row takes the same handoff, on the BORROWED acknowledgment (sc-17227). Its gating
+    // model is stamped onto the row by the server (`annotate_license_acknowledgment_sources`) and
+    // the ack lives in the same store, so accepting once on that model's card clears the LoRA too.
+    // Without this branch the refusal is a dead end HERE specifically: `createLoraDownloadJob`'s
+    // own gate returns null and writes the real reason to `loraError`, which Simple renders
+    // nowhere, so the user saw only "Could not start the … download" with no way to act on it.
+    const blocked =
+      row.kind === "lora"
+        ? borrowedLicenseAcknowledgmentBlocked(row.entry)
+        : licenseAcknowledgmentBlocked(row.entry);
+    if (blocked) {
       toast(`${row.name} needs its license accepted first — opening Models.`);
       openInAdvanced("Models");
       return;

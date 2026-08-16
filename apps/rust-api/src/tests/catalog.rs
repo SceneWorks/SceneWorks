@@ -297,6 +297,19 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
             Value::Bool(true),
             "{id} ui.img2img exposed"
         );
+        if matches!(id, "sana_1600m" | "sana_sprint_1600m") {
+            assert!(
+                m["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.contains(&Value::String("image_to_image".into()))),
+                "{id} must advertise image_to_image through /api/v1/models"
+            );
+            assert_eq!(
+                m["ui"]["img2imgStrength"]["default"],
+                serde_json::json!(0.5),
+                "{id} strength contract exposed"
+            );
+        }
     }
 }
 
@@ -4818,10 +4831,9 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         "expose only the validated VACE mode"
     );
 
-    // Per-platform download split (sc-8613): macOS pulls the native MLX VACE-Fun checkpoint;
-    // Windows/Linux pull the DIFFERENT candle Wan2.1-VACE-14B diffusers tree the candle `wan_vace`
-    // provider reads (CANDLE_WAN_VACE_REPO). Both are diffusers-loadable conversions, never the raw
-    // VideoX-Fun upstream. Every OS must have exactly one install path.
+    // Every native backend pulls the dedicated VACE-Fun diffusers checkpoint. Windows/Linux must
+    // not substitute the incompatible Wan2.1 VACE tree now that the Candle VACE-Fun provider is
+    // registered. The raw VideoX-Fun upstream remains unsuitable for either native loader.
     let downloads = model["downloads"].as_array().expect("downloads array");
     let download_for = |os: &str| {
         downloads
@@ -4838,11 +4850,11 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     assert_eq!(macos["provider"], "huggingface");
     assert_eq!(macos["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
     let windows = download_for("windows");
-    assert_eq!(windows["repo"], "Wan-AI/Wan2.1-VACE-14B-diffusers");
+    assert_eq!(windows["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
     assert_eq!(
         download_for("linux")["repo"],
-        "Wan-AI/Wan2.1-VACE-14B-diffusers",
-        "Linux rides the same candle checkpoint as Windows"
+        "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+        "Linux rides the same dedicated VACE-Fun checkpoint as Windows"
     );
     for download in downloads {
         assert_eq!(download["provider"], "huggingface");
@@ -5395,6 +5407,21 @@ const FOREIGN_DOWNLOAD_OS: &str = if cfg!(target_os = "macos") {
 /// `MiniMaxAI/MiniMax-H3`. That co-requisite repo is the one the review's bypass named, and it is
 /// platform-tagged for the OS this process is not on — so a gate that only saw primary rows, or
 /// only saw this host's rows, fails the assertions below.
+///
+/// `shared_repo_model` is the case the SHIPPED catalog does not currently contain and the typed
+/// route's model-id gate could not see (sc-17227): an entry that does NOT declare
+/// `requiresLicenseAcknowledgment` but whose primary download names the restricted repo. That is
+/// the shared-co-requisite shape the manifest already uses for other families, so it is one
+/// authoring decision away rather than hypothetical. Its download rows carry NO `platforms`, so
+/// they survive `retain_downloads_for_os` on every host and the bypass is constructible wherever
+/// the suite runs. It also carries an UNRESTRICTED co-requisite, because the route queues every
+/// co-requisite job before the primary: a gate placed after that loop would refuse the primary
+/// while the co-requisite was already enqueued, and the "nothing was queued" assertion is what
+/// catches it.
+///
+/// The LoRA catalog is seeded for the same reason on the LoRA side: `restricted_lora` names the
+/// restricted repo in its `source.repo`, which `POST /api/v1/loras/:id/download` resolves and
+/// fetches.
 fn write_license_acknowledgment_catalog(config_dir: &std::path::Path) {
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
@@ -5416,6 +5443,16 @@ fn write_license_acknowledgment_catalog(config_dir: &std::path::Path) {
                   ]
                 }},
                 {{
+                  "id": "shared_repo_model",
+                  "name": "Shares the restricted repo",
+                  "type": "video",
+                  "family": "shared-repo",
+                  "downloads": [
+                    {{ "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "files": ["*.safetensors"] }},
+                    {{ "provider": "huggingface", "repo": "owner/shared-repo-companion", "coRequisite": true, "componentId": "companion", "subdir": "companion", "files": ["companion/*"] }}
+                  ]
+                }},
+                {{
                   "id": "plain_model",
                   "name": "Plain",
                   "type": "image",
@@ -5431,6 +5468,38 @@ fn write_license_acknowledgment_catalog(config_dir: &std::path::Path) {
     )
     .expect("builtin models writes");
     write_empty_sibling_manifests(config_dir);
+    // Overwrites the empty `builtin.loras.jsonc` the helper above wrote.
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "restricted_lora",
+              "name": "Restricted LoRA",
+              "family": "minimax-h3",
+              "source": {
+                "provider": "huggingface",
+                "repo": "MiniMaxAI/MiniMax-H3",
+                "file": "adapter_model.safetensors"
+              }
+            },
+            {
+              "id": "plain_lora",
+              "name": "Plain LoRA",
+              "family": "plain",
+              "source": {
+                "provider": "huggingface",
+                "repo": "owner/plain-lora",
+                "file": "adapter_model.safetensors"
+              }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin loras writes");
 }
 
 /// The raw-queue body the review used to walk past the typed route's 403. `requestedGpu` is a
@@ -5527,6 +5596,231 @@ async fn license_acknowledgment_model_download_proceeds_once_asserted() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(job["payload"]["repo"], "owner/plain");
+}
+
+/// What the `licenseAcknowledged` STAMP on a queued payload means (sc-17227 review MINOR 3).
+///
+/// The stamp is keyed on `model_requires_license_acknowledgment(model) || license_acknowledged` —
+/// the caller's own assertion is enough on its own, so it is written even when NO gate fired. That
+/// is deliberate and load-bearing: the repo gate catches an entry with no flag whose download names
+/// a repo a flagged entry declares, and a flag-keyed stamp would write nothing for exactly that
+/// shape, so the RETRY of an authorized download would then be refused by the repo gate reading its
+/// own stored `repo`.
+///
+/// The cost of that choice is that the stamp records "the caller asserted this", not "a gate fired
+/// and was satisfied". Pinned here on the case that isolates the difference — an entry the gate has
+/// no interest in at all, downloaded with the assertion volunteered — so the stamp's meaning cannot
+/// drift into being read as evidence of a gate.
+#[tokio::test]
+async fn license_acknowledgment_stamp_records_the_assertion_even_when_no_gate_fired() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Non-vacuity, derived from the gate's OWN input — the manifest the route reads — rather than
+    // asserted about the fixture: the entry under test must neither declare the flag (the id gate)
+    // nor name a repo any FLAGGED entry declares (the repo gate). If either became true the "no
+    // gate fired" premise would silently evaporate and the assertion below would prove nothing.
+    // Read from the manifest and not `GET /api/v1/models`, because the catalog DTO does not expose
+    // `downloads` at all and the repo gate is keyed on exactly those repos.
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(config_dir.join("builtin.models.jsonc")).expect("manifest reads"),
+    )
+    .expect("manifest parses");
+    let models = manifest["models"].as_array().expect("models is an array");
+    let repos = |entry: &Value| -> Vec<String> {
+        entry["downloads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|download| download["repo"].as_str())
+            .map(str::to_owned)
+            .collect()
+    };
+    let plain = models
+        .iter()
+        .find(|item| item["id"] == "plain_model")
+        .expect("the unrestricted fixture entry is in the manifest");
+    assert!(
+        plain.get("requiresLicenseAcknowledgment").is_none(),
+        "the unrestricted entry must NOT declare the flag, or the id gate fires and this test no \
+         longer isolates the assertion-only path: {plain:?}",
+    );
+    let plain_repos = repos(plain);
+    assert!(
+        !plain_repos.is_empty(),
+        "the fixture must actually fetch something: {plain:?}",
+    );
+    for other in models {
+        if other["id"] == plain["id"]
+            || other.get("requiresLicenseAcknowledgment") != Some(&Value::Bool(true))
+        {
+            continue;
+        }
+        for repo in repos(other) {
+            assert!(
+                !plain_repos.contains(&repo),
+                "the unrestricted entry must not share a repo with a flagged entry, or the REPO \
+                 gate fires and this is no longer the no-gate case: {repo}",
+            );
+        }
+    }
+
+    // Volunteered by the caller on a download nothing gates.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(
+        job["payload"][crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY],
+        Value::Bool(true),
+        "the stamp carries the caller's assertion verbatim, gate or no gate: {job:?}",
+    );
+
+    // And the control that makes the assertion above non-trivial: the SAME entry, the SAME route,
+    // without the assertion, must carry no stamp at all. A stamp that appeared unconditionally
+    // would satisfy the assertion above while meaning nothing.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert!(
+        job["payload"]
+            .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .is_none(),
+        "an unrestricted download with no assertion must not be stamped: {job:?}",
+    );
+}
+
+/// The typed route's gate was MODEL-ID-keyed while every other door is REPO-keyed (sc-17227), so
+/// the two doors disagreed about the same weights: `POST /api/v1/models/shared_repo_model/download`
+/// fetched `MiniMaxAI/MiniMax-H3` with no acknowledgment, while `POST /api/v1/jobs` naming that
+/// repo answered 403. Constructed here rather than argued: `shared_repo_model` carries no
+/// `requiresLicenseAcknowledgment`, so the id check cannot fire, and only the repo index refuses
+/// it.
+#[tokio::test]
+async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_declares() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // The entry itself declares nothing, so the model-id gate passes it through. Pinned, so this
+    // test cannot start passing because someone flagged the fixture entry instead of fixing the
+    // route — that would make the bypass unconstructible and the assertion below vacuous.
+    let (_, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    let entry = catalog
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|item| item["id"] == "shared_repo_model")
+        .expect("the bypass fixture entry is in the catalog");
+    assert!(
+        entry.get("requiresLicenseAcknowledgment").is_none(),
+        "the bypass entry must NOT declare the flag, or the id gate refuses it and the repo index \
+         is never exercised: {entry:?}",
+    );
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/shared_repo_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(
+        body["code"], "license_acknowledgment_required",
+        "and with the SAME machine-readable code the other doors use: {body:?}",
+    );
+    assert!(
+        body["detail"].as_str().is_some_and(
+            |detail| detail.contains("MiniMaxAI/MiniMax-H3") && detail.contains("minimax_h3")
+        ),
+        "the refusal must name the repo AND the entry that declares it: {body:?}",
+    );
+
+    // Nothing queued — not even `shared_repo_model`'s unrestricted co-requisite, which the route
+    // enqueues BEFORE the primary. A gate placed after that loop would 403 the primary and still
+    // have queued the companion fetch.
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused download must enqueue nothing, co-requisites included: {jobs:?}",
+    );
+
+    // Passing controls in the SAME test, so it cannot pass by being always-red: the assertion
+    // opens the restricted entry, and an unrelated entry is untouched.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/shared_repo_model/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    // The STAMP, for the shape this test exists to cover. `shared_repo_model` carries no
+    // `requiresLicenseAcknowledgment`, so a stamp keyed on the entry's flag writes nothing here —
+    // and the RETRY below then re-runs the repo-keyed gate over the stored `repo` and 403s a
+    // download this same server had just authorized. Asserting CREATED and `payload.repo` alone
+    // does not see that; the stamp and the retry leg are what do.
+    assert_eq!(
+        job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "an authorized no-flag gated download must record its acknowledgment: {job:?}",
+    );
+
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (retry_status, retry_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        retry_status,
+        StatusCode::CREATED,
+        "an authorized no-flag gated download must stay retryable: {retry_job:?}",
+    );
+    assert_eq!(retry_job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    assert_eq!(
+        retry_job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "and the retry must carry the stamp forward: {retry_job:?}",
+    );
+
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["payload"]["repo"], "owner/plain");
+    // The stamp is not blanket: an unrestricted download whose caller asserted nothing carries no
+    // acknowledgment key, so a future gate cannot read one that was never made.
+    assert!(
+        job["payload"].get("licenseAcknowledged").is_none(),
+        "an unasserted, unrestricted download must not be stamped: {job:?}",
+    );
 }
 
 #[test]
@@ -5813,13 +6107,18 @@ async fn license_acknowledgment_lora_import_is_refused_for_a_restricted_repo() {
     );
 }
 
-/// `POST /api/v1/loras/:id/download` needs no gate of its own, and this pins WHY rather than
-/// asserting the absence: it resolves the repo from the catalog entry the path id names, so an id
-/// the catalog does not contain is a 404 and a caller has no way to supply a repo at all. If that
-/// ever changes — an id-free download, or a body-supplied repo — this test fails and the route
-/// joins the gated list.
+/// `POST /api/v1/loras/:id/download` had NO licence check at all (sc-17227), asymmetric with
+/// `create_model_download_job`, which gates on its catalog entry.
+///
+/// What stood here before asserted only that a caller cannot SUPPLY a repo — unknown ids 404, a
+/// body `repo` is inert — and read as coverage while the route was ungated. That is a claim about
+/// who CHOOSES the repo, not about whether the chosen repo is restricted: a catalog LoRA whose
+/// `source.repo` names a repo a `requiresLicenseAcknowledgment` model declares was fetched here
+/// with no acknowledgment. The weaker claim is kept, because it is true and worth pinning, but the
+/// STRONGER one is now asserted first: a catalog-named restricted repo is refused, with the same
+/// code every other door uses, queueing nothing.
 #[tokio::test]
-async fn license_acknowledgment_lora_download_is_keyed_on_the_catalog_not_the_caller() {
+async fn license_acknowledgment_lora_download_refuses_a_catalog_named_restricted_repo() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -5828,7 +6127,99 @@ async fn license_acknowledgment_lora_download_is_keyed_on_the_catalog_not_the_ca
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    // The restricted repo is not a LoRA id, and there is nowhere else in this request to put it.
+    // The fixture LoRA must actually resolve to the restricted repo, or the refusal below could be
+    // a 404 wearing a 403's clothes.
+    let (_, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+    let restricted = loras
+        .as_array()
+        .expect("loras is an array")
+        .iter()
+        .find(|item| item["id"] == "restricted_lora")
+        .expect("the restricted LoRA fixture is in the catalog");
+    assert_eq!(restricted["source"]["repo"], "MiniMaxAI/MiniMax-H3");
+    // The row must SAY it is gated, and name the model whose card takes the acknowledgment. This is
+    // the client's only route to the assertion the refusal below demands: a LoRA row renders no
+    // licence copy and no checkbox, so without this stamp the 403 is unclearable from every shipped
+    // surface and the gate is a dead end rather than a gate.
+    assert_eq!(
+        restricted["licenseAcknowledgmentModelId"], "minimax_h3",
+        "the gated LoRA row must name the model that gates it: {restricted:?}",
+    );
+    assert_eq!(
+        restricted["licenseAcknowledgmentModelName"], "MiniMax-H3",
+        "and the name the refusal copy points the user at: {restricted:?}",
+    );
+    // Not blanket: an unrestricted LoRA is untouched, so a client cannot read a requirement onto
+    // every row.
+    let plain = loras
+        .as_array()
+        .expect("loras is an array")
+        .iter()
+        .find(|item| item["id"] == "plain_lora")
+        .expect("the unrestricted LoRA fixture is in the catalog");
+    assert!(
+        plain.get("licenseAcknowledgmentModelId").is_none(),
+        "an unrestricted LoRA must carry no acknowledgment source: {plain:?}",
+    );
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/restricted_lora/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(
+        body["code"], "license_acknowledgment_required",
+        "and refuse it with the SAME machine-readable code, not some incidental 4xx: {body:?}",
+    );
+    assert!(
+        body["detail"].as_str().is_some_and(
+            |detail| detail.contains("MiniMaxAI/MiniMax-H3") && detail.contains("minimax_h3")
+        ),
+        "the refusal must name the repo AND the entry that declares it: {body:?}",
+    );
+
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused LoRA download must enqueue nothing: {jobs:?}",
+    );
+
+    // Passing controls in the SAME test, so it cannot pass by being always-red.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/plain_lora/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an unrestricted catalog LoRA must still download: {job:?}",
+    );
+    assert_eq!(job["payload"]["repo"], "owner/plain-lora");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/restricted_lora/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    assert_eq!(
+        job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the queued LoRA download must carry the assertion so RETRY re-validates rather than \
+         refusing what was just authorized: {job:?}",
+    );
+
+    // The weaker claim, still true and still worth pinning: the repo comes from the catalog entry
+    // the path id names, so an unknown id is a 404 and a body-supplied repo is inert.
     for id in ["MiniMaxAI%2FMiniMax-H3", "minimax_h3", "not_a_lora"] {
         let (status, body) = request(
             app.clone(),
@@ -5844,7 +6235,6 @@ async fn license_acknowledgment_lora_download_is_keyed_on_the_catalog_not_the_ca
         );
     }
 
-    // A repo in the BODY is inert: the route reads the catalog entry, never the request.
     let (status, body) = request(
         app,
         "POST",

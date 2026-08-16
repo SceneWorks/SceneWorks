@@ -29,6 +29,69 @@ const DEFAULT_MODEL: &str = "ltx_2_3";
 const DEFAULT_QUALITY: &str = "balanced";
 const DEFAULT_REPLACEMENT_MODE: &str = "face_only";
 
+/// Whether a selected LoRA stack contains the LTX in-context conditioning adapter required by
+/// extend, bridge, and native replacement. Routing and execution share this predicate so a job
+/// cannot be claimed and then rejected by a stricter worker-side spelling of the contract.
+pub fn loras_contain_ltx_ic_lora(loras: &[Value]) -> bool {
+    loras.iter().any(lora_looks_like_ltx_ic_lora)
+}
+
+/// Recognize the explicit metadata and canonical naming markers used by LTX IC-LoRA packages.
+pub fn lora_looks_like_ltx_ic_lora(lora: &Value) -> bool {
+    let Some(object) = lora.as_object() else {
+        return lora
+            .as_str()
+            .is_some_and(|value| ltx_ic_lora_marker(&value.to_lowercase().replace('_', "-")));
+    };
+    if object.get("icLora") == Some(&Value::Bool(true))
+        || object.get("isIcLora") == Some(&Value::Bool(true))
+    {
+        return true;
+    }
+    if object
+        .get("conditioningRole")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.trim().to_lowercase().replace('-', "_") == "ic_lora")
+    {
+        return true;
+    }
+    let source = object.get("source").and_then(Value::as_object);
+    let mut values = Vec::new();
+    for key in [
+        "id",
+        "loraId",
+        "name",
+        "displayName",
+        "installedPath",
+        "sourcePath",
+        "path",
+    ] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            values.push(value);
+        }
+    }
+    if let Some(source) = source {
+        for key in ["repo", "file", "path"] {
+            if let Some(value) = source.get(key).and_then(Value::as_str) {
+                values.push(value);
+            }
+        }
+    }
+    match source
+        .and_then(|value| value.get("files"))
+        .or_else(|| object.get("files"))
+    {
+        Some(Value::Array(files)) => values.extend(files.iter().filter_map(Value::as_str)),
+        Some(Value::String(file)) => values.push(file),
+        _ => {}
+    }
+    ltx_ic_lora_marker(&values.join(" ").to_lowercase().replace('_', "-"))
+}
+
+fn ltx_ic_lora_marker(value: &str) -> bool {
+    value.contains("ic-lora") || value.contains("ltx-2-3-ic-")
+}
+
 /// A typed video-generation request, parsed from a job payload. One job produces a
 /// single video asset (unlike images, which batch `count`).
 #[derive(Debug, Clone, PartialEq)]
@@ -931,6 +994,59 @@ pub fn reference_caps(model_manifest_entry: &JsonObject) -> ReferenceCaps {
 ///
 /// Message follows the house convention (`mlx_fit_gate::too_big_error`): name the model, state
 /// what was asked and what the cap is, and give the lever.
+/// What a `reference_to_video` reference set is, judged against the ONE rule every layer must
+/// agree on (sc-19574).
+///
+/// Four layers used to hold three opinions about an audio-only set: the Video Studio enabled
+/// Generate for it, `validate_video_job` accepted it, `sceneworks-mcp` submitted it, and the worker
+/// refused it. A user could assemble a request the product presented as valid and then be told no.
+///
+/// The engine was right, and it is not a judgement call: diffusers `MiniMaxH3` (upstream PR #14355,
+/// `0.40.0.dev0 @ 7564fb01`) documents `MiniMaxH3AudioReference` as "a voice or music reference: at
+/// most 3 per request, and never on its own — an audio reference has to be paired with at least one
+/// image or video reference. It never reaches the conditioner and is encoded by the audio VAE
+/// alone", and enforces it in `before_encoder.py`:
+///
+/// ```text
+/// if set(kinds) == {"audio"}:
+///     raise ValueError("An audio reference has to be paired with at least one image or video
+///                       reference and cannot be used on its own.")
+/// ```
+///
+/// So an audio-only set leaves the VISUAL stream unconditioned, and the render it would produce is
+/// not the one asked for.
+///
+/// It lives HERE, as one predicate the API, the MCP tool and the worker all call, because
+/// restating the rule in each of them is exactly how they came to disagree. Each layer still words
+/// its own message — an agent's error, a user's error and an engine's error are different
+/// sentences — but none of them decides the rule.
+///
+/// It judges MEDIA KINDS, not model ids: "audio conditions the soundtrack, the visual stream needs
+/// a visual reference" is a fact about which lists carry pixels. Which of the three lists a given
+/// model takes at all, and how many, stays with the model as its declared
+/// `limits.max*ReferenceAssets` ([`reference_limit_error`]) — a model that takes no audio refuses
+/// it there, one list up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceSetVerdict {
+    /// At least one image or video-clip reference: the visual conditioner has something to read.
+    Conditionable,
+    /// No references at all.
+    Empty,
+    /// Audio references only — the shape upstream raises on.
+    AudioOnly,
+}
+
+/// Classify a `reference_to_video` reference set. See [`ReferenceSetVerdict`].
+pub fn classify_reference_set(images: usize, clips: usize, audio: usize) -> ReferenceSetVerdict {
+    if images > 0 || clips > 0 {
+        return ReferenceSetVerdict::Conditionable;
+    }
+    if audio > 0 {
+        return ReferenceSetVerdict::AudioOnly;
+    }
+    ReferenceSetVerdict::Empty
+}
+
 pub fn reference_limit_error(
     model: &str,
     images: usize,
@@ -1185,6 +1301,26 @@ mod tests {
     fn steps_menu_message(entry: &JsonObject, steps: u32) -> String {
         steps_limit_error("some_distilled", steps, entry)
             .unwrap_or_else(|| panic!("{steps} steps must be refused by the declared menu"))
+    }
+
+    #[test]
+    fn ltx_ic_lora_predicate_accepts_metadata_and_canonical_markers_only() {
+        for lora in [
+            json!({ "icLora": true }),
+            json!({ "conditioningRole": "ic-lora" }),
+            json!({ "source": { "file": "ltx-2-3-ic-camera.safetensors" } }),
+            json!("community_ic_lora_v2"),
+        ] {
+            assert!(lora_looks_like_ltx_ic_lora(&lora), "{lora}");
+        }
+        assert!(!loras_contain_ltx_ic_lora(&[json!({
+            "id": "ordinary-ltx-style",
+            "source": { "file": "cinematic.safetensors" }
+        })]));
+        assert!(loras_contain_ltx_ic_lora(&[
+            json!({ "id": "ordinary-ltx-style" }),
+            json!({ "isIcLora": true }),
+        ]));
     }
 
     #[test]
@@ -2291,7 +2427,9 @@ mod tests {
     /// [`DURATION_FLOORS`] is of [`hard_min_duration`].
     ///
     /// `None` is the load-bearing half, and it is a SURVEY RESULT rather than a default: sc-19426
-    /// read every video engine's schedule construction at the pinned inference rev `014134e3`
+    /// read every video engine's schedule construction at the then-pinned inference rev `014134e3`
+    /// (sc-19721 moved the pin to `75d66db5`; the survey's finding below is unchanged, and the rev
+    /// is kept because it dates the READING)
     /// looking for a step count below which it errors or builds an unusable schedule. What it found:
     ///
     /// * **Every** engine shares gen-core's `steps == 0` rejection (`generator.rs`, "steps must be
@@ -2462,6 +2600,52 @@ mod tests {
                 "{id}: gives the lever: {message}"
             );
         }
+    }
+
+    /// sc-19574 — the ONE rule the API, the MCP tool and the worker now share about a
+    /// `reference_to_video` reference set, asserted as a complete truth table over the three
+    /// counts so no caller has to trust a prose restatement of it.
+    ///
+    /// The rule is upstream's, not ours: diffusers `MiniMaxH3` raises on `set(kinds) == {"audio"}`
+    /// (`before_encoder.py`) because an audio reference is encoded by the audio VAE alone and never
+    /// reaches the reference conditioner. Before this, four layers held three opinions — the Studio
+    /// enabled Generate, `validate_video_job` returned 201, the MCP tool submitted, and only the
+    /// worker said no.
+    #[test]
+    fn an_audio_only_reference_set_is_the_one_shape_no_layer_may_accept() {
+        use ReferenceSetVerdict::{AudioOnly, Conditionable, Empty};
+        // (images, clips, audio) -> verdict. Exhaustive over "none / some" per list.
+        for (images, clips, audio, expected) in [
+            (0, 0, 0, Empty),
+            (0, 0, 1, AudioOnly),
+            (0, 0, 3, AudioOnly),
+            (1, 0, 0, Conditionable),
+            (0, 1, 0, Conditionable),
+            (1, 0, 3, Conditionable),
+            (0, 1, 3, Conditionable),
+            (1, 1, 0, Conditionable),
+            (9, 3, 3, Conditionable),
+        ] {
+            assert_eq!(
+                classify_reference_set(images, clips, audio),
+                expected,
+                "images={images} clips={clips} audio={audio}"
+            );
+        }
+        // MUTATION CHECK: the two refusing verdicts are distinguishable from each other and from
+        // acceptance, so a layer cannot collapse them into one `is_err()` and still be correct
+        // about WHICH refusal it is reporting.
+        assert_ne!(
+            classify_reference_set(0, 0, 1),
+            classify_reference_set(0, 0, 0)
+        );
+        assert_ne!(
+            classify_reference_set(0, 0, 1),
+            classify_reference_set(1, 0, 1)
+        );
+        // The rule is about media KIND, not about counts: no number of audio references makes an
+        // audio-only set conditionable.
+        assert_eq!(classify_reference_set(0, 0, 99), AudioOnly);
     }
 
     /// sc-17158 — the two partitions are ONE model geometrically and TWO models in what they

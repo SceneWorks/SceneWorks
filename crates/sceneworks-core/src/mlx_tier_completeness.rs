@@ -1,5 +1,5 @@
 //! Per-family tier-completeness predicates for the MLX turnkeys that ship NO `model_index.json`
-//! (Anima / Boogu / SANA / Wan / SenseNova-U1 / MiniMax-H3).
+//! (Anima / Boogu / SANA / SCAIL-2 / Wan / SenseNova-U1 / MiniMax-H3).
 //!
 //! These families lay their weights out in a bespoke tree rather than a diffusers `model_index.json`
 //! pipeline, so the generic `<tier>/*` presence checks — the worker's `tier_components_present`
@@ -106,6 +106,27 @@ pub fn sana_tier_complete(dir: &Path) -> bool {
         && dir_has_visible_file_ending(&dir.join("vae"), ".safetensors")
         && dir.join("text_encoder/gemma-2-2b-it.safetensors").is_file()
         && dir.join("text_encoder/tokenizer.json").is_file()
+}
+
+/// The exact files in one self-contained `SceneWorks/scail2-mlx` tier. The dense bf16 tier is shared
+/// by MLX and candle; q4/q8 carry the same file names but an MLX-packed DiT. This list is consumed by
+/// the MLX worker resolver and rust-api install-state predicate, while the candle worker asserts it is
+/// byte-for-byte identical to the pinned inference provider's `SHARED_TIER_FILES` contract.
+pub const SCAIL2_TIER_FILES: &[&str] = &[
+    "config.json",
+    "dit.safetensors",
+    "t5_encoder.safetensors",
+    "tokenizer.json",
+    "clip.safetensors",
+    "vae.safetensors",
+];
+
+/// Whether a SCAIL-2 tier is complete enough for either native provider to load. Exact paths make a
+/// hidden sidecar insufficient and prevent a partial `<tier>/*` download from appearing installed.
+pub fn scail2_tier_complete(dir: &Path) -> bool {
+    SCAIL2_TIER_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
 }
 
 /// Whether a Wan2.2 MLX turnkey tier `dir` is COMPLETE and loadable by the native MLX Wan trainer
@@ -339,18 +360,27 @@ pub fn minimax_h3_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
 // stands in front of the download ([`crate::builtin_manifests`]' guard) cannot disagree with each
 // other, so a wrong entry here goes red in one place and is fixed in one place.
 //
-// ⚠️ NO TRIPWIRE BINDS THIS TO THE ENGINE. Being the only mirror keeps the two SceneWorks-side
-// readers consistent with EACH OTHER; nothing here can go red when the engine's probe list changes
-// upstream, because at the current pin (`014134e3`) `mlx-gen-minimax-h3` is not in the tree at all
-// and there is no symbol to import or construct. Every constant below was transcribed by reading
-// the engine source, and it stays a transcription until the pin carries the crate.
+// ⚠️ PARTLY BOUND TO THE ENGINE SINCE sc-19721's PIN BUMP — and the unbound half is named.
 //
-// The obligation therefore rides the PIN BUMP: sc-18650 must re-read
-// `mlx-gen-minimax-h3::model::load` and reconcile it against these constants, and — once the crate
-// is linkable — bind them to it (importing `DIT_COMPONENT` / `TEXT_ENCODER_COMPONENT` directly, and
-// asserting the shared-dir list against a real `load` of a fixture missing each path in turn) so
-// this stops being a mirror. Recorded on sc-18650 rather than only here, because a comment in this
-// file is not something a pin-bump session is guaranteed to open.
+// This crate cannot depend on an inference crate, so the tie lives in the worker:
+// `sceneworks-worker::pinned_engine_geometry::minimax_h3_component_names_are_the_pinned_engines_own`
+// asserts [`MINIMAX_H3_PARTITIONS`] and [`MINIMAX_H3_TEXT_ENCODER_DIR`] against
+// `mlx-gen-minimax-h3::model`'s own `DIT_COMPONENT` / `REFERENCE_DIT_PARTITION` /
+// `TEXT_ENCODER_COMPONENT`. A rename upstream now reds there instead of at load time on a user's
+// machine. Before the bump none of that was possible: at `014134e3` the crate was not in the tree
+// and there was no symbol to import.
+//
+// STILL A TRANSCRIPTION: [`MINIMAX_H3_SHARED_PROBED_FILES`],
+// [`MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`] and [`MINIMAX_H3_AUDIO_VAE_CONFIG_FILES`]. The engine's
+// probe list is a private array literal inside `model::load`, not an exported constant, so there is
+// nothing to import — binding it needs either an upstream export or a real `load` of a fixture
+// missing each path in turn (which needs weights). That remainder stays recorded on sc-18650,
+// because a comment in this file is not something a pin-bump session is guaranteed to open.
+//
+// The file-level probes are ALSO the half most exposed to the pin moving under them, which is why
+// naming them here matters: sc-19558 replaced the directory probes with file probes precisely
+// because an interrupted download leaves a present-but-empty directory, and the engine's own list
+// is what decides which file proves a component landed.
 // ---------------------------------------------------------------------------
 
 /// The shared component FILES a MiniMax-H3 load opens under the snapshot it is handed as
@@ -524,6 +554,12 @@ mod tests {
         touch(&dir.join("text_encoder/tokenizer.json"));
     }
 
+    fn seed_scail2(dir: &Path) {
+        for file in SCAIL2_TIER_FILES {
+            touch(&dir.join(file));
+        }
+    }
+
     /// Write a COMPLETE dense (single-expert, TI2V-5B) Wan MLX tier tree.
     fn seed_wan_dense(dir: &Path) {
         touch(&dir.join("config.json"));
@@ -644,6 +680,25 @@ mod tests {
             fs::remove_file(torn.join(component)).unwrap();
             assert!(
                 !sana_tier_complete(&torn),
+                "removing {component} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn scail2_complete_true_each_provider_file_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bf16");
+        seed_scail2(&dir);
+        assert!(scail2_tier_complete(&dir));
+
+        for component in SCAIL2_TIER_FILES {
+            let torn = tmp.path().join("torn");
+            seed_scail2(&torn);
+            fs::remove_file(torn.join(component)).unwrap();
+            assert!(
+                !scail2_tier_complete(&torn),
                 "removing {component} must read incomplete"
             );
             fs::remove_dir_all(&torn).ok();

@@ -2,7 +2,7 @@ use super::{
     admit_conditioning_paths, candle_artifact_path_matches, candle_certified_artifact_path,
     candle_certified_hf_artifact_path, consume_gen_events, curated_image_menu,
     drive_gen_items_scored, load_reference_image, non_empty, normalize_sampling_knob,
-    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs,
+    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs, resolve_adapters,
     resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
     resolve_character_image_likeness_source, resolve_pid_weights, resolve_seed, stage_likeness,
     standard_tier_subdir, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
@@ -415,6 +415,7 @@ pub(super) async fn generate_candle_pulid_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+    let adapters = resolve_adapters(request, settings)?;
 
     // SC-15839: build the bespoke provider's exact contract from the paths it will actually load.
     // The contract prices the full PuLID identity stack separately from the shared FLUX trunk, so
@@ -424,6 +425,7 @@ pub(super) async fn generate_candle_pulid_stream(
         pulid_weights: adapter.clone(),
         eva_weights: eva.clone(),
         face_dir: face_dir.clone(),
+        adapters: adapters.clone(),
     };
     let tier = pulid_memory_tier_key(&contract_paths)?;
     let pulid_contract =
@@ -515,6 +517,7 @@ pub(super) async fn generate_candle_pulid_stream(
     {
         let mut overlays = vec![adapter.as_path(), eva.as_path(), face_dir.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
+        overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
         admit_conditioning_paths(
             settings,
             "PuLID-FLUX",
@@ -535,6 +538,7 @@ pub(super) async fn generate_candle_pulid_stream(
                 pulid_weights: adapter,
                 eva_weights: eva,
                 face_dir,
+                adapters,
             };
             let model = match load_memory_context.as_ref() {
                 Some(context) => PulidFlux::load_with_memory_context(&paths, context.clone()),
@@ -690,6 +694,7 @@ mod tests {
             pulid_weights: temp.path().join("pulid.safetensors"),
             eva_weights: temp.path().join("eva.safetensors"),
             face_dir: temp.path().join("face"),
+            adapters: Vec::new(),
         };
 
         assert_eq!(pulid_memory_tier_key(&paths).expect("q4 tier"), "q4");

@@ -1,7 +1,7 @@
-# AuraSR Upscaling Guide
+# AuraSR Upscaling Guide (Retired)
 
-AuraSR v2 is a 4x post-process upscaler for generated and real-world images. It runs after the base image is saved, so prompts, seeds, LoRAs, and the selected image model determine the source image before AuraSR adds detail.
+AuraSR v2 is no longer offered or downloaded by SceneWorks because no current native backend routes it. A legacy catalog identity remains only so saved selections can fall back safely.
 
-Use AuraSR when you want a higher-quality 4x upscale and can spend more memory and time than Real-ESRGAN. The original image is retained alongside the upscaled variant.
+Use Real-ESRGAN for conventional 2x/4x upscaling or SeedVR2 for diffusion-based 2x/4x upscaling instead.
 
-AuraSR v2 uses Apache-2.0 weights from `fal/AuraSR-v2`. The older `fal/AuraSR` checkpoint uses CC-BY-SA-4.0 and is not wired into SceneWorks.
+Existing AuraSR v2 installations used Apache-2.0 weights from `fal/AuraSR-v2`. The license remains available in About → Licenses for those installations.

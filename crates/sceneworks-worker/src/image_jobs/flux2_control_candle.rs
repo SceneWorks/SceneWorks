@@ -2,17 +2,29 @@ use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
     apply_candle_image_load_shape, candle_certified_artifact_path,
     candle_certified_hf_artifact_path, pid_effective_dims, pid_output_tier, pose_entries,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    resolve_quant, run_candle_strict_control, trusted_control_weight_revision, ApiClient,
-    CancelFlag, CandleStrictControl, Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Image,
-    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Quant, Settings,
-    Value, WorkerError, WorkerResult,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_pid_weights, resolve_quant, run_candle_strict_control, trusted_control_weight_revision,
+    ApiClient, CancelFlag, CandleStrictControl, Flux2Control, Flux2ControlPaths,
+    Flux2ControlRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Progress, Quant, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
+
+pub(super) fn flux2_control_adapter_source_bytes(
+    adapters: &[gen_core::AdapterSpec],
+) -> WorkerResult<u64> {
+    gen_core::adapter_stack_resident_bytes(adapters, gen_core::AdapterResidencyMode::Additive)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.2 control cannot determine the resident size of the requested adapter stack."
+                    .to_owned(),
+            )
+        })
+}
 
 // Candle (Windows/CUDA) FLUX.2-dev strict-pose Fun-Controlnet-Union route (sc-7736, epic 6564) —
 // `flux2_dev` + `advanced.poses` off-Mac via `runtime_cuda::providers::flux2::Flux2Control`. The candle sibling of the
@@ -109,8 +121,22 @@ fn resolve_flux2_control_base(
 pub(super) fn flux2_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_flux2_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && flux2_control_candle_pose_count(request).is_some_and(|count| count > 0)
         && matches!(resolve_flux2_control_base(request, settings), Ok(Some(_)))
+}
+
+/// Strict scheduler/worker pose contract: no filtered-away malformed entries and no unbounded set.
+fn flux2_control_candle_pose_count(request: &ImageRequest) -> Option<usize> {
+    match request.advanced.get("poses") {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Array(poses))
+            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.iter().all(Value::is_object) =>
+        {
+            Some(poses.len())
+        }
+        Some(_) => None,
+    }
 }
 
 /// Strict control consumes a control-map overlay, not an image-reference edit route. Character
@@ -264,6 +290,7 @@ pub(super) struct Flux2StrictControl {
     /// load; `use_pid` on the request is `is_some()` so the two stay in lockstep (the engine rejects a
     /// mismatch). `None` ⇒ native FLUX.2 VAE decode.
     pid: Option<gen_core::PidWeights>,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -283,6 +310,7 @@ pub(super) fn flux2_strict_control_test_fixture(path: PathBuf) -> Flux2StrictCon
         memory_spec,
         memory_context: None,
         pid: None,
+        adapters: Vec::new(),
     }
 }
 
@@ -314,6 +342,7 @@ impl CandleStrictControl for Flux2StrictControl {
     fn conditioning_admission(&self) -> ConditioningAdmission {
         let mut overlays = vec![self.control.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "FLUX.2-dev",
             "strict-pose Fun-Controlnet-Union branch",
@@ -326,6 +355,7 @@ impl CandleStrictControl for Flux2StrictControl {
         let paths = Flux2ControlPaths {
             root: self.base.clone(),
             control: self.control.clone(),
+            adapters: self.adapters.clone(),
         };
         let loaded = match &self.memory_context {
             Some(context) => Flux2Control::load_with_memory_context(
@@ -448,9 +478,13 @@ pub(super) async fn generate_candle_flux2_control_stream(
         Some("q8") => "q8",
         _ => "bf16",
     };
-    let overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control);
+    let adapters = resolve_adapters(request, settings)?;
+    let adapter_source_bytes = flux2_control_adapter_source_bytes(&adapters)?;
+    let runtime_overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control)
+        .saturating_add(adapter_source_bytes);
     let mut strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
         .with_control(gen_core::WeightsSource::File(control.clone()))
+        .with_adapters(adapters.clone())
         .with_offload_policy(gen_core::OffloadPolicy::Sequential);
     strategy_spec.quantize = quant;
     let strategy_spec = apply_candle_image_load_shape("flux2_dev", strategy_spec);
@@ -461,7 +495,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
-        overlay_bytes,
+        runtime_overlay_bytes,
     );
     let (control_repo, control_file) = flux2_control_candle_repo_file(request)?;
     let control_revision = trusted_control_weight_revision(
@@ -500,7 +534,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         false,
         raw_budget,
         predicted_peak,
-        overlay_bytes,
+        runtime_overlay_bytes,
         gen_core::MemoryCacheState::Cold,
     )?;
     let generation_memory = memory_evaluation
@@ -542,6 +576,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         memory_spec: strategy_spec,
         memory_context,
         pid: pid_weights,
+        adapters,
     };
 
     run_candle_strict_control(

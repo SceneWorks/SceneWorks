@@ -1027,6 +1027,252 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
   });
 });
 
+// sc-19570 — the OFF-MAC half of the same gate, at the SCREEN. The predicate-level guards in
+// `modelEligibility.test.js` proved `videoModelServesMode` consults `candleVideoModeBlock`; they
+// could not prove the Advanced Video Studio consults `videoModelServesMode`. It did not: this
+// screen kept a LOCAL `modelServesMode` that read the Mac block only, and `macModeTabBlocked` was
+// `macGating && …`, false off-Mac by construction. So the off-Mac gate shipped in the shared
+// predicate — reaching the Simple studio, the screen gate and the download offers — while the
+// Advanced shell rendered every MLX-only tab and the user only found out at Generate, eating the
+// new 400 instead of never seeing the tab.
+//
+// The observation the other guards never make is ABSENCE: what is NOT on the reachable surface.
+// Asserting a submit is refused would pass on the defect. So this collects the tabs a user can
+// actually click and asserts the stranded five are missing from that set, and collects the model
+// picker's options and asserts the candle-unservable model is missing from those.
+describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
+  let container;
+  let root;
+
+  const ALL_VIDEO_MODES = [
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    "multi_video_to_video",
+    "ads2v",
+    "animate_character",
+  ];
+
+  // A video model in the shape `GET /api/v1/models` serves it: `capabilities` is what the manifest
+  // DECLARES, `candleSupport` is what `model_candle_support` computed from the real routing
+  // predicate. The two differ for exactly the stranded pairs — declaration is not reachability.
+  const model = (id, name, declared, candleServed) => ({
+    id,
+    name,
+    type: "video",
+    family: id,
+    capabilities: declared,
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+    candleSupport: {
+      supported: candleServed.length > 0,
+      features: {
+        videoModes: Object.fromEntries(
+          ALL_VIDEO_MODES.map((m) => [m, candleServed.includes(m)]),
+        ),
+      },
+    },
+  });
+
+  // LTX 2.3 as shipped: it declares six modes and candle serves only `text_to_video`. The other
+  // five are the pairs that queued forever off-Mac.
+  const LTX_DECLARED = [
+    "text_to_video",
+    "image_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+  ];
+  const LTX23 = model("ltx_2_3", "LTX 2.3", LTX_DECLARED, ["text_to_video"]);
+  // `wan_2_2_vace_fun_14b`: its ONLY advertised mode is candle-unclaimable, so the whole model has
+  // no off-Mac lane — `candleSupport.supported: false`, the case `candleAvailableModels` exists for
+  // and which NOTHING imported before this.
+  const VACE_FUN = model("wan_2_2_vace_fun_14b", "Wan 2.2 VACE-Fun 14B", ["replace_person"], []);
+  // Bernini keeps a served non-default mode on the board, so "the stranded tabs are gone" cannot be
+  // satisfied by a gate that simply disabled everything but the active tab.
+  const BERNINI = model("bernini", "Bernini", ["text_to_video", "video_to_video"], [
+    "text_to_video",
+    "video_to_video",
+  ]);
+
+  // Off-Mac: the platform-intrinsic switch the API derives from `!is_mac`. `macGatingActive` stays
+  // false — this is Windows/Linux, where every macGating helper is inert.
+  const OFF_MAC_CAPS = {
+    macGatingActive: false,
+    candleGatingActive: true,
+    platform: "linux",
+    notAvailableLabel: "Not available on Mac (MLX only)",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
+  };
+  // The same client before `GET /api/v1/capabilities/mac` answers — and the permanent value on a
+  // Mac. Every helper inert; the studio must look exactly as it did.
+  const INERT_CAPS = { ...OFF_MAC_CAPS, candleGatingActive: false, platform: "" };
+
+  const clip = {
+    id: "vid_src",
+    type: "video",
+    projectId: "project_1",
+    displayName: "Driving Clip",
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // The tabs a user can actually reach: rendered AND not disabled. This is the set the assertions
+  // below check for absence in — a disabled tab is not a way into a mode.
+  const reachableModeTabs = () =>
+    [...container.querySelectorAll(".mode-control button")]
+      .filter((button) => !button.disabled)
+      .map((button) => button.textContent.trim());
+  const modeButton = (label) =>
+    [...container.querySelectorAll(".mode-control button")].find(
+      (button) => button.textContent.trim() === label,
+    );
+  const modelSelect = () => container.querySelector(".settings-field-model select");
+
+  const STRANDED_TABS = ["Image → Video", "First → Last", "Extend", "Bridge", "Replace person"];
+
+  it("does not offer an MLX-only mode tab off-Mac", async () => {
+    await render(
+      baseContext({
+        videoModels: [LTX23, BERNINI],
+        assets: [clip],
+        macCapabilities: OFF_MAC_CAPS,
+      }),
+    );
+
+    // ABSENT — not "present but refuses on submit". Every one of these was reachable before.
+    const reachable = reachableModeTabs();
+    for (const label of STRANDED_TABS) {
+      expect(
+        reachable,
+        `"${label}" has no off-Mac lane on any installed model and must not be reachable`,
+      ).not.toContain(label);
+      // Rendered-but-disabled is how this screen has always expressed an unavailable mode, and the
+      // tooltip must name the platform doing the gating — off-Mac the Mac sentence is backwards.
+      expect(modeButton(label).disabled).toBe(true);
+      expect(modeButton(label).title).toBe(
+        "No installed model supports this mode on this platform (macOS/MLX only).",
+      );
+    }
+    // The served modes are untouched, so the gate narrowed the tab list rather than the board.
+    expect(reachable).toContain("Text → Video");
+    expect(reachable).toContain("Video → Video");
+  });
+
+  it("does not list a model with no off-Mac lane at all in the picker", async () => {
+    await render(
+      baseContext({
+        videoModels: [BERNINI, VACE_FUN],
+        assets: [clip],
+        macCapabilities: OFF_MAC_CAPS,
+      }),
+    );
+
+    expect([...modelSelect().options].map((option) => option.value)).not.toContain(
+      "wan_2_2_vace_fun_14b",
+    );
+    // …and its only mode is unreachable too, so the model cannot be reached the long way round.
+    expect(reachableModeTabs()).not.toContain("Replace person");
+  });
+
+  it("engages the sc-5947 download gate when the platform filter empties the catalog", async () => {
+    // `baseVideoModels` was `macVideoModels.length ? macVideoModels : videoModels` — it restored the
+    // UNFILTERED catalog exactly when the platform filter had emptied it. `modelReady` read off it,
+    // so with every installed model off-Mac-unserveable the gate stayed `ready` and the user got the
+    // whole Studio with a picker of models that serve no mode: every tab disabled, no download offer,
+    // and nothing saying why. Degraded rather than hung, but it hid the one screen that could fix it.
+    //
+    // Pre-existing, and unreachable before this story: `macAvailableModels` alone empties the list
+    // only for a Mac user whose every video model is torch-only. `candleAvailableModels` makes it
+    // the ordinary case for a Windows/Linux user with an MLX-only catalog.
+    await render(
+      baseContext({
+        videoModels: [VACE_FUN],
+        assets: [clip],
+        macCapabilities: OFF_MAC_CAPS,
+      }),
+    );
+
+    const gate = container.querySelector(".model-availability-gate");
+    expect(gate, "the sc-5947 gate must replace the studio, not sit alongside it").toBeTruthy();
+    expect(gate.textContent).toContain("Video Studio needs a video model");
+    // The Studio itself must be GONE, not merely covered — the model picker is the tell, because
+    // that is the control the old fallback repopulated with unserveable models.
+    expect(modelSelect(), "the studio's model picker must not render behind the gate").toBeFalsy();
+  });
+
+  it("does not engage the download gate for the same catalog when gating is inert", async () => {
+    // The anti-vacuity leg for the test above: same single model, same `candleSupport.supported:
+    // false`, switch off. Without this, a screen that gated unconditionally — on a Mac, where
+    // VACE-Fun renders fine — would satisfy the assertion above.
+    await render(
+      baseContext({
+        videoModels: [VACE_FUN],
+        assets: [clip],
+        macCapabilities: INERT_CAPS,
+      }),
+    );
+
+    expect(container.querySelector(".model-availability-gate")).toBeFalsy();
+    expect([...modelSelect().options].map((option) => option.value)).toContain(
+      "wan_2_2_vace_fun_14b",
+    );
+  });
+
+  it("leaves every tab and model reachable when off-Mac gating is inert", async () => {
+    await render(
+      baseContext({
+        videoModels: [LTX23, BERNINI, VACE_FUN],
+        assets: [clip],
+        macCapabilities: INERT_CAPS,
+      }),
+    );
+
+    // Same models, same `candleSupport` blocks, gating switch off: nothing is hidden. Without this
+    // leg the assertions above would be satisfied by a screen that hid these unconditionally — on a
+    // Mac, where every one of them renders.
+    const reachable = reachableModeTabs();
+    for (const label of [...STRANDED_TABS, "Text → Video", "Video → Video"]) {
+      expect(reachable, `${label} must stay reachable when gating is inert`).toContain(label);
+    }
+    await click(modeButton("Replace person"));
+    expect([...modelSelect().options].map((option) => option.value)).toContain(
+      "wan_2_2_vace_fun_14b",
+    );
+  });
+});
+
 describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
   let container;
   let root;
@@ -1096,7 +1342,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       .find((label) => label.textContent.trim().startsWith("Quantization"))
       ?.querySelector("select") ?? null;
 
-  it("shows ALL possible MLX tiers (disabling un-installed), stays q4-first (sc-12165)", async () => {
+  it("shows all possible MLX tiers and honors the shared generation-quality default", async () => {
     await render(
       baseContext({
         videoModels: [tieredVideoModel(["q4", "q8"])],
@@ -1118,7 +1364,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       [...tierPicker().options].map((option) => [option.value, option.disabled]),
     );
     expect(disabledByTier).toEqual({ q4: false, q8: false, bf16: true });
-    expect(tierPicker().value).toBe("q4");
+    expect(tierPicker().value).toBe("q8");
 
     // Even with a single installed tier the picker now shows (others disabled), and q4 still rides the payload.
     await unmountRoot(root, container);
@@ -1138,6 +1384,28 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(soloInstalled).toEqual({ q4: false, q8: true, bf16: true });
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("uses the native tier picker on Candle Wan and never emits Torch GGUF quantization", async () => {
+    const wan = {
+      ...tieredVideoModel(["q4", "q8"], {
+        variants: { "gguf-q4_k_m": { label: "Torch Q4" } },
+      }),
+      id: "wan_2_2",
+      name: "Wan2.2",
+      family: "wan-video",
+      adapter: "wan_video",
+    };
+    const context = baseContext({ videoModels: [wan], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeTruthy();
+    expect(quantizationPicker()).toBeNull();
+    setSelect(tierPicker(), "q4");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 4 });
+    expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
   it("keeps the candle-only NVFP4 tier out of the MLX video picker (sc-11042)", async () => {

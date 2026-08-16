@@ -57,6 +57,7 @@ let container;
 let root;
 let hookApi;
 let errors;
+let loraErrors;
 
 function Harness({ children }) {
   hookApi = useModelsAndLoras({
@@ -64,7 +65,7 @@ function Harness({ children }) {
     activeProject: { id: "proj-1" },
     activeProjectRef: { current: { id: "proj-1" } },
     setError: (value) => errors.push(value),
-    setLoraError: () => {},
+    setLoraError: (value) => loraErrors.push(value),
     setJobs: () => {},
     setActiveView: () => {},
     refreshData: async () => {},
@@ -88,6 +89,7 @@ beforeEach(async () => {
   apiFetchMock.mockResolvedValue({ id: "job-1", type: "model_download" });
   window.localStorage.clear();
   errors = [];
+  loraErrors = [];
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -196,5 +198,89 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
     });
     expect(downloadPosts()).toHaveLength(1);
     expect(JSON.parse(downloadPosts()[0][2].body).licenseAcknowledged).toBe(true);
+  });
+});
+
+// The LoRA half of the same choke point (sc-17227 review MAJOR 1). `POST /api/v1/loras/:id/download`
+// gates on the repo the catalog row resolves to, so a catalog LoRA whose `source.repo` is a
+// restricted repo is refused server-side exactly as a model download is. This hook is the only path
+// every LoRA-download surface takes (the Models screen, the Simple UI's model manager, the studio
+// LoRA pickers' Update buttons, the editor's on-demand fetch, and the dropped-workflow panel's
+// missing-requirement install), so it is where the gate binds — and without it the refusal is a bare
+// 403 with no checkbox anywhere in the product to clear it.
+//
+// Binding here is necessary but not sufficient: the gate reads the row it is HANDED, so a caller
+// that hands it an `{ id }` stub disables it just as surely as no gate at all. The dropped-workflow
+// panel did exactly that until sc-17227 review MAJOR 1; `useWorkflowDrop.test.jsx` pins that caller
+// resolving both kinds of row to their real catalog entry first.
+//
+// A LoRA row cannot declare the requirement itself: the server stamps `licenseAcknowledgmentModelId`
+// / `…ModelName` onto the row from the UNFILTERED model manifest, naming the model whose card carries
+// the licence text and the acknowledgment.
+const GATED_LORA = {
+  id: "restricted_lora",
+  name: "Restricted LoRA",
+  source: { provider: "huggingface", repo: "MiniMaxAI/MiniMax-H3" },
+  licenseAcknowledgmentModelId: "minimax_h3",
+  licenseAcknowledgmentModelName: "MiniMax-H3",
+};
+const PLAIN_LORA = { id: "plain_lora", name: "Plain LoRA" };
+
+describe("createLoraDownloadJob license-acknowledgment choke point (sc-17227)", () => {
+  it("refuses an unacknowledged gated LoRA and issues no request at all", async () => {
+    await mount();
+    let job;
+    await act(async () => {
+      job = await hookApi.createLoraDownloadJob(GATED_LORA);
+    });
+    expect(job).toBeNull();
+    expect(downloadPosts()).toHaveLength(0);
+    // The refusal must name the MODEL card that can take the acknowledgment — a message naming the
+    // LoRA would send the user to a row that renders no licence UI, which is the dead end this
+    // whole gate exists to avoid.
+    expect(loraErrors).toEqual([
+      "MiniMax-H3 requires accepting its license first. Open Models and accept the license on the MiniMax-H3 card before downloading.",
+    ]);
+  });
+
+  it("lets it through once the gating model's licence is accepted, and asserts it to the API", async () => {
+    acknowledge("minimax_h3");
+    await mount();
+    await act(async () => {
+      await hookApi.createLoraDownloadJob(GATED_LORA);
+    });
+    const posts = downloadPosts();
+    expect(posts).toHaveLength(1);
+    expect(posts[0][0]).toBe("/api/v1/loras/restricted_lora/download");
+    // Assert the BODY: the server refuses this exact request without the field, so a POST that
+    // merely happened would still be a 403 the user cannot clear.
+    expect(JSON.parse(posts[0][2].body)).toEqual({
+      requestedGpu: "auto",
+      licenseAcknowledged: true,
+    });
+  });
+
+  it("leaves an ordinary LoRA's gate and request body untouched", async () => {
+    await mount();
+    await act(async () => {
+      await hookApi.createLoraDownloadJob(PLAIN_LORA);
+    });
+    const posts = downloadPosts();
+    expect(posts).toHaveLength(1);
+    expect(posts[0][0]).toBe("/api/v1/loras/plain_lora/download");
+    expect(JSON.parse(posts[0][2].body)).toEqual({ requestedGpu: "auto" });
+    expect(loraErrors).toEqual([""]);
+  });
+
+  // Accepting a DIFFERENT model's licence must not open this one: the ack is read under the id the
+  // server stamped, not "some acknowledgment exists".
+  it("is not cleared by an unrelated model's acknowledgment", async () => {
+    acknowledge("z_image");
+    await mount();
+    await act(async () => {
+      await hookApi.createLoraDownloadJob(GATED_LORA);
+    });
+    expect(downloadPosts()).toHaveLength(0);
+    expect(loraErrors.at(-1)).toContain("requires accepting its license first");
   });
 });

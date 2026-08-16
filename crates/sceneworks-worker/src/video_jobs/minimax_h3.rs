@@ -2,6 +2,8 @@
 use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, VideoGenInput};
+#[cfg(target_os = "macos")]
+use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
 
 // ---------------------------------------------------------------------------
 // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-19508): a joint audio+video family that emits video AND
@@ -124,10 +126,11 @@ pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
 /// string** — so nothing in this module needs the provider to be importable at compile time. What
 /// it does need is for the id to be PRESENT in the registry, which is exactly what this reads.
 ///
-/// Deriving it beats asserting it: at the current pin (`014134e3`) the descriptor is absent and the
-/// refusal fires; the moment sc-18650 lands a bundle that registers `minimax_h3`, the descriptor
-/// appears and this arm goes live with **no code change**. A hard-coded revision string could only
-/// have gone stale.
+/// Deriving it beat asserting it, and sc-19721 is the proof: at `014134e3` the descriptor was
+/// absent and this refusal fired, and when the pin moved to `75d66db5` the descriptor appeared and
+/// the arm went live with **no code change here**. A hard-coded revision string would have gone
+/// stale instead — which is exactly what happened to every prose citation of the old pin around
+/// it.
 ///
 /// The same `media_descriptor(...).is_none()` idiom already gates the not-in-this-bundle branches
 /// of `mlx_fit_gate`, so this is the established way to ask the question.
@@ -370,8 +373,11 @@ pub(super) fn resolve_minimax_h3_load(
 /// * `minimax_h3_ref` (`transformer_ref/`) takes references and NO keyframes.
 /// * Keyframes AND references together are refused upstream by `MiniMaxH3Task::resolve`; refused
 ///   here too, so the user gets a SceneWorks-worded reason before anything loads.
-/// * An audio-only reference set is refused: the vision tower is the reference conditioner, so it
-///   would leave the visual stream unconditioned. The engine refuses it — this refuses it first.
+/// * An audio-only reference set is refused: an audio reference never reaches the reference
+///   conditioner (upstream `before_encoder.py` raises on `set(kinds) == {"audio"}`), so it would
+///   leave the visual stream unconditioned. sc-19574 lifted that rule into
+///   [`classify_reference_set`] so the API and the MCP tool refuse the identical shape — this is no
+///   longer the only layer holding the opinion, it is the last one.
 ///
 /// Not a duplicate of the API's `reference_limit_error` (sc-17160): that bounds HOW MANY references
 /// each entry accepts (the base entry declares 0/0/0). This bounds the SHAPE, and it is the layer a
@@ -395,35 +401,56 @@ pub(super) fn minimax_h3_validate_partition(request: &VideoRequest) -> WorkerRes
     }
     let is_reference_partition = request.model == "minimax_h3_ref";
     if is_reference_partition {
-        if !has_references {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: reference-to-video requires at least one reference (referenceAssetIds, \
-                 sourceClipAssetIds or referenceAudioAssetIds). A request with none would denoise \
-                 on the base MiniMax-H3 checkpoint, which is not the one this model loads.",
-                request.model
-            )));
-        }
-        if image_refs + clip_refs == 0 {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: an audio-only reference set leaves the visual stream unconditioned — \
-                 MiniMax-H3 conditions references through its vision tower, so at least one image \
-                 or video reference must accompany the audio.",
-                request.model
-            )));
+        // sc-19574: both refusals now come off the SHARED verdict
+        // (`sceneworks_core::video_request::classify_reference_set`) that the API's
+        // `validate_video_job` and the MCP tool's `reference` arm also read, so the three layers
+        // cannot drift back into disagreeing about which sets are legal. Only the wording is the
+        // worker's — an engine-side reason names the checkpoint, which a user-facing 400 should not.
+        match classify_reference_set(image_refs, clip_refs, audio_refs) {
+            ReferenceSetVerdict::Conditionable => {}
+            ReferenceSetVerdict::Empty => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{}: reference-to-video requires at least one reference (referenceAssetIds, \
+                     sourceClipAssetIds or referenceAudioAssetIds). A request with none would \
+                     denoise on the base MiniMax-H3 checkpoint, which is not the one this model \
+                     loads.",
+                    request.model
+                )));
+            }
+            ReferenceSetVerdict::AudioOnly => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{}: an audio-only reference set leaves the visual stream unconditioned — an \
+                     audio reference never reaches the reference conditioner, so at least one image \
+                     or video reference must accompany the audio.",
+                    request.model
+                )));
+            }
         }
         // `Conditioning::ReferenceVideo` — the ONLY variant that carries a reference clip's own
-        // frame rate — arrives with the sc-18650 pin bump. It is genuinely absent from the pinned
-        // gen-core, so this shape cannot be built here yet. Refuse it by name rather than
-        // downgrading it to `Conditioning::VideoClip`: the engine deliberately does NOT advertise
-        // `VideoClip` (it has no in-context clip mechanism), so that substitution would be refused
-        // as `Unsupported` after the load — or, worse, silently accepted by some future provider as
-        // a completely different mechanism. Tracked as the sc-19508 follow-up.
+        // frame rate.
+        //
+        // 🔴 THE REASON FOR THIS REFUSAL CHANGED AT sc-19721, AND THE MESSAGE HAD TO CHANGE WITH IT.
+        // It used to say the variant "arrives with the inference pin bump (sc-18650)", which was
+        // true at `014134e3`: gen-core had no such variant. The pin is now `75d66db5`, where
+        // `Conditioning::ReferenceVideo { frames, fps, audio }` EXISTS and MiniMax-H3's descriptor
+        // ADVERTISES `ConditioningKind::ReferenceVideo`. Both halves of the old reason are gone.
+        //
+        // What is missing is on THIS side: nothing in the worker decodes a source clip into
+        // `Vec<Image>` + its own fps + its own `AudioTrack` for this arm — no call site in the repo
+        // constructs the variant at all. That is a SceneWorks feature slice (the sc-19508
+        // follow-up), not a pin. The refusal stands, honestly stated, until it is built.
+        //
+        // Still refused BY NAME rather than downgraded to `Conditioning::VideoClip`: the engine
+        // deliberately does NOT advertise `VideoClip` (it has no in-context clip mechanism), so
+        // that substitution would be refused as `Unsupported` after the load — or, worse, silently
+        // accepted by some future provider as a completely different mechanism.
         if clip_refs > 0 {
             return Err(WorkerError::InvalidPayload(format!(
-                "{}: video references are not renderable in this build — the conditioning variant \
-                 that carries a reference clip's own frame rate arrives with the inference pin \
-                 bump (sc-18650). Image and audio references render now; remove the \
-                 sourceClipAssetIds entries, or wait for the pin. No output was produced.",
+                "{}: video references are not renderable in this build — the engine accepts them, \
+                 but SceneWorks does not yet decode a reference clip into the frames, frame rate \
+                 and soundtrack the conditioning carries (sc-19508 follow-up). Image and audio \
+                 references render now; remove the sourceClipAssetIds entries. No output was \
+                 produced.",
                 request.model
             )));
         }

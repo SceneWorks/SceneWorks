@@ -96,6 +96,14 @@ export function useWorkflowDrop({
   // is. The licence gate inside `createModelDownloadJob` reads the entry's own flags, and a stub
   // silently disables it.
   catalogModels = [],
+  // The LoRA catalog, for exactly the same reason as `catalogModels` above and against exactly the
+  // same defect (sc-17227 review MAJOR 1). `createLoraDownloadJob`'s gate reads the row's SERVER-
+  // STAMPED `licenseAcknowledgmentModelId`, so a `{ id }` stub makes `licenseAcknowledgmentSource`
+  // null: the panel would skip the acknowledgment AND omit `licenseAcknowledged` from the body,
+  // and the server gate at `apps/rust-api/src/loras.rs` would answer a 403 with nothing in the
+  // product able to clear it. The stamp exists only on the fetched row, so only the catalog can
+  // supply it.
+  catalogLoras = [],
   // The same live Mac/MLX gate Image Studio applies to its model picker and pose controls.
   macCapabilities = null,
   // A cheap identity for "what this install has on disk", derived by App from the model and LoRA
@@ -454,17 +462,30 @@ export function useWorkflowDrop({
   // refetch the catalog that re-resolves this very panel. A bare fetch here would install the model
   // and leave every one of those un-wired.
   //
-  // The row is resolved to its REAL catalog entry first (sc-17227). `createModelDownloadJob`'s
-  // licence gate reads the entry's own `gated` / `requiresLicenseAcknowledgment`, so handing it a
-  // `{ id }` stub made `requiresLicenseAcknowledgment(model)` false and the gate could not fire:
-  // the panel skipped the acknowledgment AND omitted `licenseAcknowledged` from the request body.
-  // For a `requiresLicenseAcknowledgment` model the server still refused (with a raw error instead
-  // of the guided message); for a `gated` one BOTH halves missed — the client by the stub, the
-  // server by its deliberate `gated` exclusion — so with a saved Hugging Face credential the
-  // weights landed with no acknowledgment at all.
+  // BOTH kinds of row are resolved to their REAL catalog entry first (sc-17227), because BOTH
+  // download gates read fields that live only on the fetched entry and are absent from a `{ id }`
+  // stub:
+  //
+  //   * model — `createModelDownloadJob` reads the entry's own `gated` /
+  //     `requiresLicenseAcknowledgment`, so a stub made `requiresLicenseAcknowledgment(model)`
+  //     false and the gate could not fire: the panel skipped the acknowledgment AND omitted
+  //     `licenseAcknowledged` from the request body. For a `requiresLicenseAcknowledgment` model
+  //     the server still refused (with a raw error instead of the guided message); for a `gated`
+  //     one BOTH halves missed — the client by the stub, the server by its deliberate `gated`
+  //     exclusion — so with a saved Hugging Face credential the weights landed with no
+  //     acknowledgment at all.
+  //   * lora — `createLoraDownloadJob` reads `licenseAcknowledgmentModelId`, which the SERVER
+  //     stamps onto the row (`annotate_license_acknowledgment_sources`). A stub carries no stamp,
+  //     so the panel would send no `licenseAcknowledged` and the gate in
+  //     `apps/rust-api/src/loras.rs` would answer a 403 no surface in the product can clear —
+  //     an unsatisfiable gate, the identical shape to the model defect above. Unreachable in
+  //     today's shipped LoRA catalog (no row's `source.repo` is a restricted repo), which is why
+  //     it survived the first pass; it is fixed and pinned rather than left to the catalog's
+  //     current contents.
   //
   // An id with no catalog entry falls back to the bare row: it cannot download anything either way
-  // (`POST /api/v1/models/:id/download` 404s on an unknown id), so there is nothing to gate.
+  // (`POST /api/v1/models/:id/download` and `/loras/:id/download` both 404 an unknown id), so
+  // there is nothing to gate.
   const installRequirement = useCallback(
     async (row) => {
       const key = `${row?.kind}:${row?.id}`;
@@ -479,10 +500,8 @@ export function useWorkflowDrop({
         ...current,
         installing: { ...current.installing, [key]: true },
       }));
-      const entry =
-        row.kind === "model"
-          ? catalogModels.find((candidate) => candidate?.id === row.id)
-          : null;
+      const catalog = row.kind === "model" ? catalogModels : catalogLoras;
+      const entry = catalog.find((candidate) => candidate?.id === row.id);
       const job = await start(entry ?? { id: row.id });
       setFixes((current) => ({
         ...current,
@@ -493,7 +512,7 @@ export function useWorkflowDrop({
         queued: { ...current.queued, [key]: job?.id ?? Boolean(job) },
       }));
     },
-    [fixes.installing, queued, installModel, installLora, catalogModels],
+    [fixes.installing, queued, installModel, installLora, catalogModels, catalogLoras],
   );
 
   // "Use this workflow" — build the recipe and hand it to the SAME launch the viewer's

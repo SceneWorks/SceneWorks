@@ -598,10 +598,12 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
                 # `preview: True`, not the default: this test spawns ONE worker with
                 # SCENEWORKS_GPU_ID=cpu, and `worker_capabilities_with_utility` gives a CPU worker
                 # `person_detect_preview` but deliberately NOT `person_detect` — real model-backed
-                # detection routes to the MLX/candle GPU worker. Without this the five jobs stayed
-                # `queued` with `workerId: None` forever and the test timed out. Same latent class
-                # as the export resolution above: invisible until the ffmpeg skip stopped hiding
-                # this test from CI (sc-19549).
+                # detection routes to the MLX/candle GPU worker (`preview` defaults to false in
+                # `PersonDetectionJobRequest`, so omitting it asks for the real capability).
+                # Without this the five jobs stayed `queued` with `workerId: None` forever and the
+                # test timed out; exercising the procedural preview path is the point here. Same
+                # latent class as the export resolution above: invisible until the ffmpeg skip
+                # stopped hiding this test from CI (sc-19549).
                 json={
                     "sourceAssetId": asset_id,
                     "sourceTimestamp": index * 0.1,
@@ -652,7 +654,9 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         export_job = httpx.post(
             f"{rust_api}/api/v1/projects/{project_id}/timelines/{timeline_id}/exports",
             # 640, not 240: `validate_timeline_export` admits only 640/720/1024/1280, so 240 is a
-            # flat 400 and this request never created a job. It had been that way since the route
+            # flat 400 and this request never created a job. The 240 came from the *worker's* clamp
+            # floor (`media_jobs.rs` `.clamp(240, 2160)`), which is a defensive bound on an
+            # untrusted payload rather than a supported size. It had been that way since the route
             # and this test landed on the same day (7aef05c4f / 3168dd187, 2026-05-17) — invisible
             # because the ffmpeg skip below meant this test had never once executed in CI.
             # Matches `test_rust_api_contract_snapshots.py`, which exports at 640.

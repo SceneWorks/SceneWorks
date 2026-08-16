@@ -7,6 +7,7 @@ import {
   FAMILY_STORIES,
   MODEL_STORIES,
   SOURCE_PATHS,
+  activeCalibrationPlan,
   assertCellOwnershipIsBackendScoped,
   assertCalibrationPlanTargetsResolvedCoordinates,
   assertCellInventoryMatchesCatalog,
@@ -591,18 +592,25 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
   // and also includes SC-18237's production-deferred pair. The new q4/bf16 cells carry one exact
   // current record each. Exact counts keep both facts visible.
+  //
+  // sc-19721 bumped the inference pin 014134e3 -> 75d66db5, which staled every one of these cells
+  // (the closure digest is what currency keys on, and mlx-gen/src/residency.rs moved +272 lines).
+  // The re-capture adds exactly ONE current record per cell, so every count below rises by one and
+  // no other shape changes. The uniform +1 is the signature of a clean sweep: a partial or
+  // duplicated ingest would show a ragged delta here, and the seven-cell SET assertion above still
+  // pins which cells may appear at all.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 2,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 4,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 4,
     },
     "every Verified Qwen cell must carry its exact dynamic evidence",
   );
@@ -664,28 +672,63 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async 
     }],
   );
 
-  const matrix = await buildMatrix({ publish: false });
-  const cells = matrix.cells.filter(
+  const shipped = await buildMatrix({ publish: false });
+  const shippedCells = shipped.cells.filter(
     (cell) => cell.modelId === "flux2_dev" && cell.backend === "mlx",
   );
-  assert.equal(cells.length, 180, "the full 3-tier x 4-mode x 3-overlay x 5-rung slice must exist");
+  assert.equal(
+    shippedCells.length,
+    135,
+    "the full 3-tier x 3-active-mode x 3-overlay x 5-rung slice must exist after style retirement",
+  );
   assert.deepEqual(
-    cells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
+    shippedCells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
     [
       "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
       "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
     ],
     "BF16 and every sibling mode, overlay, and rung must remain Missing",
   );
+  // sc-19721 re-captured both at pin 75d66db5, so the two shipped Resident cells are Verified again
+  // and carry current evidence. The superseded captures stayed historical until a real re-capture
+  // arrived rather than being re-stamped, which is the property this has always been protecting.
   assert.ok(
-    cells
+    shippedCells
       .filter((cell) => cell.state !== "Missing")
       .every(
         (cell) =>
           cell.state === "Runtime verified" &&
-          cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
-          cell.evidence.currentEnvironmentVerification.length === 2,
+          cell.evidence.currentEnvironmentVerification.length > 0,
       ),
+    "the sc-19721 re-capture must promote the shipped FLUX.2 Resident cells (runtime_complete records give Runtime verified, not Verified)",
+  );
+
+  // Promotion is tested against a mechanically re-stamped fixture. The checked-in physical
+  // captures are deliberately never re-stamped when inference source changes: doing so would turn
+  // provenance into an assertion instead of evidence.
+  const onCurrentClosure = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture({
+        select: (record) =>
+          record.target.provider === "flux2_dev" &&
+          record.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      }),
+      manifest: await currentManifestCalibrationFixture({
+        select: (binding) => binding.provider === "flux2_dev",
+      }),
+    },
+  });
+  const currentCells = onCurrentClosure.cells.filter(
+    (cell) => cell.modelId === "flux2_dev" && cell.backend === "mlx" && cell.state !== "Missing",
+  );
+  assert.ok(
+    currentCells.every(
+      (cell) =>
+        cell.state === "Runtime verified" &&
+        cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
+        cell.evidence.currentEnvironmentVerification.length === 4,
+    ),
     "each admitted cell must be backed by its exact 768 and 1024 current captures",
   );
 });
@@ -1976,7 +2019,8 @@ test("a rung-4 implementation claim survives an absent rung 1 exactly when the p
 test("a structurally-N/A rung 1 satisfies the provider's own rung-4 edge vacuously", async () => {
   // `validate_selection` has TWO accepting arms for a `Rung { .. EngagedInSameRequest }` edge, and
   // the gate shipped only the first. inference
-  // `crates/contracts/gen-core/src/memory_strategy.rs:1468-1481` at pinned `014134e3`:
+  // `crates/contracts/gen-core/src/memory_strategy.rs` at pinned `75d66db5` (`1468-1481` at
+  // the `014134e3` this was written against):
   //
   //     if self.engages(selection.strategy, rung) { continue; }
   //     // `StructurallyNotApplicable` satisfies the edge vacuously: it asserts the
@@ -2480,8 +2524,17 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // inferenceRevision` does not date it and something on the record has to.
   const survey = await surveyFixture();
   const cargo = await readFile(new URL("../Cargo.toml", import.meta.url), "utf8");
+  // ANTI-VACUITY, not a snapshot. This used to read
+  // `assert.equal(pin, "014134e3035ad7e4eca5c2ed7bded2375dc3c071")`, which pinned a literal that
+  // carries no meaning of its own and goes stale on every inference bump — the exact defect class
+  // sc-19751/sc-19758 removed elsewhere. The load-bearing assertion is `notEqual(revision, pin)`
+  // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
+  // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
   const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  assert.equal(pin, "014134e3035ad7e4eca5c2ed7bded2375dc3c071");
+  // sc-19721 moved the pin onto the inference sc-17137 feature head. The literal is re-stamped
+  // rather than relaxed to a shape check: the assertion below only means something while the pin is
+  // known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
+  assert.equal(pin, "75d66db50543ac288deb278853d0f0b432f92c5c");
 
   for (const backend of ["mlx", "candle"]) {
     const revision = h3(survey).backends[backend].contractRevision;
@@ -3355,20 +3408,42 @@ async function currentManifestCalibrationFixture({
   return JSON.stringify(parsed);
 }
 
-/// Retained Qwen q8 records using the shared rung-4 fingerprint, re-stamped current.
+/// Qwen records re-stamped current: the retained q8 rung-4 fixture, plus SC-18353's physical
+/// captures.
 ///
-/// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
-/// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
-/// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
-/// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: SC-18353 now supplies
-/// their real production-deferred current captures.
+/// The q8 half is selected by calibration fingerprint, which is what separates it from the 22 older
+/// Qwen records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the
+/// bare `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the
+/// `-eager` / `-deferred` load-shape variants.
+///
+/// **The physical half was added by sc-19721 and the reason matters.** Q4/BF16 used to be
+/// deliberately excluded here, because SC-18353's real production-deferred captures were CURRENT on
+/// their own and using them unmodified was the stronger arrangement. sc-19721's inference pin bump
+/// (`014134e3` -> `75d66db5`) moved `mlx:qwen_image`'s compile closure — `mlx-gen/src/residency.rs`
+/// alone is +272 lines, and it is the shared MLX residency mechanism these captures measure — so
+/// those records stopped being current and the two fixture-backed assertions below collapsed from
+/// 9/7 promotions to 2. Re-stamping them here restores what this fixture is FOR: proving that
+/// current evidence plus current bindings promotes a cell, whether or not the shipped bundle
+/// happens to be current. The same reasoning the Krea comment in the sc-16060 test records.
+///
+/// Selection is on `sourceProvenance` rather than tier, and that is load-bearing: it re-stamps only
+/// records backed by a validated physical MLX session. The harness refuses the alternative outright
+/// — `validateCurrentPhysicalMlxProvenance` fails any authoritative Qwen q4/bf16 record stamped
+/// current without `sourceProvenance === "physical_mlx_v1"` — so a broader selector here does not
+/// widen coverage, it makes the whole fixture unbuildable. Verified by running it.
+///
+/// This does NOT claim the shipped corpus is current. It is not: the shipped Qwen and FLUX.2 cells
+/// demote to `Implemented/unverified` under this pin, the assertions below that read the shipped
+/// matrix say so, and the re-capture is sc-19721's own work rather than another family's.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
+const QWEN_PRODUCTION_DEFERRED_REVISION = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
 const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({
     select: (record) =>
       record.target.provider === "qwen_image" &&
-      record.target.tier === "q8" &&
-      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT,
+      (record.sourceProvenance === "physical_mlx_v1" ||
+        (record.target.tier === "q8" &&
+          record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT)),
   });
 
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
@@ -3415,10 +3490,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     9,
     "the retained q8 fixture plus the physical q4/bf16 captures must verify all nine bindings",
   );
+  // sc-19721 re-captured at pin 75d66db5, so the shipped bundle verifies all nine bindings on its
+  // own now. The captures stayed historical until a real re-capture arrived rather than being
+  // re-stamped, which is the property this protects.
   assert.equal(
     verifiedQwen(shipped),
     9,
-    "the shipped Qwen opt-in contains all nine production-deferred bindings",
+    "the sc-19721 re-capture must verify all nine shipped Qwen bindings",
   );
 
   const evidenceOnlyZ = await buildMatrix({
@@ -3719,9 +3797,9 @@ test("every conformance and characterization state carries a definition (sc-1606
 test("publication keeps every planned, measured, bound and cited coordinate — and nothing else", async () => {
   const resolved = await buildMatrix({ publish: false });
   const publishedDocument = await buildMatrix();
-  const plan = JSON.parse(
+  const plan = activeCalibrationPlan(JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
-  );
+  ));
 
   const planned = plannedCellIds(plan, resolved.cells);
   assert.ok(planned.size > 100, "the shipped plan must target a substantial set of coordinates");
@@ -3766,12 +3844,13 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, admits the nine current Qwen coordinates
-  // (SC-18237 q8 plus SC-18353 q4/bf16) and the SC-18218 FLUX.2 q4/q8 Resident coordinates at this
-  // pin. Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, was empty while the rich capability-descriptor
+  // change had moved the shared MLX provider closure with no re-capture behind it. sc-19721 supplied
+  // the re-capture at pin 75d66db5, so these eleven coordinates carry current evidence again — this
+  // test flipping is the designed outcome, not a regression.
+  // Two facts keep this assertion useful:
   //
-  //   1. It is exact: each listed Qwen and FLUX.2 cell was captured at its current provider closure;
-  //      no historical or sibling-rung row may join.
+  //   1. It is exact: no historical or sibling-rung row may join merely because the pin moved.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm being empty therefore cannot elide anything.
@@ -3796,7 +3875,7 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
     ],
-    "only the SC-18237/SC-18353 Qwen cells and SC-18218 FLUX.2 Resident cells are current",
+    "only the sc-19721 re-capture's coordinates may carry current evidence; a historical or sibling-rung row joining merely because the pin moved is the failure this pins",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
@@ -4082,8 +4161,17 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
   // that capability `edit_image`, so they matched ZERO coordinates. Nothing caught it —
   // `expectedEngagedRungs` just returned null, and `memory-calibration.schema.json` types `mode` as a
   // free string — and a capture run against them would have produced records binding to nothing.
-  const plan = JSON.parse(
+  const rawPlan = JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
+  );
+  const retiredStyleRows = rawPlan.providers.filter(
+    (entry) => entry.target.mode === "style_variations",
+  );
+  assert.ok(retiredStyleRows.length > 0, "historical style captures remain provenance");
+  const plan = activeCalibrationPlan(rawPlan);
+  assert.ok(
+    plan.providers.every((entry) => entry.target.mode !== "style_variations"),
+    "retired product modes are excluded from the active calibration plan",
   );
 
   // The shipped plan is clean, which is the property worth pinning: every entry addresses something.

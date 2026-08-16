@@ -203,15 +203,6 @@ impl CatalogCacheStageTestSignal {
 #[cfg(test)]
 struct CatalogCacheStageTestHook {
     claimed: std::sync::atomic::AtomicBool,
-    /// Set the first time the shortened candidate budget is handed out, so
-    /// EXACTLY ONE candidate ever gets it — the one this hook parks. It used to
-    /// be handed to every candidate for as long as the hook was installed,
-    /// including the replacement candidate the hook test needs to SUCCEED; on a
-    /// loaded runner that replacement blew the 100 ms budget too and signalled a
-    /// second, unexpected timeout. Keying off `claimed` instead would still
-    /// race, because the claim happens inside the verifier, after the budget has
-    /// already been chosen.
-    short_budget_issued: std::sync::atomic::AtomicBool,
     /// Stall injected into the staging verifier BEFORE it claims the hook, so a
     /// test can put the candidate budget's expiry ahead of the `before_stage`
     /// meeting point deterministically. That is the ordering a loaded CI runner
@@ -303,7 +294,6 @@ pub(crate) fn install_catalog_cache_stage_test_hook(
 ) -> CatalogCacheStageTestControl {
     let hook = std::sync::Arc::new(CatalogCacheStageTestHook {
         claimed: std::sync::atomic::AtomicBool::new(false),
-        short_budget_issued: std::sync::atomic::AtomicBool::new(false),
         verifier_delay,
         before_stage: CatalogCacheStageTestRendezvous::new("before_stage"),
         release_stage: CatalogCacheStageTestRendezvous::new("release_stage"),
@@ -775,7 +765,7 @@ pub(crate) async fn materialize_catalog_results(
                 break 'pages;
             }
             let acquired = tokio::time::timeout(
-                remaining.min(materialization_candidate_timeout()),
+                remaining.min(materialization_candidate_timeout(staging_token)),
                 acquire_materialization_source(
                     &catalog_root,
                     staging.path(),
@@ -1043,11 +1033,15 @@ fn verified_cached_source(
     let content_hash = verified.content_hash;
     verify_record_content_hash(record, &content_hash)?;
     #[cfg(test)]
-    sleep_catalog_cache_stage_test_verifier_delay();
-    #[cfg(test)]
-    let claimed_test_hook = claim_catalog_cache_stage_test_hook();
+    let claimed_test_hook = claim_catalog_cache_stage_test_hook(index);
     #[cfg(test)]
     if let Some(hook) = &claimed_test_hook {
+        // Stall AFTER claiming, never before. Sleeping first put a 400 ms
+        // scheduler-dependent gap between the two verifiers' claims, which is
+        // how the parked candidate stopped being deterministic (sc-19806).
+        if !hook.verifier_delay.is_zero() {
+            std::thread::sleep(hook.verifier_delay);
+        }
         hook.before_stage.wait();
         hook.release_stage.wait();
     }
@@ -1081,50 +1075,52 @@ fn verify_record_content_hash(record: &CatalogRecord, actual: &str) -> Result<()
     Ok(())
 }
 
-fn materialization_candidate_timeout() -> std::time::Duration {
-    // The shortened budget belongs to the ONE candidate the cache-stage hook
-    // parks, not to every candidate for as long as the hook is installed. The
-    // hook test needs its *replacement* candidate to succeed, and on a loaded
-    // runner that replacement blew the short budget too (sc-19764).
-    #[cfg(test)]
-    if catalog_cache_stage_test_hook()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(|hook| {
-            hook.short_budget_issued
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_ok()
-        })
+/// The shortened budget, and the staging park, belong to this candidate and no
+/// other.
+///
+/// Both used to be first-come: whichever verifier thread reached the CAS first
+/// won. The two verifiers reach it only ~166 ms apart (measured: candidate 1 at
+/// t=406 ms, candidate 2 at t=572 ms), each after a `thread::sleep` whose
+/// wake-up is at the scheduler's discretion, so on a slower host candidate 2
+/// could win — and when it did, the hook parked the replacement candidate that
+/// the test needs to SUCCEED. The request then blocked forever awaiting that
+/// parked verifier, `before_project_copy` and `release_stage` were each left
+/// without a partner, and the test failed at the 120 s rendezvous bound
+/// (sc-19806, seen on the hosted macOS runner). Keying on the candidate index
+/// makes it deterministic on any host, at any speed.
+#[cfg(test)]
+const CATALOG_CACHE_STAGE_TEST_PARKED_CANDIDATE: usize = 1;
+
+#[cfg(test)]
+fn materialization_candidate_timeout(candidate_index: usize) -> std::time::Duration {
+    // Only the parked candidate gets the short budget. Every other candidate —
+    // including the replacement this test needs to succeed — keeps the
+    // production budget (sc-19764).
+    if candidate_index == CATALOG_CACHE_STAGE_TEST_PARKED_CANDIDATE
+        && catalog_cache_stage_test_hook()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     {
         return CATALOG_CACHE_STAGE_TEST_CANDIDATE_TIMEOUT;
     }
     MATERIALIZATION_CANDIDATE_TIMEOUT
 }
 
-/// Runs on the staging verifier's `spawn_blocking` thread, so the stall never
-/// touches a test's runtime thread.
-#[cfg(test)]
-fn sleep_catalog_cache_stage_test_verifier_delay() {
-    let delay = catalog_cache_stage_test_hook()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .map_or(std::time::Duration::ZERO, |hook| hook.verifier_delay);
-    if !delay.is_zero() {
-        std::thread::sleep(delay);
-    }
+#[cfg(not(test))]
+fn materialization_candidate_timeout(_candidate_index: usize) -> std::time::Duration {
+    MATERIALIZATION_CANDIDATE_TIMEOUT
 }
 
 #[cfg(test)]
-fn claim_catalog_cache_stage_test_hook() -> Option<std::sync::Arc<CatalogCacheStageTestHook>> {
+fn claim_catalog_cache_stage_test_hook(
+    candidate_index: usize,
+) -> Option<std::sync::Arc<CatalogCacheStageTestHook>> {
     use std::sync::atomic::Ordering;
 
+    if candidate_index != CATALOG_CACHE_STAGE_TEST_PARKED_CANDIDATE {
+        return None;
+    }
     let hook = catalog_cache_stage_test_hook()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -3063,6 +3063,69 @@ mod tests {
                 ("bf16", StrategyRung::BoundedTransformerResidency),
             ),
         ]);
+        // sc-19721's re-capture at inference 75d66db5. The pin bump staled every Qwen cell, so
+        // these fifteen sessions are the new physical evidence and the map above stays as the
+        // superseded history. Kept as a separate map because their receipts live under a different
+        // story directory, which the path assertion below checks per set.
+        let qwen_recapture_sessions = BTreeMap::from([
+            (
+                "ims-14ef0a12500370ae986a",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-18a536fe9257f2454d84",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-1aa2aea49827fa8a3429",
+                ("q8", StrategyRung::BoundedTransformerResidency),
+            ),
+            (
+                "ims-1b8865eec64a0a207666",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-1cac21ce200c07abc06e",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-55bceaefa8634380504f",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-6307ffd2d70c04d52bc9",
+                ("bf16", StrategyRung::BoundedAttention),
+            ),
+            (
+                "ims-92fdb7aac7a7f2cb258b",
+                ("bf16", StrategyRung::BoundedTransformerResidency),
+            ),
+            ("ims-98be010417fa32e0067c", ("bf16", StrategyRung::Resident)),
+            (
+                "ims-a9d06f3a15fc043b56fb",
+                ("q4", StrategyRung::BoundedAttention),
+            ),
+            (
+                "ims-aa12e1d8c38d23925faf",
+                ("q8", StrategyRung::BoundedAttention),
+            ),
+            (
+                "ims-d136b960a448b29cca75",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-f1d5e56386b7eb34074a",
+                ("bf16", StrategyRung::StagedResidency),
+            ),
+            (
+                "ims-f28c107adfddf79e31f5",
+                ("q4", StrategyRung::BoundedTransformerResidency),
+            ),
+            (
+                "ims-fdd69af7359038823c08",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+        ]);
         let actual_session_ids = bundle
             .source_sessions
             .iter()
@@ -3073,11 +3136,15 @@ mod tests {
             .copied()
             .chain(flux2_sessions.keys().copied())
             .chain(qwen_sessions.keys().copied())
+            .chain(qwen_recapture_sessions.keys().copied())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual_session_ids, expected_session_ids);
         assert_eq!(
             bundle.source_sessions.len(),
-            preserved_session_ids.len() + flux2_sessions.len() + qwen_sessions.len()
+            preserved_session_ids.len()
+                + flux2_sessions.len()
+                + qwen_sessions.len()
+                + qwen_recapture_sessions.len()
         );
         for session in &bundle.source_sessions {
             let Some((path, rung, mode, overlay)) = flux2_sessions.get(session.id.as_str()) else {
@@ -3092,13 +3159,23 @@ mod tests {
             assert_eq!(target.overlay, *overlay);
         }
         for session in &bundle.source_sessions {
-            let Some((tier, rung)) = qwen_sessions.get(session.id.as_str()) else {
+            // Each set carries its own story directory, so resolve the expected prefix from which
+            // map the id belongs to rather than accepting either.
+            let Some((story, (tier, rung))) = qwen_sessions
+                .get(session.id.as_str())
+                .map(|entry| ("sc-18353", entry))
+                .or_else(|| {
+                    qwen_recapture_sessions
+                        .get(session.id.as_str())
+                        .map(|entry| ("sc-19721", entry))
+                })
+            else {
                 continue;
             };
             assert_eq!(session.kind, SourceSessionKind::PhysicalMlx);
             assert_eq!(
                 session.source_path,
-                format!("docs/calibration/sc-18353/{}.log", session.id)
+                format!("docs/calibration/{story}/{}.log", session.id)
             );
             let target = session.target.as_ref().expect("SC-18353 target receipt");
             assert_eq!(target.tier, *tier);
@@ -3130,7 +3207,8 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 65);
+        // sc-19721's re-capture adds 15 complete and 4 runtime_complete records.
+        assert_eq!(complete_count, 80);
         let runtime_keys = bundle
             .records
             .iter()
@@ -3151,7 +3229,7 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::RuntimeComplete)
             .count();
-        assert_eq!(runtime_complete_count, 19);
+        assert_eq!(runtime_complete_count, 23);
         assert_eq!(
             bundle.records.len(),
             complete_count + runtime_complete_count
@@ -3162,7 +3240,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
                 .count(),
-            54
+            58
         );
         assert_eq!(
             bundle
@@ -3170,7 +3248,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            30
+            45
         );
     }
 

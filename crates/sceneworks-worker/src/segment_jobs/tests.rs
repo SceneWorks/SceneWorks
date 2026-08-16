@@ -82,3 +82,15 @@ fn parse_points_rejects_malformed() {
     // Missing y.
     assert!(parse_points(&obj(json!({ "points": [{ "x": 1.0 }] }))).is_err());
 }
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_point_prompts_fail_closed_with_actionable_error() {
+    let points = [(12.0, 18.0, 1), (22.0, 30.0, 0)];
+    let error = reject_unsupported_candle_points(Some(&points))
+        .expect_err("the pinned Candle provider has no point-prompt API");
+    let message = error.to_string();
+    assert!(message.contains("box prompt surface"));
+    assert!(message.contains("2 interactive point prompt(s)"));
+    assert!(reject_unsupported_candle_points(None).is_ok());
+}

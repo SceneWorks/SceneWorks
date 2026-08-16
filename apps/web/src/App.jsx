@@ -3056,6 +3056,10 @@ export function App() {
     // The whole catalog, so an install requirement resolves to its real entry — including a VIDEO
     // model, which `imageModels` filters out — before the download starts (sc-17227).
     catalogModels: models,
+    // The LoRA catalog, for the same reason: `createLoraDownloadJob` gates on the row's
+    // server-stamped `licenseAcknowledgmentModelId`, which a `{ id }` stub does not carry
+    // (sc-17227).
+    catalogLoras: loras,
     macCapabilities,
     catalogRevision,
     failedInstallJobIds,

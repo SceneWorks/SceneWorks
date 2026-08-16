@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -565,7 +566,6 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
         "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
         "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
         "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/zimage_identity_candle.rs": "default_repo_for(&request.model)",
         "sensenova_jobs.rs": "default_repo_for(&request.model)",
         "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
     }
@@ -701,6 +701,29 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_sensenova_models_do_not_advertise_lora_compatibility():
+    """sc-18476: SenseNova has no diffusion-LoRA merge path, so advertise none."""
+    manifest = _load_builtin_models_manifest()
+    sensenova = {
+        model["id"]: model
+        for model in manifest["models"]
+        if model.get("family") == "sensenova-u1"
+    }
+    assert set(sensenova) == {
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_infographic_v3_fast",
+    }
+    for model_id, model in sensenova.items():
+        assert "loraCompatibility" not in model, (
+            f"{model_id} must omit the LoRA advertisement; the SenseNova worker accepts no "
+            "user adapters"
+        )
+
+
 def test_schema_accepts_mlx_sequential_offload_capability():
     """SC-18377: MLX staged-residency declarations are part of the authoring contract."""
     schema = _load_schema(SCHEMA_PATH)
@@ -737,12 +760,13 @@ def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
     assert set(static_overlays) == set(contract_overlays) == expected
 
 
-def test_measured_memory_rows_declare_their_1024_square_geometry():
+def test_measured_memory_rows_declare_their_workload_geometry():
     """sc-16020: geometry is data, not a prose assumption.
 
     The counts were derived from the live catalog when the field landed. Update them when
-    adding/removing measured rows; the universal assertions are what prevent a new row from
-    silently escaping the normalization contract.
+    adding/removing rows; the universal assertions are what prevent a new row from silently
+    escaping the normalization contract or an unmeasured tier gate from presenting itself as a
+    calibrated measurement.
     """
     manifest = _load_builtin_models_manifest()
     mlx_rows = []
@@ -757,9 +781,70 @@ def test_measured_memory_rows_declare_their_1024_square_geometry():
             candle_rows.append((model["id"], candle))
 
     assert len(mlx_rows) == 16
-    assert len(candle_rows) == 35
+    assert len(candle_rows) == 36
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
-    assert all(row[1].get("vramMeasuredPixels") == 1024 * 1024 for row in candle_rows), candle_rows
+    assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
+
+    measured_rows = [row for row in candle_rows if row[1]["measured"]]
+    unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
+    assert len(measured_rows) == 24
+    assert len(unmeasured_rows) == 12
+
+    measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
+    assert all(
+        row[1].get("vramMeasuredPixels") == 1024 * 1024
+        for row in measured_image_rows
+    ), measured_image_rows
+    scail = [row for row in measured_rows if row[0] == "scail2_14b"]
+    assert len(scail) == 1
+    assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
+
+    # Unmeasured rows still declare the geometry of their estimate or conservative gate, but they
+    # do not enter the calibrated 1024² set. FLUX.2-dev is deliberately the sole 256² gate: its
+    # durable runs establish a safe high-water, not a 1024² calibration.
+    non_calibration_geometry = [
+        (model_id, candle["vramMeasuredPixels"])
+        for model_id, candle in unmeasured_rows
+        if candle["vramMeasuredPixels"] != 1024 * 1024
+    ]
+    assert non_calibration_geometry == [("flux2_dev", 256 * 256)]
+    flux2_dev = next(
+        candle for model_id, candle in unmeasured_rows if model_id == "flux2_dev"
+    )
+    assert flux2_dev["measured"] is False
+    assert flux2_dev["vramGbByTier"] == {"q4": 42.7, "q8": 70.8}
+
+
+def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
+    """sc-18473: the installable shared package and its fail-closed gate share one exact row."""
+    manifest = _load_builtin_models_manifest()
+    scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
+    candle = scail["candle"]
+    assert candle == {
+        "minMemoryGb": 105,
+        "vramGbByTier": {"bf16": 102.115},
+        "vramMeasuredPixels": 832 * 480,
+        "measured": True,
+    }
+    assert candle["minMemoryGb"] == math.ceil(
+        candle["vramGbByTier"]["bf16"] + 2
+    )
+    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+
+    raw = MANIFEST_PATH.read_text(encoding="utf-8")
+    scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(
+        "// Krea Realtime 14B", 1
+    )[0]
+    for exact_evidence in [
+        "3174984b20334bb029170e367be234de0b3f8753",
+        "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+        "31455292141",
+        "93667700921",
+        "9089420126",
+        "de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9",
+        "overallPeakGb=102.115",
+    ]:
+        assert exact_evidence in scail_section
 
 
 def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
@@ -798,6 +883,12 @@ def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
     assert any(
         error.validator == "required"
         and "vramMeasuredPixels" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["candle"]
+        for error in candle_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]
+    assert any(
+        error.validator == "required"
+        and "measured" in error.validator_value
         and list(error.absolute_path)[-1:] == ["candle"]
         for error in candle_errors
     ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]
@@ -2573,35 +2664,258 @@ def test_acestep_declares_its_distilled_guidance_axes_explicitly():
 # does not exist, and not declaring it left no gate at all.
 # --------------------------------------------------------------------------------------
 
-MINIMAX_H3_IDS = ("minimax_h3", "minimax_h3_ref")
+def _huggingface_repo_key(repo):
+    """Canonicalize one repo string the way the API's `huggingface_repo_key` does: lower-cased,
+    trailing slash and `.git` stripped. `None` for anything that is not a non-empty string."""
+    if not isinstance(repo, str):
+        return None
+    repo = repo.strip().rstrip("/").strip()
+    if repo.lower().endswith(".git"):
+        repo = repo[: -len(".git")].rstrip("/").strip()
+    return repo.lower() or None
+
+
+def _declared_download_repos(model):
+    """Every Hugging Face repo `model`'s `downloads` rows name in their `repo` field, canonicalized.
+
+    Mirrors the MANIFEST-row read `license_acknowledgment_repo_index` performs — which is
+    `download.get("repo")` and nothing else (apps/rust-api/src/models.rs). It is deliberately NOT
+    `LICENSE_GATED_REPO_PAYLOAD_KEYS`: that constant is a JOB-PAYLOAD key list, applied by
+    `ensure_job_payload_license_acknowledged` to the object a client POSTs, and a manifest download
+    row has no `baseRepo`/`sourceRepo` for the index to read. Applying the payload list here
+    described an operation the Rust index never performs.
+    """
+    repos = set()
+    for download in model.get("downloads", []):
+        key = _huggingface_repo_key(download.get("repo"))
+        if key:
+            repos.add(key)
+    return repos
+
+
+def _license_acknowledgment_repo_index(models):
+    """`owner/name` -> the id of the entry that declares it, for every repo a
+    `requiresLicenseAcknowledgment` entry names. Mirrors `license_acknowledgment_repo_index` in
+    apps/rust-api/src/models.rs, which is the predicate the running gate uses."""
+    index = {}
+    for model in models:
+        if model.get("requiresLicenseAcknowledgment") is not True:
+            continue
+        for repo in _declared_download_repos(model):
+            index.setdefault(repo, model["id"])
+    return index
+
+
+def _license_acknowledgment_models():
+    """Every catalog entry that must carry the acknowledgment contract, DERIVED from the flag
+    rather than listed.
+
+    This replaced a hard-coded `MINIMAX_H3_IDS = ("minimax_h3", "minimax_h3_ref")`. A tuple of ids
+    inside an audit whose job is to catch entries nobody remembered to list is self-defeating: a
+    new entry simply is not in the tuple, every loop below skips it, and CI stays green. No entry
+    ids are maintained here — add a flagged entry to the manifest and it is audited on the next run.
+
+    What this set may be asserted on is the FAMILY-AGNOSTIC half of the contract, and only that.
+    The MiniMax-specific copy assertions live under `_minimax_h3_license_models()` below: a review
+    (sc-17227) caught them being made against every flagged entry, which would have turned three
+    audits red for the first non-MiniMax entry to carry the flag, for reasons having nothing to do
+    with it. Deriving the SET from the flag and then asserting one family's prose over it trades
+    maintained ids for maintained copy; it does not remove the coupling.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    flagged = {
+        model["id"]: model
+        for model in models
+        if model.get("requiresLicenseAcknowledgment") is True
+    }
+    # Without this the loops below iterate an empty dict and pass vacuously — the failure mode a
+    # derived set has and a literal tuple does not.
+    assert flagged, "no catalog entry declares requiresLicenseAcknowledgment"
+    return flagged
+
+
+# The one token that scopes the MiniMax-specific copy audits. It is a FAMILY, not a list of entry
+# ids: a new MiniMax-H3 partition inherits the copy contract automatically, and an entry of any
+# other family is out of scope by construction rather than by being forgotten.
+MINIMAX_H3_FAMILY = "minimax-h3"
+
+
+def _minimax_h3_license_models():
+    """The flagged entries of the MiniMax-H3 family — the scope for assertions about MiniMax's own
+    licence text, attribution string and licence URL."""
+    minimax = {
+        model_id: entry
+        for model_id, entry in _license_acknowledgment_models().items()
+        if entry.get("family") == MINIMAX_H3_FAMILY
+    }
+    assert minimax, f"no flagged entry is in the {MINIMAX_H3_FAMILY} family"
+    return minimax
+
+
+def _builtin_lora_source_repos():
+    """`lora id` -> the canonicalized Hugging Face repo its download resolves to.
+
+    Mirrors what `create_lora_download_job` reads (apps/rust-api/src/loras.rs): `source.repo`, or a
+    top-level `repo` when the entry is written flat.
+    """
+    repos = {}
+    for lora in _load_jsonc(LORA_MANIFEST_PATH)["loras"]:
+        source = lora.get("source") or {}
+        key = _huggingface_repo_key(source.get("repo") or lora.get("repo"))
+        if key:
+            repos[lora["id"]] = key
+    return repos
+
+
+def test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself():
+    """An entry that names a restricted repo in its `downloads` but does not itself declare
+    `requiresLicenseAcknowledgment` is a second door onto the same weights.
+
+    `POST /api/v1/models/:id/download` gated on the entry the PATH id names, so such an entry
+    downloaded those weights ungated while `POST /api/v1/jobs` naming the same repo answered 403.
+    The route now also consults the repo index (sc-17227), so this is no longer the only thing
+    standing between that shape and the weights — but the manifest is where the shape is authored,
+    and a shared restricted repo across two entries is one authoring decision away: the manifest
+    already uses co-requisite rows naming a shared repo for several families.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    index = _license_acknowledgment_repo_index(models)
+    assert index, "no repo is licence-gated; this guard would pass vacuously"
+
+    offenders = {}
+    for model in models:
+        if model.get("requiresLicenseAcknowledgment") is True:
+            continue
+        shared = sorted(_declared_download_repos(model) & index.keys())
+        if shared:
+            offenders[model["id"]] = [(repo, index[repo]) for repo in shared]
+
+    assert not offenders, (
+        "these entries name a licence-gated repo without declaring "
+        f"requiresLicenseAcknowledgment themselves: {offenders}"
+    )
+
+
+def _lora_license_remedy_offenders(lora_repos, models):
+    """LoRA ids whose download is licence-gated but whose gate has no way to be CLEARED.
+
+    A catalog LoRA naming a licence-gated repo is refused by `create_lora_download_job` until the
+    caller asserts the acknowledgment. The only surface that can make that assertion is the MODEL
+    card of the entry the repo index maps the repo to — a LoRA row carries no licence copy and no
+    checkbox — so the remedy exists only if that entry can actually render the acceptance, i.e. it
+    is in this catalog and carries the licence text and link the card shows. Where it cannot, the
+    LoRA is un-downloadable through every shipped surface, which is the regression this guard
+    exists to catch.
+    """
+    index = _license_acknowledgment_repo_index(models)
+    by_id = {model["id"]: model for model in models}
+    offenders = {}
+    for lora_id, repo in sorted(lora_repos.items()):
+        model_id = index.get(repo)
+        if model_id is None:
+            continue
+        entry = by_id.get(model_id)
+        missing = [
+            field
+            for field in ("licenseUrl", "licenseNotice")
+            if not isinstance((entry or {}).get(field), str) or not (entry or {})[field].strip()
+        ]
+        if entry is None or missing:
+            offenders[lora_id] = (repo, model_id, missing or ["<entry absent>"])
+    return offenders
+
+
+def test_every_builtin_lora_naming_a_license_gated_repo_has_a_reachable_remedy():
+    """The LoRA half of the gate, which nothing scanned before (sc-17227 review MAJOR 1).
+
+    `POST /api/v1/loras/:id/download` is repo-keyed like every other door, so a catalog LoRA whose
+    `source.repo` is a repo a `requiresLicenseAcknowledgment` model declares is refused 403 without
+    the assertion. `builtin.loras.jsonc` was outside every audit here — the model-side guard above
+    iterates `_load_builtin_models_manifest()["models"]` only — so nothing checked that such a LoRA
+    is still downloadable by a user who accepts the licence.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    index = _license_acknowledgment_repo_index(models)
+    assert index, "no repo is licence-gated; this guard would pass vacuously"
+
+    offenders = _lora_license_remedy_offenders(_builtin_lora_source_repos(), models)
+    assert not offenders, (
+        "these built-in LoRAs fetch a licence-gated repo with no model card able to take the "
+        f"acknowledgment that clears the refusal: {offenders}"
+    )
+
+    # POSITIVE CONTROL, in the same test: the shipped LoRA catalog names no gated repo today, so
+    # the assertion above passes vacuously on its own. Drive the same predicate over a SYNTHETIC
+    # catalog to prove it intersects `source.repo` against the index at all, and that it reports the
+    # unclearable case rather than only the clearable one.
+    gated_repo, gating_model_id = sorted(index.items())[0]
+    synthetic = {"synthetic_gated_lora": gated_repo, "synthetic_plain_lora": "owner/not-gated"}
+    assert not _lora_license_remedy_offenders(synthetic, models), (
+        "a LoRA naming a gated repo whose model carries the licence copy has a remedy and must "
+        "not be reported"
+    )
+
+    stripped = [
+        {key: value for key, value in model.items() if key != "licenseNotice"}
+        if model["id"] == gating_model_id
+        else model
+        for model in models
+    ]
+    assert _lora_license_remedy_offenders(synthetic, stripped) == {
+        "synthetic_gated_lora": (gated_repo, gating_model_id, ["licenseNotice"])
+    }, "the guard must catch a gated LoRA whose gating model cannot render the acceptance"
+
+
+def test_every_license_acknowledgment_entry_declares_the_credential_free_shape():
+    """The FAMILY-AGNOSTIC half of the acknowledgment contract, asserted over every flagged entry.
+
+    `requiresLicenseAcknowledgment` exists to express "the licence binds the user" WITHOUT
+    "a Hugging Face credential is needed" — the two used to be one flag. So an entry that raises
+    this gate must not also claim the credential shape: `gated` would make the Models screen render
+    "Add token in Settings" and "Request access on Hugging Face" for a credential and an access page
+    that need not exist, and `credentialHost` is the field that drives that UI.
+
+    It must also carry the copy the gate SHOWS. A gate whose card has no licence text is a checkbox
+    over nothing, and it is what the LoRA-side remedy resolves to as well
+    (`_lora_license_remedy_offenders`). What that text has to SAY is family-specific and is
+    asserted per family below; that it exists is not.
+    """
+    for model_id, entry in _license_acknowledgment_models().items():
+        assert entry["requiresLicenseAcknowledgment"] is True, model_id
+        assert entry.get("gated") is not True, f"{model_id}: the gated shape demands a credential"
+        assert "credentialHost" not in entry, model_id
+        for field in ("licenseUrl", "licenseNotice"):
+            value = entry.get(field)
+            assert isinstance(value, str) and value.strip(), f"{model_id}: empty {field}"
 
 
 def test_minimax_h3_requires_license_acknowledgment_without_a_credential():
-    """Both partitions raise the acknowledgment gate, and NEITHER is credential-gated.
-
-    `gated` here would be a factual error about a public repo, not merely a UX wart: the Models
-    screen would render "Add token in Settings" and "Request access on Hugging Face" for a
-    credential and an access page that do not exist.
+    """MiniMax-H3's own licence URL. Scoped to the family (sc-17227 review MAJOR 3): asserted over
+    every flagged entry, this would fail the first non-MiniMax entry to raise the gate, for a reason
+    having nothing to do with it. The credential-free half of what this used to assert is now
+    `test_every_license_acknowledgment_entry_declares_the_credential_free_shape`.
     """
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    for model_id in MINIMAX_H3_IDS:
-        entry = models[model_id]
-        assert entry["requiresLicenseAcknowledgment"] is True, model_id
-        assert entry.get("gated") is not True, f"{model_id}: MiniMaxAI/MiniMax-H3 is a PUBLIC repo"
-        assert "credentialHost" not in entry, model_id
+    for model_id, entry in _minimax_h3_license_models().items():
         assert entry["licenseUrl"] == "https://huggingface.co/MiniMaxAI/MiniMax-H3", model_id
 
 
 def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
     """§V.2 requires notifying the user that the use restrictions apply — a bare "accept the
     license" checkbox does not. The notice must name the FOUR terms that decide whether the user
-    may use the model at all, so assert on the SUBSTANCE, not on the field being non-empty."""
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    for model_id in MINIMAX_H3_IDS:
-        notice = models[model_id]["licenseNotice"]
+    may use the model at all, so assert on the SUBSTANCE, not on the field being non-empty.
+
+    Scoped to the MiniMax-H3 family: every string below is MiniMax's own copy, and asserting it
+    over the derived flag set made the flag mean "carries MiniMax's licence text" rather than
+    "requires an acknowledgment" (sc-17227 review MAJOR 3)."""
+    for model_id, entry in _minimax_h3_license_models().items():
+        notice = entry["licenseNotice"]
         # §II / §I.9 — the licence binds the user, not only SceneWorks.
         assert "NON-TRANSFERABLE" in notice, model_id
-        # §I.5 / §V.4 — every Excluded Territory, named. A partial list would mislead.
+        # §I.5 / §V.4 — the agreement's DEFAULT Applicable Territory, every excluded region named.
+        # A partial list would mislead. Named as the agreement's own default scope, and nothing
+        # here says how the written authorization below relates to it: which provision that
+        # confirmation is given under is not something this repository has established
+        # (sc-17227 records it as unresolved), so neither the copy nor this audit asserts it.
         for territory in (
             "European Union",
             "United Kingdom",
@@ -2609,9 +2923,20 @@ def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
             "United States of America",
         ):
             assert territory in notice, f"{model_id}: {territory} missing from licenseNotice"
-        # §II — the Excluded-Territory scope is "not yet", not "not ever": the agreement invites
-        # anyone there to ask about a licence. Omitting the route would make the territory line
-        # read as a flat, permanent bar.
+        # The written authorization MiniMax gave SceneWorks, recorded verbatim on sc-17227. Pinned
+        # as a FACT the notice must state — the copy it replaced pointed the reader at MiniMax to
+        # ask about obtaining a licence, which stopped being the useful thing to say once the reply
+        # arrived.
+        assert "authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works" in notice, model_id
+        assert "welcome to contact MiniMax about obtaining a licence" not in notice, model_id
+        # Deliberately NOT pinned: any phrasing about which clause that authorization lands under,
+        # in either direction (sc-17227 review MAJOR 4). A negative pin on the superseded
+        # "the licence does not authorize use of the model" made restoring that reading a test
+        # failure, which is a test asserting a clause attribution this repository has not
+        # established. sc-17227's own analysis records the §II question as open; whether the reply
+        # is a §II territorial extension is Michael's to determine, not this audit's to lock in.
+        # The contact address survives the rewrite: it is the agreement's own, and a reader's
+        # question about their OWN use still goes there.
         assert "api@minimax.io" in notice, model_id
         # §V.1 + Exhibit A item 12 — the disclosure obligation SceneWorks does NOT discharge for
         # the user (nothing in the app marks output as machine-generated), so it must be stated.
@@ -2662,10 +2987,12 @@ def test_minimax_h3_shipped_notice_names_the_same_restrictions():
 
 def test_minimax_h3_declares_the_section_iv_2_ui_attribution():
     """§IV.2: "You shall prominently display 'MiniMax H3' on the user interface". The exact string
-    with a SPACE — the hyphenated `MiniMax-H3` product name does not contain it."""
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    for model_id in MINIMAX_H3_IDS:
-        attribution = models[model_id]["ui"]["attribution"]
+    with a SPACE — the hyphenated `MiniMax-H3` product name does not contain it.
+
+    Scoped to the MiniMax-H3 family: §IV.2 is MiniMax's clause, and this attribution string is not
+    something a flagged entry of another family could satisfy (sc-17227 review MAJOR 3)."""
+    for model_id, entry in _minimax_h3_license_models().items():
+        attribution = entry["ui"]["attribution"]
         assert "MiniMax H3" in attribution, model_id
         assert attribution == "Powered by MiniMax H3", model_id
 

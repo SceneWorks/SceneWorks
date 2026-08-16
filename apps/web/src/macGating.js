@@ -13,6 +13,9 @@ export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (MLX only)";
 // non-Mac / observe-mode deployments). Every helper below short-circuits to "not blocked".
 export const DEFAULT_MAC_CAPABILITIES = {
   macGatingActive: false,
+  // sc-19570 — the off-Mac twin (see candleGating.js). Inert here for the same reason
+  // `macGatingActive` is: until the capabilities endpoint responds, nothing is gated.
+  candleGatingActive: false,
   platform: "",
   notAvailableLabel: MAC_NOT_AVAILABLE_LABEL,
   features: {},
@@ -87,8 +90,8 @@ export function macVideoModeBlock(model, caps, mode) {
       blocked: true,
       // On Mac the runtime is MLX-only (epic 3482) — there is no torch fallback, so a
       // blocked mode simply isn't served for this model here (some modes have no MLX path
-      // on this engine; others, like Bernini's editing/reference modes, are MLX-only and
-      // exclusive to another model). Don't call it "torch-only".
+      // on this engine; other specialist surfaces may be exposed under a different catalog
+      // model). Don't call it "torch-only".
       text: `${label(caps)} — the selected model doesn't support this mode on macOS.`,
     };
   }
