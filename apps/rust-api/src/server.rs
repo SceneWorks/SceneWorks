@@ -112,6 +112,21 @@ pub struct Settings {
     /// (other source IPs) stay gated. The desktop sets `SCENEWORKS_TRUST_LOOPBACK`;
     /// Docker/server never does, so a reverse-proxied deployment stays fail-closed.
     pub trust_loopback: bool,
+    /// sc-19570 — the API host's OS (`std::env::consts::OS` in production), threaded through
+    /// `Settings` rather than read at each use site so the OFF-MAC branch of the per-mode
+    /// reachability sweep can be exercised on a Mac. macOS structurally cannot detect that class of
+    /// defect by running on itself: the sweep fails only what no Windows/Linux lane will claim, and
+    /// on a Mac that branch never executes, so an untestable `std::env::consts::OS` call inside
+    /// `JobsStore::fail_platform_unreachable_jobs`'s callers would ship a guard whose only proof is
+    /// its own doc comment.
+    ///
+    /// It decides a job's EXECUTION outcome, never an HTTP status code: `POST /api/v1/video/jobs`
+    /// answers `201` for the same body on every platform, and this field only determines whether
+    /// the job it creates is `queued` or terminal `failed`. A read of this field that changes a
+    /// response code is a bug — that shape was ruled out.
+    ///
+    /// Values are the `std::env::consts::OS` vocabulary (`"macos"` / `"windows"` / `"linux"`).
+    pub host_os: String,
     /// Epic 10231 (sc-10233) — base URL the embedded MCP server's thin API client
     /// uses to call back into this API's `/api/v1/*` routes (the MCP tools are a
     /// thin HTTP client over the existing surface, mirroring the Rust worker — no
@@ -212,6 +227,10 @@ impl Settings {
             trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
+            // Always the real host OS in production — never an env override. The field exists to
+            // be substitutable in a test, not configurable in a deployment: a deployment that
+            // could claim to be Windows would re-open the exact hang sc-19570 closes.
+            host_os: std::env::consts::OS.to_owned(),
             // The MCP self-calls originate on this machine; derive a base URL that
             // resolves to an interface this API actually binds (sc-10260).
             // `SCENEWORKS_API_URL` still overrides for reverse-proxy/container setups.

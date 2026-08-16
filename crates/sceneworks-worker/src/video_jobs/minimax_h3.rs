@@ -2,6 +2,8 @@
 use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, VideoGenInput};
+#[cfg(target_os = "macos")]
+use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
 
 // ---------------------------------------------------------------------------
 // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-19508): a joint audio+video family that emits video AND
@@ -370,8 +372,11 @@ pub(super) fn resolve_minimax_h3_load(
 /// * `minimax_h3_ref` (`transformer_ref/`) takes references and NO keyframes.
 /// * Keyframes AND references together are refused upstream by `MiniMaxH3Task::resolve`; refused
 ///   here too, so the user gets a SceneWorks-worded reason before anything loads.
-/// * An audio-only reference set is refused: the vision tower is the reference conditioner, so it
-///   would leave the visual stream unconditioned. The engine refuses it — this refuses it first.
+/// * An audio-only reference set is refused: an audio reference never reaches the reference
+///   conditioner (upstream `before_encoder.py` raises on `set(kinds) == {"audio"}`), so it would
+///   leave the visual stream unconditioned. sc-19574 lifted that rule into
+///   [`classify_reference_set`] so the API and the MCP tool refuse the identical shape — this is no
+///   longer the only layer holding the opinion, it is the last one.
 ///
 /// Not a duplicate of the API's `reference_limit_error` (sc-17160): that bounds HOW MANY references
 /// each entry accepts (the base entry declares 0/0/0). This bounds the SHAPE, and it is the layer a
@@ -395,21 +400,30 @@ pub(super) fn minimax_h3_validate_partition(request: &VideoRequest) -> WorkerRes
     }
     let is_reference_partition = request.model == "minimax_h3_ref";
     if is_reference_partition {
-        if !has_references {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: reference-to-video requires at least one reference (referenceAssetIds, \
-                 sourceClipAssetIds or referenceAudioAssetIds). A request with none would denoise \
-                 on the base MiniMax-H3 checkpoint, which is not the one this model loads.",
-                request.model
-            )));
-        }
-        if image_refs + clip_refs == 0 {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: an audio-only reference set leaves the visual stream unconditioned — \
-                 MiniMax-H3 conditions references through its vision tower, so at least one image \
-                 or video reference must accompany the audio.",
-                request.model
-            )));
+        // sc-19574: both refusals now come off the SHARED verdict
+        // (`sceneworks_core::video_request::classify_reference_set`) that the API's
+        // `validate_video_job` and the MCP tool's `reference` arm also read, so the three layers
+        // cannot drift back into disagreeing about which sets are legal. Only the wording is the
+        // worker's — an engine-side reason names the checkpoint, which a user-facing 400 should not.
+        match classify_reference_set(image_refs, clip_refs, audio_refs) {
+            ReferenceSetVerdict::Conditionable => {}
+            ReferenceSetVerdict::Empty => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{}: reference-to-video requires at least one reference (referenceAssetIds, \
+                     sourceClipAssetIds or referenceAudioAssetIds). A request with none would \
+                     denoise on the base MiniMax-H3 checkpoint, which is not the one this model \
+                     loads.",
+                    request.model
+                )));
+            }
+            ReferenceSetVerdict::AudioOnly => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{}: an audio-only reference set leaves the visual stream unconditioned — an \
+                     audio reference never reaches the reference conditioner, so at least one image \
+                     or video reference must accompany the audio.",
+                    request.model
+                )));
+            }
         }
         // `Conditioning::ReferenceVideo` — the ONLY variant that carries a reference clip's own
         // frame rate — arrives with the sc-18650 pin bump. It is genuinely absent from the pinned
