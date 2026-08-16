@@ -51,7 +51,7 @@ test("the runner freezes the exact tiny bounded-decode canary", () => {
     decodeTileEdge: 192, decodeOverlap: 64,
   });
   assert.deepEqual(request.planned._canary, {
-    videoMode: "no_audio", fps: 24, seed: 1234,
+    videoMode: "default", fps: 24, seed: 1234,
   });
   assert.equal(request.planned._watchdog.maxFootprintBytes, 53_347_146_863);
   assert.deepEqual(request.planned._artifact.numericTierInventory, {
@@ -95,7 +95,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       provider: "ltx_2_3",
       tier: "q4",
       geometry: { width: 256, height: 256, frames: 9, fps: 24 },
-      audio: false,
+      audio: true,
     },
     artifact: {
       repository: "SceneWorks/ltx-2.3-mlx",
@@ -146,7 +146,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
   );
   const mutations = [
     (value) => { value.promotable = true; },
-    (value) => { value.target.audio = true; },
+    (value) => { value.target.audio = false; },
     (value) => { value.target.geometry.frames = 97; },
     (value) => { value.strategy.parameters.decodeTileEdge = 384; },
     (value) => { value.strategy.engagedRungs = ["resident", "bounded_decode"]; },

@@ -173,7 +173,7 @@ export function canaryRequest(memoryBytes, textEncoderInventory) {
       calibrationFingerprint: FINGERPRINT,
       fixture: FIXTURE,
       _watchdog: { maxFootprintBytes: MAX_FOOTPRINT_BYTES },
-      _canary: { videoMode: "no_audio", fps: 24, seed: 1234 },
+      _canary: { videoMode: "default", fps: 24, seed: 1234 },
       _artifact: {
         repository: ARTIFACT_REPOSITORY,
         revision: ARTIFACT_REVISION,
@@ -234,7 +234,7 @@ export function validateCanaryResponse(
       || response?.target?.geometry?.height !== 256
       || response?.target?.geometry?.frames !== 9
       || response?.target?.geometry?.fps !== 24
-      || response?.target?.audio !== false) {
+      || response?.target?.audio !== true) {
     fail("adapter response changed the exact canary identity");
   }
   if (response?.artifact?.repository !== ARTIFACT_REPOSITORY
