@@ -654,4 +654,70 @@ describe("SimpleModelManager license gate (sc-17227)", () => {
     expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image" }));
     expect(simpleUi.openInAdvanced).not.toHaveBeenCalled();
   });
+
+  // A LoRA row borrows its acknowledgment from the model the SERVER stamped onto it
+  // (`annotate_license_acknowledgment_sources`). Before this branch existed, Simple's LoRA
+  // download hit `createLoraDownloadJob`'s own gate, which returns null and writes the real
+  // reason to `loraError` — a field Simple renders nowhere — so the row produced only
+  // "Could not start the … download" and the user had no way to reach the checkbox.
+  const ACK_LORA = {
+    id: "h3_style_lora",
+    name: "H3 Style LoRA",
+    installState: "missing",
+    licenseAcknowledgmentModelId: "minimax_h3",
+    licenseAcknowledgmentModelName: "MiniMax-H3",
+  };
+
+  async function openLorasTab() {
+    const tab = [...container.querySelectorAll(".su-tab")].find(
+      (node) => node.textContent === "LoRAs",
+    );
+    expect(tab, "the LoRAs tab").toBeTruthy();
+    await act(async () => {
+      tab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  it("routes a LoRA whose borrowed license is unaccepted to the screen that can accept", async () => {
+    const createLoraDownloadJob = vi.fn(async () => ({ id: "job-2" }));
+    await render(root, { loras: [ACK_LORA], createLoraDownloadJob });
+    await openLorasTab();
+
+    await clickDownload();
+
+    expect(createLoraDownloadJob).not.toHaveBeenCalled();
+    expect(simpleUi.openInAdvanced).toHaveBeenCalledWith("Models");
+    // The handoff names the GATING model's requirement, not a bare failure.
+    expect(simpleUi.toast).toHaveBeenCalledWith(
+      "H3 Style LoRA needs its license accepted first — opening Models.",
+    );
+  });
+
+  it("downloads a LoRA once the gating model's license is accepted, and leaves unstamped LoRAs alone", async () => {
+    const createLoraDownloadJob = vi.fn(async () => ({ id: "job-2" }));
+    // Accepting on the MODEL's card is what clears the LoRA — the same store, one acceptance.
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    await render(root, { loras: [ACK_LORA], createLoraDownloadJob });
+    await openLorasTab();
+    await clickDownload();
+    expect(createLoraDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "h3_style_lora" }),
+    );
+    expect(simpleUi.openInAdvanced).not.toHaveBeenCalled();
+
+    // A LoRA the server did not stamp is untouched — this must not become "Simple can't
+    // download LoRAs".
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    await render(root, {
+      loras: [{ id: "plain_lora", name: "Plain LoRA", installState: "missing" }],
+      createLoraDownloadJob,
+    });
+    await openLorasTab();
+    await clickDownload();
+    expect(createLoraDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "plain_lora" }),
+    );
+    expect(simpleUi.openInAdvanced).not.toHaveBeenCalled();
+  });
 });

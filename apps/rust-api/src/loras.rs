@@ -5,6 +5,19 @@ pub(crate) async fn list_loras(
     Query(query): Query<LorasQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let mut items = lora_catalog(&state, query.project_id.as_deref()).await?;
+    // Tell the client which rows sit behind a licence acknowledgment (sc-17227). The download route
+    // below refuses an unacknowledged fetch of a licence-gated repo; without this the refusal has no
+    // remedy in any shipped surface, because nothing on the row says an acknowledgment is needed and
+    // no LoRA card carries licence copy of its own. The annotation names the MODEL whose card does.
+    crate::models::annotate_license_acknowledgment_sources(&state, &mut items, |item| {
+        item.get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("repo"))
+            .or_else(|| item.get("repo"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .await?;
     if let Some(model_family) = query.model_family {
         // `lora_families` returns canonical tokens, so canonicalize the raw query
         // param too — otherwise a `?model_family=krea-2` filter would miss a stored
@@ -75,6 +88,26 @@ pub(crate) async fn create_lora_download_job(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad_request("LoRA download source is missing a repo"))?
         .to_owned();
+    // Licence acknowledgment, keyed on the repo this download will FETCH (sc-17227) — the same
+    // predicate `POST /api/v1/jobs`, `/models/import` and `/loras/import` apply.
+    //
+    // This route had no licence check of any kind, which made it asymmetric with
+    // `create_model_download_job`: that route gates on its catalog entry, this one did not gate at
+    // all. The reason previously recorded for leaving it alone — that the repo comes from the
+    // catalog entry the path id names, so "a caller cannot supply a repo" — answers a different
+    // question. Who CHOOSES the repo is not who is bound by its licence: a catalog LoRA whose
+    // `source.repo` names a repo a `requiresLicenseAcknowledgment` model declares would have been
+    // fetched here with no acknowledgment, while the identical `lora_download` job posted to
+    // `/api/v1/jobs` was answered 403. Unreachable in the shipped LoRA catalog today; the route
+    // comment above notes the on-demand pull at first generation, which is the path that would
+    // surface it.
+    crate::models::ensure_license_acknowledged_for_source(
+        &state,
+        &[Some(repo.as_str())],
+        None,
+        payload.license_acknowledged,
+    )
+    .await?;
     // A single `file` or an explicit `files` list narrows the snapshot to the adapter
     // weights; an empty list lets the worker fetch the (small) repo.
     let mut files: Vec<String> = Vec::new();
@@ -120,6 +153,15 @@ pub(crate) async fn create_lora_download_job(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo));
     job_payload.insert("files".to_owned(), json!(files));
+    // Record the acknowledgment ON the job (sc-17227), for the reason `create_model_download_job`
+    // does: RETRY and DUPLICATE re-run `validate_raw_job_payload` over the STORED payload, and the
+    // repo-keyed gate there would otherwise refuse a download this route had already authorized.
+    if payload.license_acknowledged {
+        job_payload.insert(
+            crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
     if let Some(revision) = source
         .and_then(|source| source.get("revision"))
         .or_else(|| lora.get("revision"))
