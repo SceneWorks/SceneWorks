@@ -12116,7 +12116,14 @@ mod tests {
         let bernini_capabilities = (bernini.descriptor)().capabilities;
         assert!(!bernini_capabilities.supports_sequential_offload);
         assert!(bernini_capabilities.unconditionally_engages_staged_residency);
-        assert!(!engine_supports_sequential("bernini"));
+        // The DESCRIPTOR still does not advertise the selectable Sequential control — that is the
+        // assertion directly above, and it is what keeps the knob off Bernini. `engine_supports_
+        // sequential` is a different question: it feeds `decide_residency_with_headroom`, i.e. how
+        // much memory to CHARGE. sc-19721 widened it to the disjunction because reading only
+        // `supports_sequential_offload` made Bernini charge the SUM of planner + UMT5-XXL + both
+        // experts — a co-residency `generate_impl` never creates. Unconditional staging is
+        // sequential for accounting purposes even though it is not offerable as a control.
+        assert!(engine_supports_sequential("bernini"));
         // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
         // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor

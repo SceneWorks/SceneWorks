@@ -14907,7 +14907,10 @@ fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
             ),
         )
         .iter()
-        .map(|probe| probe.to_string_lossy().into_owned())
+        // `to_string_lossy` yields NATIVE separators, so this is `FL2VA\audio_vae\config.json` on
+        // Windows while the declared patterns are Hugging Face download globs, which are always
+        // `/`. Comparing them raw passes on macOS/Linux and fails only on the Windows candle lane.
+        .map(|probe| probe.to_string_lossy().replace('\\', "/"))
         .collect();
     assert!(
         probes.len() >= 8,
