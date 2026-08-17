@@ -2775,8 +2775,10 @@ mod tests {
         )
     }
 
+    /// Renamed from `..._adapters_and_load_layout`: load layout is no longer part of the key, so a
+    /// name promising that coverage would advertise a guarantee this test cannot make.
     #[test]
-    fn cold_admission_exact_key_covers_scail_precision_adapters_and_load_layout() {
+    fn cold_admission_exact_key_covers_scail_precision_and_adapters() {
         let weights = tempfile::tempdir().expect("weights");
         let adapter = weights.path().join("style.safetensors");
         std::fs::write(&adapter, b"adapter").expect("adapter fixture");
@@ -2792,16 +2794,14 @@ mod tests {
         precision.precision = Precision::Fp32;
         let mut adapted = base.clone();
         adapted.adapters = vec![AdapterSpec::new(adapter, 0.75, AdapterKind::Lora)];
-        let layout = base
-            .clone()
-            .with_load_shape(LoadShape::DeferredMaterialization);
-        let offload = base.clone().with_offload_policy(OffloadPolicy::Sequential);
-        for (field, changed) in [
-            ("precision", precision),
-            ("adapters", adapted),
-            ("load shape", layout),
-            ("offload policy", offload),
-        ] {
+        // Load shape and offload policy are deliberately NOT here. They describe how a resident
+        // generator was materialized, not which weights it is, so they moved onto `ExecutionPolicy`
+        // and out of the reusable cache key — see `execution_policy_does_not_change_load_identity`
+        // for that contract, `warm_hit_keeps_cold_load_policy_but_gets_fresh_access_state` for what
+        // a warm hit then reports, and `log_warm_policy_mismatch` for the seam that surfaces a
+        // request whose policy differs from the resident's. Only fields that change WHICH TENSORS
+        // become resident belong in this list.
+        for (field, changed) in [("precision", precision), ("adapters", adapted)] {
             assert_ne!(
                 key,
                 LoadIdentity::from_load_spec("scail2", &changed),

@@ -15303,14 +15303,38 @@ fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
         ("Z-Image control", include_str!("zimage_control.rs"), "self.adapters.iter()"),
         ("Kolors IP-Adapter", include_str!("kolors_ipadapter.rs"), "admission_overlays.extend(adapters.iter()"),
         ("PuLID fallback", include_str!("pulid_candle.rs"), "overlays.extend(adapters.iter()"),
-        ("Z-Image ComfyUI", include_str!("zimage_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
-        ("FLUX.2 ComfyUI", include_str!("flux2_comfyui_candle.rs"), "admission_paths.extend(adapters.iter()"),
-        ("Krea imported", include_str!("krea_imported.rs"), "admission_paths.extend(adapters.iter()"),
         ("SDXL detail", include_str!("detail.rs"), "admission_paths.extend(adapters.iter()"),
     ] {
         assert!(
             source.contains(marker),
             "{route} must add the same resolved adapter paths to preflight admission"
+        );
+    }
+
+    // The cached-admission lanes reach the same guarantee by a different route. They do not build an
+    // eager `admission_paths` list at all: the resolved adapter pins are chained into the finalized
+    // `LoadSpec` file pins, and `prepare_cached_candle_base_floor` prices the floor from exactly
+    // those pins. Asserting the eager marker here would demand the adapters be counted TWICE.
+    for (route, source, marker) in [
+        (
+            "Z-Image ComfyUI",
+            include_str!("zimage_comfyui_candle.rs"),
+            "pins.extend(adapter_pins)",
+        ),
+        (
+            "FLUX.2 ComfyUI",
+            include_str!("flux2_comfyui_candle.rs"),
+            "pins.extend(adapter_pins)",
+        ),
+        (
+            "Krea imported",
+            include_str!("krea_imported.rs"),
+            ".chain(adapter_pins)",
+        ),
+    ] {
+        assert!(
+            source.contains(marker),
+            "{route} must chain the resolved adapter pins into the priced LoadSpec"
         );
     }
 }
@@ -16808,10 +16832,18 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
             "modelPath": file.to_str().unwrap()
         }
     }));
+    // No candle route, and that is the truthful answer rather than a gap. `candle-gen-krea`
+    // registers exactly three imported `krea_2` TransformerFile operations — Generate, Edit and
+    // MultiPhase — and no Pose, so the descriptor probe behind `krea_imported_control_available`
+    // finds nothing and the ladder declines. The retired `KREA_IMPORTED_SUPPORTS_POSE_CONTROL`
+    // boolean used to answer `true` here without the engine backing it; declaring a lane is not the
+    // same as reaching one. The scheduler's imported-family mirror refuses the same shape, so a
+    // candle host never claims the job rather than stranding it. MLX, which does register the Pose
+    // provider, keeps its own coverage in the macOS route tests.
     assert_eq!(
         resolve_candle_image_route(&strict_pose, &settings),
-        Some(CandleImageRoute::KreaImportedControl),
-        "strict pose must dispatch to the imported Krea control provider"
+        None,
+        "candle registers no imported Krea pose provider, so the ladder must decline it"
     );
 }
 
@@ -17007,39 +17039,29 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         );
     }
 
-    for (label, extra) in [
-        (
-            "img2img + hires",
-            json!({ "referenceAssetId": "r", "hiresFix": { "enabled": true } }),
-        ),
-        (
-            "edit + hires",
-            json!({
-                "mode": "edit_image", "sourceAssetId": "s",
-                "hiresFix": { "enabled": true }
-            }),
-        ),
-        (
-            "pose + hires",
-            json!({
-                "advanced": { "poses": [{ "id": "a" }] },
-                "hiresFix": { "enabled": true }
-            }),
-        ),
-    ] {
-        let mut payload = json!({
-            "projectId": "p", "model": "kreamania_variant5",
-            "modelManifestEntry": base.clone()
-        });
-        payload
-            .as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
-        assert!(
-            !krea_imported_available(&request(payload), &settings),
-            "{label} must fail closed instead of dropping conditioning"
-        );
-    }
+    // Only a POSE set is hires-incompatible. Edit and img2img hires used to be refused here too,
+    // before `krea_imported_generate_one` became a two-pass renderer that threads the request
+    // conditioning into the first pass and refines it — so those two shapes now render the source
+    // instead of dropping it, and refusing them would reject work the lane actually serves. The
+    // strict-pose handler still renders one image per pose and never reads `hires_fix`, so it stays
+    // fail-closed.
+    let mut pose_hires = json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": base.clone()
+    });
+    pose_hires.as_object_mut().unwrap().extend(
+        json!({
+            "advanced": { "poses": [{ "id": "a" }] },
+            "hiresFix": { "enabled": true }
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    assert!(
+        !krea_imported_available(&request(pose_hires), &settings),
+        "pose + hires must fail closed instead of dropping conditioning"
+    );
 
     // Bare-transformer guards stay rejected on EVERY backend: mask, character, a
     // NON-edit two-reference SET (the edit surface, only valid in edit mode), and a bare non-edit
@@ -18103,20 +18125,18 @@ fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpo
 /// else claims it).
 ///
 /// Discriminating: one entry, one flip of one field per case.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// macOS only, and that is a statement about the ENGINES, not about this lane's code. Reachability
+/// here comes from the linked registry, not from a static per-backend flag: `mlx-gen-mage` calls
+/// `register_imported_model` for `mage-flow`, and `candle-gen-mage` registers none at all, so on
+/// candle `prepare_mage_finetuned_transformer` resolves no descriptor and the route correctly never
+/// fires. Asserting the claim on candle would be asserting a declaration the engine does not back.
+/// If candle-gen-mage ever registers the imported model, widen this cfg back to both backends.
+#[cfg(target_os = "macos")]
 #[test]
 fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
     let dir = tempfile::tempdir().unwrap();
     let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let mut settings = settings;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    {
-        settings.backend_candle_enabled = true;
-    }
     let path_str = checkpoint.to_str().unwrap().to_owned();
     let job = |extra: serde_json::Value| {
         let mut value = json!({
