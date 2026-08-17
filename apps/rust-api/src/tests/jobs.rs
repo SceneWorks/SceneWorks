@@ -710,6 +710,7 @@ fn write_imported_image_model_manifests(root: &std::path::Path) {
                     "name": "Imported Krea",
                     "type": "image",
                     "family": "krea_2",
+                    "importSourceShape": "transformer_file",
                     "capabilities": ["text_to_image", "edit_image"],
                     "paths": {{ "model": "{}" }},
                     "defaults": {{ "count": 1, "resolution": "1024x1024" }},

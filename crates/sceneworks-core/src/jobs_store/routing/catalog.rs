@@ -1057,6 +1057,45 @@ fn imported_provider_route(
 /// Exact structural source shape stamped by the component scanner/importer/training registrar.
 /// Absence or an unknown label fails closed; routing must never choose a sibling route from family
 /// identity alone.
+/// The single imported provider operation a payload selects. Exactly one wins, and the order is the
+/// contract: a phase list is a MultiPhase job even when it also carries poses, and so on down.
+fn imported_payload_operation(payload: &Map<String, Value>) -> &'static str {
+    if has_nonempty_nested_array(payload, "advanced", "phases") {
+        "multi_phase"
+    } else if has_nonempty_nested_array(payload, "advanced", "poses") {
+        "pose"
+    } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        "edit"
+    } else {
+        "generate"
+    }
+}
+
+/// Whether `backend`'s checked-in engine facts DECLARE an imported provider route for the exact
+/// (family, source, operation) this payload selects.
+///
+/// Declaration only. It deliberately stops short of the adapter / quant / conditioning checks
+/// [`imported_image_request_provider_eligible`] goes on to make, so a caller can compare "the facts
+/// say this backend serves this shape" against an independently measured "the worker actually
+/// routes it". That comparison is what lets the capability matrix prove a declared lane is really
+/// reachable instead of restating one side of the same lookup.
+pub fn imported_backend_declared_route(
+    payload: &Map<String, Value>,
+    backend: &str,
+) -> Option<&'static ImportedProviderSurface> {
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)?;
+    let family = entry.get("family").and_then(Value::as_str)?;
+    let source = imported_source_shape(entry)?;
+    imported_provider_route(backend, family, source, imported_payload_operation(payload))
+}
+
+/// Convenience form of [`imported_backend_declared_route`] for callers that only need existence.
+pub fn imported_backend_declares_route(payload: &Map<String, Value>, backend: &str) -> bool {
+    imported_backend_declared_route(payload, backend).is_some()
+}
+
 fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
     match entry.get("importSourceShape").and_then(Value::as_str) {
         Some(
@@ -1199,15 +1238,7 @@ pub fn imported_image_request_provider_eligible(
         return false;
     }
 
-    let operation = if has_phases {
-        "multi_phase"
-    } else if has_poses {
-        "pose"
-    } else if is_edit {
-        "edit"
-    } else {
-        "generate"
-    };
+    let operation = imported_payload_operation(payload);
     // An explicit user control map/mode is semantically material. It may only accompany a selected
     // Pose operation; never flatten it into Generate/Edit/MultiPhase. The exact route lookup and
     // Control-conditioning check below then prove that this source/backend can consume the request.
@@ -2718,17 +2749,21 @@ mod tests {
         assert_eq!(mlx("sdxl"), Some(true));
         assert_eq!(candle("sdxl"), Some(true));
 
-        // mage-flow — full fine-tunes are routed on both native backends, but their provider seam
-        // rejects adapters on every backend.
+        // mage-flow — the two answers differ, and the difference is the point. `Some(false)` means
+        // "this lane serves the family and refuses adapters"; `None` means "this backend is not on
+        // the seam at all, so it has no opinion to advertise". MLX declares a `mage-flow` imported
+        // provider whose seam rejects adapters, so it answers `Some(false)`. Candle declares no
+        // `mage-flow` imported provider in its engine facts, so the base claim never lands and the
+        // honest answer is `None` — advertising `Some(false)` there would imply a lane exists.
         assert_eq!(
             mlx("mage-flow"),
             Some(false),
-            "a Mage fine-tune renders t2i on MLX but refuses adapters on every backend"
+            "a Mage fine-tune renders t2i on MLX but refuses adapters"
         );
         assert_eq!(
             candle("mage-flow"),
-            Some(false),
-            "a Mage fine-tune renders t2i on Candle but still refuses adapters"
+            None,
+            "candle declares no mage-flow imported provider, so it advertises no opinion"
         );
 
         // A family the route-by-family path does not serve at all: no opinion, entry untouched.

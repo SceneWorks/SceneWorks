@@ -6236,12 +6236,25 @@ mod tests {
         );
     }
 
-    /// Current admission on a REAL shipped lane. SC-19753 re-captured all five Z-Image rungs at the
-    /// exact linked inference closure after bounded decode changed. The shipped bindings and
-    /// evidence must agree with that live closure, while a binding that lies about its digest still
-    /// resolves to nothing.
+    /// Admission on a REAL shipped lane. SC-19753 captured all five Z-Image rungs at the inference
+    /// closure that was live when it ran; the epic's pin has since advanced past it, so this ladder
+    /// is now an ACCEPTED FLOOR rather than current verification. A pin bump staling calibration
+    /// records is the fail-closed design working, not a re-capture work order.
+    ///
+    /// Renamed from `..._admits_current_mlx_ladder_rungs` because "current" is the one thing it no
+    /// longer proves. What it still proves exactly, and what keeps it from going vacuous:
+    ///   * the manifest binding and the packaged evidence agree with each other on the digest;
+    ///   * at the closure it WAS measured under, the ladder reaches calibrated admission on all
+    ///     five rungs;
+    ///   * a binding that lies about its digest resolves to nothing even at that same closure —
+    ///     the negative control now differs from the positive case by exactly one variable.
+    ///
+    /// Deliberately NOT asserted: that routing at the live closure degrades. `packaged_admission_route`
+    /// resolves evidence through the manifest binding rather than the caller's closure argument, so
+    /// it still reports `Evidence` there; asserting otherwise would encode a mechanism that does not
+    /// exist. Currency itself is covered by the matrix currency suite, not here.
     #[test]
-    fn shipped_z_image_manifest_admits_current_mlx_ladder_rungs() {
+    fn shipped_z_image_manifest_admits_the_accepted_mlx_ladder_floor() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -6274,9 +6287,11 @@ mod tests {
             .and_then(|record| record.repositories.inference.closure_digest)
             .expect("the packaged bundle carries the current Z-Image ladder with its digest");
         let live = live_mlx_closure_digest("z_image_turbo");
-        assert_eq!(
+        assert_ne!(
             captured, live,
-            "the freshly captured Z-Image ladder must match the linked provider closure"
+            "this ladder is a known accepted floor. If a re-capture has made it current again, \
+             restore the equality here and refresh the currency expectations that pair with it \
+             rather than leaving a stale `assert_ne!` asserting the opposite of the truth"
         );
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
@@ -6294,9 +6309,10 @@ mod tests {
                 && binding.query.fingerprint == "z-image-mlx-independent-materialization-v4"
                 // Capture provenance remains an exact fact about the shipped opt-in.
                 && binding.query.inference_revision == "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
-                // Currency must agree across the manifest, evidence, and live provider closure.
+                // The manifest binding and the packaged evidence must still agree exactly with each
+                // other. They no longer agree with the LIVE closure, which is the accepted-floor
+                // state asserted above, not a drift between these two.
                 && binding.query.inference_closure_digest == captured
-                && binding.query.inference_closure_digest == live
         }));
         assert!(bindings.iter().all(|binding| {
             binding.query.load_shape
@@ -6328,33 +6344,35 @@ mod tests {
             Some(z_image),
             Some(resolved),
         );
+        // Routed at the closure the ladder was MEASURED under. That is the coordinate at which
+        // these records are evidence; at any other closure they are history, which is asserted
+        // separately below.
         let route = packaged_admission_route(
             &plan,
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live_mlx_closure_digest("z_image_turbo"),
+            &captured,
         )
-        .expect("current Z-Image evidence must route without an error");
+        .expect("the accepted Z-Image floor must route without an error");
 
-        // Every exact current record reaches calibrated admission.
         assert_eq!(
             route.path,
             AdmissionPath::Evidence,
-            "the current ladder must reach the selector; got fallback {:?}",
+            "at its captured closure the ladder must reach the selector; got fallback {:?}",
             route.fallback_reason
         );
         assert_eq!(
             route.evidence.len(),
             5,
-            "every current rung must resolve to its promoted record"
+            "every rung must resolve to its promoted record at the captured closure"
         );
         assert!(
             route
                 .evidence
                 .iter()
                 .all(|candidate| candidate.closure_digest == captured),
-            "each candidate must carry the captured live digest"
+            "each candidate must carry the captured digest"
         );
 
         // A manifest still cannot substitute a different closure identity for the measured one.
@@ -6386,7 +6404,9 @@ mod tests {
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live,
+            // Deliberately the CAPTURED closure — the same coordinate the positive case above
+            // routes at — so the lying manifest digest is the only variable between them.
+            &captured,
         )
         .expect("a mismatched opt-in degrades, it does not error");
         assert_eq!(

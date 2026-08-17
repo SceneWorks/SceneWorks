@@ -8604,19 +8604,27 @@ mod imported_lora_advertisement_tests {
         assert_eq!(on_mlx["loraCompatibility"]["supported"], json!(true));
     }
 
-    /// Generated Mage-Flow full fine-tunes render plain text-to-image on both native backends, but
-    /// both provider seams reject adapters. Each projection must therefore withdraw only the LoRA
-    /// promise while preserving the now-routable model itself.
+    /// Generated Mage-Flow full fine-tunes render plain text-to-image on MLX, whose provider seam
+    /// rejects adapters — so that projection withdraws the LoRA promise while preserving the
+    /// routable model itself. Candle declares no `mage-flow` imported provider at all, so it has no
+    /// opinion to project and must leave the entry untouched: withdrawing there would advertise a
+    /// lane that exists and merely lacks adapters, which is a different and false claim.
     #[test]
-    fn mage_flow_withdraws_adapters_on_both_native_lanes() {
-        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
-            let mut object = entry("finetune_9f3c", "mage-flow");
-            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
-            assert!(
-                withdrawn(&object),
-                "{lane} renders generated Mage t2i but cannot load adapters: {object:?}"
-            );
-        }
+    fn mage_flow_withdraws_adapters_only_on_the_lane_that_serves_it() {
+        let mut on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
+        assert!(
+            withdrawn(&on_mlx),
+            "MLX renders generated Mage t2i but cannot load adapters: {on_mlx:?}"
+        );
+
+        let untouched = entry("finetune_9f3c", "mage-flow");
+        let mut on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
+        assert_eq!(
+            on_candle, untouched,
+            "candle declares no mage-flow imported provider, so there is no promise to withdraw"
+        );
     }
 
     /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather

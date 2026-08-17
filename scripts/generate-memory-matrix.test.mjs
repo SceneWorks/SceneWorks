@@ -561,13 +561,20 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
-  // SC-18311 changes the shared gen-core contract and therefore the provider compile closure. The
-  // older SC-18353 q4/bf16 receipts must remain historical; this fixture deliberately re-stamps only
-  // the retained q8 rung-4 records. Pinned as the SET, not a count: neither admitting a stale sibling
-  // nor losing one of the explicitly refreshed q8 bindings may read as green.
+  // This is the SYNTHETIC current-closure fixture: it re-stamps the shipped records onto whatever
+  // closure is live, so it measures the promotion RULE rather than today's shipped currency. The
+  // q4/bf16 receipts rejoin here because the pin advance moved them into the re-stamped set; the
+  // shipped artifact keeps them historical, which the checked-in assertions below pin separately.
+  // Pinned as the SET, not a count: neither admitting a stale sibling nor losing a refreshed
+  // binding may read as green.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
     ],
@@ -576,13 +583,18 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
-  // and also includes SC-18237's production-deferred pair. Exact counts keep that fact visible while
-  // ensuring the stale q4/bf16 receipts cannot be promoted by a manifest-only restamp.
+  // and also includes SC-18237's production-deferred pair. The q4/bf16 cells carry one exact record
+  // each. Exact counts keep both facts visible.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 1,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 1,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
     },
@@ -792,17 +804,16 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     (cell) => zImageIds.includes(cell.modelId) && cell.backend === "mlx",
   );
   const verified = allZImageMlx.filter((cell) => cell.state === "Verified");
-  const expectedVerified = [
-    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_attention",
-    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_decode",
-    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
-    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:resident",
-    "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:staged_residency",
-  ];
+  // SC-19753's five q4 rungs were captured at the closure live at the time. The epic's inference
+  // pin has since advanced past it, so they are an ACCEPTED FLOOR and no longer promote — a pin
+  // bump staling calibration records is the fail-closed design, not a re-capture work order. Kept
+  // as an exact empty SET rather than a count so a record that silently survives the drift as
+  // current still fails here.
+  const expectedVerified = [];
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     expectedVerified,
-    "only the freshly captured Z-Image Turbo q4 rungs may verify",
+    "no Z-Image rung may verify while its capture closure is superseded",
   );
   assert.deepEqual(
     allZImageMlx
@@ -810,7 +821,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
       .map((cell) => cell.id)
       .sort(),
     expectedVerified,
-    "current evidence must stay confined to the exact captured Z-Image tuples",
+    "a superseded capture must not survive the closure change as current evidence",
   );
   assert.ok(
     allZImageMlx
@@ -2618,8 +2629,8 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(promotedQwen),
-    2,
-    "only the explicitly re-stamped q8 rung-4 records may verify after the shared contract changes",
+    9,
+    "every re-stamped Qwen binding must verify once evidence and manifest share the live closure",
   );
   assert.equal(
     verifiedQwen(shipped),
@@ -2632,10 +2643,31 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
         cell.state === "Verified",
     ).length;
+  // The shipped Z-Image ladder is an accepted floor now: its capture closure was superseded by the
+  // pin advance, so nothing promotes from the checked-in artifact.
   assert.equal(
     verifiedZ(shipped),
+    0,
+    "a Z-Image ladder whose capture closure was superseded must not ship as Verified",
+  );
+  // ...which would leave the mismatched-binding control below comparing 0 against 0. Re-establish a
+  // real positive first: with BOTH evidence and manifest binding re-stamped onto the live closure,
+  // all five rungs promote. That is the baseline the mismatch must then destroy.
+  const promotedZ = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture({
+        select: (record) => record.target.provider === "z_image_turbo",
+      }),
+      manifest: await currentManifestCalibrationFixture({
+        select: (binding) => binding.provider === "z_image_turbo",
+      }),
+    },
+  });
+  assert.equal(
+    verifiedZ(promotedZ),
     5,
-    "the five freshly captured Z-Image rungs must ship as Verified on their exact binding",
+    "on a shared live closure every Z-Image rung must still promote — the rule is intact, only the shipped capture is stale",
   );
 
   const manifestWithMismatchedZBinding = JSON.parse(stripJsoncComments(await readFile(
@@ -2690,7 +2722,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(pinOnlyQwen),
-    2,
+    9,
     "a pin move that leaves Qwen's compile closure alone must NOT demote its retained measurements",
   );
 
@@ -2707,7 +2739,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(otherProviderMoved),
-    2,
+    9,
     "another model's code path moving must never demote retained Qwen evidence",
   );
 
@@ -2993,14 +3025,8 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
       .map((cell) => cell.id)
       .sort(),
-    [
-      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_attention",
-      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_decode",
-      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
-      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:resident",
-      "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:staged_residency",
-    ],
-    "only the fresh Z-Image capture may be current after the SC-18311 closure change",
+    [],
+    "provider closure drift must demote every formerly current capture without re-stamping it",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
