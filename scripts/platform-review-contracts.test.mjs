@@ -2006,7 +2006,28 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     '"status": "diagnostic_canary_complete"',
     '"promotable": false',
     '"ingestible": false',
+    '"preProviderActiveBytes": pre_provider.active',
+    '"preProviderCacheBytes": pre_provider.cache',
+    '"identity": LTX_CANARY_ONES_CACHE_IDENTITY',
+    '"bytes": expected_persistent_active',
   ]) assert.ok(canary.includes(required), `canary must retain ${required}`);
+  const limitsInstalled = canary.indexOf("let limits = LtxCanaryLimits::install()?");
+  const baselineCaptured = canary.indexOf("let pre_provider = AllocatorState::capture_current()");
+  const providerLoadSpec = canary.indexOf("ltx_load_spec(request, \"q4\", &selection)?");
+  assert.ok(limitsInstalled >= 0 && limitsInstalled < baselineCaptured,
+    "the allocator baseline must be captured after canary limits are installed");
+  assert.ok(baselineCaptured < providerLoadSpec,
+    "the allocator baseline must be captured before provider/model resolution");
+  assert.match(canary, /clear_cache\(\);\n\s*let pre_provider = AllocatorState::capture_current\(\);/,
+    "the pre-provider baseline must exclude reclaimable allocator cache");
+  assert.match(canary, /validate_ltx_canary_pre_provider\(pre_provider\)\?;/);
+  assert.match(
+    canary,
+    /validate_ltx_canary_cleanup\(pre_provider, cleanup, expected_persistent_active\)\?;/,
+    "successful canary output must require the exact named persistent allocation",
+  );
+  assert.doesNotMatch(campaign, /validate_ltx_canary_(?:pre_provider|cleanup)/,
+    "production generation must not use the diagnostic canary residue exception");
 
   const generationRequest = adapter.slice(
     adapter.indexOf("fn ltx_canary_generation_request("),

@@ -150,6 +150,15 @@ const LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES: u64 = 17;
 const LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES: u64 = 26_427_894_918;
 const LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256: &str =
     "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7";
+// The pinned mlx-gen-ltx `transformer::ONES_CACHE` retains one bf16 unit-weight Array for each
+// AvDiT stream's weightless RMSNorm dimension on the current thread. The exact LTX-2.3 config is
+// video 32 heads x 128 = 4096 and audio 32 x 64 = 2048. These six Ki elements intentionally
+// outlive the dropped generator so production denoise can reuse them; the diagnostic canary
+// accounts for this one named allocation by checked arithmetic, never by a tolerance.
+const LTX_CANARY_ONES_CACHE_IDENTITY: &str = "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1";
+const LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION: u64 = 4_096;
+const LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION: u64 = 2_048;
+const BFLOAT16_BYTES_PER_ELEMENT: u64 = 2;
 const LTX_INCIDENT_FORBIDDEN: &str = "incident_forbidden";
 const LTX_ARITHMETIC_UNMEASURABLE: &str = "arithmetic_unmeasurable";
 const LTX_SAFETY_REFUSED_OPEN: &str = "safety_refused_open";
@@ -6781,11 +6790,59 @@ fn consume_ltx_canary_watchdog_attestation_stream(
 /// One deliberately tiny, non-ingestible real-weight probe for the permanent-pin tiled-release
 /// repair. This is not a campaign arm: it executes one render, never the six-render lifecycle
 /// sweep, and emits a status the calibration harness schema rejects.
+fn ltx_canary_ones_cache_bytes() -> Result<u64, String> {
+    LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION
+        .checked_add(LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION)
+        .and_then(|elements| elements.checked_mul(BFLOAT16_BYTES_PER_ELEMENT))
+        .ok_or_else(|| "LTX safety canary ONES_CACHE byte arithmetic overflowed".to_owned())
+}
+
+fn validate_ltx_canary_pre_provider(pre_provider: AllocatorState) -> Result<(), String> {
+    if pre_provider.cache != 0 {
+        return Err(format!(
+            "LTX safety canary preProviderCacheBytes {} did not attest the cleared cache 0",
+            pre_provider.cache
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ltx_canary_cleanup(
+    pre_provider: AllocatorState,
+    post_cleanup: AllocatorState,
+    expected_persistent_active: u64,
+) -> Result<(), String> {
+    let expected_post_active = pre_provider
+        .active
+        .checked_add(expected_persistent_active)
+        .ok_or_else(|| "LTX safety canary cleanup active-byte arithmetic overflowed".to_owned())?;
+    if post_cleanup.active != expected_post_active {
+        return Err(format!(
+            "LTX safety canary postCleanupActiveBytes {} did not equal pre-provider active {} plus intentional persistent active {} = {}",
+            post_cleanup.active,
+            pre_provider.active,
+            expected_persistent_active,
+            expected_post_active
+        ));
+    }
+    if post_cleanup.cache != pre_provider.cache {
+        return Err(format!(
+            "LTX safety canary postCleanupCacheBytes {} did not return to preProviderCacheBytes {}",
+            post_cleanup.cache, pre_provider.cache
+        ));
+    }
+    Ok(())
+}
+
 fn run_ltx_canary(request: &Value) -> Result<Value, String> {
     let selection = validate_ltx_canary_plan(request)?;
     let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
     let watchdog_lease = watchdog.start_lease()?;
     let limits = LtxCanaryLimits::install()?;
+    clear_cache();
+    let pre_provider = AllocatorState::capture_current();
+    validate_ltx_canary_pre_provider(pre_provider)?;
+    let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
     let geometry = LtxGeometry {
         width: LTX_CANARY_WIDTH,
         height: LTX_CANARY_HEIGHT,
@@ -6895,6 +6952,7 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
     drop(generator);
     clear_cache();
     let cleanup = AllocatorState::capture_current();
+    validate_ltx_canary_cleanup(pre_provider, cleanup, expected_persistent_active)?;
     let planned_artifact = protocol::planned(request)?
         .get("_artifact")
         .cloned()
@@ -6943,6 +7001,16 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
             "wiredLimitBytes": limits.wired,
         },
         "observedMemory": {
+            "preProviderActiveBytes": pre_provider.active,
+            "preProviderCacheBytes": pre_provider.cache,
+            "expectedPersistentActive": {
+                "identity": LTX_CANARY_ONES_CACHE_IDENTITY,
+                "videoDimension": LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION,
+                "audioDimension": LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION,
+                "dtype": "bfloat16",
+                "bytesPerElement": BFLOAT16_BYTES_PER_ELEMENT,
+                "bytes": expected_persistent_active,
+            },
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
             "decode": decode.json(),
@@ -8546,6 +8614,86 @@ mod ltx_tests {
         let mut provider_override = ltx_canary_generation_request();
         provider_override.video_mode = Some("default".to_owned());
         assert!(restore_ltx_canary_no_audio_after_configuration(&mut provider_override).is_err());
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_accounts_for_only_the_exact_av_bfloat16_ones_cache() {
+        let expected = ltx_canary_ones_cache_bytes().expect("checked ONES_CACHE arithmetic");
+        assert_eq!(
+            expected,
+            (LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION + LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION)
+                * BFLOAT16_BYTES_PER_ELEMENT
+        );
+        assert!(validate_ltx_canary_pre_provider(AllocatorState {
+            active: 0,
+            cache: 0,
+        })
+        .is_ok());
+        let pre_provider = AllocatorState {
+            active: 7,
+            cache: 0,
+        };
+        assert!(validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected,
+                cache: 0,
+            },
+            expected,
+        )
+        .is_ok());
+
+        let low = validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected - 1,
+                cache: 0,
+            },
+            expected,
+        )
+        .expect_err("one byte below the exact active identity must fail");
+        assert!(low.contains("intentional persistent active"));
+        let high = validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected + 1,
+                cache: 0,
+            },
+            expected,
+        )
+        .expect_err("one byte above the exact active identity must fail");
+        assert!(high.contains("intentional persistent active"));
+
+        let dirty_pre = validate_ltx_canary_pre_provider(AllocatorState {
+            active: 0,
+            cache: 1,
+        })
+        .expect_err("a non-empty baseline cache must fail");
+        assert!(dirty_pre.contains("preProviderCacheBytes 1"));
+        let dirty_post = validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected,
+                cache: 1,
+            },
+            expected,
+        )
+        .expect_err("a retained post-cleanup cache byte must fail");
+        assert!(dirty_post.contains("postCleanupCacheBytes 1"));
+
+        let overflow = validate_ltx_canary_cleanup(
+            AllocatorState {
+                active: u64::MAX,
+                cache: 0,
+            },
+            AllocatorState::default(),
+            expected,
+        )
+        .expect_err("pre-provider plus persistent active bytes must not wrap");
+        assert_eq!(
+            overflow,
+            "LTX safety canary cleanup active-byte arithmetic overflowed"
+        );
     }
 
     #[test]
