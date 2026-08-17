@@ -398,6 +398,54 @@ fn completion_rejects_a_bundle_symlink_without_touching_external_bytes() {
         .is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn complete_validation_rejects_a_post_publication_bundle_swap_everywhere() {
+    use std::os::unix::fs::symlink;
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    let candidate = source_candidate(&source, REVISION_A);
+    make_complete(&store, &candidate, &source);
+    let bundle = store.bundle_path(&candidate.cache_key).unwrap();
+    std::fs::remove_dir_all(&bundle).unwrap();
+    let external = scratch.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("weights.bin"), b"model-weights").unwrap();
+    std::fs::write(external.join("sentinel"), b"external-must-survive").unwrap();
+    symlink(&external, &bundle).unwrap();
+
+    assert!(store.lookup_complete(&candidate.cache_key).is_err());
+    let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
+    assert!(store
+        .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+        .is_err());
+    assert!(store.enumerate().is_err());
+    let digest = cache_key_digest(&candidate.cache_key).unwrap();
+    let _lock = store.lock_metadata(&digest).unwrap();
+    assert_eq!(
+        store.read_metadata_locked(&digest).unwrap().last_used_at,
+        None
+    );
+    drop(_lock);
+
+    let entry = store.entry_path(&candidate.cache_key).unwrap();
+    for slot in 0..=1 {
+        std::fs::write(entry.join(format!("metadata.{slot}.json")), b"corrupt").unwrap();
+    }
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered[0].state, ResolvedCacheEntryState::Corrupt);
+    assert!(recovered[0].metadata.is_none());
+    assert_eq!(
+        std::fs::read(external.join("weights.bin")).unwrap(),
+        b"model-weights"
+    );
+    assert_eq!(
+        std::fs::read(external.join("sentinel")).unwrap(),
+        b"external-must-survive"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn completion_rejects_a_directory_reparse_point_when_windows_allows_fixture_creation() {
@@ -426,6 +474,38 @@ fn completion_rejects_a_directory_reparse_point_when_windows_allows_fixture_crea
     assert_eq!(
         std::fs::read(external.join("weights.bin")).unwrap(),
         b"external-model-bytes"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn complete_validation_rejects_a_post_publication_directory_reparse_point() {
+    use std::os::windows::fs::symlink_dir;
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    let candidate = source_candidate(&source, REVISION_A);
+    make_complete(&store, &candidate, &source);
+    let bundle = store.bundle_path(&candidate.cache_key).unwrap();
+    std::fs::remove_dir_all(&bundle).unwrap();
+    let external = scratch.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("weights.bin"), b"model-weights").unwrap();
+    std::fs::write(external.join("sentinel"), b"external-must-survive").unwrap();
+    if let Err(error) = symlink_dir(&external, &bundle) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            return;
+        }
+        panic!("create directory reparse fixture: {error}");
+    }
+    assert!(store.lookup_complete(&candidate.cache_key).is_err());
+    let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
+    assert!(store
+        .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+        .is_err());
+    assert_eq!(
+        std::fs::read(external.join("sentinel")).unwrap(),
+        b"external-must-survive"
     );
 }
 

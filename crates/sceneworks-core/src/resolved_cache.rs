@@ -525,11 +525,16 @@ impl ResolvedCacheStore {
                 .to_owned();
             let metadata_lock = self.lock_metadata(&digest)?;
             let summary = match self.read_metadata_unlocked(&digest) {
-                Ok(JournalRead::Valid { metadata, .. }) => ResolvedCacheEntrySummary {
-                    cache_key: metadata.cache_key.clone(),
-                    state: metadata.state.clone(),
-                    metadata: Some(*metadata),
-                },
+                Ok(JournalRead::Valid { metadata, .. }) => {
+                    if metadata.state == ResolvedCacheEntryState::Complete {
+                        validate_complete_metadata(self, &metadata)?;
+                    }
+                    ResolvedCacheEntrySummary {
+                        cache_key: metadata.cache_key.clone(),
+                        state: metadata.state.clone(),
+                        metadata: Some(*metadata),
+                    }
+                }
                 Ok(JournalRead::Missing) => ResolvedCacheEntrySummary {
                     cache_key: format!("sha256:{digest}"),
                     state: ResolvedCacheEntryState::Corrupt,
@@ -1421,6 +1426,7 @@ fn validate_complete_metadata(
             "complete cache artifact has the wrong local root",
         ));
     }
+    validate_completion_confinement(store, &metadata.cache_key, &metadata.artifact)?;
     metadata
         .artifact
         .validate()
