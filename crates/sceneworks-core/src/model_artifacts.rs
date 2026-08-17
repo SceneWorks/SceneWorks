@@ -5,6 +5,10 @@
 //! distinct prevents a cache path from silently becoming artifact identity, and gives the hot
 //! cache a behavior-preserving migration seam.
 
+#[path = "model_artifacts/artifact_selection.rs"]
+pub mod artifact_selection;
+#[path = "model_artifacts/external_library.rs"]
+pub mod external_library;
 #[path = "resolved_cache.rs"]
 pub mod resolved_cache;
 
